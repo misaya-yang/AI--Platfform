@@ -1,0 +1,533 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+
+import { useServices } from "@/hooks/useServices";
+import { invokeService } from "@/api/gateway";
+import {
+  createSession,
+  deleteSession,
+  getSessionHistory,
+  listSessions,
+  updateSession,
+  type SessionSummary,
+} from "@/api/sessions";
+import { sseFetch } from "@/lib/sse";
+import { cn } from "@/lib/utils";
+import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
+import { MultimodalInput } from "@/components/MultimodalInput";
+import type { ContentItem, StreamChunk, ToolCall } from "@/types/gateway";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { MessageSquarePlus, Trash2 } from "lucide-react";
+
+export function PlaygroundPage() {
+  const servicesQuery = useServices();
+  const services = servicesQuery.data || [];
+  const [serviceId, setServiceId] = useState<string | undefined>();
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // 会话管理状态（用于左侧历史列表 & 多轮上下文）
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sessionEnabled, setSessionEnabled] = useState(true);
+  // 本地会话标题缓存（用于在后端未返回 title 时显示）
+  const [localTitles, setLocalTitles] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, loading]);
+
+  const refreshSessions = useCallback(async () => {
+    if (!serviceId) {
+      setSessions([]);
+      return;
+    }
+    setSessionsLoading(true);
+    try {
+      const data = await listSessions({ service_id: serviceId, limit: 100 });
+      setSessions(data);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [serviceId]);
+
+  const handleNewSession = useCallback(async () => {
+    if (!serviceId) return;
+    const created = await createSession({ service_id: serviceId });
+    setActiveSessionId(created.session_id);
+    setMessages([]);
+    await refreshSessions();
+  }, [serviceId, refreshSessions]);
+
+  const handleSelectSession = useCallback(async (id: string) => {
+    setActiveSessionId(id);
+    setHistoryLoading(true);
+    try {
+      const history = await getSessionHistory(id, { limit: 200 });
+      const nextMessages: ChatMessage[] = history.map((m) => ({
+        role: m.role === "user" ? "user" : "assistant",
+        content:
+          typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+      }));
+      setMessages(nextMessages);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
+  const handleDeleteSession = useCallback(
+    async (id: string) => {
+      await deleteSession(id);
+      if (activeSessionId === id) {
+        setActiveSessionId(null);
+        setMessages([]);
+      }
+      await refreshSessions();
+    },
+    [activeSessionId, refreshSessions]
+  );
+
+  // 切换服务时刷新会话列表并清空当前对话（不自动新建）
+  useEffect(() => {
+    setMessages([]);
+    setActiveSessionId(null);
+    void refreshSessions();
+  }, [serviceId, refreshSessions]);
+
+  async function handleSend(inputs: ContentItem[]) {
+    if (!serviceId) return;
+    const text = inputs.find((i) => i.type === "text")?.data || "";
+    if (!text) return;
+
+    setLoading(true);
+
+    try {
+      let effectiveSessionId: string | undefined = undefined;
+      let isNewSession = false;
+      if (sessionEnabled) {
+        if (!activeSessionId) {
+          const created = await createSession({ service_id: serviceId });
+          effectiveSessionId = created.session_id;
+          setActiveSessionId(created.session_id);
+          isNewSession = true;
+          await refreshSessions();
+        } else {
+          effectiveSessionId = activeSessionId;
+        }
+      }
+
+      // 为新会话或首次发送消息时设置标题
+      if (effectiveSessionId && (isNewSession || !localTitles[effectiveSessionId])) {
+        const titleText = String(text).trim().split('\n')[0].slice(0, 40);
+        if (titleText) {
+          setLocalTitles(prev => ({ ...prev, [effectiveSessionId!]: titleText }));
+          // 异步更新后端会话标题（不阻塞发送）
+          updateSession(effectiveSessionId, { metadata: { title: titleText } }).catch(() => {});
+        }
+      }
+
+      const req = {
+        service_id: serviceId,
+        inputs: [{ type: "text" as const, data: String(text) }],
+        // 传递会话 ID 以保持上下文
+        session_id: effectiveSessionId,
+      };
+
+      // 添加用户消息 + 占位助手消息，后续按索引逐步更新
+      let assistantIndex = 0;
+      setMessages((prev) => {
+        const next = [
+          ...prev,
+          { role: "user" as const, content: String(text) },
+          { role: "assistant" as const, content: "", toolCalls: [] },
+        ];
+        assistantIndex = next.length - 1;
+        return next;
+      });
+
+      let acc = "";
+      let streamed = false;
+      // 工具调用追踪
+      const toolCallsMap = new Map<string, ToolCallWithResult>();
+
+      try {
+        for await (const chunk of sseFetch<StreamChunk>("/api/v1/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(req),
+        })) {
+          const eventType = chunk?.event_type || "text_delta";
+
+          // 处理文本增量
+          if (eventType === "text_delta") {
+            const delta = chunk?.content?.data;
+            if (typeof delta === "string" && delta) {
+              streamed = true;
+              acc += delta;
+              setMessages((m) => {
+                const next = [...m];
+                if (next[assistantIndex]) {
+                  next[assistantIndex] = {
+                    ...next[assistantIndex],
+                    content: acc,
+                  };
+                }
+                return next;
+              });
+            }
+          }
+
+          // 处理工具调用开始/增量
+          if (eventType === "tool_call_start" || eventType === "tool_call_delta") {
+            streamed = true;
+            const tc = chunk?.tool_call;
+            if (tc) {
+              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              if (existingTc) {
+                // 增量更新参数
+                const updatedTc: ToolCall = {
+                  ...existingTc.toolCall,
+                  name: tc.name || existingTc.toolCall.name,
+                  arguments: existingTc.toolCall.arguments + (tc.arguments || ""),
+                  status: tc.status || existingTc.toolCall.status,
+                };
+                toolCallsMap.set(tc.tool_call_id, {
+                  toolCall: updatedTc,
+                  result: existingTc.result,
+                });
+              } else {
+                // 新的工具调用
+                toolCallsMap.set(tc.tool_call_id, {
+                  toolCall: {
+                    tool_call_id: tc.tool_call_id,
+                    name: tc.name || "",
+                    arguments: tc.arguments || "",
+                    status: tc.status || "running",
+                  },
+                });
+              }
+
+              // 更新消息
+              setMessages((m) => {
+                const next = [...m];
+                if (next[assistantIndex]) {
+                  next[assistantIndex] = {
+                    ...next[assistantIndex],
+                    toolCalls: Array.from(toolCallsMap.values()),
+                  };
+                }
+                return next;
+              });
+            }
+          }
+
+          // 处理工具调用结束
+          if (eventType === "tool_call_end") {
+            streamed = true;
+            const tc = chunk?.tool_call;
+            if (tc) {
+              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              if (existingTc) {
+                toolCallsMap.set(tc.tool_call_id, {
+                  toolCall: {
+                    ...existingTc.toolCall,
+                    status: "completed",
+                  },
+                  result: existingTc.result,
+                });
+              }
+
+              setMessages((m) => {
+                const next = [...m];
+                if (next[assistantIndex]) {
+                  next[assistantIndex] = {
+                    ...next[assistantIndex],
+                    toolCalls: Array.from(toolCallsMap.values()),
+                  };
+                }
+                return next;
+              });
+            }
+          }
+
+          // 处理工具结果
+          if (eventType === "tool_result") {
+            streamed = true;
+            const tc = chunk?.tool_call;
+            const resultText = chunk?.content?.data;
+
+            if (tc) {
+              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              if (existingTc) {
+                toolCallsMap.set(tc.tool_call_id, {
+                  toolCall: {
+                    ...existingTc.toolCall,
+                    status: "completed",
+                  },
+                  result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                });
+              } else {
+                // 可能是先收到结果
+                toolCallsMap.set(tc.tool_call_id, {
+                  toolCall: {
+                    tool_call_id: tc.tool_call_id,
+                    name: tc.name || "",
+                    arguments: tc.arguments || "",
+                    status: "completed",
+                  },
+                  result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                });
+              }
+
+              setMessages((m) => {
+                const next = [...m];
+                if (next[assistantIndex]) {
+                  next[assistantIndex] = {
+                    ...next[assistantIndex],
+                    toolCalls: Array.from(toolCallsMap.values()),
+                  };
+                }
+                return next;
+              });
+            }
+          }
+
+          if (chunk?.is_final) break;
+        }
+      } catch (streamErr) {
+        console.error("Stream error:", streamErr);
+        // 如果已经有部分内容，不算失败
+        if (!acc && !toolCallsMap.size) {
+          streamed = false;
+        }
+      }
+
+      if (!streamed) {
+        // 流式失败，尝试同步调用
+        console.log("Falling back to sync invoke");
+        const resp = await invokeService(req);
+        const out = resp.outputs?.[0]?.data ?? "";
+        acc = String(out);
+        setMessages((m) => {
+          const next = [...m];
+          if (next[assistantIndex]) {
+            next[assistantIndex] = {
+              ...next[assistantIndex],
+              content: acc,
+            };
+          }
+          return next;
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "发生错误";
+      setMessages((m) => {
+        const next = [...m];
+        next.push({ role: "assistant", content: message });
+        return next;
+      });
+    } finally {
+      setLoading(false);
+      if (sessionEnabled && serviceId) {
+        void refreshSessions();
+      }
+    }
+  }
+
+  return (
+    <div className="flex h-[calc(100vh-64px)] overflow-hidden rounded-2xl border border-border/50 bg-background/50">
+      {/* Sessions Sidebar */}
+      <aside className="hidden lg:flex w-[300px] flex-col border-r border-border/50 bg-background/40">
+        <div className="p-3 flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => void handleNewSession()}
+            disabled={!serviceId || loading}
+            className="w-full justify-start gap-2"
+          >
+            <MessageSquarePlus className="h-4 w-4" />
+            New chat
+          </Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2 pb-3">
+          {!serviceId ? (
+            <div className="px-3 py-6 text-sm text-muted-foreground">
+              Select an agent to view chats.
+            </div>
+          ) : sessionsLoading ? (
+            <div className="px-3 py-6 text-sm text-muted-foreground">Loading…</div>
+          ) : sessions.length === 0 ? (
+            <div className="px-3 py-6 text-sm text-muted-foreground">
+              No chats yet. Start a new one.
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {sessions.map((s) => {
+                const title =
+                  (s.metadata?.title as string | undefined) ||
+                  (s.metadata?.name as string | undefined) ||
+                  localTitles[s.session_id] ||
+                  "New chat";
+                const ts = (s.updated_at || s.created_at) as string;
+                const active = activeSessionId === s.session_id;
+                return (
+                  <button
+                    key={s.session_id}
+                    onClick={() => void handleSelectSession(s.session_id)}
+                    className={cn(
+                      "w-full rounded-xl border px-3 py-2 text-left transition-colors",
+                      active
+                        ? "bg-primary text-primary-foreground border-primary/30"
+                        : "bg-background/60 hover:bg-background border-border/50"
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium">{title}</div>
+                        <div className={cn("text-[11px] opacity-70", active ? "text-primary-foreground/80" : "text-muted-foreground")}>
+                          {new Date(ts).toLocaleString()}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void handleDeleteSession(s.session_id);
+                        }}
+                        className={cn(
+                          "rounded-md p-1.5 opacity-70 hover:opacity-100",
+                          active ? "hover:bg-primary-foreground/10" : "hover:bg-muted"
+                        )}
+                        aria-label="Delete chat"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col relative">
+      {/* Header / Config Bar */}
+      <div className="w-full border-b bg-background/50 backdrop-blur-sm z-10">
+        <div className="mx-auto w-full max-w-4xl px-4 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 flex-1">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" x2="12" y1="19" y2="22" /></svg>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-muted-foreground">Model</span>
+                <Select value={serviceId} onValueChange={setServiceId}>
+                  <SelectTrigger className="h-7 w-[200px] border-0 bg-transparent p-0 text-sm font-semibold focus:ring-0">
+                    <SelectValue placeholder="Select an Agent" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {services.map((s) => (
+                      <SelectItem key={s.service_id} value={s.service_id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 rounded-full border bg-background px-3 py-1.5">
+                <input
+                  type="checkbox"
+                  id="session-toggle"
+                  checked={sessionEnabled}
+                  onChange={(e) => setSessionEnabled(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-muted-foreground/30 accent-indigo-500"
+                />
+                <label htmlFor="session-toggle" className="text-xs font-medium cursor-pointer select-none">
+                  Memory
+                </label>
+              </div>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (sessionEnabled) {
+                    void handleNewSession();
+                  } else {
+                    setMessages([]);
+                    setActiveSessionId(null);
+                  }
+                }}
+                disabled={loading || (sessionEnabled ? !serviceId : messages.length === 0)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                Clear
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Chat Area */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-smooth pb-32">
+        {!serviceId ? (
+          <div className="flex h-full flex-col items-center justify-center p-8 text-center opacity-0 animate-in fade-in duration-500 delay-100 fill-mode-forwards" style={{ opacity: 1 }}>
+            <div className="mb-6 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 p-6 shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5">
+              <div className="h-16 w-16 mx-auto rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
+              </div>
+            </div>
+            <h2 className="text-2xl font-semibold tracking-tight">How can I help you today?</h2>
+            <p className="mt-2 text-muted-foreground max-w-sm">Select an agent service from the dropdown above to start a conversation.</p>
+          </div>
+        ) : historyLoading ? (
+          <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
+            Loading chat history…
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
+            {sessionEnabled
+              ? "Select a chat on the left or start a new one."
+              : "Type a message to start."}
+          </div>
+        ) : (
+          <ChatWindow messages={messages} />
+        )}
+      </div>
+
+      {/* Floating Input Area */}
+      <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background via-background/80 to-transparent pt-10 pb-6 px-4">
+        <div className="mx-auto w-full max-w-3xl shadow-2xl rounded-3xl border border-black/5 dark:border-white/10 bg-background/80 backdrop-blur-xl transition-all focus-within:ring-2 ring-primary/20">
+          <MultimodalInput
+            onSend={handleSend}
+            disabled={!serviceId || loading}
+            includeFiles={false} // Would be true if backend supported
+          />
+        </div>
+        <div className="mt-2 text-center text-[10px] text-muted-foreground/60">
+          AI generated responses may be inaccurate.
+        </div>
+      </div>
+    </div>
+  </div>
+  );
+}

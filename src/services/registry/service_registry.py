@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Type
+
+import yaml
+
+from ...adapters.base import ProtocolAdapter
+from ...core.exceptions import AdapterNotFoundError, ValidationFailedError
+from ...models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ...models.service import (
+    ServiceDefinition,
+    ServiceConfig,
+    ServiceRateLimitConfig,
+    ServiceAuthConfig,
+    ServiceCacheConfig,
+    ServicePriorityConfig,
+)
+
+
+class RegistryStorage:
+    async def save(self, service: ServiceDefinition) -> None:
+        raise NotImplementedError
+
+    async def get(self, service_id: str) -> Optional[ServiceDefinition]:
+        raise NotImplementedError
+
+    async def list(self) -> List[ServiceDefinition]:
+        raise NotImplementedError
+
+    async def delete(self, service_id: str) -> bool:
+        raise NotImplementedError
+
+
+class MemoryRegistryStorage(RegistryStorage):
+    def __init__(self):
+        self._services: Dict[str, ServiceDefinition] = {}
+
+    async def save(self, service: ServiceDefinition) -> None:
+        self._services[service.service_id] = service
+
+    async def get(self, service_id: str) -> Optional[ServiceDefinition]:
+        return self._services.get(service_id)
+
+    async def list(self) -> List[ServiceDefinition]:
+        return list(self._services.values())
+
+    async def delete(self, service_id: str) -> bool:
+        return self._services.pop(service_id, None) is not None
+
+
+class ServiceRegistry:
+    def __init__(self, storage: RegistryStorage):
+        self.storage = storage
+        self._cache: Dict[str, ServiceDefinition] = {}
+        self._adapters: Dict[str, Type[ProtocolAdapter]] = {}
+
+    async def register(self, service: ServiceDefinition) -> None:
+        self._validate_service(service)
+        await self.storage.save(service)
+        self._cache[service.service_id] = service
+
+    async def register_from_config(self, config_path: str) -> None:
+        path = Path(config_path)
+        files: List[Path]
+        if path.is_dir():
+            files = [
+                p
+                for p in path.rglob("*")
+                if p.suffix.lower() in {".yaml", ".yml", ".json"}
+            ]
+        else:
+            files = [path]
+
+        for file_path in files:
+            text = file_path.read_text(encoding="utf-8")
+            if file_path.suffix.lower() == ".json":
+                data = json.loads(text)
+            else:
+                data = yaml.safe_load(text)
+            if not data:
+                continue
+            service = self._service_from_dict(data)
+            await self.register(service)
+
+    async def get(self, service_id: str) -> Optional[ServiceDefinition]:
+        if service_id in self._cache:
+            return self._cache[service_id]
+        service = await self.storage.get(service_id)
+        if service:
+            self._cache[service_id] = service
+        return service
+
+    async def list(
+        self,
+        service_type: Optional[ServiceType] = None,
+        tags: Optional[List[str]] = None,
+        status: str = "active",
+    ) -> List[ServiceDefinition]:
+        # Prefer persistent storage, but always merge with in-memory cache so
+        # newly registered services remain visible even if the DB backend is
+        # temporarily unavailable (e.g. local dev without PostgreSQL).
+        services = await self.storage.list()
+        merged: Dict[str, ServiceDefinition] = {s.service_id: s for s in services}
+        merged.update(self._cache)
+
+        result: List[ServiceDefinition] = []
+        for service in merged.values():
+            if status and service.status != status:
+                continue
+            if service_type and service.service_type != service_type:
+                continue
+            if tags and not set(tags).issubset(set(service.tags or [])):
+                continue
+            result.append(service)
+        return result
+
+    async def find_by_capability(
+        self, content_types: List[ContentType]
+    ) -> List[ServiceDefinition]:
+        services = await self.storage.list()
+        wanted = set(content_types)
+        return [
+            s
+            for s in services
+            if wanted.issubset(set(s.accepted_content_types or []))
+        ]
+
+    def register_adapter(
+        self, adapter_type: str, adapter_class: Type[ProtocolAdapter]
+    ) -> None:
+        self._adapters[adapter_type] = adapter_class
+
+    def get_adapter(self, service: ServiceDefinition) -> ProtocolAdapter:
+        adapter_type = (service.metadata or {}).get("adapter_type", "generic_rest")
+        adapter_class = self._adapters.get(adapter_type)
+        if not adapter_class:
+            raise AdapterNotFoundError(adapter_type)
+        return adapter_class(service)
+
+    def _validate_service(self, service: ServiceDefinition) -> None:
+        if not service.service_id:
+            raise ValidationFailedError("service_id is required")
+        if not service.connector_type:
+            raise ValidationFailedError("connector_type is required")
+
+    def _service_from_dict(self, data: Dict[str, Any]) -> ServiceDefinition:
+        def as_enum(enum_cls, value, default):
+            if value is None:
+                return default
+            return enum_cls(value)
+
+        service_type = as_enum(ServiceType, data.get("service_type"), ServiceType.CUSTOM)
+        supported_modes = [
+            as_enum(InvocationMode, m, InvocationMode.SYNC)
+            for m in data.get("supported_modes", ["sync"])
+        ]
+        connector_type = as_enum(
+            ConnectorType, data.get("connector_type"), ConnectorType.HTTP
+        )
+
+        accepted = [
+            as_enum(ContentType, t, ContentType.TEXT)
+            for t in data.get("accepted_content_types", [])
+        ]
+        outputs = [
+            as_enum(ContentType, t, ContentType.TEXT)
+            for t in data.get("output_content_types", [])
+        ]
+
+        # 解析服务级别配置
+        service_config = None
+        if "service_config" in data:
+            sc = data["service_config"]
+            service_config = ServiceConfig(
+                rate_limit=ServiceRateLimitConfig(
+                    enabled=sc.get("rate_limit", {}).get("enabled", False),
+                    requests=sc.get("rate_limit", {}).get("requests", 100),
+                    window=sc.get("rate_limit", {}).get("window", 60),
+                    burst=sc.get("rate_limit", {}).get("burst", 0),
+                    strategy=sc.get("rate_limit", {}).get("strategy", "sliding_window"),
+                ),
+                auth=ServiceAuthConfig(
+                    enabled=sc.get("auth", {}).get("enabled", False),
+                    require_auth=sc.get("auth", {}).get("require_auth", True),
+                    allowed_roles=sc.get("auth", {}).get("allowed_roles", []),
+                    allowed_api_keys=sc.get("auth", {}).get("allowed_api_keys", []),
+                    public=sc.get("auth", {}).get("public", False),
+                ),
+                cache=ServiceCacheConfig(
+                    enabled=sc.get("cache", {}).get("enabled", False),
+                    ttl=sc.get("cache", {}).get("ttl", 300),
+                    semantic_cache=sc.get("cache", {}).get("semantic_cache", False),
+                ),
+                priority=ServicePriorityConfig(
+                    priority=sc.get("priority", {}).get("priority", 5),
+                    weight=sc.get("priority", {}).get("weight", 1),
+                    max_queue_size=sc.get("priority", {}).get("max_queue_size", 100),
+                ),
+            )
+
+        return ServiceDefinition(
+            service_id=data["service_id"],
+            name=data.get("name", data["service_id"]),
+            description=data.get("description", ""),
+            version=data.get("version", "1.0.0"),
+            service_type=service_type,
+            supported_modes=supported_modes,
+            connector_type=connector_type,
+            connector_config=data.get("connector_config") or {},
+            input_schema=data.get("input_schema") or {},
+            output_schema=data.get("output_schema") or {},
+            accepted_content_types=accepted,
+            output_content_types=outputs,
+            session_enabled=bool(data.get("session_enabled", False)),
+            session_adapter=data.get("session_adapter"),
+            timeout=int(data.get("timeout", 60)),
+            max_retries=int(data.get("max_retries", 3)),
+            retry_delay=float(data.get("retry_delay", 1.0)),
+            circuit_breaker_enabled=bool(
+                data.get("circuit_breaker_enabled", True)
+            ),
+            failure_threshold=int(data.get("failure_threshold", 5)),
+            recovery_timeout=int(data.get("recovery_timeout", 30)),
+            rate_limit=data.get("rate_limit"),
+            concurrency_limit=data.get("concurrency_limit"),
+            status=data.get("status", "active"),
+            tags=data.get("tags") or [],
+            metadata=data.get("metadata") or {},
+            async_config=data.get("async_config"),
+            service_config=service_config,
+        )

@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from ..deps import AuthContext, get_auth_context, get_session_manager
+from ...services.session.session_manager import SessionManager
+
+
+router = APIRouter()
+
+
+class SessionCreate(BaseModel):
+    service_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class SessionUpdate(BaseModel):
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@router.get("/sessions")
+async def list_sessions(
+    service_id: Optional[str] = Query(default=None),
+    limit: int = Query(100, ge=1, le=500),
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    sessions = await session_manager.list_sessions(
+        user_id=auth.user_id or None,
+        tenant_id=auth.tenant_id or None,
+        service_id=service_id,
+        limit=limit,
+    )
+    return [
+        {
+            "session_id": s.session_id,
+            "user_id": s.user_id,
+            "tenant_id": s.tenant_id,
+            "service_id": getattr(s, "service_id", None),
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+            "metadata": s.metadata,
+        }
+        for s in sessions
+    ]
+
+
+@router.post("/sessions")
+async def create_session(
+    body: SessionCreate = Body(default_factory=SessionCreate),
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    session = await session_manager.create(
+        user_id=auth.user_id or "",
+        tenant_id=auth.tenant_id or "",
+        service_id=body.service_id,
+        metadata=body.metadata,
+    )
+    return {"session_id": session.session_id}
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    session = await session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {
+        "session_id": session.session_id,
+        "user_id": session.user_id,
+        "tenant_id": session.tenant_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "metadata": session.metadata,
+    }
+
+
+@router.patch("/sessions/{session_id}")
+async def update_session(
+    session_id: str,
+    body: SessionUpdate,
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    session = await session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="session not found")
+    
+    if body.metadata:
+        # 支持 update_metadata 方法（DatabaseSessionManager）或直接更新（内存版本）
+        if hasattr(session_manager, 'update_metadata'):
+            await session_manager.update_metadata(session_id, body.metadata)
+        else:
+            session.metadata = session.metadata or {}
+            session.metadata.update(body.metadata)
+    
+    return {"session_id": session_id, "status": "updated"}
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    await session_manager.delete(session_id)
+    return {"session_id": session_id, "status": "deleted"}
+
+
+@router.get("/sessions/{session_id}/history")
+async def get_history(
+    session_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    session_manager: SessionManager = Depends(get_session_manager),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    history = await session_manager.history(session_id, limit=limit)
+    return [
+        {"role": m.role, "content": m.content, "timestamp": m.timestamp}
+        for m in history
+    ]

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s \"c:\\Projects\\Agent_Gateway\")",
+      "Bash(findstr:*)",
+      "Bash(dir:*)",
+      "Bash(tree:*)"
+    ]
+  }
+}
