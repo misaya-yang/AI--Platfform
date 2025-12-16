@@ -51,7 +51,10 @@ class RequestValidator:
 
         # 如果需要强制鉴权，检查用户是否已鉴权
         if auth_config.require_auth:
-            if not request.user_id and not roles:
+            is_anon = (request.user_id or "").startswith("anon:") or (
+                roles and all(r == "guest" for r in roles)
+            )
+            if is_anon or not request.user_id:
                 raise AuthenticationRequiredError(
                     f"服务 {service.service_id} 需要鉴权"
                 )

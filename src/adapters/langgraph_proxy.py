@@ -779,6 +779,8 @@ class LangGraphProxy:
         run_config["configurable"]["user_id"] = user.user_id
         run_config["configurable"]["user_tier"] = user.tier
         run_config["configurable"]["tenant_id"] = user.tenant_id
+        # Namespacing for checkpointing/memory where supported by the upstream runtime.
+        run_config["configurable"]["checkpoint_ns"] = user.tenant_id or ""
         
         return run_config
     
@@ -894,7 +896,6 @@ class MemoryNamespaceInjector:
             return len(namespace) > 1 and namespace[1] == user.tenant_id
         
         return False
-
 
 
 

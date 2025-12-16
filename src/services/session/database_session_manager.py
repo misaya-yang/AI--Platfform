@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...models.session import Session, SessionMessage
+from ...core.exceptions import PermissionDeniedError
 
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
@@ -25,11 +26,13 @@ class DatabaseSessionManager:
         redis: Optional["RedisStorage"] = None,
         cache_ttl: int = 3600,  # Redis 缓存 1 小时
         default_session_ttl: int = 86400 * 7,  # 默认会话有效期 7 天
+        anonymous_session_ttl: int = 86400,  # 匿名会话有效期 24 小时
     ):
         self.database = database
         self.redis = redis
         self.cache_ttl = cache_ttl
         self.default_session_ttl = default_session_ttl
+        self.anonymous_session_ttl = anonymous_session_ttl
         
         # 内存缓存，用于没有 Redis 时
         self._memory_cache: Dict[str, Session] = {}
@@ -47,7 +50,15 @@ class DatabaseSessionManager:
         """创建新会话"""
         session_id_value = session_id or str(uuid.uuid4())
         now = datetime.utcnow()
-        expires_at = now + timedelta(seconds=ttl or self.default_session_ttl)
+
+        ttl_seconds = ttl
+        if ttl_seconds is None:
+            ttl_seconds = (
+                self.anonymous_session_ttl
+                if (user_id or "").startswith("anon:")
+                else self.default_session_ttl
+            )
+        expires_at = now + timedelta(seconds=int(ttl_seconds)) if ttl_seconds else None
         
         session = Session(
             session_id=session_id_value,
@@ -103,18 +114,27 @@ class DatabaseSessionManager:
         user_id: str,
         tenant_id: str = "",
         service_id: str = None,
+        ttl: int = None,
     ) -> Session:
         """获取或创建会话"""
         if session_id:
             session = await self.get(session_id)
             if session:
+                if session.user_id != user_id or session.tenant_id != tenant_id:
+                    raise PermissionDeniedError("Session does not belong to current user")
+                if service_id:
+                    if session.service_id and session.service_id != service_id:
+                        raise PermissionDeniedError("Session is bound to a different service")
+                    if not session.service_id:
+                        session.service_id = service_id
                 return session
         
         return await self.create(
             user_id=user_id,
             tenant_id=tenant_id,
             service_id=service_id,
-            session_id=session_id,
+            session_id=None,  # do not accept unknown client-provided IDs
+            ttl=ttl,
         )
     
     async def list_sessions(
@@ -133,7 +153,16 @@ class DatabaseSessionManager:
             status=status,
             limit=limit,
         )
-        return [self._dict_to_session(s) for s in sessions_dict]
+        now = datetime.utcnow()
+        sessions: List[Session] = []
+        for row in sessions_dict:
+            s = self._dict_to_session(row)
+            if s.expires_at:
+                expires = s.expires_at.replace(tzinfo=None) if s.expires_at.tzinfo else s.expires_at
+                if expires < now:
+                    continue
+            sessions.append(s)
+        return sessions
     
     async def delete(self, session_id: str) -> bool:
         """删除会话"""

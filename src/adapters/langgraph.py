@@ -326,8 +326,15 @@ class LangGraphAdapter(ProtocolAdapter):
         }
         if request.callback_url:
             payload["webhook"] = request.callback_url
+        # Ensure upstream graphs receive the same user/session scoping as the gateway.
+        run_config: Dict[str, Any] = {}
         if isinstance(params.get("config"), dict):
-            payload["config"] = params["config"]
+            run_config = dict(params["config"])
+        run_config["configurable"] = run_config.get("configurable", {})
+        run_config["configurable"]["user_id"] = request.user_id
+        run_config["configurable"]["tenant_id"] = request.tenant_id
+        run_config["configurable"]["checkpoint_ns"] = request.tenant_id or ""
+        payload["config"] = run_config
 
         if self.service.session_enabled and request.session_id:
             # 确保 thread 存在并获取有效的 UUID thread_id
@@ -373,8 +380,14 @@ class LangGraphAdapter(ProtocolAdapter):
                 "tenant_id": request.tenant_id,
             },
         }
+        run_config: Dict[str, Any] = {}
         if isinstance(params.get("config"), dict):
-            payload["config"] = params["config"]
+            run_config = dict(params["config"])
+        run_config["configurable"] = run_config.get("configurable", {})
+        run_config["configurable"]["user_id"] = request.user_id
+        run_config["configurable"]["tenant_id"] = request.tenant_id
+        run_config["configurable"]["checkpoint_ns"] = request.tenant_id or ""
+        payload["config"] = run_config
 
         if self.service.session_enabled and request.session_id:
             # 确保 thread 存在并获取有效的 UUID thread_id

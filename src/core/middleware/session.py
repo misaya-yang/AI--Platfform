@@ -71,15 +71,15 @@ class SessionMiddleware(InvocationMiddleware):
         service = context.service
         request = context.request
         
-        # 如果服务未启用会话或请求没有 session_id，直接跳过
-        if not service.session_enabled or not request.session_id:
+        # 如果服务未启用会话，直接跳过
+        if not service.session_enabled:
             return await next_middleware(context)
         
         # 获取或创建会话
         session = await self.session_manager.get_or_create(
             request.session_id,
-            user_id=request.user_id or "",
-            tenant_id=request.tenant_id or "",
+            user_id=request.user_id or "local",
+            tenant_id=request.tenant_id or "local",
             service_id=service.service_id,
         )
         
@@ -144,4 +144,3 @@ class SessionMiddleware(InvocationMiddleware):
                 await self.session_manager.add_message(
                     session_id, "assistant", accumulated_text
                 )
-

@@ -95,7 +95,7 @@ class GatewayDispatcher:
 
         # Session persistence (for chat history / multi-turn context)
         session_id: Optional[str] = None
-        if service.session_enabled and request.session_id:
+        if service.session_enabled:
             session = await self.session_manager.get_or_create(
                 request.session_id,
                 user_id=request.user_id or "local",
@@ -138,6 +138,10 @@ class GatewayDispatcher:
         else:
             resp = await with_retries()
 
+        # Ensure callers always receive the effective session_id if sessioning is enabled.
+        if session_id and service.session_enabled and not resp.session_id:
+            resp.session_id = session_id
+
         if session_id and service.session_enabled:
             assistant_text = self._response_to_text(resp)
             if assistant_text:
@@ -160,7 +164,7 @@ class GatewayDispatcher:
 
         session_id: Optional[str] = None
         acc_text: str = ""
-        if service.session_enabled and request.session_id:
+        if service.session_enabled:
             session = await self.session_manager.get_or_create(
                 request.session_id,
                 user_id=request.user_id or "local",
@@ -197,6 +201,18 @@ class GatewayDispatcher:
         service = await self._get_service(request.service_id)
         await self.validator.validate(request, service, roles)
         await self.rate_limiter.enforce(request, service, client_ip)
+
+        if service.session_enabled:
+            session = await self.session_manager.get_or_create(
+                request.session_id,
+                user_id=request.user_id or "local",
+                tenant_id=request.tenant_id or "local",
+                service_id=service.service_id,
+            )
+            request.session_id = session.session_id
+            user_text = self._inputs_to_text(request)
+            if user_text:
+                await self.session_manager.add_message(session.session_id, "user", user_text)
 
         task = await self.task_manager.create_task(request, roles, client_ip)
         return task.task_id

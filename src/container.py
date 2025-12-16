@@ -280,11 +280,19 @@ class Container:
             database = self._providers["database"].get_sync()
             redis = self._providers["redis"].get_sync()
             logger.info("使用 PostgreSQL 作为会话存储后端")
-            return DatabaseSessionManager(database, redis)
+            return DatabaseSessionManager(
+                database,
+                redis,
+                default_session_ttl=self.settings.session.authenticated_ttl_seconds,
+                anonymous_session_ttl=self.settings.session.anonymous_ttl_seconds,
+            )
         else:
             from .services.session.session_manager import SessionManager
             logger.info("使用内存作为会话存储后端")
-            return SessionManager()
+            return SessionManager(
+                default_session_ttl=self.settings.session.authenticated_ttl_seconds,
+                anonymous_session_ttl=self.settings.session.anonymous_ttl_seconds,
+            )
     
     def _create_task_queue(self):
         """创建任务队列"""
@@ -643,4 +651,3 @@ def create_container(settings: Settings) -> Container:
     global _container
     _container = Container(settings)
     return _container
-

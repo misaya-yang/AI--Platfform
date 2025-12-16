@@ -275,6 +275,10 @@ class DatabaseStorage:
             query += f" AND status = ${param_idx}"
             params.append(status)
             param_idx += 1
+
+        # By default, hide expired sessions from list views.
+        if status == "active":
+            query += " AND (expires_at IS NULL OR expires_at > NOW())"
         
         query += f" ORDER BY updated_at DESC LIMIT ${param_idx}"
         params.append(limit)

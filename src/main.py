@@ -21,6 +21,7 @@ from .core.observability.logging import configure_structured_logging, get_logger
 from .core.observability.tracing import TracingMiddleware
 from .core.observability.metrics import get_metrics
 from .adapters.registry import auto_register_builtin_adapters
+from .core.auth.anonymous_middleware import AnonymousIdentityMiddleware
 
 # 兼容旧的异常导入（向后兼容）
 from .core.exceptions import (
@@ -65,6 +66,9 @@ def create_app() -> FastAPI:
     
     # ========== 中间件配置 ==========
     
+    # Stable anonymous identity for guest users (cookie/header)
+    app.add_middleware(AnonymousIdentityMiddleware, settings=settings)
+
     # CORS 中间件
     app.add_middleware(
         CORSMiddleware,

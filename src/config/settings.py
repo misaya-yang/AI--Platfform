@@ -40,11 +40,32 @@ class AuthenticationSettings(BaseModel):
 class RBACSettings(BaseModel):
     roles: Dict[str, List[str]] = Field(
         default_factory=lambda: {
+            # Anonymous/guest users. Keep minimal permissions; per-service auth
+            # config should still be used to require authenticated roles where needed.
+            "guest": ["service:invoke"],
             "user": ["service:invoke", "task:read"],
             "developer": ["service:invoke", "task:read", "service:manage"],
             "admin": ["admin:*"],
         }
     )
+
+
+class AnonymousIdentitySettings(BaseModel):
+    """Anonymous/guest identity settings (for stable pre-auth sessions)."""
+
+    enabled: bool = True
+    cookie_name: str = "ag_anon_id"
+    header_name: str = "X-AG-Anonymous-Id"
+    ttl_days: int = 30
+    same_site: str = "lax"  # lax | strict | none
+
+
+class SessionSettings(BaseModel):
+    """Session persistence settings."""
+
+    # Default TTLs applied when the backing SessionManager supports expiry.
+    anonymous_ttl_seconds: int = 86400  # 24h
+    authenticated_ttl_seconds: int = 86400 * 7  # 7d
 
 
 class RateLimitSettings(BaseModel):
@@ -115,6 +136,10 @@ class Settings(BaseSettings):
     authentication: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     rbac: RBACSettings = Field(default_factory=RBACSettings)
     rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
+
+    # Anonymous identity + session policy
+    anonymous: AnonymousIdentitySettings = Field(default_factory=AnonymousIdentitySettings)
+    session: SessionSettings = Field(default_factory=SessionSettings)
 
     # 负载均衡
     load_balancer: LoadBalancerSettings = Field(default_factory=LoadBalancerSettings)

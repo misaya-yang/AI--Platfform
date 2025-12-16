@@ -5,7 +5,8 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from ..deps import AuthContext, get_auth_context, get_session_manager
+from ..deps import get_session_manager, get_user_context
+from ...core.auth.user_resolver import UserContext
 from ...services.session.session_manager import SessionManager
 
 
@@ -26,11 +27,11 @@ async def list_sessions(
     service_id: Optional[str] = Query(default=None),
     limit: int = Query(100, ge=1, le=500),
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
     sessions = await session_manager.list_sessions(
-        user_id=auth.user_id or None,
-        tenant_id=auth.tenant_id or None,
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
         service_id=service_id,
         limit=limit,
     )
@@ -52,11 +53,11 @@ async def list_sessions(
 async def create_session(
     body: SessionCreate = Body(default_factory=SessionCreate),
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
     session = await session_manager.create(
-        user_id=auth.user_id or "local",
-        tenant_id=auth.tenant_id or "local",
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
         service_id=body.service_id,
         metadata=body.metadata,
     )
@@ -67,10 +68,10 @@ async def create_session(
 async def get_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
     session = await session_manager.get(session_id)
-    if not session:
+    if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
         raise HTTPException(status_code=404, detail="session not found")
     return {
         "session_id": session.session_id,
@@ -87,10 +88,10 @@ async def update_session(
     session_id: str,
     body: SessionUpdate,
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
     session = await session_manager.get(session_id)
-    if not session:
+    if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
         raise HTTPException(status_code=404, detail="session not found")
     
     if body.metadata:
@@ -108,8 +109,11 @@ async def update_session(
 async def delete_session(
     session_id: str,
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
+    session = await session_manager.get(session_id)
+    if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
+        raise HTTPException(status_code=404, detail="session not found")
     await session_manager.delete(session_id)
     return {"session_id": session_id, "status": "deleted"}
 
@@ -119,8 +123,11 @@ async def get_history(
     session_id: str,
     limit: int = Query(50, ge=1, le=500),
     session_manager: SessionManager = Depends(get_session_manager),
-    auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
+    session = await session_manager.get(session_id)
+    if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
+        raise HTTPException(status_code=404, detail="session not found")
     history = await session_manager.history(session_id, limit=limit)
     return [
         {"role": m.role, "content": m.content, "timestamp": m.timestamp}

@@ -57,7 +57,9 @@ class UnifiedRequestSchema(BaseModel):
             parameters=self.parameters,
             callback_url=self.callback_url,
             priority=self.priority or 0,
-            user_id=self.user_id or default_user_id,
-            tenant_id=self.tenant_id or default_tenant_id,
+            # User identity must be derived from gateway auth/session context,
+            # not from client-provided request fields.
+            user_id=default_user_id,
+            tenant_id=default_tenant_id,
             timestamp=self.timestamp or datetime.utcnow(),
         )
