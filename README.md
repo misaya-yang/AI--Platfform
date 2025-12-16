@@ -18,7 +18,7 @@ pip install -r requirements.txt
 uvicorn src.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-默认会从根目录下的 `services/` 读取服务 YAML 并自动注册。
+默认会从根目录下的 `services/` 读取服务 YAML 并自动注册1。
 
 ## API
 
