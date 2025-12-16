@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ...models.session import Session, SessionMessage
@@ -86,9 +86,11 @@ class DatabaseSessionManager:
         
         session = self._dict_to_session(session_dict)
         
-        # 检查是否过期
-        if session.expires_at and session.expires_at < datetime.utcnow():
-            return None
+        # 检查是否过期 (处理时区感知和时区无关的 datetime 比较)
+        if session.expires_at:
+            expires = session.expires_at.replace(tzinfo=None) if session.expires_at.tzinfo else session.expires_at
+            if expires < datetime.utcnow():
+                return None
         
         # 写入缓存
         await self._cache_session(session)

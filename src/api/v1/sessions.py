@@ -55,8 +55,8 @@ async def create_session(
     auth: AuthContext = Depends(get_auth_context),
 ):
     session = await session_manager.create(
-        user_id=auth.user_id or "",
-        tenant_id=auth.tenant_id or "",
+        user_id=auth.user_id or "local",
+        tenant_id=auth.tenant_id or "local",
         service_id=body.service_id,
         metadata=body.metadata,
     )

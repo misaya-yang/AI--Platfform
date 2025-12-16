@@ -4,7 +4,9 @@
       "Bash(dir /s \"c:\\Projects\\Agent_Gateway\")",
       "Bash(findstr:*)",
       "Bash(dir:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(cmd /c \"cd C:\\Projects\\Agent_Gateway && powershell -Command \"\"(Get-Content ''src\\core\\gateway\\dispatcher.py'' -Raw) -replace ''user_id=request.user_id or \\\"\"\\\"\"'', ''user_id=request.user_id or \\\"\"local\\\"\"'' | Set-Content ''src\\core\\gateway\\dispatcher.py'' -NoNewline\"\"\")",
+      "Bash(powershell -Command \"(Get-Content ''C:\\Projects\\Agent_Gateway\\src\\core\\gateway\\dispatcher.py'' -Raw) -replace ''user_id=request.user_id or \"\"\"\"'', ''user_id=request.user_id or \"\"local\"\"'' -replace ''tenant_id=request.tenant_id or \"\"\"\"'', ''tenant_id=request.tenant_id or \"\"local\"\"'' | Set-Content ''C:\\Projects\\Agent_Gateway\\src\\core\\gateway\\dispatcher.py'' -NoNewline\")"
     ]
   }
 }

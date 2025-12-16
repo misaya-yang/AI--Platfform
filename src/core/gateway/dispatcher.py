@@ -98,8 +98,8 @@ class GatewayDispatcher:
         if service.session_enabled and request.session_id:
             session = await self.session_manager.get_or_create(
                 request.session_id,
-                user_id=request.user_id or "",
-                tenant_id=request.tenant_id or "",
+                user_id=request.user_id or "local",
+                tenant_id=request.tenant_id or "local",
                 service_id=service.service_id,
             )
             session_id = session.session_id
@@ -163,8 +163,8 @@ class GatewayDispatcher:
         if service.session_enabled and request.session_id:
             session = await self.session_manager.get_or_create(
                 request.session_id,
-                user_id=request.user_id or "",
-                tenant_id=request.tenant_id or "",
+                user_id=request.user_id or "local",
+                tenant_id=request.tenant_id or "local",
                 service_id=service.service_id,
             )
             session_id = session.session_id
