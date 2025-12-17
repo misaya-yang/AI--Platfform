@@ -198,15 +198,80 @@ class LangGraphProxy:
                 timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0),
             )
         return self._clients[instance.instance_id]
-    
+
     async def close(self) -> None:
         """关闭所有客户端连接"""
         for client in self._clients.values():
             await client.aclose()
         self._clients.clear()
+
+    def _build_langgraph_headers(
+        self,
+        user: UserContext,
+        original_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        """
+        构建发送给 LangGraph 的 headers
+
+        注入用户信息，供 LangGraph Server 的 Auth 系统使用：
+        - X-User-Id: 用户标识
+        - X-User-Type: 用户类型 (user/guest/anonymous)
+        - X-Tenant-Id: 租户标识
+        - X-User-Tier: 用户层级
+        """
+        headers = {
+            "Content-Type": "application/json",
+            # 关键：注入用户信息
+            "X-User-Id": user.user_id,
+            "X-User-Type": "user" if user.is_authenticated else "guest",
+            "X-Tenant-Id": user.tenant_id or "",
+            "X-User-Tier": user.tier,
+        }
+
+        # 如果有原始 Authorization header，透传给 LangGraph
+        if original_headers:
+            if auth := original_headers.get("Authorization"):
+                headers["Authorization"] = auth
+            if trace_id := original_headers.get("X-Trace-Id"):
+                headers["X-Trace-Id"] = trace_id
+            if request_id := original_headers.get("X-Request-Id"):
+                headers["X-Request-Id"] = request_id
+
+        return headers
+
+    async def _make_request(
+        self,
+        method: str,
+        path: str,
+        user: UserContext,
+        json_data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        original_headers: Optional[Dict[str, str]] = None,
+    ) -> httpx.Response:
+        """
+        统一的请求转发方法
+
+        1. 选择健康实例
+        2. 构建 headers（包含用户信息）
+        3. 发送请求
+        4. 处理响应
+        """
+        instance = await self.lb.select_instance()
+        client = await self._get_client(instance)
+        headers = self._build_langgraph_headers(user, original_headers)
+
+        response = await client.request(
+            method=method,
+            url=path,
+            headers=headers,
+            json=json_data,
+            params=params,
+        )
+
+        return response
     
     # ============ Assistants API ============
-    
+
     async def list_assistants(
         self,
         user: UserContext,
@@ -217,21 +282,23 @@ class LangGraphProxy:
         """列出 Assistants"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"limit": limit, "offset": offset}
         if metadata:
             params["metadata"] = json.dumps(metadata)
-        
-        response = await client.post("/assistants/search", json=params)
+
+        response = await client.post("/assistants/search", json=params, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def get_assistant(self, user: UserContext, assistant_id: str) -> Dict[str, Any]:
         """获取 Assistant 详情"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
-        response = await client.get(f"/assistants/{assistant_id}")
+        headers = self._build_langgraph_headers(user)
+
+        response = await client.get(f"/assistants/{assistant_id}", headers=headers)
         response.raise_for_status()
         return response.json()
     
@@ -247,27 +314,28 @@ class LangGraphProxy:
         # 权限检查
         if user.tier not in ["enterprise", "admin"]:
             raise ForbiddenError("Custom assistants require enterprise plan")
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         payload: Dict[str, Any] = {"graph_id": graph_id}
         if config:
             payload["config"] = config
         if name:
             payload["name"] = name
-        
+
         # 注入创建者信息
         payload["metadata"] = metadata or {}
         payload["metadata"]["created_by"] = user.user_id
         payload["metadata"]["tenant_id"] = user.tenant_id
-        
-        response = await client.post("/assistants", json=payload)
+
+        response = await client.post("/assistants", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     # ============ Threads API ============
-    
+
     async def create_thread(
         self,
         user: UserContext,
@@ -275,13 +343,14 @@ class LangGraphProxy:
         if_exists: str = "do_nothing",
     ) -> Dict[str, Any]:
         """创建 Thread，注入用户元数据"""
-        
+
         # 检查 Thread 配额
         await self._check_thread_quota(user)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         # 注入用户元数据
         thread_metadata = metadata or {}
         thread_metadata.update({
@@ -290,38 +359,39 @@ class LangGraphProxy:
             "user_tier": user.tier,
             "created_at": datetime.utcnow().isoformat(),
         })
-        
+
         payload = {
             "metadata": thread_metadata,
             "if_exists": if_exists,
         }
-        
-        response = await client.post("/threads", json=payload)
+
+        response = await client.post("/threads", json=payload, headers=headers)
         response.raise_for_status()
         thread = response.json()
-        
+
         # 记录用户的 Thread 计数
         await self._increment_thread_count(user)
-        
+
         return thread
-    
+
     async def get_thread(self, user: UserContext, thread_id: str) -> Dict[str, Any]:
         """获取 Thread，验证所有权"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
-        response = await client.get(f"/threads/{thread_id}")
+        headers = self._build_langgraph_headers(user)
+
+        response = await client.get(f"/threads/{thread_id}", headers=headers)
         if response.status_code == 404:
             raise ThreadNotFoundError(thread_id)
         response.raise_for_status()
-        
+
         thread = response.json()
-        
+
         # 验证所有权
         self._verify_ownership(thread, user)
-        
+
         return thread
-    
+
     async def update_thread(
         self,
         user: UserContext,
@@ -331,32 +401,34 @@ class LangGraphProxy:
         """更新 Thread"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         payload = {}
         if metadata:
             payload["metadata"] = metadata
-        
-        response = await client.patch(f"/threads/{thread_id}", json=payload)
+
+        response = await client.patch(f"/threads/{thread_id}", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def delete_thread(self, user: UserContext, thread_id: str) -> None:
         """删除 Thread"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
-        response = await client.delete(f"/threads/{thread_id}")
+        headers = self._build_langgraph_headers(user)
+
+        response = await client.delete(f"/threads/{thread_id}", headers=headers)
         response.raise_for_status()
-        
+
         # 减少 Thread 计数
         await self._decrement_thread_count(user)
-    
+
     async def search_threads(
         self,
         user: UserContext,
@@ -367,19 +439,20 @@ class LangGraphProxy:
         """搜索用户的 Threads"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         # 只搜索用户自己的 Threads
         search_metadata = metadata or {}
         if user.tier != "admin":
             search_metadata["owner_id"] = user.user_id
-        
+
         payload = {
             "metadata": search_metadata,
             "limit": limit,
             "offset": offset,
         }
-        
-        response = await client.post("/threads/search", json=payload)
+
+        response = await client.post("/threads/search", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
     
@@ -387,14 +460,15 @@ class LangGraphProxy:
         """获取 Thread 状态"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
-        response = await client.get(f"/threads/{thread_id}/state")
+        headers = self._build_langgraph_headers(user)
+
+        response = await client.get(f"/threads/{thread_id}/state", headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def update_thread_state(
         self,
         user: UserContext,
@@ -405,18 +479,19 @@ class LangGraphProxy:
         """更新 Thread 状态"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         payload: Dict[str, Any] = {"values": values}
         if as_node:
             payload["as_node"] = as_node
-        
-        response = await client.post(f"/threads/{thread_id}/state", json=payload)
+
+        response = await client.post(f"/threads/{thread_id}/state", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def get_thread_history(
         self,
         user: UserContext,
@@ -427,20 +502,21 @@ class LangGraphProxy:
         """获取 Thread 历史"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"limit": limit}
         if before:
             params["before"] = before
-        
-        response = await client.get(f"/threads/{thread_id}/history", params=params)
+
+        response = await client.get(f"/threads/{thread_id}/history", params=params, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     # ============ Runs API ============
-    
+
     async def create_run(
         self,
         user: UserContext,
@@ -454,25 +530,26 @@ class LangGraphProxy:
         interrupt_after: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """创建 Run"""
-        
+
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         instance.active_connections += 1
-        
+
         try:
             client = await self._get_client(instance)
-            
+            headers = self._build_langgraph_headers(user)
+
             # 构建 Run 配置，注入用户上下文
             run_config = self._build_run_config(user, config)
-            
+
             payload: Dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
             }
-            
+
             if metadata:
                 payload["metadata"] = metadata
             if webhook:
@@ -481,13 +558,13 @@ class LangGraphProxy:
                 payload["interrupt_before"] = interrupt_before
             if interrupt_after:
                 payload["interrupt_after"] = interrupt_after
-            
-            response = await client.post(f"/threads/{thread_id}/runs", json=payload)
+
+            response = await client.post(f"/threads/{thread_id}/runs", json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
         finally:
             instance.active_connections -= 1
-    
+
     async def create_run_wait(
         self,
         user: UserContext,
@@ -498,17 +575,18 @@ class LangGraphProxy:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """创建 Run 并等待完成"""
-        
+
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         instance.active_connections += 1
-        
+
         try:
             client = await self._get_client(instance)
+            headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
-            
+
             payload: Dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
@@ -516,13 +594,13 @@ class LangGraphProxy:
             }
             if metadata:
                 payload["metadata"] = metadata
-            
-            response = await client.post(f"/threads/{thread_id}/runs/wait", json=payload)
+
+            response = await client.post(f"/threads/{thread_id}/runs/wait", json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
         finally:
             instance.active_connections -= 1
-    
+
     async def stream_run(
         self,
         user: UserContext,
@@ -533,41 +611,42 @@ class LangGraphProxy:
         stream_mode: Optional[List[str]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式执行 Run"""
-        
+
         # 如果有 thread_id，验证所有权
         if thread_id:
             await self.get_thread(user, thread_id)
             endpoint = f"/threads/{thread_id}/runs/stream"
         else:
             endpoint = "/runs/stream"
-        
+
         instance = await self.lb.select_instance()
         instance.active_connections += 1
-        
+
         try:
             client = await self._get_client(instance)
+            headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
-            
+
             payload: Dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
                 "stream_mode": stream_mode or ["messages", "updates"],
             }
-            
-            async with client.stream("POST", endpoint, json=payload) as response:
+
+            async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
                 response.raise_for_status()
-                
+
                 current_event = ""
                 async for line in response.aiter_lines():
                     if not line:
                         current_event = ""
                         continue
-                    
+
                     if line.startswith("event:"):
                         current_event = line[6:].strip()
                         continue
-                    
+
                     if line.startswith("data:"):
                         data_str = line[5:].strip()
                         if data_str and data_str != "[DONE]":
@@ -588,14 +667,15 @@ class LangGraphProxy:
         """获取 Run 详情"""
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
-        response = await client.get(f"/threads/{thread_id}/runs/{run_id}")
+        headers = self._build_langgraph_headers(user)
+
+        response = await client.get(f"/threads/{thread_id}/runs/{run_id}", headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def list_runs(
         self,
         user: UserContext,
@@ -606,15 +686,16 @@ class LangGraphProxy:
         """列出 Thread 的 Runs"""
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"limit": limit, "offset": offset}
-        response = await client.get(f"/threads/{thread_id}/runs", params=params)
+        response = await client.get(f"/threads/{thread_id}/runs", params=params, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     async def cancel_run(
         self,
         user: UserContext,
@@ -625,16 +706,17 @@ class LangGraphProxy:
         """取消 Run"""
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"wait": wait}
-        response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel", params=params)
+        response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel", params=params, headers=headers)
         response.raise_for_status()
-    
+
     # ============ Threadless Runs ============
-    
+
     async def create_stateless_run(
         self,
         user: UserContext,
@@ -645,25 +727,26 @@ class LangGraphProxy:
         """创建无状态 Run（一次性对话）"""
         instance = await self.lb.select_instance()
         instance.active_connections += 1
-        
+
         try:
             client = await self._get_client(instance)
+            headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
-            
+
             payload: Dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
             }
-            
-            response = await client.post("/runs/wait", json=payload)
+
+            response = await client.post("/runs/wait", json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
         finally:
             instance.active_connections -= 1
-    
+
     # ============ Store API (Memory) ============
-    
+
     async def store_get(
         self,
         user: UserContext,
@@ -671,21 +754,22 @@ class LangGraphProxy:
         key: str,
     ) -> Optional[Dict[str, Any]]:
         """获取记忆，验证 namespace 权限"""
-        
+
         if not self._validate_namespace_access(namespace, user):
             raise ForbiddenError("Access denied to this namespace")
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"namespace": json.dumps(namespace), "key": key}
-        response = await client.get("/store/items", params=params)
-        
+        response = await client.get("/store/items", params=params, headers=headers)
+
         if response.status_code == 404:
             return None
         response.raise_for_status()
         return response.json()
-    
+
     async def store_put(
         self,
         user: UserContext,
@@ -694,22 +778,23 @@ class LangGraphProxy:
         value: Dict[str, Any],
     ) -> None:
         """写入记忆，验证权限"""
-        
+
         if not self._validate_namespace_access(namespace, user, write=True):
             raise ForbiddenError("Access denied to this namespace")
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         payload = {
             "namespace": namespace,
             "key": key,
             "value": value,
         }
-        
-        response = await client.post("/store/items", json=payload)
+
+        response = await client.post("/store/items", json=payload, headers=headers)
         response.raise_for_status()
-    
+
     async def store_delete(
         self,
         user: UserContext,
@@ -717,17 +802,18 @@ class LangGraphProxy:
         key: str,
     ) -> None:
         """删除记忆项"""
-        
+
         if not self._validate_namespace_access(namespace, user, write=True):
             raise ForbiddenError("Access denied to this namespace")
-        
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         params = {"namespace": json.dumps(namespace), "key": key}
-        response = await client.delete("/store/items", params=params)
+        response = await client.delete("/store/items", params=params, headers=headers)
         response.raise_for_status()
-    
+
     async def store_list_namespaces(
         self,
         user: UserContext,
@@ -736,16 +822,17 @@ class LangGraphProxy:
         """列出命名空间"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
-        
+        headers = self._build_langgraph_headers(user)
+
         # 限制只能看到自己的命名空间
         if user.tier != "admin":
             prefix = ["user", user.user_id] + (prefix or [])
-        
+
         params = {}
         if prefix:
             params["prefix"] = json.dumps(prefix)
-        
-        response = await client.get("/store/namespaces", params=params)
+
+        response = await client.get("/store/namespaces", params=params, headers=headers)
         response.raise_for_status()
         return response.json()
     

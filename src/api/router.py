@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from .v1.config import router as config_router
+from .v1.conversations import router as conversations_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.langgraph import router as langgraph_router
@@ -19,4 +20,5 @@ api_router.include_router(sessions_router)
 api_router.include_router(services_router)
 api_router.include_router(health_router)
 api_router.include_router(config_router)
+api_router.include_router(conversations_router)  # 简化的对话 API
 api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理

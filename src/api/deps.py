@@ -65,6 +65,11 @@ def get_rate_limiter(request: Request) -> Optional[MultiDimensionRateLimiter]:
     return getattr(request.app.state, "multi_rate_limiter", None)
 
 
+def get_guest_session_manager(request: Request):
+    """获取游客会话管理器"""
+    return getattr(request.app.state, "guest_session_manager", None)
+
+
 def _get_client_ip(request: Request) -> str:
     """Best-effort client IP (proxy-aware)."""
     forwarded = request.headers.get("X-Forwarded-For")

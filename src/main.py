@@ -22,6 +22,9 @@ from .core.observability.tracing import TracingMiddleware
 from .core.observability.metrics import get_metrics
 from .adapters.registry import auto_register_builtin_adapters
 from .core.auth.anonymous_middleware import AnonymousIdentityMiddleware
+from .core.middleware.auth import AuthMiddleware, AuthConfig
+from .core.middleware.rate_limit_http import RateLimitMiddleware, RateLimitConfig
+from .core.middleware.request_logging import RequestLoggingMiddleware, RequestLogConfig
 
 # 兼容旧的异常导入（向后兼容）
 from .core.exceptions import (
@@ -65,9 +68,47 @@ def create_app() -> FastAPI:
     )
     
     # ========== 中间件配置 ==========
-    
+    # 注意：中间件执行顺序与添加顺序相反（后添加的先执行）
+    # 执行顺序：Tracing -> CORS -> RequestLogging -> RateLimit -> Auth -> AnonymousIdentity
+
     # Stable anonymous identity for guest users (cookie/header)
     app.add_middleware(AnonymousIdentityMiddleware, settings=settings)
+
+    # 统一鉴权中间件（支持 JWT、API Key、游客会话）
+    auth_config = AuthConfig(
+        jwt_enabled=settings.authentication.jwt.enabled if hasattr(settings, 'authentication') else False,
+        jwt_secret=settings.authentication.jwt.secret if hasattr(settings, 'authentication') else "",
+        jwt_algorithms=settings.authentication.jwt.algorithms if hasattr(settings, 'authentication') else ["HS256"],
+        api_key_enabled=settings.authentication.api_key.enabled if hasattr(settings, 'authentication') else False,
+        guest_session_enabled=True,
+        anonymous_enabled=True,
+        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"],
+    )
+    app.add_middleware(AuthMiddleware, config=auth_config)
+
+    # HTTP 级别限流中间件
+    rate_limit_config = RateLimitConfig(
+        enabled=True,
+        global_limit=1000,
+        global_window=60,
+        user_limit=100,
+        user_window=60,
+        guest_limit=20,
+        guest_window=60,
+        ip_limit=50,
+        ip_window=60,
+        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics"],
+    )
+    app.add_middleware(RateLimitMiddleware, config=rate_limit_config, redis_client=None)
+
+    # 请求日志中间件
+    request_log_config = RequestLogConfig(
+        enabled=True,
+        log_request_body=False,
+        log_response_body=False,
+        exclude_paths=["/health", "/health/live", "/health/ready", "/metrics"],
+    )
+    app.add_middleware(RequestLoggingMiddleware, config=request_log_config)
 
     # CORS 中间件
     app.add_middleware(
@@ -77,7 +118,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # 追踪中间件
     app.add_middleware(
         TracingMiddleware,
@@ -227,7 +268,7 @@ def create_app() -> FastAPI:
 def _setup_app_state(app: FastAPI, container: Container) -> None:
     """
     设置 app.state 属性
-    
+
     为向后兼容，将容器中的组件暴露到 app.state。
     """
     app.state.registry = container.service_registry
@@ -239,11 +280,18 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.task_worker = container.task_worker
     app.state.database = container.database
     app.state.redis = container.redis
-    
+
     # LangGraph 相关
     app.state.langgraph_proxy = container.langgraph_proxy
     app.state.multi_rate_limiter = container.multi_rate_limiter
     app.state.user_resolver = container.user_resolver
+
+    # 游客会话管理器
+    from .services.session.guest_session_manager import GuestSessionManager, GuestSessionConfig
+    app.state.guest_session_manager = GuestSessionManager(
+        config=GuestSessionConfig(),
+        redis_client=container.redis,
+    )
 
 
 async def _load_services_from_database(container: Container, settings: Settings) -> None:
