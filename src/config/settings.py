@@ -119,7 +119,11 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         # Prefer repo-local env files (used by this project layout), but keep
         # compatibility with conventional root `.env` files as well.
-        env_file=("config/.env", "config/env.local", ".env", ".env.local"),
+        # Precedence (later overrides earlier):
+        # - config/env.local: committed template/defaults
+        # - config/.env: local actual config (e.g., port changes)
+        # - .env / .env.local: conventional root env files (optional)
+        env_file=("config/env.local", "config/.env", ".env", ".env.local"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

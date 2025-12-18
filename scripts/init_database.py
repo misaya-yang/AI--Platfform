@@ -20,6 +20,26 @@ except ImportError:
     sys.exit(1)
 
 
+def _get_dsn() -> str:
+    # 1) 显式环境变量优先（便于临时覆盖）
+    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    if dsn:
+        return dsn
+
+    # 2) 尝试读取项目 Settings（会自动加载 config/.env 等）
+    try:
+        from src.config.settings import Settings
+
+        settings = Settings()
+        if getattr(settings, "database", None) and settings.database.dsn:
+            return settings.database.dsn
+    except Exception:
+        pass
+
+    # 3) 兜底默认值
+    return "postgresql://postgres:111111@localhost:5432/gateway"
+
+
 async def create_database(dsn: str, db_name: str = "gateway"):
     """创建数据库（如果不存在）"""
     # 连接到默认的 postgres 数据库
@@ -36,15 +56,15 @@ async def create_database(dsn: str, db_name: str = "gateway"):
         if not exists:
             # 创建数据库
             await conn.execute(f'CREATE DATABASE "{db_name}"')
-            print(f"✓ 数据库 '{db_name}' 创建成功")
+            print(f"[OK] 数据库 '{db_name}' 创建成功")
         else:
-            print(f"✓ 数据库 '{db_name}' 已存在")
+            print(f"[OK] 数据库 '{db_name}' 已存在")
         
         await conn.close()
         return True
         
     except Exception as e:
-        print(f"✗ 创建数据库失败: {e}")
+        print(f"[ERROR] 创建数据库失败: {e}")
         return False
 
 
@@ -62,11 +82,11 @@ async def execute_schema(dsn: str, schema_path: str):
         await conn.execute(sql)
         
         await conn.close()
-        print(f"✓ 建表脚本执行成功")
+        print("[OK] 建表脚本执行成功")
         return True
         
     except Exception as e:
-        print(f"✗ 执行建表脚本失败: {e}")
+        print(f"[ERROR] 执行建表脚本失败: {e}")
         return False
 
 
@@ -76,11 +96,11 @@ async def test_connection(dsn: str):
         conn = await asyncpg.connect(dsn)
         version = await conn.fetchval("SELECT version()")
         await conn.close()
-        print(f"✓ 数据库连接成功")
+        print("[OK] 数据库连接成功")
         print(f"  PostgreSQL 版本: {version.split(',')[0]}")
         return True
     except Exception as e:
-        print(f"✗ 数据库连接失败: {e}")
+        print(f"[ERROR] 数据库连接失败: {e}")
         return False
 
 
@@ -105,16 +125,13 @@ async def list_tables(dsn: str):
         
         return True
     except Exception as e:
-        print(f"✗ 查询表失败: {e}")
+        print(f"[ERROR] 查询表失败: {e}")
         return False
 
 
 async def main():
     # 从环境变量或默认值获取配置
-    dsn = os.environ.get(
-        "GATEWAY_DATABASE__DSN",
-        "postgresql://postgres:111111@localhost:5432/gateway"
-    )
+    dsn = _get_dsn()
     
     schema_path = project_root / "database" / "schema.sql"
     
@@ -144,7 +161,7 @@ async def main():
     # 3. 执行建表脚本
     print("\n步骤 3: 执行建表脚本...")
     if not schema_path.exists():
-        print(f"✗ 找不到建表脚本: {schema_path}")
+        print(f"[ERROR] 找不到建表脚本: {schema_path}")
         sys.exit(1)
     
     await execute_schema(dsn, str(schema_path))
@@ -154,10 +171,9 @@ async def main():
     await list_tables(dsn)
     
     print("\n" + "=" * 50)
-    print("✓ 数据库初始化完成!")
+    print("[OK] 数据库初始化完成!")
     print("=" * 50)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
