@@ -58,16 +58,46 @@ class LangGraphAdapter(ProtocolAdapter):
                 "thread_stream_endpoint", "/threads/{thread_id}/runs/stream"
             )
 
+    def _build_run_config(self, request: UnifiedRequest, thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """Build LangGraph run config with gateway-injected `configurable` values."""
+        params = request.parameters or {}
+        run_config: Dict[str, Any] = {}
+        if isinstance(params.get("config"), dict):
+            run_config = dict(params["config"])
+
+        configurable = run_config.get("configurable") or {}
+        if not isinstance(configurable, dict):
+            configurable = {}
+        configurable = dict(configurable)
+
+        # Merge in caller-provided configurable from request.context / request.parameters.
+        for source in (request.context, request.parameters):
+            if not isinstance(source, dict):
+                continue
+            src_cfg = source.get("configurable")
+            if isinstance(src_cfg, dict):
+                for k, v in src_cfg.items():
+                    if k not in configurable and v is not None:
+                        configurable[k] = v
+            for k in ("dataset_id", "gateway_token"):
+                v = source.get(k)
+                if k not in configurable and v is not None:
+                    configurable[k] = v
+
+        # Enforce gateway scoping fields.
+        configurable["user_id"] = request.user_id
+        configurable["tenant_id"] = request.tenant_id
+        configurable["checkpoint_ns"] = request.tenant_id or ""
+        configurable["thread_id"] = thread_id or (request.session_id or request.request_id)
+
+        run_config["configurable"] = configurable
+        return run_config
+
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         messages = self._build_messages(request.inputs)
         if not self.remote:
-            config = {
-                "configurable": {
-                    "thread_id": request.session_id or request.request_id,
-                    "checkpoint_ns": request.tenant_id or "",
-                }
-            }
-            result = await self.graph.ainvoke({"messages": messages}, config)
+            run_config = self._build_run_config(request)
+            result = await self.graph.ainvoke({"messages": messages}, run_config)
         else:
             result = await self._remote_wait(request, messages)
         content = self._extract_result_text(result)
@@ -84,16 +114,11 @@ class LangGraphAdapter(ProtocolAdapter):
         if not self.remote:
             if not hasattr(self.graph, "astream_events"):
                 raise ValidationFailedError("graph does not support streaming")
-            config = {
-                "configurable": {
-                    "thread_id": request.session_id or request.request_id,
-                    "checkpoint_ns": request.tenant_id or "",
-                }
-            }
+            run_config = self._build_run_config(request)
             # 追踪已处理的内容，用于去重
             seen_content_ids: set = set()
 
-            async for event in self.graph.astream_events({"messages": messages}, config, version="v2"):
+            async for event in self.graph.astream_events({"messages": messages}, run_config, version="v2"):
                 stream_event = self._extract_stream_event(event, seen_content_ids)
                 if stream_event:
                     yield StreamChunk(
@@ -326,22 +351,14 @@ class LangGraphAdapter(ProtocolAdapter):
         }
         if request.callback_url:
             payload["webhook"] = request.callback_url
-        # Ensure upstream graphs receive the same user/session scoping as the gateway.
-        run_config: Dict[str, Any] = {}
-        if isinstance(params.get("config"), dict):
-            run_config = dict(params["config"])
-        run_config["configurable"] = run_config.get("configurable", {})
-        run_config["configurable"]["user_id"] = request.user_id
-        run_config["configurable"]["tenant_id"] = request.tenant_id
-        run_config["configurable"]["checkpoint_ns"] = request.tenant_id or ""
-        payload["config"] = run_config
-
         if self.service.session_enabled and request.session_id:
             # 确保 thread 存在并获取有效的 UUID thread_id
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             endpoint = self.thread_invoke_endpoint.format(thread_id=valid_thread_id)
+            payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
         else:
             endpoint = self.invoke_endpoint
+            payload["config"] = self._build_run_config(request)
         try:
             return await self.connector.post(endpoint, json=payload)
         except Exception as exc:
@@ -380,21 +397,14 @@ class LangGraphAdapter(ProtocolAdapter):
                 "tenant_id": request.tenant_id,
             },
         }
-        run_config: Dict[str, Any] = {}
-        if isinstance(params.get("config"), dict):
-            run_config = dict(params["config"])
-        run_config["configurable"] = run_config.get("configurable", {})
-        run_config["configurable"]["user_id"] = request.user_id
-        run_config["configurable"]["tenant_id"] = request.tenant_id
-        run_config["configurable"]["checkpoint_ns"] = request.tenant_id or ""
-        payload["config"] = run_config
-
         if self.service.session_enabled and request.session_id:
             # 确保 thread 存在并获取有效的 UUID thread_id
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             endpoint = self.thread_stream_endpoint.format(thread_id=valid_thread_id)
+            payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
         else:
             endpoint = self.stream_endpoint
+            payload["config"] = self._build_run_config(request)
 
         client = getattr(self.connector, "_client", None)
         if client is None:

@@ -1,11 +1,12 @@
 import { useEffect } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Settings,
   PlaySquare,
   ServerCog,
   ListChecks,
+  Database,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -15,6 +16,7 @@ import { useAppStore } from "@/store/useAppStore";
 const navItems = [
   { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { to: "/services", label: "服务管理", icon: ServerCog },
+  { to: "/knowledge", label: "知识库", icon: Database },
   { to: "/playground", label: "对话测试", icon: PlaySquare },
   { to: "/tasks", label: "任务管理", icon: ListChecks },
   { to: "/settings", label: "系统设置", icon: Settings },
@@ -22,6 +24,8 @@ const navItems = [
 
 export function AppLayout() {
   const { darkMode, toggleDarkMode } = useAppStore();
+  const location = useLocation();
+  const isKnowledge = location.pathname.startsWith("/knowledge");
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -64,7 +68,7 @@ export function AppLayout() {
             })}
           </nav>
 
-          < div className="mt-auto pt-4 border-t border-border/50">
+          <div className="mt-auto pt-4 border-t border-border/50">
              <div className="flex items-center justify-between rounded-xl p-2 hover:bg-white/50 dark:hover:bg-white/10 transition-colors">
                 <span className="text-xs font-medium text-muted-foreground ml-1">Dark Mode</span>
                 <Switch checked={darkMode} onCheckedChange={toggleDarkMode} className="scale-75" />
@@ -81,7 +85,12 @@ export function AppLayout() {
         </header>
         
         <main className="flex-1 overflow-auto p-4 md:p-6 scroll-smooth">
-          <div className="mx-auto max-w-6xl h-full animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div
+            className={cn(
+              "mx-auto h-full animate-in fade-in slide-in-from-bottom-4 duration-500",
+              isKnowledge ? "max-w-none" : "max-w-6xl"
+            )}
+          >
             <Outlet />
           </div>
         </main>

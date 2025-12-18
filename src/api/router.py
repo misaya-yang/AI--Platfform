@@ -5,6 +5,7 @@ from .v1.conversations import router as conversations_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.langgraph import router as langgraph_router
+from .v1.knowledge import router as knowledge_router
 from .v1.services import router as services_router
 from .v1.sessions import router as sessions_router
 from .v1.stream import router as stream_router
@@ -22,3 +23,4 @@ api_router.include_router(health_router)
 api_router.include_router(config_router)
 api_router.include_router(conversations_router)  # 简化的对话 API
 api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理
+api_router.include_router(knowledge_router)  # KBMS Knowledge Base

@@ -10,9 +10,16 @@ websockets>=12.0
 jsonpath-ng>=1.6
 pytest>=8.0
 pytest-asyncio>=0.23
-sse-starlette>=2.0        # SSE 支持
-langgraph-sdk>=0.1.51     # LangGraph SDK
+sse-starlette>=2.0
+langgraph-sdk>=0.1.51
 
-# 可选依赖 - 数据库和缓存
-asyncpg>=0.29        # PostgreSQL 支持
-redis>=5.0           # Redis 支持
+# File upload (FastAPI UploadFile)
+python-multipart>=0.0.9
+
+# Optional: database/cache
+asyncpg>=0.29
+redis>=5.0
+
+# Knowledge Base (KBMS)
+qdrant-client>=1.16.0
+dashscope>=1.20.0

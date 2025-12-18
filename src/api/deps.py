@@ -49,6 +49,26 @@ def get_langgraph_proxy(request: Request) -> Optional[LangGraphProxy]:
     """获取 LangGraph 代理"""
     return getattr(request.app.state, "langgraph_proxy", None)
 
+def get_knowledge_service(request: Request):
+    """Get KnowledgeService (KBMS)."""
+    svc = getattr(request.app.state, "knowledge_service", None)
+    if svc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge service is not initialized (check GATEWAY_KNOWLEDGE__ENABLED and Qdrant settings).",
+        )
+    return svc
+
+def get_knowledge_worker(request: Request):
+    """Get KnowledgeWorker (KBMS)."""
+    worker = getattr(request.app.state, "knowledge_worker", None)
+    if worker is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge worker is not initialized (check GATEWAY_KNOWLEDGE__ENABLED).",
+        )
+    return worker
+
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     """获取 LangGraph 代理（若未初始化则返回 503）"""
     proxy = getattr(request.app.state, "langgraph_proxy", None)

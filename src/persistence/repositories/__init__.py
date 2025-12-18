@@ -8,6 +8,7 @@ from .session_repository import SessionRepository, DatabaseSessionRepository
 from .task_repository import TaskRepository, DatabaseTaskRepository
 from .user_repository import UserRepository, DatabaseUserRepository
 from .api_key_repository import APIKeyRepository, DatabaseAPIKeyRepository
+from .knowledge_repository import KnowledgeRepository, DatabaseKnowledgeRepository
 
 __all__ = [
     "ServiceRepository",
@@ -20,5 +21,6 @@ __all__ = [
     "DatabaseUserRepository",
     "APIKeyRepository",
     "DatabaseAPIKeyRepository",
+    "KnowledgeRepository",
+    "DatabaseKnowledgeRepository",
 ]
-

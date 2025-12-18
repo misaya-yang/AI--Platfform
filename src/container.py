@@ -204,6 +204,7 @@ class Container:
         return DatabaseStorage(
             dsn=self.settings.database.dsn,
             enabled=self.settings.database.enabled,
+            auto_init=getattr(self.settings.database, "auto_init", True),
         )
     
     def _create_redis(self):

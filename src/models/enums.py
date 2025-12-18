@@ -37,11 +37,33 @@ class ContentType(str, Enum):
 
 
 class StreamEventType(str, Enum):
-    """流式事件类型"""
-    TEXT_DELTA = "text_delta"  # 文本增量
-    TOOL_CALL_START = "tool_call_start"  # 工具调用开始
-    TOOL_CALL_DELTA = "tool_call_delta"  # 工具调用参数增量
-    TOOL_CALL_END = "tool_call_end"  # 工具调用结束
-    TOOL_RESULT = "tool_result"  # 工具执行结果
-    THINKING = "thinking"  # 思考过程
-    FINAL = "final"  # 最终结果
+    """Streaming event types."""
+
+    TEXT_DELTA = "text_delta"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_DELTA = "tool_call_delta"
+    TOOL_CALL_END = "tool_call_end"
+    TOOL_RESULT = "tool_result"
+    THINKING = "thinking"
+    FINAL = "final"
+
+
+class DatasetVisibility(str, Enum):
+    PRIVATE = "private"
+    TENANT = "tenant"
+    PUBLIC = "public"
+
+
+class DocumentStatus(str, Enum):
+    UPLOADED = "uploaded"
+    PARSING = "parsing"
+    SEGMENTING = "segmenting"
+    EMBEDDING = "embedding"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class DatasetPermission(str, Enum):
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"

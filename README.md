@@ -30,3 +30,9 @@ This gateway treats **user identity as server-resolved**, and enforces **strict 
 - Session TTLs:
   - `GATEWAY_SESSION__ANONYMOUS_TTL_SECONDS` (default `86400`)
   - `GATEWAY_SESSION__AUTHENTICATED_TTL_SECONDS` (default `604800`)
+
+## Knowledge Base (KBMS)
+
+- Retrieval modes: `keyword` / `vector` / `hybrid` (RRF), optional `rerank` + `MMR`
+- Docs: `docs/kb_retrieval.md`
+- Database schema: auto-init on startup via `GATEWAY_DATABASE__AUTO_INIT=true` (or run `python scripts/init_database.py`)

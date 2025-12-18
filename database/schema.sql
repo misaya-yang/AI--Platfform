@@ -289,6 +289,70 @@ COMMENT ON COLUMN tasks.started_at IS '开始执行时间。';
 COMMENT ON COLUMN tasks.completed_at IS '完成时间。';
 
 -- ============================================================
+-- 6b. Knowledge Base (KBMS)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS datasets (
+    dataset_id VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    tenant_id VARCHAR(255) NOT NULL DEFAULT '',
+    visibility VARCHAR(50) NOT NULL DEFAULT 'private', -- private|tenant|public
+    embedding_provider VARCHAR(50) NOT NULL DEFAULT 'openai',
+    embedding_model VARCHAR(100) NOT NULL DEFAULT 'text-embedding-3-small',
+    embedding_dimension INTEGER NOT NULL DEFAULT 1536 CHECK (embedding_dimension > 0),
+    embedding_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    index_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    collection_name VARCHAR(255),
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+    document_id VARCHAR(255) PRIMARY KEY,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    source_type VARCHAR(50) NOT NULL DEFAULT 'upload', -- upload|text|url
+    source_uri TEXT,
+    mime_type VARCHAR(100),
+    size_bytes BIGINT CHECK (size_bytes IS NULL OR size_bytes >= 0),
+    status VARCHAR(50) NOT NULL DEFAULT 'uploaded', -- uploaded|parsing|segmenting|embedding|completed|failed
+    progress NUMERIC(5,2) NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
+    error TEXT,
+    content TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS segments (
+    segment_id VARCHAR(255) PRIMARY KEY,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    document_id VARCHAR(255) NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    text TEXT NOT NULL,
+    token_count INTEGER NOT NULL DEFAULT 0 CHECK (token_count >= 0),
+    vector_id VARCHAR(255),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(document_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS dataset_permissions (
+    id BIGSERIAL PRIMARY KEY,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    subject_type VARCHAR(50) NOT NULL, -- user|role
+    subject_id VARCHAR(255) NOT NULL,
+    permission VARCHAR(50) NOT NULL DEFAULT 'viewer', -- owner|editor|viewer
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(dataset_id, subject_type, subject_id)
+);
+
+-- ============================================================
 -- 7. 鉴权配置表
 -- ============================================================
 CREATE TABLE IF NOT EXISTS auth_config (
@@ -583,6 +647,20 @@ CREATE INDEX IF NOT EXISTS idx_tasks_tenant_id ON tasks(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_datasets_tenant_id ON datasets(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_datasets_visibility ON datasets(visibility);
+
+CREATE INDEX IF NOT EXISTS idx_documents_dataset_id ON documents(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);
+CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_segments_dataset_id ON segments(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_segments_document_id ON segments(document_id);
+CREATE INDEX IF NOT EXISTS idx_segments_vector_id ON segments(vector_id);
+
+CREATE INDEX IF NOT EXISTS idx_dataset_permissions_dataset_id ON dataset_permissions(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_dataset_permissions_subject ON dataset_permissions(subject_type, subject_id);
+
 CREATE INDEX IF NOT EXISTS idx_semantic_cache_service_id ON semantic_cache(service_id);
 CREATE INDEX IF NOT EXISTS idx_semantic_cache_expires_at ON semantic_cache(expires_at);
 
@@ -633,6 +711,22 @@ CREATE TRIGGER update_sessions_updated_at BEFORE UPDATE ON sessions
 
 DROP TRIGGER IF EXISTS update_tasks_updated_at ON tasks;
 CREATE TRIGGER update_tasks_updated_at BEFORE UPDATE ON tasks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_datasets_updated_at ON datasets;
+CREATE TRIGGER update_datasets_updated_at BEFORE UPDATE ON datasets
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_documents_updated_at ON documents;
+CREATE TRIGGER update_documents_updated_at BEFORE UPDATE ON documents
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_segments_updated_at ON segments;
+CREATE TRIGGER update_segments_updated_at BEFORE UPDATE ON segments
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_dataset_permissions_updated_at ON dataset_permissions;
+CREATE TRIGGER update_dataset_permissions_updated_at BEFORE UPDATE ON dataset_permissions
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 DROP TRIGGER IF EXISTS update_auth_config_updated_at ON auth_config;

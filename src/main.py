@@ -137,6 +137,9 @@ def create_app() -> FastAPI:
     # ========== 路由 ==========
     
     app.include_router(api_router, prefix="/api/v1")
+    # Compatibility alias for agents expecting `/v1/...`
+    from .api.v1.knowledge import router as knowledge_router
+    app.include_router(knowledge_router, prefix="/v1")
     
     # ========== 健康检查和指标端点 ==========
     
@@ -219,12 +222,20 @@ def create_app() -> FastAPI:
         # 从数据库加载服务
         await _load_services_from_database(container, settings)
         
-        # 从配置文件加载服务
-        await _load_services_from_config(container, settings)
-        
         # 启动后台任务
         await container.health_monitor.start()
         await container.task_worker.start(settings.task_worker_concurrency)
+
+        # 启动 Knowledge Base (KBMS) 后台任务
+        if getattr(settings, "knowledge", None) and settings.knowledge.enabled:
+            from .services.knowledge.knowledge_service import KnowledgeService
+            from .services.knowledge.worker import KnowledgeWorker
+
+            app.state.knowledge_service = KnowledgeService(
+                settings=settings, database=container.database
+            )
+            app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
+            await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
         
         # 打印启动信息
         _print_startup_info(settings)
@@ -233,6 +244,13 @@ def create_app() -> FastAPI:
     async def shutdown():
         """应用关闭"""
         logger.info("正在关闭 AI Gateway...")
+        # Stop KBMS worker/service first (if enabled)
+        kb_worker = getattr(app.state, "knowledge_worker", None)
+        if kb_worker is not None:
+            await kb_worker.stop()
+        kb_service = getattr(app.state, "knowledge_service", None)
+        if kb_service is not None:
+            await kb_service.close()
         await container.shutdown()
         logger.info("AI Gateway 已关闭")
     
@@ -286,6 +304,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.multi_rate_limiter = container.multi_rate_limiter
     app.state.user_resolver = container.user_resolver
 
+    # Knowledge Base (KBMS)
+    app.state.knowledge_service = None
+    app.state.knowledge_worker = None
+
     # 游客会话管理器
     from .services.session.guest_session_manager import GuestSessionManager, GuestSessionConfig
     app.state.guest_session_manager = GuestSessionManager(
@@ -308,7 +330,7 @@ async def _load_services_from_database(container: Container, settings: Settings)
         
         db_services = await database.list_services()
         registry = container.service_registry
-        registry_storage = registry._storage
+        registry_storage = registry.storage
         
         loaded_count = 0
         for svc in db_services:
@@ -324,16 +346,6 @@ async def _load_services_from_database(container: Container, settings: Settings)
             logger.info(f"从数据库加载了 {loaded_count} 个服务")
     except Exception as e:
         logger.warning(f"从数据库加载服务失败: {e}")
-
-
-async def _load_services_from_config(container: Container, settings: Settings) -> None:
-    """从配置文件加载服务"""
-    try:
-        registry = container.service_registry
-        await registry.register_from_config(settings.services_path)
-        logger.info("从配置文件加载服务完成")
-    except Exception as e:
-        logger.warning(f"从配置文件加载服务失败: {e}")
 
 
 def _print_startup_info(settings: Settings) -> None:

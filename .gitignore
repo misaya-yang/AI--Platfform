@@ -9,4 +9,5 @@ __pycache__/
 dist/
 build/
 .env
+config/.env
 *.log

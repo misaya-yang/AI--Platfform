@@ -10,6 +10,8 @@ class DatabaseSettings(BaseModel):
     """PostgreSQL 数据库配置"""
     enabled: bool = False
     dsn: str = "postgresql://postgres:postgres@localhost:5432/gateway"
+    # Development-friendly: automatically run `database/schema.sql` when core tables are missing.
+    auto_init: bool = True
 
 
 class RedisSettings(BaseModel):
@@ -44,7 +46,7 @@ class RBACSettings(BaseModel):
             # config should still be used to require authenticated roles where needed.
             "guest": ["service:invoke"],
             "user": ["service:invoke", "task:read"],
-            "developer": ["service:invoke", "task:read", "service:manage"],
+            "developer": ["service:invoke", "task:read", "service:manage", "knowledge:manage"],
             "admin": ["admin:*"],
         }
     )
@@ -113,6 +115,27 @@ class LangGraphSettings(BaseModel):
     })
 
 
+class KnowledgeQdrantSettings(BaseModel):
+    enabled: bool = True
+    url: str = "http://localhost:6333"
+    api_key: Optional[str] = None
+    prefer_grpc: bool = False
+    timeout_seconds: float = 30.0
+
+
+class KnowledgeProviderSettings(BaseModel):
+    api_key: str = ""
+    base_url: Optional[str] = None
+
+
+class KnowledgeSettings(BaseModel):
+    enabled: bool = True
+    worker_concurrency: int = 2
+    qdrant: KnowledgeQdrantSettings = Field(default_factory=KnowledgeQdrantSettings)
+    openai: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
+    dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GATEWAY_",
@@ -150,6 +173,9 @@ class Settings(BaseSettings):
 
     # LangGraph 配置
     langgraph: LangGraphSettings = Field(default_factory=LangGraphSettings)
+
+    # Knowledge Base (KBMS)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

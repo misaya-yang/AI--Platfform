@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -20,9 +21,19 @@ except ImportError:
 class DatabaseStorage:
     """PostgreSQL 数据库存储"""
 
-    def __init__(self, dsn: Optional[str] = None, enabled: bool = False):
+    def __init__(
+        self,
+        dsn: Optional[str] = None,
+        enabled: bool = False,
+        auto_init: bool = True,
+        schema_path: Optional[str] = None,
+    ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
+        self.auto_init = bool(auto_init)
+        self.schema_path = schema_path or str(
+            Path(__file__).resolve().parent.parent.parent / "database" / "schema.sql"
+        )
         self._pool: Optional[Any] = None
 
     async def connect(self) -> None:
@@ -32,6 +43,8 @@ class DatabaseStorage:
         if not HAS_ASYNCPG:
             raise RuntimeError("asyncpg is not installed. Run: pip install asyncpg")
         self._pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=10)
+        if self.auto_init:
+            await self._auto_initialize_schema()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -47,6 +60,33 @@ class DatabaseStorage:
             sql = f.read()
         async with self._pool.acquire() as conn:
             await conn.execute(sql)
+
+    async def _schema_is_missing(self) -> bool:
+        """Detect whether core tables are missing (e.g., first run)."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            # Use to_regclass for a cheap existence check.
+            services = await conn.fetchval("SELECT to_regclass('public.services')")
+            datasets = await conn.fetchval("SELECT to_regclass('public.datasets')")
+            return services is None or datasets is None
+
+    async def _auto_initialize_schema(self) -> None:
+        """Auto-run schema.sql when core tables are missing (idempotent)."""
+        if not self._pool:
+            return
+        try:
+            if not await self._schema_is_missing():
+                return
+        except Exception:
+            # If we cannot check, skip auto-init to avoid masking the real error.
+            return
+
+        schema_path = self.schema_path
+        if not schema_path or not Path(schema_path).exists():
+            raise RuntimeError(f"Database schema not found: {schema_path}")
+
+        await self.execute_schema(schema_path)
 
     # =========================================================================
     # 服务定义表 (services)
@@ -511,6 +551,521 @@ class DatabaseStorage:
                 LIMIT $1
             """, limit)
             return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # Knowledge Base (KBMS)
+    # =========================================================================
+
+    async def save_dataset(self, dataset: Dict[str, Any]) -> None:
+        """保存或更新知识库 Dataset"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO datasets (
+                    dataset_id, name, description, tenant_id, visibility,
+                    embedding_provider, embedding_model, embedding_dimension,
+                    embedding_config, index_config, collection_name, created_by
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8,
+                    $9, $10, $11, $12
+                )
+                ON CONFLICT (dataset_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    tenant_id = EXCLUDED.tenant_id,
+                    visibility = EXCLUDED.visibility,
+                    embedding_provider = EXCLUDED.embedding_provider,
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding_dimension = EXCLUDED.embedding_dimension,
+                    embedding_config = EXCLUDED.embedding_config,
+                    index_config = EXCLUDED.index_config,
+                    collection_name = EXCLUDED.collection_name,
+                    created_by = EXCLUDED.created_by,
+                    updated_at = NOW()
+                """,
+                dataset.get("dataset_id"),
+                dataset.get("name"),
+                dataset.get("description"),
+                dataset.get("tenant_id", ""),
+                dataset.get("visibility", "private"),
+                dataset.get("embedding_provider", "openai"),
+                dataset.get("embedding_model", "text-embedding-3-small"),
+                int(dataset.get("embedding_dimension") or 0) or 1536,
+                json.dumps(dataset.get("embedding_config", {})),
+                json.dumps(dataset.get("index_config", {})),
+                dataset.get("collection_name"),
+                dataset.get("created_by"),
+            )
+
+    async def get_dataset(self, dataset_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Dataset"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM datasets WHERE dataset_id = $1", dataset_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def list_datasets(
+        self,
+        tenant_id: Optional[str] = None,
+        include_public: bool = True,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """列出 Dataset"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM datasets WHERE 1=1"
+        params: List[Any] = []
+        param_idx = 1
+
+        if tenant_id:
+            if include_public:
+                query += f" AND (tenant_id = ${param_idx} OR visibility = 'public')"
+                params.append(tenant_id)
+                param_idx += 1
+            else:
+                query += f" AND tenant_id = ${param_idx}"
+                params.append(tenant_id)
+                param_idx += 1
+        else:
+            if not include_public:
+                query += " AND visibility != 'public'"
+
+        query += (
+            f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        )
+        params.extend([limit, offset])
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def delete_dataset(self, dataset_id: str) -> bool:
+        """删除 Dataset（级联删除文档/片段/权限）"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM datasets WHERE dataset_id = $1", dataset_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def grant_dataset_permission(
+        self,
+        dataset_id: str,
+        subject_type: str,
+        subject_id: str,
+        permission: str,
+    ) -> None:
+        """授予 Dataset 权限（subject_type=user|role）"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO dataset_permissions (
+                    dataset_id, subject_type, subject_id, permission
+                ) VALUES ($1, $2, $3, $4)
+                ON CONFLICT (dataset_id, subject_type, subject_id) DO UPDATE SET
+                    permission = EXCLUDED.permission,
+                    updated_at = NOW()
+                """,
+                dataset_id,
+                subject_type,
+                subject_id,
+                permission,
+            )
+
+    async def revoke_dataset_permission(
+        self, dataset_id: str, subject_type: str, subject_id: str
+    ) -> bool:
+        """撤销 Dataset 权限"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM dataset_permissions
+                WHERE dataset_id = $1 AND subject_type = $2 AND subject_id = $3
+                """,
+                dataset_id,
+                subject_type,
+                subject_id,
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def list_dataset_permissions(self, dataset_id: str) -> List[Dict[str, Any]]:
+        """列出 Dataset 权限"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT * FROM dataset_permissions
+                WHERE dataset_id = $1
+                ORDER BY created_at ASC
+                """,
+                dataset_id,
+            )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_dataset_permission(
+        self, dataset_id: str, subject_type: str, subject_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """获取指定 subject 对 Dataset 的权限记录"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM dataset_permissions
+                WHERE dataset_id = $1 AND subject_type = $2 AND subject_id = $3
+                """,
+                dataset_id,
+                subject_type,
+                subject_id,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def save_document(self, document: Dict[str, Any]) -> None:
+        """保存或更新文档 Document"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO documents (
+                    document_id, dataset_id, title, source_type, source_uri,
+                    mime_type, size_bytes, status, progress, error, content,
+                    metadata, started_at, completed_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8, $9, $10, $11,
+                    $12, $13, $14
+                )
+                ON CONFLICT (document_id) DO UPDATE SET
+                    dataset_id = EXCLUDED.dataset_id,
+                    title = EXCLUDED.title,
+                    source_type = EXCLUDED.source_type,
+                    source_uri = EXCLUDED.source_uri,
+                    mime_type = EXCLUDED.mime_type,
+                    size_bytes = EXCLUDED.size_bytes,
+                    status = EXCLUDED.status,
+                    progress = EXCLUDED.progress,
+                    error = EXCLUDED.error,
+                    content = EXCLUDED.content,
+                    metadata = EXCLUDED.metadata,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = NOW()
+                """,
+                document.get("document_id"),
+                document.get("dataset_id"),
+                document.get("title"),
+                document.get("source_type", "upload"),
+                document.get("source_uri"),
+                document.get("mime_type"),
+                document.get("size_bytes"),
+                document.get("status", "uploaded"),
+                float(document.get("progress", 0) or 0),
+                document.get("error"),
+                document.get("content"),
+                json.dumps(document.get("metadata", {})),
+                document.get("started_at"),
+                document.get("completed_at"),
+            )
+
+    async def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Document"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM documents WHERE document_id = $1", document_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def list_documents(
+        self,
+        dataset_id: str,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """列出文档"""
+        if not self._pool:
+            return []
+
+        query = """
+            SELECT document_id, dataset_id, title, source_type, source_uri, 
+                   mime_type, size_bytes, status, progress, error, metadata, 
+                   started_at, completed_at, created_at, updated_at 
+            FROM documents WHERE dataset_id = $1
+        """
+        params: List[Any] = [dataset_id]
+        param_idx = 2
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def update_document_status(
+        self,
+        document_id: str,
+        status: str,
+        progress: Optional[float] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """更新 Document 状态"""
+        if not self._pool:
+            return
+
+        updates = ["status = $1", "updated_at = NOW()"]
+        params: List[Any] = [status]
+        param_idx = 2
+
+        if progress is not None:
+            updates.append(f"progress = ${param_idx}")
+            params.append(progress)
+            param_idx += 1
+
+        if error is not None:
+            updates.append(f"error = ${param_idx}")
+            params.append(error)
+            param_idx += 1
+
+        if status in ("parsing", "segmenting", "embedding"):
+            updates.append(f"started_at = COALESCE(started_at, ${param_idx})")
+            params.append(datetime.utcnow())
+            param_idx += 1
+
+        if status in ("completed", "failed"):
+            updates.append(f"completed_at = ${param_idx}")
+            params.append(datetime.utcnow())
+            param_idx += 1
+
+        params.append(document_id)
+        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_document(self, document_id: str) -> bool:
+        """删除 Document（级联删除 Segment）"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM documents WHERE document_id = $1", document_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
+        """批量插入/更新 Segment"""
+        if not self._pool or not segments:
+            return
+
+        rows = []
+        for seg in segments:
+            rows.append(
+                (
+                    seg.get("segment_id"),
+                    seg.get("dataset_id"),
+                    seg.get("document_id"),
+                    int(seg.get("position", 0) or 0),
+                    seg.get("text", ""),
+                    int(seg.get("token_count", 0) or 0),
+                    seg.get("vector_id"),
+                    json.dumps(seg.get("metadata", {})),
+                )
+            )
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO segments (
+                    segment_id, dataset_id, document_id, position,
+                    text, token_count, vector_id, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (segment_id) DO UPDATE SET
+                    dataset_id = EXCLUDED.dataset_id,
+                    document_id = EXCLUDED.document_id,
+                    position = EXCLUDED.position,
+                    text = EXCLUDED.text,
+                    token_count = EXCLUDED.token_count,
+                    vector_id = EXCLUDED.vector_id,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+                """,
+                rows,
+            )
+
+    async def delete_segments_by_document(self, document_id: str) -> int:
+        """删除指定文档下的所有 Segment"""
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM segments WHERE document_id = $1", document_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1])
+            return 0
+
+    async def list_segments(
+        self,
+        dataset_id: str,
+        document_id: Optional[str] = None,
+        query_text: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """列出 Segment"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM segments WHERE dataset_id = $1"
+        params: List[Any] = [dataset_id]
+        param_idx = 2
+
+        if document_id:
+            query += f" AND document_id = ${param_idx}"
+            params.append(document_id)
+            param_idx += 1
+
+        if query_text:
+            query += f" AND text ILIKE ${param_idx}"
+            params.append(f"%{query_text}%")
+            param_idx += 1
+
+        query += f" ORDER BY document_id ASC, position ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def search_segments_like_any(
+        self,
+        dataset_id: str,
+        terms: List[str],
+        document_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Keyword candidate retrieval using ILIKE OR over terms (best-effort).
+
+        This is intentionally lightweight and does not require extra PostgreSQL extensions.
+        """
+        if not self._pool:
+            return []
+
+        cleaned = [t.strip() for t in (terms or []) if str(t or "").strip()]
+        if not cleaned:
+            return []
+
+        query = "SELECT * FROM segments WHERE dataset_id = $1"
+        params: List[Any] = [dataset_id]
+        param_idx = 2
+
+        if document_id:
+            query += f" AND document_id = ${param_idx}"
+            params.append(document_id)
+            param_idx += 1
+
+        # ILIKE any term
+        parts = []
+        for t in cleaned:
+            parts.append(f"text ILIKE ${param_idx}")
+            params.append(f"%{t}%")
+            param_idx += 1
+        query += " AND (" + " OR ".join(parts) + ")"
+
+        query += f" LIMIT ${param_idx}"
+        params.append(int(limit))
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_segment(self, segment_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Segment"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM segments WHERE segment_id = $1", segment_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def update_segment(
+        self,
+        segment_id: str,
+        text: str,
+        token_count: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        vector_id: Optional[str] = None,
+    ) -> None:
+        """更新 Segment"""
+        if not self._pool:
+            return
+
+        updates = ["text = $1", "updated_at = NOW()"]
+        params: List[Any] = [text]
+        param_idx = 2
+
+        if token_count is not None:
+            updates.append(f"token_count = ${param_idx}")
+            params.append(token_count)
+            param_idx += 1
+
+        if vector_id is not None:
+            updates.append(f"vector_id = ${param_idx}")
+            params.append(vector_id)
+            param_idx += 1
+
+        if metadata is not None:
+            updates.append(f"metadata = ${param_idx}")
+            params.append(json.dumps(metadata))
+            param_idx += 1
+
+        params.append(segment_id)
+        query = f"UPDATE segments SET {', '.join(updates)} WHERE segment_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_segment(self, segment_id: str) -> bool:
+        """删除 Segment"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM segments WHERE segment_id = $1", segment_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
 
     # =========================================================================
     # API Key 表 (api_keys)
