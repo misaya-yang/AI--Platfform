@@ -6,11 +6,20 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Reques
 
 from ..deps import get_knowledge_service, get_knowledge_worker, get_user_context
 from ..schemas.knowledge import (
+    BatchDeleteSchema,
+    BatchReindexSchema,
     DatasetCreateSchema,
     DatasetPermissionGrantSchema,
     DatasetUpdateSchema,
+    DocumentArchiveSchema,
+    DocumentBatchCreateSchema,
     DocumentCreateTextSchema,
+    DocumentCreateUrlSchema,
+    DocumentEnableDisableSchema,
+    DocumentUpdateSchema,
     RetrieveRequestSchema,
+    SegmentCreateSchema,
+    SegmentEnableDisableSchema,
     SegmentUpdateSchema,
 )
 from ...core.auth.user_resolver import UserContext
@@ -192,6 +201,30 @@ async def upload_document(
             filename=file.filename or "upload",
             content_bytes=content,
             mime_type=file.content_type,
+        )
+        await worker.enqueue(dataset_id, doc["document_id"])
+        return doc
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/url")
+async def create_document_url(
+    dataset_id: str,
+    payload: DocumentCreateUrlSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    try:
+        doc = await svc.create_document_from_url(
+            user,
+            dataset_id,
+            url=payload.url,
+            title=payload.title,
+            metadata=payload.metadata,
         )
         await worker.enqueue(dataset_id, doc["document_id"])
         return doc
@@ -388,6 +421,226 @@ async def hit_test(
             ],
             "metadata": meta,
         }
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ============================================================
+# Document Enable/Disable/Archive Endpoints (Dify-style)
+# ============================================================
+
+@router.patch("/knowledge/{dataset_id}/documents/{document_id}/status")
+async def update_document_status(
+    dataset_id: str,
+    document_id: str,
+    payload: DocumentEnableDisableSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Enable or disable a document."""
+    try:
+        doc = await svc.set_document_enabled(user, dataset_id, document_id, payload.enabled)
+        return doc
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/knowledge/{dataset_id}/documents/{document_id}/archive")
+async def archive_document(
+    dataset_id: str,
+    document_id: str,
+    payload: DocumentArchiveSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Archive or unarchive a document."""
+    try:
+        doc = await svc.set_document_archived(
+            user, dataset_id, document_id, payload.archived, payload.reason
+        )
+        return doc
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/knowledge/{dataset_id}/documents/{document_id}")
+async def update_document(
+    dataset_id: str,
+    document_id: str,
+    payload: DocumentUpdateSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Update document metadata."""
+    try:
+        doc = await svc.update_document(user, dataset_id, document_id, payload.model_dump(exclude_none=True))
+        return doc
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ============================================================
+# Batch Operations (Dify-style)
+# ============================================================
+
+@router.post("/knowledge/{dataset_id}/documents/batch")
+async def batch_create_documents(
+    dataset_id: str,
+    payload: DocumentBatchCreateSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """Batch create documents from text."""
+    try:
+        results = await svc.batch_create_documents(
+            user,
+            dataset_id,
+            documents=payload.documents,
+            process_rule=payload.process_rule.model_dump() if payload.process_rule else None,
+            batch_name=payload.batch_name,
+        )
+        # Enqueue all for processing
+        for doc in results.get("documents", []):
+            await worker.enqueue(dataset_id, doc["document_id"])
+        return results
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/batch-reindex")
+async def batch_reindex_documents(
+    dataset_id: str,
+    payload: BatchReindexSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """Batch reindex documents."""
+    try:
+        await svc.require_dataset_access(user, dataset_id, required="editor")
+        
+        if payload.all_documents:
+            docs = await svc.list_documents(user, dataset_id)
+            doc_ids = [d["document_id"] for d in docs]
+        else:
+            doc_ids = payload.document_ids
+        
+        for doc_id in doc_ids:
+            await worker.enqueue(dataset_id, doc_id)
+        
+        return {"status": "queued", "document_count": len(doc_ids)}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/batch-delete")
+async def batch_delete_documents(
+    dataset_id: str,
+    payload: BatchDeleteSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Batch delete documents."""
+    try:
+        results = await svc.batch_delete_documents(user, dataset_id, payload.document_ids)
+        return results
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ============================================================
+# Segment Enable/Disable Endpoints
+# ============================================================
+
+@router.patch("/knowledge/{dataset_id}/segments/{segment_id}/status")
+async def update_segment_status(
+    dataset_id: str,
+    segment_id: str,
+    payload: SegmentEnableDisableSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Enable or disable a segment."""
+    try:
+        seg = await svc.set_segment_enabled(user, dataset_id, segment_id, payload.enabled)
+        return seg
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/segments")
+async def create_segment(
+    dataset_id: str,
+    document_id: str,
+    payload: SegmentCreateSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Create a new segment manually."""
+    try:
+        seg = await svc.create_segment(
+            user,
+            dataset_id,
+            document_id,
+            content=payload.content,
+            answer=payload.answer,
+            keywords=payload.keywords,
+        )
+        return seg
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ============================================================
+# Statistics Endpoints
+# ============================================================
+
+@router.get("/knowledge/{dataset_id}/statistics")
+async def get_dataset_statistics(
+    dataset_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Get dataset statistics (document count, segment count, etc.)."""
+    try:
+        stats = await svc.get_dataset_statistics(user, dataset_id)
+        return stats
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/statistics")
+async def get_document_statistics(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Get document statistics."""
+    try:
+        stats = await svc.get_document_statistics(user, dataset_id, document_id)
+        return stats
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:

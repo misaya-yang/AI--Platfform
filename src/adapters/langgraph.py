@@ -57,6 +57,47 @@ class LangGraphAdapter(ProtocolAdapter):
             self.thread_stream_endpoint = config.get(
                 "thread_stream_endpoint", "/threads/{thread_id}/runs/stream"
             )
+            # 认证配置：如果 Agent 启用了 auth，网关需要传递用户信息
+            # 支持配置静态用户 ID 或动态传递请求中的用户信息
+            self.auth_user_id = config.get("auth_user_id")  # 静态用户 ID（可选）
+            self.auth_user_type = config.get("auth_user_type", "user")  # 用户类型
+            self.forward_auth = config.get("forward_auth", True)  # 是否转发认证信息
+
+    def _build_auth_headers(self, request: UnifiedRequest) -> Dict[str, str]:
+        """
+        构建认证头部，用于转发给 LangGraph Agent。
+        
+        LangGraph Agent 的 auth 模块支持两种认证方式：
+        1. X-User-Id 头部（网关转发）
+        2. Authorization Bearer token（直接访问）
+        
+        为确保兼容性，同时发送两种认证方式。
+        """
+        if not self.forward_auth:
+            return {}
+        
+        # 使用配置的静态用户 ID 或请求中的用户 ID
+        user_id = self.auth_user_id or request.user_id or "gateway-user"
+        user_type = self.auth_user_type
+        user_name = f"User-{request.user_id}" if request.user_id else "Gateway User"
+        
+        headers: Dict[str, str] = {
+            # 方式1: X-User-Id 头部（LangGraph SDK 会自动映射到 x_user_id 参数）
+            "x-user-id": str(user_id),
+            "x-user-type": user_type,
+            "x-user-name": user_name,
+            "x-user-permissions": "read,write",
+        }
+        
+        # 方式2: 同时发送 Bearer token 作为备用认证
+        # 使用 user_id 作为简单 token，LangGraph auth 会在 DEV_MODE 下接受任何 token
+        headers["Authorization"] = f"Bearer gateway-{user_id}"
+        
+        # 如果有租户 ID，也传递
+        if request.tenant_id:
+            headers["x-tenant-id"] = str(request.tenant_id)
+        
+        return headers
 
     def _build_run_config(self, request: UnifiedRequest, thread_id: Optional[str] = None) -> Dict[str, Any]:
         """Build LangGraph run config with gateway-injected `configurable` values."""
@@ -158,7 +199,18 @@ class LangGraphAdapter(ProtocolAdapter):
     async def health_check(self) -> bool:
         if not self.remote:
             return self.graph is not None
-        return await self.connector.health_check()
+        # 为远程健康检查构建认证头部
+        # 使用虚拟请求构建头部（因为健康检查没有实际请求上下文）
+        from ..models.request import UnifiedRequest
+        dummy_request = UnifiedRequest(
+            request_id="health-check",
+            service_id=self.service.service_id,
+            inputs=[],
+            user_id="gateway-health-check",
+            tenant_id="gateway",
+        )
+        auth_headers = self._build_auth_headers(dummy_request)
+        return await self.connector.health_check(headers=auth_headers)
 
     def _build_messages(self, inputs: List[ContentItem]) -> List[Dict[str, Any]]:
         texts = [str(i.data) for i in inputs if i.type == ContentType.TEXT and i.data]
@@ -360,7 +412,9 @@ class LangGraphAdapter(ProtocolAdapter):
             endpoint = self.invoke_endpoint
             payload["config"] = self._build_run_config(request)
         try:
-            return await self.connector.post(endpoint, json=payload)
+            # 构建认证头部
+            auth_headers = self._build_auth_headers(request)
+            return await self.connector.post(endpoint, json=payload, headers=auth_headers)
         except Exception as exc:
             # HTTPConnector uses httpx under the hood; surface readable upstream errors
             # instead of returning a generic 500.
@@ -417,9 +471,13 @@ class LangGraphAdapter(ProtocolAdapter):
         import logging
         logger = logging.getLogger(__name__)
         
+        # 构建认证头部
+        auth_headers = self._build_auth_headers(request)
+        logger.info(f"LangGraph stream auth headers: {auth_headers}")
+        
         try:
             async with client.stream(
-                "POST", endpoint, json=payload, timeout=stream_timeout
+                "POST", endpoint, json=payload, timeout=stream_timeout, headers=auth_headers
             ) as resp:
                 # 检查响应状态
                 if resp.status_code != 200:
@@ -692,6 +750,8 @@ class LangGraphAdapter(ProtocolAdapter):
         self._session_to_thread_map[session_id] = valid_thread_id
         
         try:
+            # 构建认证头部
+            auth_headers = self._build_auth_headers(request)
             await self.connector.post(
                 "/threads",
                 json={
@@ -703,6 +763,7 @@ class LangGraphAdapter(ProtocolAdapter):
                         "original_session_id": session_id,  # 保留原始 session_id
                     },
                 },
+                headers=auth_headers,
             )
         except Exception:
             pass

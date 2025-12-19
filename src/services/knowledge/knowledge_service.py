@@ -4,9 +4,12 @@ import json
 import os
 import asyncio
 import uuid
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import httpx
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
@@ -14,7 +17,7 @@ from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...persistence.database import DatabaseStorage
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize
-from .utils import split_into_segments
+from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
 
 
@@ -141,8 +144,8 @@ class KnowledgeService:
         if not dataset_id:
             dataset_id = f"kb_{uuid.uuid4().hex[:12]}"
 
-        embedding_provider = str(data.get("embedding_provider") or "openai")
-        embedding_model = str(data.get("embedding_model") or "text-embedding-3-small")
+        embedding_provider = str(data.get("embedding_provider") or "local")
+        embedding_model = str(data.get("embedding_model") or "hash-384")
         embedding_dimension = int(data.get("embedding_dimension") or 0) or None
 
         collection_name = str(data.get("collection_name") or "").strip() or None
@@ -151,22 +154,25 @@ class KnowledgeService:
         embedding_config = _ensure_dict(data.get("embedding_config"))
         index_config = _ensure_dict(data.get("index_config"))
 
-        # Determine embedding config (api_key/base_url) from dataset config + gateway settings.
-        econf = self._resolve_embedding_config(
-            provider=embedding_provider,
-            model=embedding_model,
-            embedding_config=embedding_config,
-        )
-
         embedder: Optional[BaseEmbedding] = None
         dim: int = 0
+        collection: str = ""
         try:
+            # Determine embedding config (api_key/base_url) from dataset config + gateway settings.
+            econf = self._resolve_embedding_config(
+                provider=embedding_provider,
+                model=embedding_model,
+                embedding_config=embedding_config,
+            )
+
             embedder = create_embedding(econf, dimension=embedding_dimension)
-            
-            # If dimension is unknown, dry-run to fetch it (e.g. for DashScope v4)
+
+            # If dimension is unknown, dry-run to fetch it.
             if embedder._dimension is None:
-                # Embedding a sample text to resolve dimension
-                await embedder.embed_query("test")
+                await asyncio.wait_for(
+                    embedder.embed_query("test"),
+                    timeout=float(econf.timeout_seconds) + 5.0,
+                )
 
             dim = embedder._dimension or 1024  # fallback to 1024 if still unknown
             collection = await self.vector_store.ensure_collection(
@@ -174,6 +180,8 @@ class KnowledgeService:
                 dimension=dim,
                 collection_name=collection_name,
             )
+        except Exception as exc:
+            raise ValidationFailedError(f"Failed to create dataset index: {exc}") from exc
         finally:
             if embedder:
                 await embedder.close()
@@ -226,31 +234,40 @@ class KnowledgeService:
         updated.update(filtered)
 
         # If embedding settings changed, ensure a matching collection.
-        embedder: Optional[BaseEmbedding] = None
-        dim: int = 0
-        try:
-            econf = self._resolve_embedding_config(
-                provider=str(updated.get("embedding_provider") or "openai"),
-                model=str(updated.get("embedding_model") or "text-embedding-3-small"),
-                embedding_config=_ensure_dict(updated.get("embedding_config")),
-            )
-            embedder = create_embedding(econf, dimension=int(updated.get("embedding_dimension") or 0) or None)
-            
-            # If dimension is unknown, dry-run to fetch it
-            if embedder._dimension is None:
-                await embedder.embed_query("test")
+        embedding_keys = {"embedding_provider", "embedding_model", "embedding_dimension", "embedding_config"}
+        if embedding_keys.intersection(filtered.keys()):
+            embedder: Optional[BaseEmbedding] = None
+            dim: int = 0
+            try:
+                econf = self._resolve_embedding_config(
+                    provider=str(updated.get("embedding_provider") or "local"),
+                    model=str(updated.get("embedding_model") or "hash-384"),
+                    embedding_config=_ensure_dict(updated.get("embedding_config")),
+                )
+                embedder = create_embedding(
+                    econf, dimension=int(updated.get("embedding_dimension") or 0) or None
+                )
 
-            dim = embedder._dimension or 1024  # fallback to 1024 if still unknown
-            collection = await self.vector_store.ensure_collection(
-                dataset_id=dataset_id,
-                dimension=dim,
-                collection_name=str(updated.get("collection_name") or "") or None,
-            )
-            updated["embedding_dimension"] = dim
-            updated["collection_name"] = collection
-        finally:
-            if embedder:
-                await embedder.close()
+                # If dimension is unknown, dry-run to fetch it.
+                if embedder._dimension is None:
+                    await asyncio.wait_for(
+                        embedder.embed_query("test"),
+                        timeout=float(econf.timeout_seconds) + 5.0,
+                    )
+
+                dim = embedder._dimension or 1024  # fallback to 1024 if still unknown
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=dim,
+                    collection_name=str(updated.get("collection_name") or "") or None,
+                )
+                updated["embedding_dimension"] = dim
+                updated["collection_name"] = collection
+            except Exception as exc:
+                raise ValidationFailedError(f"Failed to update dataset embedding/index: {exc}") from exc
+            finally:
+                if embedder:
+                    await embedder.close()
 
         await self.db.save_dataset(updated)
         return await self._get_dataset_or_404(dataset_id)
@@ -330,16 +347,87 @@ class KnowledgeService:
     ) -> Dict[str, Any]:
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc_id = str(uuid.uuid4())
-        
-        # Run CPU-bound decoding in thread pool to avoid blocking event loop
-        text = await asyncio.to_thread(self._decode_upload, content_bytes)
-        
+
+        # Run CPU-bound parsing in thread pool to avoid blocking event loop
+        text, detected_mime = await asyncio.to_thread(
+            self._extract_text_from_bytes, content_bytes, filename, mime_type
+        )
+
         doc = {
             "document_id": doc_id,
             "dataset_id": dataset_id,
             "title": filename or doc_id,
             "source_type": "upload",
-            "mime_type": mime_type or "application/octet-stream",
+            "mime_type": detected_mime or mime_type or "application/octet-stream",
+            "size_bytes": len(content_bytes),
+            "status": "uploaded",
+            "progress": 0,
+            "content": text,
+            "metadata": metadata or {},
+        }
+        await self.db.save_document(doc)
+        return await self.db.get_document(doc_id) or doc
+
+    async def create_document_from_url(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        url: str,
+        title: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        await self.require_dataset_access(user, dataset_id, required="editor")
+
+        raw_url = (url or "").strip()
+        if not raw_url:
+            raise ValidationFailedError("url is required")
+
+        parsed = httpx.URL(raw_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValidationFailedError("Only http/https URLs are supported")
+
+        max_bytes = 10 * 1024 * 1024  # 10MB safety limit
+        headers = {
+            "User-Agent": "AI-Gateway-KBMS/1.0 (+https://github.com)",
+            "Accept": "*/*",
+        }
+
+        content_type: Optional[str] = None
+        content_bytes: bytes = b""
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(20.0, read=20.0),
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            async with client.stream("GET", str(parsed)) as resp:
+                if resp.status_code >= 400:
+                    raise ValidationFailedError(
+                        f"Failed to fetch url: {resp.status_code} {resp.reason_phrase or ''}".strip()
+                    )
+                content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip() or None
+                chunks: List[bytes] = []
+                size = 0
+                async for part in resp.aiter_bytes():
+                    if not part:
+                        continue
+                    size += len(part)
+                    if size > max_bytes:
+                        raise ValidationFailedError("URL content is too large (limit 10MB)")
+                    chunks.append(part)
+                content_bytes = b"".join(chunks)
+
+        text, detected_mime = await asyncio.to_thread(
+            self._extract_text_from_bytes, content_bytes, str(parsed), content_type
+        )
+
+        doc_id = str(uuid.uuid4())
+        doc = {
+            "document_id": doc_id,
+            "dataset_id": dataset_id,
+            "title": (title or "").strip() or raw_url,
+            "source_type": "url",
+            "source_uri": raw_url,
+            "mime_type": detected_mime or content_type or "text/html",
             "size_bytes": len(content_bytes),
             "status": "uploaded",
             "progress": 0,
@@ -410,9 +498,9 @@ class KnowledgeService:
         # Sanitize text for PostgreSQL
         clean_text = self._sanitize_text_for_db(new_text)
 
-        # Re-embed and upsert
-        embedding_provider = str(dataset.get("embedding_provider") or "openai")
-        embedding_model = str(dataset.get("embedding_model") or "text-embedding-3-small")
+        # Re-embed and upsert (best-effort; keep DB updated even if vector update fails)
+        embedding_provider = str(dataset.get("embedding_provider") or "local")
+        embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
         econf = self._resolve_embedding_config(
@@ -421,23 +509,30 @@ class KnowledgeService:
             embedding_config=embedding_config,
         )
 
-        embedder: Optional[BaseEmbedding] = None
-        try:
-            embedder = create_embedding(econf, dimension=dim)
-            vec = (await embedder.embed_documents([clean_text]))[0]
-            collection = await self.vector_store.ensure_collection(
-                dataset_id=dataset_id,
-                dimension=embedder.dimension,
-                collection_name=str(dataset.get("collection_name") or "") or None,
-            )
-        finally:
-            if embedder:
-                await embedder.close()
+        # Always persist the new text first.
+        await self.db.update_segment(segment_id, text=clean_text)
 
+        vector_error: Optional[str] = None
         try:
+            embedder: Optional[BaseEmbedding] = None
+            try:
+                embedder = create_embedding(econf, dimension=dim)
+                vec = (await asyncio.wait_for(
+                    embedder.embed_documents([clean_text]),
+                    timeout=float(econf.timeout_seconds) + 10.0,
+                ))[0]
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=embedder.dimension,
+                    collection_name=str(dataset.get("collection_name") or "") or None,
+                )
+            finally:
+                if embedder:
+                    await embedder.close()
+
             from qdrant_client.http import models as qmodels  # type: ignore
 
-            pid = str(seg.get("vector_id") or seg.get("segment_id"))
+            pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
             payload = {
                 "dataset_id": dataset_id,
                 "document_id": str(seg.get("document_id")),
@@ -445,16 +540,19 @@ class KnowledgeService:
                 "position": int(seg.get("position") or 0),
                 "text": clean_text,
             }
-            await self.vector_store.upsert(
-                collection_name=collection,
-                points=[qmodels.PointStruct(id=pid, vector=vec, payload=payload)],
-            )
-        except Exception:
-            # Keep DB updated even if vector upsert fails; retrieval may be stale.
-            pass
+            if pid and collection:
+                await self.vector_store.upsert(
+                    collection_name=collection,
+                    points=[qmodels.PointStruct(id=pid, vector=vec, payload=payload)],
+                )
+        except Exception as exc:
+            vector_error = str(exc)
 
-        await self.db.update_segment(segment_id, text=clean_text)
-        return await self.db.get_segment(segment_id) or seg
+        out = await self.db.get_segment(segment_id) or seg
+        if vector_error:
+            out = dict(out)
+            out["_vector_error"] = vector_error
+        return out
 
     async def delete_segment(self, user: UserContext, dataset_id: str, segment_id: str) -> bool:
         dataset = await self.require_dataset_access(user, dataset_id, required="editor")
@@ -474,147 +572,169 @@ class KnowledgeService:
     # ========================= Ingest pipeline =========================
 
     async def ingest_document(self, dataset_id: str, document_id: str) -> None:
-        dataset = await self._get_dataset_or_404(dataset_id)
-        doc = await self.db.get_document(document_id)
-        if not doc or str(doc.get("dataset_id")) != dataset_id:
-            raise ValidationFailedError("document not found")
-
-        await self.db.update_document_status(document_id, status="parsing", progress=10)
-
-        raw_text = str(doc.get("content") or "")
-        text = raw_text.strip()
-        if not text:
-            await self.db.update_document_status(
-                document_id, status="failed", progress=100, error="empty document"
-            )
-            return
-
-        await self.db.update_document_status(document_id, status="segmenting", progress=25)
-        chunks = split_into_segments(text)
-        if not chunks:
-            await self.db.update_document_status(
-                document_id, status="failed", progress=100, error="no segments generated"
-            )
-            return
-
-        # Prepare segments (delete old vectors/segments first)
-        old_segments = await self.db.list_segments(
-            dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
-        )
-        old_point_ids = [
-            str(s.get("vector_id") or s.get("segment_id") or "") for s in old_segments
-        ]
-
-        embedding_provider = str(dataset.get("embedding_provider") or "openai")
-        embedding_model = str(dataset.get("embedding_model") or "text-embedding-3-small")
-        embedding_config = _ensure_dict(dataset.get("embedding_config"))
-
-        econf = self._resolve_embedding_config(
-            provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
-        )
-
-        embedder: Optional[BaseEmbedding] = None
         try:
-            embedder = create_embedding(econf, dimension=int(dataset.get("embedding_dimension") or 0) or None)
-            
-            # If dimension is unknown, dry-run to fetch it
-            if embedder._dimension is None:
-                await embedder.embed_query("test")
-            
-            dim = embedder._dimension or 1024  # fallback
-            collection = await self.vector_store.ensure_collection(
-                dataset_id=dataset_id,
-                dimension=dim,
-                collection_name=str(dataset.get("collection_name") or "") or None,
-            )
-        except Exception as exc:
-            await self.db.update_document_status(
-                document_id, status="failed", progress=100, error=str(exc)
-            )
-            if embedder:
-                await embedder.close()
-            return
+            dataset = await self._get_dataset_or_404(dataset_id)
+            doc = await self.db.get_document(document_id)
+            if not doc or str(doc.get("dataset_id")) != dataset_id:
+                raise ValidationFailedError("document not found")
 
-        await self.db.update_document_status(document_id, status="embedding", progress=35)
+            await self.db.update_document_status(document_id, status="parsing", progress=10)
 
-        # Remove old vectors + segments (best-effort)
-        if old_point_ids and collection:
+            raw_text = str(doc.get("content") or "")
+            text = raw_text.strip()
+            if not text:
+                await self.db.update_document_status(
+                    document_id, status="failed", progress=100, error="empty document"
+                )
+                return
+
+            await self.db.update_document_status(document_id, status="segmenting", progress=25)
+            chunks = split_into_segments(text)
+            if not chunks:
+                await self.db.update_document_status(
+                    document_id, status="failed", progress=100, error="no segments generated"
+                )
+                return
+
+            # Prepare segments (delete old vectors/segments first)
+            old_segments = await self.db.list_segments(
+                dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
+            )
+            old_point_ids = [
+                str(s.get("vector_id") or s.get("segment_id") or "") for s in old_segments
+            ]
+
+            embedding_provider = str(dataset.get("embedding_provider") or "local")
+            embedding_model = str(dataset.get("embedding_model") or "hash-384")
+            embedding_config = _ensure_dict(dataset.get("embedding_config"))
+
+            econf = self._resolve_embedding_config(
+                provider=embedding_provider,
+                model=embedding_model,
+                embedding_config=embedding_config,
+            )
+
+            embedder: Optional[BaseEmbedding] = None
             try:
-                await self.vector_store.delete_points(collection, old_point_ids)
-            except Exception:
-                pass
-        await self.db.delete_segments_by_document(document_id)
+                embedder = create_embedding(
+                    econf, dimension=int(dataset.get("embedding_dimension") or 0) or None
+                )
 
-        # Embed + upsert
-        segment_rows: List[Dict[str, Any]] = []
-        points = []
-        try:
-            from qdrant_client.http import models as qmodels  # type: ignore
-
-            batch_size = 32
-            total = len(chunks)
-            embedded = 0
-
-            for i in range(0, total, batch_size):
-                batch = chunks[i : i + batch_size]
-                texts = [t for t, _ in batch]
-                vectors = await embedder.embed_documents(texts)
-
-                for j, (chunk_text, token_count) in enumerate(batch):
-                    pos = i + j
-                    seg_id = str(uuid.uuid4())
-                    payload = {
-                        "dataset_id": dataset_id,
-                        "document_id": document_id,
-                        "segment_id": seg_id,
-                        "position": pos,
-                        "text": chunk_text,
-                        "token_count": token_count,
-                    }
-                    points.append(
-                        qmodels.PointStruct(
-                            id=seg_id,
-                            vector=vectors[j],
-                            payload=payload,
-                        )
+                # If dimension is unknown, dry-run to fetch it.
+                if embedder._dimension is None:
+                    await asyncio.wait_for(
+                        embedder.embed_query("test"),
+                        timeout=float(econf.timeout_seconds) + 5.0,
                     )
-                    segment_rows.append(
-                        {
-                            "segment_id": seg_id,
+
+                dim = embedder._dimension or 1024  # fallback
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=dim,
+                    collection_name=str(dataset.get("collection_name") or "") or None,
+                )
+            except Exception as exc:
+                await self.db.update_document_status(
+                    document_id, status="failed", progress=100, error=str(exc)
+                )
+                if embedder:
+                    await embedder.close()
+                return
+
+            await self.db.update_document_status(document_id, status="embedding", progress=35)
+
+            # Remove old vectors + segments (best-effort)
+            if old_point_ids and collection:
+                try:
+                    await self.vector_store.delete_points(collection, old_point_ids)
+                except Exception:
+                    pass
+            await self.db.delete_segments_by_document(document_id)
+
+            # Embed + upsert
+            segment_rows: List[Dict[str, Any]] = []
+            points = []
+            try:
+                from qdrant_client.http import models as qmodels  # type: ignore
+
+                batch_size = 32
+                total = len(chunks)
+                embedded = 0
+
+                for i in range(0, total, batch_size):
+                    batch = chunks[i : i + batch_size]
+                    texts = [t for t, _ in batch]
+                    vectors = await asyncio.wait_for(
+                        embedder.embed_documents(texts),
+                        timeout=float(econf.timeout_seconds) + 10.0,
+                    )
+
+                    for j, (chunk_text, token_count) in enumerate(batch):
+                        pos = i + j
+                        seg_id = str(uuid.uuid4())
+                        payload = {
                             "dataset_id": dataset_id,
                             "document_id": document_id,
+                            "segment_id": seg_id,
                             "position": pos,
                             "text": chunk_text,
                             "token_count": token_count,
-                            "vector_id": seg_id,
-                            "metadata": {},
                         }
+                        points.append(
+                            qmodels.PointStruct(
+                                id=seg_id,
+                                vector=vectors[j],
+                                payload=payload,
+                            )
+                        )
+                        segment_rows.append(
+                            {
+                                "segment_id": seg_id,
+                                "dataset_id": dataset_id,
+                                "document_id": document_id,
+                                "position": pos,
+                                "text": chunk_text,
+                                "token_count": token_count,
+                                "vector_id": seg_id,
+                                "metadata": {},
+                            }
+                        )
+
+                    embedded += len(batch)
+                    progress = 35 + (embedded / max(total, 1)) * 55
+                    await self.db.update_document_status(
+                        document_id, status="embedding", progress=min(progress, 95)
                     )
 
-                embedded += len(batch)
-                progress = 35 + (embedded / max(total, 1)) * 55
+                await self.vector_store.upsert(collection_name=collection, points=points)
+                await self.db.insert_segments(segment_rows)
+
+                # Persist dataset dimension/collection if missing.
+                if int(dataset.get("embedding_dimension") or 0) != dim or not dataset.get(
+                    "collection_name"
+                ):
+                    updated = dict(dataset)
+                    updated["embedding_dimension"] = dim
+                    updated["collection_name"] = collection
+                    await self.db.save_dataset(updated)
+
+                await self.db.update_document_status(document_id, status="completed", progress=100)
+            except Exception as exc:
                 await self.db.update_document_status(
-                    document_id, status="embedding", progress=min(progress, 95)
+                    document_id, status="failed", progress=100, error=str(exc)
                 )
-
-            await self.vector_store.upsert(collection_name=collection, points=points)
-            await self.db.insert_segments(segment_rows)
-
-            # Persist dataset dimension/collection if missing.
-            if int(dataset.get("embedding_dimension") or 0) != dim or not dataset.get("collection_name"):
-                updated = dict(dataset)
-                updated["embedding_dimension"] = dim
-                updated["collection_name"] = collection
-                await self.db.save_dataset(updated)
-
-            await self.db.update_document_status(document_id, status="completed", progress=100)
+            finally:
+                if embedder:
+                    await embedder.close()
         except Exception as exc:
-            await self.db.update_document_status(
-                document_id, status="failed", progress=100, error=str(exc)
-            )
-        finally:
-            if embedder:
-                await embedder.close()
+            # Best-effort: keep document status in a terminal state.
+            try:
+                await self.db.update_document_status(
+                    document_id, status="failed", progress=100, error=str(exc)
+                )
+            except Exception:
+                pass
+            return
 
     # ========================= Retrieval =========================
 
@@ -734,8 +854,8 @@ class KnowledgeService:
             effective_mmr_lambda = float(mmr_lambda if mmr_lambda is not None else 0.5)
             effective_mmr_threshold = float(mmr_threshold) if mmr_threshold is not None else None
 
-        embedding_provider = str(dataset.get("embedding_provider") or "openai")
-        embedding_model = str(dataset.get("embedding_model") or "text-embedding-3-small")
+        embedding_provider = str(dataset.get("embedding_provider") or "local")
+        embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
         collection = str(dataset.get("collection_name") or "")
@@ -1124,15 +1244,7 @@ class KnowledgeService:
                 cleaned.append(char)
         return "".join(cleaned)
 
-    def _decode_upload(self, content: bytes) -> str:
-        # Check for PDF signature
-        if content.startswith(b"%PDF"):
-             raise ValidationFailedError("PDF upload is not supported yet (requires pypdf)")
-        
-        # Check for Office/Zip signature
-        if content.startswith(b"PK\x03\x04"):
-             raise ValidationFailedError("Office/Zip files are not supported yet (requires python-docx)")
-
+    def _decode_text_bytes(self, content: bytes) -> str:
         for enc in ("utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"):
             try:
                 decoded = content.decode(enc)
@@ -1142,6 +1254,149 @@ class KnowledgeService:
                 continue
         raise ValidationFailedError("Unable to decode uploaded file as text")
 
+    def _extract_text_from_pdf_bytes(self, content: bytes) -> str:
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except Exception as exc:
+            raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf)") from exc
+
+        try:
+            from io import BytesIO
+
+            reader = PdfReader(BytesIO(content))
+            parts: List[str] = []
+            for page in reader.pages:
+                try:
+                    t = page.extract_text() or ""
+                except Exception:
+                    t = ""
+                if t:
+                    parts.append(t)
+            text = "\n".join(parts)
+            return self._sanitize_text_for_db(normalize_text(text))
+        except Exception as exc:
+            raise ValidationFailedError(f"Failed to parse PDF: {exc}") from exc
+
+    def _extract_text_from_docx_bytes(self, content: bytes) -> str:
+        try:
+            from docx import Document  # type: ignore
+        except Exception as exc:
+            raise ValidationFailedError("DOCX parsing requires python-docx (pip install python-docx)") from exc
+
+        try:
+            from io import BytesIO
+
+            doc = Document(BytesIO(content))
+            parts: List[str] = []
+
+            for p in getattr(doc, "paragraphs", []) or []:
+                t = (p.text or "").strip()
+                if t:
+                    parts.append(t)
+
+            # Tables (best-effort)
+            for table in getattr(doc, "tables", []) or []:
+                for row in getattr(table, "rows", []) or []:
+                    cells = [str(getattr(c, "text", "") or "").strip() for c in getattr(row, "cells", []) or []]
+                    line = " | ".join([c for c in cells if c])
+                    if line.strip():
+                        parts.append(line)
+
+            text = "\n".join(parts)
+            text = normalize_text(text)
+            if not text:
+                raise ValidationFailedError("DOCX parsed but no text extracted")
+            return self._sanitize_text_for_db(text)
+        except ValidationFailedError:
+            raise
+        except Exception as exc:
+            raise ValidationFailedError(f"Failed to parse DOCX: {exc}") from exc
+
+    def _extract_text_from_doc_bytes(self, content: bytes) -> str:
+        try:
+            import textract  # type: ignore
+        except Exception as exc:
+            raise ValidationFailedError(
+                "DOC parsing requires textract (pip install textract) and system extractors."
+            ) from exc
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".doc", delete=True) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                raw = textract.process(tmp.name)
+
+            decoded = raw.decode("utf-8", errors="ignore")
+            text = normalize_text(decoded)
+            if not text:
+                raise ValidationFailedError("DOC parsed but no text extracted")
+            return self._sanitize_text_for_db(text)
+        except ValidationFailedError:
+            raise
+        except Exception as exc:
+            raise ValidationFailedError(f"Failed to parse DOC: {exc}") from exc
+
+    def _extract_text_from_html(self, html: str) -> str:
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+        except Exception as exc:
+            raise ValidationFailedError(
+                "HTML parsing requires beautifulsoup4 (pip install beautifulsoup4 lxml)"
+            ) from exc
+
+        soup = BeautifulSoup(html or "", "lxml")
+        for tag in soup(["script", "style", "noscript"]):
+            try:
+                tag.decompose()
+            except Exception:
+                pass
+
+        text = soup.get_text(separator="\n", strip=True)
+        lines = [ln.strip() for ln in (text or "").splitlines()]
+        lines = [ln for ln in lines if ln]
+        return self._sanitize_text_for_db(normalize_text("\n".join(lines)))
+
+    def _extract_text_from_bytes(
+        self,
+        content: bytes,
+        filename: Optional[str] = None,
+        mime_type: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        name = (filename or "").strip().lower()
+        mime = (mime_type or "").strip().lower()
+
+        # Legacy Office (.doc) is OLE2 Compound Document.
+        if (
+            content.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+            or name.endswith(".doc")
+            or "application/msword" in mime
+        ):
+            return self._extract_text_from_doc_bytes(content), "application/msword"
+
+        # PDF
+        if content.startswith(b"%PDF") or name.endswith(".pdf") or "application/pdf" in mime:
+            return self._extract_text_from_pdf_bytes(content), "application/pdf"
+
+        # DOCX (OOXML zip)
+        if content.startswith(b"PK\x03\x04") or name.endswith(".docx") or "wordprocessingml.document" in mime:
+            return (
+                self._extract_text_from_docx_bytes(content),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+
+        # HTML (primarily for URL ingestion)
+        if "text/html" in mime or name.endswith(".html") or name.endswith(".htm"):
+            decoded = self._decode_text_bytes(content)
+            return self._extract_text_from_html(decoded), "text/html"
+
+        # Markdown
+        if name.endswith(".md") or mime in {"text/markdown", "text/x-markdown"}:
+            return self._decode_text_bytes(content), "text/markdown"
+
+        # Plain text fallback
+        decoded = self._decode_text_bytes(content)
+        return decoded, (mime_type or "text/plain")
+
     def _resolve_embedding_config(
         self, provider: str, model: str, embedding_config: Dict[str, Any]
     ) -> EmbeddingConfig:
@@ -1149,9 +1404,23 @@ class KnowledgeService:
         api_key = str(embedding_config.get("api_key") or "").strip()
         base_url = str(embedding_config.get("base_url") or "").strip() or None
 
+        if provider_key in {"local", "builtin", "hash"}:
+            return EmbeddingConfig(
+                provider="local",
+                model=model or "hash-384",
+                api_key=None,
+                base_url=None,
+                timeout_seconds=5.0,
+                extra=embedding_config or {},
+            )
         if provider_key == "openai":
             if not api_key:
-                api_key = self.settings.knowledge.openai.api_key
+                api_key = (
+                    self.settings.knowledge.openai.api_key
+                    or os.getenv("OPENAI_API_KEY")
+                    or os.getenv("OPENAI_KEY")
+                    or ""
+                )
             if not base_url:
                 base_url = self.settings.knowledge.openai.base_url or "https://api.openai.com/v1"
         elif provider_key in {"dashscope", "aliyun"}:
@@ -1161,11 +1430,19 @@ class KnowledgeService:
                     or os.getenv("DASHSCOPE_API_KEY")
                     or os.getenv("Aliyun_KEY")
                     or os.getenv("ALIYUN_KEY")
-                    or "sk-e320c076a3f741f6a5097afaece92022"
                 )
-            # Use compatible mode URL if not specified
+            if not api_key:
+                raise ValidationFailedError("DashScope api_key is required")
+
+            # DashScopeEmbedding uses the official DashScope SDK.
+            # If you want to use OpenAI-compatible endpoints (compatible-mode),
+            # choose embedding_provider=openai and set openai.base_url accordingly.
             if not base_url:
-                base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                base_url = (
+                    getattr(self.settings.knowledge.dashscope, "base_url", None)
+                    or os.getenv("DASHSCOPE_BASE_URL")
+                    or None
+                )
         else:
             raise ValidationFailedError(f"Unsupported embedding provider: {provider}")
 
@@ -1177,3 +1454,316 @@ class KnowledgeService:
             timeout_seconds=30.0,
             extra={k: v for k, v in (embedding_config or {}).items() if k not in {"api_key", "base_url"}},
         )
+
+    # ========================= Document Enable/Disable/Archive (Dify-style) =========================
+
+    async def set_document_enabled(
+        self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Enable or disable a document."""
+        await self.require_dataset_access(user, dataset_id, required="editor")
+        doc = await self.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("document not found")
+
+        update_data: Dict[str, Any] = {"enabled": enabled}
+        if not enabled:
+            update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["disabled_by"] = user.user_id
+        else:
+            update_data["disabled_at"] = None
+            update_data["disabled_by"] = None
+
+        await self.db.update_document_fields(document_id, update_data)
+        return await self.db.get_document(document_id) or doc
+
+    async def set_document_archived(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str,
+        archived: bool,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Archive or unarchive a document."""
+        await self.require_dataset_access(user, dataset_id, required="editor")
+        doc = await self.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("document not found")
+
+        update_data: Dict[str, Any] = {"archived": archived}
+        if archived:
+            update_data["archived_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["archived_by"] = user.user_id
+            update_data["archived_reason"] = reason
+        else:
+            update_data["archived_at"] = None
+            update_data["archived_by"] = None
+            update_data["archived_reason"] = None
+
+        await self.db.update_document_fields(document_id, update_data)
+        return await self.db.get_document(document_id) or doc
+
+    async def update_document(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str,
+        update_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update document metadata."""
+        await self.require_dataset_access(user, dataset_id, required="editor")
+        doc = await self.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("document not found")
+
+        allowed_fields = {"title", "metadata", "doc_type", "doc_language"}
+        filtered = {k: v for k, v in update_data.items() if k in allowed_fields}
+        if filtered:
+            await self.db.update_document_fields(document_id, filtered)
+        return await self.db.get_document(document_id) or doc
+
+    # ========================= Batch Operations =========================
+
+    async def batch_create_documents(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        documents: List[Any],
+        process_rule: Optional[Dict[str, Any]] = None,
+        batch_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Batch create documents from text."""
+        await self.require_dataset_access(user, dataset_id, required="editor")
+
+        batch_id = batch_name or f"batch_{uuid.uuid4().hex[:8]}"
+        created_docs: List[Dict[str, Any]] = []
+        errors: Dict[str, str] = {}
+
+        for i, doc_data in enumerate(documents):
+            try:
+                title = doc_data.title if hasattr(doc_data, "title") else doc_data.get("title", f"doc_{i}")
+                content = doc_data.content if hasattr(doc_data, "content") else doc_data.get("content", "")
+                metadata = doc_data.metadata if hasattr(doc_data, "metadata") else doc_data.get("metadata", {})
+
+                doc = await self.create_document_from_text(
+                    user, dataset_id, title=title, content=content, metadata=metadata
+                )
+                # Set batch ID
+                await self.db.update_document_fields(doc["document_id"], {"batch": batch_id})
+                created_docs.append(doc)
+            except Exception as e:
+                errors[f"doc_{i}"] = str(e)
+
+        return {
+            "batch": batch_id,
+            "documents": created_docs,
+            "success_count": len(created_docs),
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
+    async def batch_delete_documents(
+        self, user: UserContext, dataset_id: str, document_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Batch delete documents."""
+        await self.require_dataset_access(user, dataset_id, required="editor")
+
+        success_count = 0
+        failed_ids: List[str] = []
+        errors: Dict[str, str] = {}
+
+        for doc_id in document_ids:
+            try:
+                ok = await self.delete_document(user, dataset_id, doc_id)
+                if ok:
+                    success_count += 1
+                else:
+                    failed_ids.append(doc_id)
+                    errors[doc_id] = "not found"
+            except Exception as e:
+                failed_ids.append(doc_id)
+                errors[doc_id] = str(e)
+
+        return {
+            "success_count": success_count,
+            "failed_count": len(failed_ids),
+            "failed_ids": failed_ids,
+            "errors": errors,
+        }
+
+    # ========================= Segment Enable/Disable =========================
+
+    async def set_segment_enabled(
+        self, user: UserContext, dataset_id: str, segment_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Enable or disable a segment."""
+        dataset = await self.require_dataset_access(user, dataset_id, required="editor")
+        seg = await self.db.get_segment(segment_id)
+        if not seg or str(seg.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("segment not found")
+
+        update_data: Dict[str, Any] = {"enabled": enabled}
+        if not enabled:
+            update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["disabled_by"] = user.user_id
+        else:
+            update_data["disabled_at"] = None
+            update_data["disabled_by"] = None
+
+        await self.db.update_segment_fields(segment_id, update_data)
+
+        # If disabling, optionally remove from vector store
+        if not enabled:
+            collection = str(dataset.get("collection_name") or "")
+            if collection:
+                pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
+                try:
+                    await self.vector_store.delete_points(collection, [pid])
+                except Exception:
+                    pass
+
+        return await self.db.get_segment(segment_id) or seg
+
+    async def create_segment(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: str,
+        content: str,
+        answer: Optional[str] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create a new segment manually."""
+        dataset = await self.require_dataset_access(user, dataset_id, required="editor")
+        doc = await self.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("document not found")
+
+        # Get next position
+        existing_segs = await self.db.list_segments(
+            dataset_id=dataset_id, document_id=document_id, limit=1000, offset=0
+        )
+        position = max((s.get("position", 0) for s in existing_segs), default=-1) + 1
+
+        seg_id = str(uuid.uuid4())
+        clean_content = self._sanitize_text_for_db(content)
+
+        seg = {
+            "segment_id": seg_id,
+            "dataset_id": dataset_id,
+            "document_id": document_id,
+            "position": position,
+            "text": clean_content,
+            "token_count": len(clean_content) // 4,
+            "word_count": len(clean_content.split()),
+            "answer": answer,
+            "keywords": keywords or [],
+            "created_by": user.user_id,
+            "enabled": True,
+            "status": "waiting",
+            "metadata": {},
+        }
+
+        await self.db.insert_segments([seg])
+
+        # Embed and index the segment
+        try:
+            embedding_provider = str(dataset.get("embedding_provider") or "local")
+            embedding_model = str(dataset.get("embedding_model") or "hash-384")
+            embedding_config = _ensure_dict(dataset.get("embedding_config"))
+            dim = int(dataset.get("embedding_dimension") or 0) or None
+
+            econf = self._resolve_embedding_config(
+                provider=embedding_provider,
+                model=embedding_model,
+                embedding_config=embedding_config,
+            )
+
+            embedder: Optional[BaseEmbedding] = None
+            try:
+                embedder = create_embedding(econf, dimension=dim)
+                vec = (await asyncio.wait_for(
+                    embedder.embed_documents([clean_content]),
+                    timeout=float(econf.timeout_seconds) + 10.0,
+                ))[0]
+
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=embedder.dimension,
+                    collection_name=str(dataset.get("collection_name") or "") or None,
+                )
+            finally:
+                if embedder:
+                    await embedder.close()
+
+            from qdrant_client.http import models as qmodels
+
+            payload = {
+                "dataset_id": dataset_id,
+                "document_id": document_id,
+                "segment_id": seg_id,
+                "position": position,
+                "text": clean_content,
+            }
+            await self.vector_store.upsert(
+                collection_name=collection,
+                points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
+            )
+            await self.db.update_segment_fields(seg_id, {"vector_id": seg_id, "status": "completed"})
+        except Exception as exc:
+            await self.db.update_segment_fields(seg_id, {"status": "error", "error": str(exc)})
+
+        return await self.db.get_segment(seg_id) or seg
+
+    # ========================= Statistics =========================
+
+    async def get_dataset_statistics(
+        self, user: UserContext, dataset_id: str
+    ) -> Dict[str, Any]:
+        """Get dataset statistics."""
+        await self.require_dataset_access(user, dataset_id, required="viewer")
+
+        docs = await self.db.list_documents(dataset_id=dataset_id, limit=10000, offset=0)
+        segs = await self.db.list_segments(dataset_id=dataset_id, limit=50000, offset=0)
+
+        total_docs = len(docs)
+        available_docs = len([d for d in docs if d.get("status") == "completed" and d.get("enabled", True) and not d.get("archived", False)])
+        total_segs = len(segs)
+        available_segs = len([s for s in segs if s.get("enabled", True) and s.get("status") == "completed"])
+
+        word_count = sum(d.get("word_count", 0) or 0 for d in docs)
+        hit_count = sum(s.get("hit_count", 0) or 0 for s in segs)
+
+        return {
+            "dataset_id": dataset_id,
+            "document_count": total_docs,
+            "available_document_count": available_docs,
+            "segment_count": total_segs,
+            "available_segment_count": available_segs,
+            "word_count": word_count,
+            "hit_count": hit_count,
+        }
+
+    async def get_document_statistics(
+        self, user: UserContext, dataset_id: str, document_id: str
+    ) -> Dict[str, Any]:
+        """Get document statistics."""
+        await self.require_dataset_access(user, dataset_id, required="viewer")
+        doc = await self.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("document not found")
+
+        segs = await self.db.list_segments(
+            dataset_id=dataset_id, document_id=document_id, limit=10000, offset=0
+        )
+
+        return {
+            "document_id": document_id,
+            "segment_count": len(segs),
+            "word_count": doc.get("word_count", 0) or 0,
+            "hit_count": sum(s.get("hit_count", 0) or 0 for s in segs),
+            "status": doc.get("status", "unknown"),
+            "enabled": doc.get("enabled", True),
+            "archived": doc.get("archived", False),
+        }

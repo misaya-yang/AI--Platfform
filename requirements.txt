@@ -23,3 +23,9 @@ redis>=5.0
 # Knowledge Base (KBMS)
 qdrant-client>=1.16.0
 dashscope>=1.20.0
+
+# Document loaders (KBMS)
+pypdf>=4.0.0
+python-docx>=1.1.2
+beautifulsoup4>=4.12.3
+lxml>=5.3.0

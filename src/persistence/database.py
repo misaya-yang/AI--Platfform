@@ -881,8 +881,45 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
+    async def update_document_fields(
+        self, document_id: str, fields: Dict[str, Any]
+    ) -> None:
+        """Update arbitrary document fields (Dify-style enable/disable/archive support)"""
+        if not self._pool or not fields:
+            return
+
+        # Allowed fields for update
+        allowed = {
+            "title", "metadata", "enabled", "disabled_at", "disabled_by",
+            "archived", "archived_reason", "archived_by", "archived_at",
+            "batch", "doc_type", "doc_form", "doc_language", "word_count",
+            "segment_count", "tokens", "process_rule_id",
+        }
+        filtered = {k: v for k, v in fields.items() if k in allowed}
+        if not filtered:
+            return
+
+        updates = ["updated_at = NOW()"]
+        params: List[Any] = []
+        param_idx = 1
+
+        for key, value in filtered.items():
+            if key == "metadata" and isinstance(value, dict):
+                updates.append(f"{key} = ${param_idx}")
+                params.append(json.dumps(value))
+            else:
+                updates.append(f"{key} = ${param_idx}")
+                params.append(value)
+            param_idx += 1
+
+        params.append(document_id)
+        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
     async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
-        """批量插入/更新 Segment"""
+        """批量插入/更新 Segment (enhanced with Dify-style fields)"""
         if not self._pool or not segments:
             return
 
@@ -898,6 +935,13 @@ class DatabaseStorage:
                     int(seg.get("token_count", 0) or 0),
                     seg.get("vector_id"),
                     json.dumps(seg.get("metadata", {})),
+                    # New Dify-style fields
+                    seg.get("enabled", True),
+                    seg.get("status", "completed"),
+                    int(seg.get("word_count", 0) or 0),
+                    json.dumps(seg.get("keywords", [])),
+                    seg.get("answer"),
+                    seg.get("created_by"),
                 )
             )
 
@@ -906,8 +950,9 @@ class DatabaseStorage:
                 """
                 INSERT INTO segments (
                     segment_id, dataset_id, document_id, position,
-                    text, token_count, vector_id, metadata
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    text, token_count, vector_id, metadata,
+                    enabled, status, word_count, keywords, answer, created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 ON CONFLICT (segment_id) DO UPDATE SET
                     dataset_id = EXCLUDED.dataset_id,
                     document_id = EXCLUDED.document_id,
@@ -916,6 +961,11 @@ class DatabaseStorage:
                     token_count = EXCLUDED.token_count,
                     vector_id = EXCLUDED.vector_id,
                     metadata = EXCLUDED.metadata,
+                    enabled = EXCLUDED.enabled,
+                    status = EXCLUDED.status,
+                    word_count = EXCLUDED.word_count,
+                    keywords = EXCLUDED.keywords,
+                    answer = EXCLUDED.answer,
                     updated_at = NOW()
                 """,
                 rows,
@@ -1047,6 +1097,42 @@ class DatabaseStorage:
         if metadata is not None:
             updates.append(f"metadata = ${param_idx}")
             params.append(json.dumps(metadata))
+            param_idx += 1
+
+        params.append(segment_id)
+        query = f"UPDATE segments SET {', '.join(updates)} WHERE segment_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def update_segment_fields(
+        self, segment_id: str, fields: Dict[str, Any]
+    ) -> None:
+        """Update arbitrary segment fields (Dify-style enable/disable support)"""
+        if not self._pool or not fields:
+            return
+
+        # Allowed fields for update
+        allowed = {
+            "enabled", "disabled_at", "disabled_by", "status", "hit_count",
+            "word_count", "keywords", "answer", "index_node_id", "index_node_hash",
+            "vector_id", "error",
+        }
+        filtered = {k: v for k, v in fields.items() if k in allowed}
+        if not filtered:
+            return
+
+        updates = ["updated_at = NOW()"]
+        params: List[Any] = []
+        param_idx = 1
+
+        for key, value in filtered.items():
+            if key == "keywords" and isinstance(value, list):
+                updates.append(f"{key} = ${param_idx}")
+                params.append(json.dumps(value))
+            else:
+                updates.append(f"{key} = ${param_idx}")
+                params.append(value)
             param_idx += 1
 
         params.append(segment_id)

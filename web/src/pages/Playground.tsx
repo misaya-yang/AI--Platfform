@@ -24,11 +24,21 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
+import { useAppStore } from "@/store/useAppStore";
 
 export function PlaygroundPage() {
   const servicesQuery = useServices();
   const services = servicesQuery.data || [];
-  const [serviceId, setServiceId] = useState<string | undefined>();
+  
+  const { 
+    selectedServiceId: serviceId, 
+    setSelectedServiceId: setServiceId,
+    activeSessionId,
+    setActiveSessionId,
+    localTitles,
+    setLocalTitles
+  } = useAppStore();
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -37,17 +47,9 @@ export function PlaygroundPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionEnabled, setSessionEnabled] = useState(true);
-  // 本地会话标题缓存（用于在后端未返回 title 时显示）
-  const [localTitles, setLocalTitles] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    });
-  }, [messages, loading]);
+  const isInitialMount = useRef(true);
 
   const refreshSessions = useCallback(async () => {
     if (!serviceId) {
@@ -58,18 +60,21 @@ export function PlaygroundPage() {
     try {
       const data = await listSessions({ service_id: serviceId, limit: 100 });
       setSessions(data);
+      // 从服务器返回的 metadata.title 初始化 localTitles（页面刷新后恢复标题）
+      setLocalTitles(prev => {
+        const updated = { ...prev };
+        for (const s of data) {
+          const serverTitle = (s.metadata?.title as string | undefined);
+          if (serverTitle && !updated[s.session_id]) {
+            updated[s.session_id] = serverTitle;
+          }
+        }
+        return updated;
+      });
     } finally {
       setSessionsLoading(false);
     }
   }, [serviceId]);
-
-  const handleNewSession = useCallback(async () => {
-    if (!serviceId) return;
-    const created = await createSession({ service_id: serviceId });
-    setActiveSessionId(created.session_id);
-    setMessages([]);
-    await refreshSessions();
-  }, [serviceId, refreshSessions]);
 
   const handleSelectSession = useCallback(async (id: string) => {
     setActiveSessionId(id);
@@ -85,26 +90,68 @@ export function PlaygroundPage() {
     } finally {
       setHistoryLoading(false);
     }
-  }, []);
+  }, [setActiveSessionId]);
+
+  const handleNewSession = useCallback(async () => {
+    if (!serviceId) return;
+    const created = await createSession({ service_id: serviceId });
+    setActiveSessionId(created.session_id);
+    setMessages([]);
+    await refreshSessions();
+  }, [serviceId, refreshSessions, setActiveSessionId]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [messages, loading]);
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
       await deleteSession(id);
       if (activeSessionId === id) {
-        setActiveSessionId(null);
+        setActiveSessionId(undefined);
         setMessages([]);
       }
+      // 从本地标题缓存中移除
+      setLocalTitles(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       await refreshSessions();
     },
-    [activeSessionId, refreshSessions]
+    [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles]
   );
 
-  // 切换服务时刷新会话列表并清空当前对话（不自动新建）
+  // 1. 初始化挂载：如果已有持久化状态，恢复数据
   useEffect(() => {
-    setMessages([]);
-    setActiveSessionId(null);
-    void refreshSessions();
-  }, [serviceId, refreshSessions]);
+    const init = async () => {
+      if (serviceId) {
+        await refreshSessions();
+        if (activeSessionId) {
+          await handleSelectSession(activeSessionId);
+        }
+      }
+      isInitialMount.current = false;
+    };
+    void init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 2. 切换服务时：清空当前会话
+  const prevServiceId = useRef(serviceId);
+  useEffect(() => {
+    if (isInitialMount.current) return;
+    
+    if (serviceId !== prevServiceId.current) {
+      setMessages([]);
+      setActiveSessionId(undefined);
+      void refreshSessions();
+    }
+    prevServiceId.current = serviceId;
+  }, [serviceId, refreshSessions, setActiveSessionId]);
 
   async function handleSend(inputs: ContentItem[]) {
     if (!serviceId) return;
@@ -128,13 +175,15 @@ export function PlaygroundPage() {
         }
       }
 
-      // 为新会话或首次发送消息时设置标题
-      if (effectiveSessionId && (isNewSession || !localTitles[effectiveSessionId])) {
+      // 为会话设置标题：使用第一条消息的前40个字符
+      // 只在本地没有标题时设置（localTitles 是 source of truth）
+      if (effectiveSessionId && !localTitles[effectiveSessionId]) {
         const titleText = String(text).trim().split('\n')[0].slice(0, 40);
         if (titleText) {
           setLocalTitles(prev => ({ ...prev, [effectiveSessionId!]: titleText }));
           // 异步更新后端会话标题（不阻塞发送）
-          updateSession(effectiveSessionId, { metadata: { title: titleText } }).catch(() => {});
+          updateSession(effectiveSessionId, { metadata: { title: titleText } })
+            .catch((err) => console.error('Failed to update session title:', err));
         }
       }
 
@@ -376,10 +425,11 @@ export function PlaygroundPage() {
           ) : (
             <div className="space-y-1">
               {sessions.map((s) => {
+                // 优先使用 localTitles（同步更新），然后才是服务器端的 metadata
                 const title =
+                  localTitles[s.session_id] ||
                   (s.metadata?.title as string | undefined) ||
                   (s.metadata?.name as string | undefined) ||
-                  localTitles[s.session_id] ||
                   "New chat";
                 const ts = (s.updated_at || s.created_at) as string;
                 const active = activeSessionId === s.session_id;
@@ -474,7 +524,7 @@ export function PlaygroundPage() {
                     void handleNewSession();
                   } else {
                     setMessages([]);
-                    setActiveSessionId(null);
+                    setActiveSessionId(undefined);
                   }
                 }}
                 disabled={loading || (sessionEnabled ? !serviceId : messages.length === 0)}

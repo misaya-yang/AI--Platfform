@@ -4,7 +4,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import List, Optional
 
+from ...core.observability.logging import get_logger
 from .knowledge_service import KnowledgeService
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,20 @@ class KnowledgeWorker:
             task = await self.queue.get()
             try:
                 await self.service.ingest_document(task.dataset_id, task.document_id)
+            except Exception as exc:
+                # Never let a single ingest failure kill the background worker loop.
+                logger.exception(
+                    "KB ingest task failed",
+                    extra={"dataset_id": task.dataset_id, "document_id": task.document_id},
+                )
+                try:
+                    await self.service.db.update_document_status(
+                        task.document_id,
+                        status="failed",
+                        progress=100,
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass
             finally:
                 self.queue.task_done()
-

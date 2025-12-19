@@ -22,7 +22,13 @@ class BaseConnector(ABC):
     async def post(self, url: str, **kwargs: Any) -> Any:
         return await self.request("POST", url, **kwargs)
 
-    async def health_check(self) -> bool:
+    async def health_check(self, headers: dict = None) -> bool:
+        """
+        健康检查。
+        
+        Args:
+            headers: 可选的认证头部，用于需要认证的服务
+        """
         return True
 
     async def close(self) -> None:

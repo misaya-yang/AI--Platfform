@@ -57,13 +57,41 @@ class DatasetVisibility(str, Enum):
 class DocumentStatus(str, Enum):
     UPLOADED = "uploaded"
     PARSING = "parsing"
-    SEGMENTING = "segmenting"
+    CLEANING = "cleaning"
+    SPLITTING = "splitting"
+    SEGMENTING = "segmenting"  # alias for splitting
     EMBEDDING = "embedding"
+    INDEXING = "indexing"
     COMPLETED = "completed"
     FAILED = "failed"
+    PAUSED = "paused"
+
+
+class SegmentStatus(str, Enum):
+    """Segment indexing status"""
+    WAITING = "waiting"
+    INDEXING = "indexing"
+    COMPLETED = "completed"
+    ERROR = "error"
 
 
 class DatasetPermission(str, Enum):
     OWNER = "owner"
     EDITOR = "editor"
     VIEWER = "viewer"
+
+
+class RetrievalMethod(str, Enum):
+    """Retrieval method types - matches Dify's RetrievalMethod"""
+    SEMANTIC_SEARCH = "semantic_search"
+    FULL_TEXT_SEARCH = "full_text_search"
+    HYBRID_SEARCH = "hybrid_search"
+
+
+class DataSourceType(str, Enum):
+    """Document data source types"""
+    UPLOAD_FILE = "upload_file"
+    NOTION_IMPORT = "notion_import"
+    WEBSITE_CRAWL = "website_crawl"
+    TEXT_INPUT = "text"
+    URL_IMPORT = "url"

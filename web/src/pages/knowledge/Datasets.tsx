@@ -11,6 +11,9 @@ import {
   Users,
   Globe,
   RefreshCcw,
+  Search,
+  UploadCloud,
+  Link as LinkIcon,
 } from "lucide-react";
 
 import { useDatasets } from "@/hooks/useKnowledge";
@@ -44,18 +47,20 @@ type CreateForm = {
   name: string;
   description?: string;
   visibility: DatasetVisibility;
-  embedding_provider: "openai" | "dashscope";
+  embedding_provider: "local" | "openai" | "dashscope";
   embedding_model: string;
   rerank_enabled: boolean;
   rerank_model: string;
 };
 
 const EMBEDDING_MODEL_OPTIONS: Record<CreateForm["embedding_provider"], string[]> = {
+  local: ["hash-384", "hash-768", "hash-1024"],
   openai: ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
   dashscope: ["text-embedding-v4", "text-embedding-v3", "text-embedding-v2", "text-embedding-v1"],
 };
 
 const DEFAULT_EMBEDDING_MODEL: Record<CreateForm["embedding_provider"], string> = {
+  local: "hash-384",
   openai: "text-embedding-3-small",
   dashscope: "text-embedding-v4",
 };
@@ -82,18 +87,37 @@ export function KnowledgeDatasetsPage() {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [visibilityFilter, setVisibilityFilter] = useState<DatasetVisibility | "all">("all");
   const [form, setForm] = useState<CreateForm>({
     dataset_id: "",
     name: "",
     description: "",
     visibility: "private",
-    embedding_provider: "dashscope",
-    embedding_model: DEFAULT_EMBEDDING_MODEL.dashscope,
+    embedding_provider: "local",
+    embedding_model: DEFAULT_EMBEDDING_MODEL.local,
     rerank_enabled: false,
     rerank_model: "gte-rerank",
   });
 
   const canSubmit = useMemo(() => form.name.trim().length > 0, [form.name]);
+  const filteredDatasets = useMemo(() => {
+    const keyword = search.trim().toLowerCase();
+    return datasets.filter((d) => {
+      if (visibilityFilter !== "all" && d.visibility !== visibilityFilter) return false;
+      if (!keyword) return true;
+      return [
+        d.name,
+        d.description || "",
+        d.dataset_id,
+        d.embedding_provider,
+        d.embedding_model,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword);
+    });
+  }, [datasets, search, visibilityFilter]);
 
   async function handleCreate() {
     if (!canSubmit) {
@@ -110,6 +134,10 @@ export function KnowledgeDatasetsPage() {
         embedding_provider: form.embedding_provider,
         embedding_model: form.embedding_model,
       };
+      if (form.embedding_provider === "local") {
+        const match = form.embedding_model.match(/(\d{2,5})/);
+        if (match) payload.embedding_dimension = Number(match[1]);
+      }
       if (form.dataset_id?.trim()) payload.dataset_id = form.dataset_id.trim();
       if (form.rerank_enabled) {
         payload.index_config = {
@@ -129,8 +157,8 @@ export function KnowledgeDatasetsPage() {
         name: "",
         description: "",
         visibility: "private",
-        embedding_provider: "dashscope",
-        embedding_model: DEFAULT_EMBEDDING_MODEL.dashscope,
+        embedding_provider: "local",
+        embedding_model: DEFAULT_EMBEDDING_MODEL.local,
         rerank_enabled: false,
         rerank_model: "gte-rerank",
       });
@@ -143,37 +171,34 @@ export function KnowledgeDatasetsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800">
-      <div className="max-w-7xl mx-auto p-6">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-4">
-            <div className="h-12 w-12 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/25">
-              <Database className="h-6 w-6 text-white" />
+    <div className="min-h-screen bg-slate-50">
+      <div className="max-w-[1400px] mx-auto px-6 py-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="h-11 w-11 rounded-xl bg-white border border-slate-200 flex items-center justify-center shadow-sm">
+              <Database className="h-5 w-5 text-slate-700" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-                知识库
-              </h1>
-              <p className="text-sm text-slate-500 mt-0.5">
-                管理文档和向量检索
+              <h1 className="text-xl font-semibold text-slate-900">知识库</h1>
+              <p className="text-xs text-slate-500">
+                统一管理文档索引与检索配置
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
               onClick={() => qc.invalidateQueries({ queryKey: ["kb-datasets"] })}
-              className="bg-white/50"
+              className="border-slate-200 bg-white"
             >
               <RefreshCcw className={`h-4 w-4 mr-1.5 ${datasetsQuery.isFetching ? "animate-spin" : ""}`} />
               刷新
             </Button>
             <Dialog open={open} onOpenChange={setOpen}>
               <DialogTrigger asChild>
-                <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/25">
+                <Button className="bg-slate-900 hover:bg-slate-800 text-white">
                   <Plus className="h-4 w-4 mr-1.5" />
                   新建知识库
                 </Button>
@@ -265,7 +290,7 @@ export function KnowledgeDatasetsPage() {
                       <Select
                         value={form.embedding_provider}
                         onValueChange={(v) => {
-                          const provider = v as "openai" | "dashscope";
+                          const provider = v as CreateForm["embedding_provider"];
                           const allowed = EMBEDDING_MODEL_OPTIONS[provider];
                           const nextModel = allowed.includes(form.embedding_model)
                             ? form.embedding_model
@@ -277,6 +302,7 @@ export function KnowledgeDatasetsPage() {
                           <SelectValue placeholder="选择 Provider" />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value="local">Local (离线可用)</SelectItem>
                           <SelectItem value="dashscope">DashScope (阿里云)</SelectItem>
                           <SelectItem value="openai">OpenAI</SelectItem>
                         </SelectContent>
@@ -305,7 +331,7 @@ export function KnowledgeDatasetsPage() {
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <Label className="text-sm font-medium">重排序 (Rerank)</Label>
+                      <Label className="text-sm font-medium">重排序(Rerank)</Label>
                       <Select
                         value={form.rerank_enabled ? "on" : "off"}
                         onValueChange={(v) => setForm({ ...form, rerank_enabled: v === "on" })}
@@ -315,7 +341,7 @@ export function KnowledgeDatasetsPage() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="off">关闭</SelectItem>
-                          <SelectItem value="on">开启 (DashScope)</SelectItem>
+                          <SelectItem value="on">开启(DashScope)</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -355,7 +381,7 @@ export function KnowledgeDatasetsPage() {
                   <Button
                     onClick={handleCreate}
                     disabled={saving || !canSubmit}
-                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
+                    className="bg-slate-900 hover:bg-slate-800"
                   >
                     {saving ? "创建中..." : "创建知识库"}
                   </Button>
@@ -365,89 +391,159 @@ export function KnowledgeDatasetsPage() {
           </div>
         </div>
 
-        {/* Dataset Grid */}
-        {datasetsQuery.isLoading ? (
-          <div className="text-center py-16">
-            <RefreshCcw className="h-8 w-8 animate-spin mx-auto text-blue-500" />
-            <p className="text-sm text-slate-500 mt-3">加载中...</p>
-          </div>
-        ) : datasets.length === 0 ? (
-          <div className="text-center py-20">
-            <div className="h-20 w-20 rounded-3xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
-              <FolderOpen className="h-10 w-10 text-slate-400" />
-            </div>
-            <h3 className="text-lg font-semibold text-slate-700 mb-1">
-              暂无知识库
-            </h3>
-            <p className="text-sm text-slate-500 mb-6">
-              创建您的第一个知识库，开始构建智能检索系统
-            </p>
-            <Button
-              onClick={() => setOpen(true)}
-              className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white"
-            >
-              <Plus className="h-4 w-4 mr-1.5" />
-              新建知识库
-            </Button>
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {datasets.map((d) => (
-              <Card
-                key={d.dataset_id}
-                className="group p-5 bg-white/80 backdrop-blur border-slate-200/60 hover:border-blue-300 hover:shadow-xl hover:shadow-blue-500/10 transition-all duration-300 cursor-pointer"
-                onClick={() => nav(`/knowledge/${d.dataset_id}`)}
+        <div className="mt-6 grid grid-cols-12 gap-6">
+          <aside className="col-span-12 lg:col-span-3 space-y-4">
+            <Card className="border-slate-200 bg-white p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-800">创建入口</h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    支持 Word / PDF / TXT / MD / URL
+                  </p>
+                </div>
+                <Database className="h-4 w-4 text-slate-400" />
+              </div>
+              <div className="mt-4 space-y-2">
+                <Button
+                  className="w-full bg-slate-900 hover:bg-slate-800 text-white"
+                  onClick={() => setOpen(true)}
+                >
+                  <Plus className="h-4 w-4 mr-1.5" />
+                  新建知识库
+                </Button>
+                <Button variant="outline" className="w-full border-slate-200" disabled>
+                  <UploadCloud className="h-4 w-4 mr-1.5" />
+                  导入知识库
+                </Button>
+                <Button variant="outline" className="w-full border-slate-200" disabled>
+                  <LinkIcon className="h-4 w-4 mr-1.5" />
+                  外部知识库 API
+                </Button>
+              </div>
+            </Card>
+
+            <Card className="border-slate-200 bg-white p-4">
+              <h3 className="text-xs font-semibold text-slate-700">提示</h3>
+              <ul className="mt-3 space-y-2 text-xs text-slate-500">
+                <li>默认 Local Embedding 可离线使用，无需 API Key。</li>
+                <li>如需更高质量向量，请在创建时选择 OpenAI/DashScope 并配置 Key。</li>
+                <li>支持 URL 自动抓取与解析 HTML/Markdown 内容。</li>
+              </ul>
+            </Card>
+          </aside>
+
+          <section className="col-span-12 lg:col-span-9 space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative flex-1 min-w-[220px]">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="搜索知识库、描述或 ID"
+                  className="pl-9 border-slate-200 bg-white"
+                />
+              </div>
+              <Select
+                value={visibilityFilter}
+                onValueChange={(v) => setVisibilityFilter(v as DatasetVisibility | "all")}
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-blue-500/10 to-indigo-500/10 flex items-center justify-center shrink-0">
-                        <Database className="h-5 w-5 text-blue-600" />
+                <SelectTrigger className="w-[160px] border-slate-200 bg-white">
+                  <SelectValue placeholder="可见性" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部可见性</SelectItem>
+                  <SelectItem value="private">私有</SelectItem>
+                  <SelectItem value="tenant">租户内</SelectItem>
+                  <SelectItem value="public">公开</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {datasetsQuery.isLoading ? (
+              <div className="text-center py-16">
+                <RefreshCcw className="h-8 w-8 animate-spin mx-auto text-slate-400" />
+                <p className="text-sm text-slate-500 mt-3">加载中...</p>
+              </div>
+            ) : filteredDatasets.length === 0 ? (
+              <div className="text-center py-20 bg-white border border-dashed border-slate-200 rounded-2xl">
+                <div className="h-16 w-16 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
+                  <FolderOpen className="h-8 w-8 text-slate-400" />
+                </div>
+                <h3 className="text-base font-semibold text-slate-700 mb-1">
+                  暂无知识库
+                </h3>
+                <p className="text-sm text-slate-500 mb-6">
+                  新建一个知识库来开始管理文档与检索策略
+                </p>
+                <Button
+                  onClick={() => setOpen(true)}
+                  className="bg-slate-900 hover:bg-slate-800 text-white"
+                >
+                  <Plus className="h-4 w-4 mr-1.5" />
+                  新建知识库
+                </Button>
+              </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {filteredDatasets.map((d) => (
+                  <Card
+                    key={d.dataset_id}
+                    className="group border-slate-200 bg-white p-5 hover:border-slate-300 hover:shadow-lg transition-all duration-200 cursor-pointer"
+                    onClick={() => nav(`/knowledge/${d.dataset_id}`)}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="h-9 w-9 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+                            <Database className="h-4 w-4 text-slate-600" />
+                          </div>
+                          <div className="min-w-0">
+                            <h3 className="font-semibold text-slate-800 truncate group-hover:text-slate-900">
+                              {d.name}
+                            </h3>
+                            <p className="text-xs text-slate-500 truncate">
+                              {d.description || d.dataset_id}
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <div className="min-w-0">
-                        <h3 className="font-semibold text-slate-800 truncate group-hover:text-blue-600 transition-colors">
-                          {d.name}
-                        </h3>
-                        <p className="text-xs text-slate-500 truncate">
-                          {d.description || d.dataset_id}
-                        </p>
+                      <ChevronRight className="h-5 w-5 text-slate-300 group-hover:text-slate-500 transition-all shrink-0 mt-2" />
+                    </div>
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Badge
+                        variant="outline"
+                        className="text-xs font-normal bg-slate-50 border-slate-200"
+                      >
+                        <VisibilityIcon visibility={d.visibility} />
+                        <span className="ml-1.5">{d.visibility}</span>
+                      </Badge>
+                      <Badge
+                        variant="outline"
+                        className="text-xs font-mono font-normal bg-slate-50 border-slate-200"
+                      >
+                        {d.embedding_provider}:{d.embedding_model}
+                      </Badge>
+                      {d.my_permission && (
+                        <Badge className="text-xs bg-blue-50 text-blue-700 border-blue-200">
+                          {d.my_permission}
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100">
+                      <div className="text-xs text-slate-400 font-mono truncate">
+                        {d.dataset_id}
                       </div>
                     </div>
-                  </div>
-                  <ChevronRight className="h-5 w-5 text-slate-300 group-hover:text-blue-500 group-hover:translate-x-1 transition-all shrink-0 mt-2" />
-                </div>
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Badge
-                    variant="outline"
-                    className="text-xs font-normal bg-slate-50 border-slate-200"
-                  >
-                    <VisibilityIcon visibility={d.visibility} />
-                    <span className="ml-1.5">{d.visibility}</span>
-                  </Badge>
-                  <Badge
-                    variant="outline"
-                    className="text-xs font-mono font-normal bg-slate-50 border-slate-200"
-                  >
-                    {d.embedding_provider}:{d.embedding_model}
-                  </Badge>
-                  {d.my_permission && (
-                    <Badge className="text-xs bg-blue-500/10 text-blue-600 border-blue-500/20">
-                      {d.my_permission}
-                    </Badge>
-                  )}
-                </div>
-
-                <div className="mt-4 pt-3 border-t border-slate-100">
-                  <div className="text-xs text-slate-400 font-mono truncate">
-                    {d.dataset_id}
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
+                  </Card>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );
 }
+

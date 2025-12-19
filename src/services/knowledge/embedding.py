@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
@@ -195,6 +198,53 @@ class DashScopeEmbedding(BaseEmbedding):
         return vectors
 
 
+class LocalHashEmbedding(BaseEmbedding):
+    """Lightweight local embedding via feature hashing (no external dependencies)."""
+
+    DEFAULT_DIMENSION = 384
+
+    def __init__(self, model: str, dimension: Optional[int] = None):
+        dim = dimension or _infer_local_dimension(model) or self.DEFAULT_DIMENSION
+        super().__init__(provider="local", model=model, dimension=dim)
+
+    async def embed_texts(
+        self, texts: List[str], text_type: Optional[str] = None
+    ) -> List[List[float]]:
+        if not texts:
+            return []
+
+        vectors: List[List[float]] = []
+        dim = self.dimension
+        token_re = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
+
+        for text in texts:
+            vec = [0.0] * dim
+            for token in token_re.findall((text or "").lower()):
+                digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+                idx = int.from_bytes(digest[:4], "little") % dim
+                sign = 1.0 if (digest[4] & 1) == 0 else -1.0
+                vec[idx] += sign
+
+            norm = math.sqrt(sum(v * v for v in vec))
+            if norm > 0:
+                vec = [v / norm for v in vec]
+            vectors.append(vec)
+
+        return vectors
+
+
+def _infer_local_dimension(model: str) -> Optional[int]:
+    if not model:
+        return None
+    match = re.search(r"(\d{2,5})", model)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
     """Best-effort parser for DashScope embedding outputs."""
     if output is None:
@@ -257,6 +307,11 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             dimension=dimension,
             organization=config.extra.get("organization") if config.extra else None,
         )
+    if provider in {"local", "builtin", "hash"}:
+        return LocalHashEmbedding(
+            model=config.model or "hash-384",
+            dimension=dimension or (config.extra or {}).get("dimension"),
+        )
     if provider in {"dashscope", "aliyun"}:
         return DashScopeEmbedding(
             model=config.model,
@@ -265,4 +320,3 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             base_url=config.base_url,
         )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
-

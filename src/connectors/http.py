@@ -35,6 +35,13 @@ class HTTPConnector(BaseConnector):
         )
 
     async def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        # 支持动态传递额外的 headers（与 client 默认 headers 合并）
+        extra_headers = kwargs.pop("headers", None)
+        if extra_headers:
+            merged_headers = dict(self._client.headers)
+            merged_headers.update(extra_headers)
+            kwargs["headers"] = merged_headers
+        
         response = await self._client.request(method, url, **kwargs)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "")
@@ -42,10 +49,27 @@ class HTTPConnector(BaseConnector):
             return response.json()
         return response
 
-    async def health_check(self) -> bool:
-        endpoint = (self.service.connector_config or {}).get("health_endpoint", "/health")
+    async def health_check(self, headers: dict = None) -> bool:
+        """
+        健康检查。
+        
+        Args:
+            headers: 可选的认证头部，用于需要认证的服务
+        """
+        config = self.service.connector_config or {}
+        endpoint = config.get("health_endpoint", "/health")
+        # 对于需要认证的服务，可以配置 health_skip_auth 跳过健康检查的认证
+        skip_auth = config.get("health_skip_auth", False)
+        
         try:
-            response = await self._client.get(endpoint)
+            request_headers = None
+            if headers and not skip_auth:
+                # 合并客户端默认头部和传入的认证头部
+                request_headers = dict(self._client.headers)
+                request_headers.update(headers)
+            
+            response = await self._client.get(endpoint, headers=request_headers)
+            # 403 表示认证问题，但服务本身是健康的
             return response.status_code < 500
         except Exception:
             return False

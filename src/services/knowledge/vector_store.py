@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
@@ -59,13 +60,29 @@ class VectorStore:
             timeout=timeout_seconds,
         )
 
+    async def _call(self, coro):
+        try:
+            return await asyncio.wait_for(coro, timeout=float(self.timeout_seconds))
+        except asyncio.TimeoutError as exc:
+            raise VectorStoreError(
+                f"Qdrant request timed out after {self.timeout_seconds}s (url={self.url})"
+            ) from exc
+        except Exception as exc:
+            raise VectorStoreError(f"Qdrant request failed (url={self.url}): {exc}") from exc
+
     async def close(self) -> None:
         await self._client.close()
+
+    def make_collection_name(
+        self, dataset_id: str, dimension: int, collection_name: Optional[str] = None
+    ) -> str:
+        base = _sanitize_collection_name(dataset_id)
+        return _sanitize_collection_name(collection_name or f"kb_{base}_{dimension}")
 
     async def delete_collection(self, collection_name: str) -> None:
         if not collection_name:
             return
-        await self._client.delete_collection(collection_name=collection_name)
+        await self._call(self._client.delete_collection(collection_name=collection_name))
 
     async def ensure_collection(
         self,
@@ -78,11 +95,10 @@ class VectorStore:
 
         Returns the actual collection name to use.
         """
-        base = _sanitize_collection_name(dataset_id)
-        desired = _sanitize_collection_name(collection_name or f"kb_{base}_{dimension}")
+        desired = self.make_collection_name(dataset_id=dataset_id, dimension=dimension, collection_name=collection_name)
 
         try:
-            info = await self._client.get_collection(desired)
+            info = await self._call(self._client.get_collection(desired))
             current_size = int(info.config.params.vectors.size)  # type: ignore[attr-defined]
             if current_size == int(dimension):
                 return desired
@@ -101,18 +117,22 @@ class VectorStore:
         elif distance.lower() in {"euclid", "l2"}:
             dist = qmodels.Distance.EUCLID
 
-        await self._client.create_collection(
-            collection_name=actual,
-            vectors_config=qmodels.VectorParams(size=int(dimension), distance=dist),
+        await self._call(
+            self._client.create_collection(
+                collection_name=actual,
+                vectors_config=qmodels.VectorParams(size=int(dimension), distance=dist),
+            )
         )
 
         # Payload indexes for fast filtering.
         for field_name in ("document_id", "segment_id"):
             try:
-                await self._client.create_payload_index(
-                    collection_name=actual,
-                    field_name=field_name,
-                    field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                await self._call(
+                    self._client.create_payload_index(
+                        collection_name=actual,
+                        field_name=field_name,
+                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                    )
                 )
             except Exception:
                 pass
@@ -124,15 +144,17 @@ class VectorStore:
     ) -> None:
         if not points:
             return
-        await self._client.upsert(collection_name=collection_name, points=list(points))
+        await self._call(self._client.upsert(collection_name=collection_name, points=list(points)))
 
     async def delete_points(self, collection_name: str, point_ids: Sequence[str]) -> None:
         ids = [pid for pid in point_ids if pid]
         if not ids:
             return
-        await self._client.delete(
-            collection_name=collection_name,
-            points_selector=qmodels.PointIdsList(points=list(ids)),
+        await self._call(
+            self._client.delete(
+                collection_name=collection_name,
+                points_selector=qmodels.PointIdsList(points=list(ids)),
+            )
         )
 
     async def search(
@@ -156,13 +178,15 @@ class VectorStore:
             )
 
         # qdrant-client >= 1.11 uses `query_points` as the unified entry point.
-        resp = await self._client.query_points(
-            collection_name=collection_name,
-            query=query_vector,
-            limit=int(top_k),
-            with_payload=with_payload,
-            with_vectors=with_vectors,
-            query_filter=flt,
+        resp = await self._call(
+            self._client.query_points(
+                collection_name=collection_name,
+                query=query_vector,
+                limit=int(top_k),
+                with_payload=with_payload,
+                with_vectors=with_vectors,
+                query_filter=flt,
+            )
         )
         hits = list(getattr(resp, "points", None) or [])
 
@@ -192,11 +216,13 @@ class VectorStore:
         if not ids:
             return {}
 
-        records = await self._client.retrieve(
-            collection_name=collection_name,
-            ids=list(ids),
-            with_payload=False,
-            with_vectors=True,
+        records = await self._call(
+            self._client.retrieve(
+                collection_name=collection_name,
+                ids=list(ids),
+                with_payload=False,
+                with_vectors=True,
+            )
         )
         vectors: Dict[str, List[float]] = {}
         for r in records or []:

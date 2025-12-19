@@ -51,6 +51,11 @@ export async function createDocumentFromText(datasetId: string, payload: Record<
   return data;
 }
 
+export async function createDocumentFromUrl(datasetId: string, payload: Record<string, unknown>) {
+  const { data } = await api.post<Document>(`/api/v1/knowledge/${datasetId}/documents/url`, payload);
+  return data;
+}
+
 export async function uploadDocument(datasetId: string, file: File) {
   const form = new FormData();
   form.append("file", file);
@@ -91,4 +96,3 @@ export async function hitTest(datasetId: string, req: RetrieveRequest) {
   const { data } = await api.post<RetrieveResponse>(`/api/v1/knowledge/${datasetId}/hit_test`, req);
   return data;
 }
-
