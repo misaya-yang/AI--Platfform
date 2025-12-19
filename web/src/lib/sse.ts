@@ -1,10 +1,17 @@
 export type SSEMessage<T = unknown> = { data: T };
 
+export interface SSEFetchOptions extends RequestInit {
+  signal?: AbortSignal;
+}
+
 export async function* sseFetch<T>(
   url: string,
-  init: RequestInit
+  init: SSEFetchOptions
 ): AsyncGenerator<T, void, void> {
-  const resp = await fetch(url, init);
+  const resp = await fetch(url, {
+    ...init,
+    signal: init.signal,
+  });
   if (!resp.ok || !resp.body) {
     throw new Error(`SSE request failed: ${resp.status}`);
   }

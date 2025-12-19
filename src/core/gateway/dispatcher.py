@@ -165,17 +165,26 @@ class GatewayDispatcher:
         session_id: Optional[str] = None
         acc_text: str = ""
         if service.session_enabled:
-            session = await self.session_manager.get_or_create(
-                request.session_id,
-                user_id=request.user_id or "local",
-                tenant_id=request.tenant_id or "local",
-                service_id=service.service_id,
-            )
-            session_id = session.session_id
-            request.session_id = session_id
+            # 如果 session_id 已由上层（stream.py）设置，直接使用，避免重复的会话操作
+            if request.session_id:
+                session_id = request.session_id
+            else:
+                session = await self.session_manager.get_or_create(
+                    request.session_id,
+                    user_id=request.user_id or "local",
+                    tenant_id=request.tenant_id or "local",
+                    service_id=service.service_id,
+                )
+                session_id = session.session_id
+                request.session_id = session_id
+            # 添加用户消息到历史（异步不阻塞）
             user_text = self._inputs_to_text(request)
-            if user_text:
-                await self.session_manager.add_message(session_id, "user", user_text)
+            if user_text and session_id:
+                # 使用 asyncio.create_task 避免阻塞流式响应
+                import asyncio
+                asyncio.create_task(
+                    self.session_manager.add_message(session_id, "user", user_text)
+                )
 
         adapter = self.registry.get_adapter(service)
         try:

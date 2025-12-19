@@ -14,6 +14,7 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   toolCalls?: ToolCallWithResult[];
+  isThinking?: boolean; // 显示"AI思考中"状态
 };
 
 export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
@@ -61,12 +62,25 @@ export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
                   </div>
                 ) : null}
 
-                {/* Loading Indicator for empty AI messages */}
+                {/* AI Thinking / Loading Indicator */}
                 {!m.content && (!m.toolCalls || m.toolCalls.length === 0) && !isUser && (
-                  <div className="flex items-center gap-1.5 h-6">
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500" />
+                  <div className="flex items-center gap-2 h-6">
+                    {m.isThinking ? (
+                      <>
+                        <span className="text-sm text-muted-foreground">AI 思考中</span>
+                        <div className="flex items-center gap-1">
+                          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
+                          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
+                          <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500" />
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
+                        <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
+                        <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500" />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

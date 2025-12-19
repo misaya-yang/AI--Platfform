@@ -58,7 +58,7 @@ async def stream(
                 payload = StreamChunkSchema.from_domain(chunk).model_dump_json()
                 yield f"data: {payload}\n\n"
                 chunk_count += 1
-            
+
             logger.debug(f"Stream completed, sent {chunk_count} chunks")
         except GatewayError as exc:
             logger.error(f"Stream gateway error: {exc}")

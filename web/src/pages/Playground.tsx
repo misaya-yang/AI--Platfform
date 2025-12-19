@@ -29,9 +29,9 @@ import { useAppStore } from "@/store/useAppStore";
 export function PlaygroundPage() {
   const servicesQuery = useServices();
   const services = servicesQuery.data || [];
-  
-  const { 
-    selectedServiceId: serviceId, 
+
+  const {
+    selectedServiceId: serviceId,
     setSelectedServiceId: setServiceId,
     activeSessionId,
     setActiveSessionId,
@@ -50,6 +50,13 @@ export function PlaygroundPage() {
   const [sessionEnabled, setSessionEnabled] = useState(true);
 
   const isInitialMount = useRef(true);
+
+  // 用于取消正在进行的请求，解决竞态条件
+  const abortControllerRef = useRef<AbortController | null>(null);
+  // 用于追踪当前请求的会话ID，防止串台
+  const currentRequestSessionRef = useRef<string | null>(null);
+  // 用于追踪当前正在加载的历史会话ID
+  const loadingHistorySessionRef = useRef<string | null>(null);
 
   const refreshSessions = useCallback(async () => {
     if (!serviceId) {
@@ -77,24 +84,57 @@ export function PlaygroundPage() {
   }, [serviceId]);
 
   const handleSelectSession = useCallback(async (id: string) => {
+    // 取消正在进行的流式请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    // 记录当前正在加载的会话ID，用于防止竞态条件
+    loadingHistorySessionRef.current = id;
     setActiveSessionId(id);
     setHistoryLoading(true);
+
     try {
       const history = await getSessionHistory(id, { limit: 200 });
+
+      // 检查是否仍然是当前选中的会话（防止竞态条件）
+      if (loadingHistorySessionRef.current !== id) {
+        console.log("Session changed during history load, discarding result for:", id);
+        return;
+      }
+
       const nextMessages: ChatMessage[] = history.map((m) => ({
         role: m.role === "user" ? "user" : "assistant",
         content:
           typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
       }));
       setMessages(nextMessages);
+    } catch (err) {
+      // 只有当仍是当前会话时才显示错误
+      if (loadingHistorySessionRef.current === id) {
+        console.error("Failed to load session history:", err);
+      }
     } finally {
-      setHistoryLoading(false);
+      // 只有当仍是当前会话时才清除加载状态
+      if (loadingHistorySessionRef.current === id) {
+        setHistoryLoading(false);
+      }
     }
   }, [setActiveSessionId]);
 
   const handleNewSession = useCallback(async () => {
     if (!serviceId) return;
+
+    // 取消正在进行的流式请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
     const created = await createSession({ service_id: serviceId });
+    loadingHistorySessionRef.current = created.session_id;
+    currentRequestSessionRef.current = created.session_id;
     setActiveSessionId(created.session_id);
     setMessages([]);
     await refreshSessions();
@@ -106,6 +146,16 @@ export function PlaygroundPage() {
       behavior: "smooth",
     });
   }, [messages, loading]);
+
+  // 组件卸载时取消正在进行的请求
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
@@ -140,12 +190,21 @@ export function PlaygroundPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. 切换服务时：清空当前会话
+  // 2. 切换服务时：清空当前会话并取消进行中的请求
   const prevServiceId = useRef(serviceId);
   useEffect(() => {
     if (isInitialMount.current) return;
-    
+
     if (serviceId !== prevServiceId.current) {
+      // 取消正在进行的流式请求
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      // 清除会话追踪
+      currentRequestSessionRef.current = null;
+      loadingHistorySessionRef.current = null;
+
       setMessages([]);
       setActiveSessionId(undefined);
       void refreshSessions();
@@ -158,25 +217,53 @@ export function PlaygroundPage() {
     const text = inputs.find((i) => i.type === "text")?.data || "";
     if (!text) return;
 
+    // 取消之前进行中的流式请求
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // 创建新的 AbortController
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     setLoading(true);
+
+    // **立即显示用户消息和"AI思考中"状态，不等待任何网络请求**
+    let assistantIndex = 0;
+    setMessages((prev) => {
+      const next = [
+        ...prev,
+        { role: "user" as const, content: String(text) },
+        { role: "assistant" as const, content: "", toolCalls: [], isThinking: true },
+      ];
+      assistantIndex = next.length - 1;
+      return next;
+    });
 
     try {
       let effectiveSessionId: string | undefined = undefined;
-      let isNewSession = false;
+
+      // 并行处理：会话创建与准备请求同时进行
       if (sessionEnabled) {
         if (!activeSessionId) {
+          // 会话创建不阻塞UI更新，但需要等待完成才能发送请求
           const created = await createSession({ service_id: serviceId });
+
+          // 检查是否已被取消
+          if (abortController.signal.aborted) return;
+
           effectiveSessionId = created.session_id;
+          currentRequestSessionRef.current = created.session_id;
           setActiveSessionId(created.session_id);
-          isNewSession = true;
-          await refreshSessions();
+          // 后台刷新会话列表，不阻塞
+          refreshSessions().catch(console.error);
         } else {
           effectiveSessionId = activeSessionId;
+          currentRequestSessionRef.current = activeSessionId;
         }
       }
 
       // 为会话设置标题：使用第一条消息的前40个字符
-      // 只在本地没有标题时设置（localTitles 是 source of truth）
       if (effectiveSessionId && !localTitles[effectiveSessionId]) {
         const titleText = String(text).trim().split('\n')[0].slice(0, 40);
         if (titleText) {
@@ -190,34 +277,38 @@ export function PlaygroundPage() {
       const req = {
         service_id: serviceId,
         inputs: [{ type: "text" as const, data: String(text) }],
-        // 传递会话 ID 以保持上下文
         session_id: effectiveSessionId,
       };
 
-      // 添加用户消息 + 占位助手消息，后续按索引逐步更新
-      let assistantIndex = 0;
-      setMessages((prev) => {
-        const next = [
-          ...prev,
-          { role: "user" as const, content: String(text) },
-          { role: "assistant" as const, content: "", toolCalls: [] },
-        ];
-        assistantIndex = next.length - 1;
-        return next;
-      });
-
       let acc = "";
       let streamed = false;
-      // 工具调用追踪
       const toolCallsMap = new Map<string, ToolCallWithResult>();
+
+      // 用于检查当前请求是否仍有效
+      const isRequestValid = () => {
+        return !abortController.signal.aborted &&
+          currentRequestSessionRef.current === effectiveSessionId;
+      };
 
       try {
         for await (const chunk of sseFetch<StreamChunk>("/api/v1/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(req),
+          signal: abortController.signal,
         })) {
+          // 检查请求是否仍有效（防止会话切换后仍更新旧会话的数据）
+          if (!isRequestValid()) {
+            console.log("Request cancelled or session changed, stopping stream processing");
+            break;
+          }
+
           const eventType = chunk?.event_type || "text_delta";
+
+          // thinking 事件：保持思考状态，不做其他处理
+          if (eventType === "thinking") {
+            continue;
+          }
 
           // 处理文本增量
           if (eventType === "text_delta") {
@@ -231,6 +322,7 @@ export function PlaygroundPage() {
                   next[assistantIndex] = {
                     ...next[assistantIndex],
                     content: acc,
+                    isThinking: false,
                   };
                 }
                 return next;
@@ -243,24 +335,23 @@ export function PlaygroundPage() {
             streamed = true;
             const tc = chunk?.tool_call;
             if (tc) {
-              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              const tcId = tc.tool_call_id || "unknown";
+              const existingTc = toolCallsMap.get(tcId);
               if (existingTc) {
-                // 增量更新参数
                 const updatedTc: ToolCall = {
                   ...existingTc.toolCall,
                   name: tc.name || existingTc.toolCall.name,
                   arguments: existingTc.toolCall.arguments + (tc.arguments || ""),
                   status: tc.status || existingTc.toolCall.status,
                 };
-                toolCallsMap.set(tc.tool_call_id, {
+                toolCallsMap.set(tcId, {
                   toolCall: updatedTc,
                   result: existingTc.result,
                 });
               } else {
-                // 新的工具调用
-                toolCallsMap.set(tc.tool_call_id, {
+                toolCallsMap.set(tcId, {
                   toolCall: {
-                    tool_call_id: tc.tool_call_id,
+                    tool_call_id: tcId,
                     name: tc.name || "",
                     arguments: tc.arguments || "",
                     status: tc.status || "running",
@@ -268,13 +359,14 @@ export function PlaygroundPage() {
                 });
               }
 
-              // 更新消息
               setMessages((m) => {
                 const next = [...m];
                 if (next[assistantIndex]) {
                   next[assistantIndex] = {
                     ...next[assistantIndex],
+                    content: acc,
                     toolCalls: Array.from(toolCallsMap.values()),
+                    isThinking: false,
                   };
                 }
                 return next;
@@ -287,9 +379,10 @@ export function PlaygroundPage() {
             streamed = true;
             const tc = chunk?.tool_call;
             if (tc) {
-              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              const tcId = tc.tool_call_id || "unknown";
+              const existingTc = toolCallsMap.get(tcId);
               if (existingTc) {
-                toolCallsMap.set(tc.tool_call_id, {
+                toolCallsMap.set(tcId, {
                   toolCall: {
                     ...existingTc.toolCall,
                     status: "completed",
@@ -303,7 +396,9 @@ export function PlaygroundPage() {
                 if (next[assistantIndex]) {
                   next[assistantIndex] = {
                     ...next[assistantIndex],
+                    content: acc,
                     toolCalls: Array.from(toolCallsMap.values()),
+                    isThinking: false,
                   };
                 }
                 return next;
@@ -318,9 +413,10 @@ export function PlaygroundPage() {
             const resultText = chunk?.content?.data;
 
             if (tc) {
-              const existingTc = toolCallsMap.get(tc.tool_call_id);
+              const tcId = tc.tool_call_id || "unknown";
+              const existingTc = toolCallsMap.get(tcId);
               if (existingTc) {
-                toolCallsMap.set(tc.tool_call_id, {
+                toolCallsMap.set(tcId, {
                   toolCall: {
                     ...existingTc.toolCall,
                     status: "completed",
@@ -328,10 +424,9 @@ export function PlaygroundPage() {
                   result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
                 });
               } else {
-                // 可能是先收到结果
-                toolCallsMap.set(tc.tool_call_id, {
+                toolCallsMap.set(tcId, {
                   toolCall: {
-                    tool_call_id: tc.tool_call_id,
+                    tool_call_id: tcId,
                     name: tc.name || "",
                     arguments: tc.arguments || "",
                     status: "completed",
@@ -345,7 +440,9 @@ export function PlaygroundPage() {
                 if (next[assistantIndex]) {
                   next[assistantIndex] = {
                     ...next[assistantIndex],
+                    content: acc,
                     toolCalls: Array.from(toolCallsMap.values()),
+                    isThinking: false,
                   };
                 }
                 return next;
@@ -356,41 +453,71 @@ export function PlaygroundPage() {
           if (chunk?.is_final) break;
         }
       } catch (streamErr) {
+        // 忽略取消导致的错误
+        if (streamErr instanceof Error && streamErr.name === 'AbortError') {
+          console.log("Stream aborted");
+          return;
+        }
         console.error("Stream error:", streamErr);
-        // 如果已经有部分内容，不算失败
         if (!acc && !toolCallsMap.size) {
           streamed = false;
         }
       }
 
+      // 检查请求是否仍有效
+      if (!isRequestValid()) return;
+
       if (!streamed) {
         // 流式失败，尝试同步调用
         console.log("Falling back to sync invoke");
-        const resp = await invokeService(req);
-        const out = resp.outputs?.[0]?.data ?? "";
-        acc = String(out);
-        setMessages((m) => {
-          const next = [...m];
-          if (next[assistantIndex]) {
-            next[assistantIndex] = {
-              ...next[assistantIndex],
-              content: acc,
-            };
-          }
-          return next;
-        });
+        try {
+          const resp = await invokeService(req);
+          if (!isRequestValid()) return;
+
+          const out = resp.outputs?.[0]?.data ?? "";
+          acc = String(out);
+          setMessages((m) => {
+            const next = [...m];
+            if (next[assistantIndex]) {
+              next[assistantIndex] = {
+                ...next[assistantIndex],
+                content: acc,
+                isThinking: false,
+              };
+            }
+            return next;
+          });
+        } catch (syncErr) {
+          if (!isRequestValid()) return;
+          throw syncErr;
+        }
       }
     } catch (err) {
+      // 忽略取消导致的错误
+      if (err instanceof Error && err.name === 'AbortError') return;
+
       const message = err instanceof Error ? err.message : "发生错误";
       setMessages((m) => {
         const next = [...m];
-        next.push({ role: "assistant", content: message });
+        if (next[assistantIndex]) {
+          next[assistantIndex] = {
+            ...next[assistantIndex],
+            content: message,
+            isThinking: false,
+          };
+        } else {
+          next.push({ role: "assistant", content: message });
+        }
         return next;
       });
     } finally {
-      setLoading(false);
+      // 只有当前请求完成时才清除 loading 状态
+      if (abortControllerRef.current === abortController) {
+        setLoading(false);
+        abortControllerRef.current = null;
+      }
       if (sessionEnabled && serviceId) {
-        void refreshSessions();
+        refreshSessions().catch(console.error);
       }
     }
   }
