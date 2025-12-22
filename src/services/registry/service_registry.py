@@ -171,7 +171,7 @@ class ServiceRegistry:
 
         # 解析服务级别配置
         service_config = None
-        if "service_config" in data:
+        if data.get("service_config"):
             sc = data["service_config"]
             service_config = ServiceConfig(
                 rate_limit=ServiceRateLimitConfig(

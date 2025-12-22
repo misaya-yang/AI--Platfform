@@ -177,6 +177,7 @@ export function ServiceConfigDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["service-config", serviceId] });
       queryClient.invalidateQueries({ queryKey: ["services"] });
+      onOpenChange(false);
     },
   });
 
@@ -194,6 +195,7 @@ export function ServiceConfigDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["service-detail", serviceId] });
       queryClient.invalidateQueries({ queryKey: ["services"] });
+      onOpenChange(false);
     },
     onError: (err) => {
       const msg = err instanceof Error ? err.message : "更新失败";

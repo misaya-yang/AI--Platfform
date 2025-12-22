@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from dataclasses import asdict
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ..deps import AuthContext, get_auth_context, get_registry
@@ -83,7 +84,7 @@ def _service_to_dict(service) -> dict:
         "async_config": service.async_config,
     }
     if getattr(service, "service_config", None):
-        data["service_config"] = service.service_config.__dict__
+        data["service_config"] = asdict(service.service_config)
     return data
 
 
@@ -140,29 +141,8 @@ async def get_service(
     service = await registry.get(service_id)
     if not service:
         raise HTTPException(status_code=404, detail="service not found")
-    return {
-        "service_id": service.service_id,
-        "name": service.name,
-        "description": service.description,
-        "version": service.version,
-        "service_type": service.service_type,
-        "supported_modes": service.supported_modes,
-        "connector_type": service.connector_type,
-        "connector_config": service.connector_config,
-        "input_schema": service.input_schema,
-        "output_schema": service.output_schema,
-        "accepted_content_types": service.accepted_content_types,
-        "output_content_types": service.output_content_types,
-        "session_enabled": service.session_enabled,
-        "session_adapter": service.session_adapter,
-        "timeout": service.timeout,
-        "max_retries": service.max_retries,
-        "retry_delay": service.retry_delay,
-        "rate_limit": service.rate_limit,
-        "status": service.status,
-        "tags": service.tags,
-        "metadata": service.metadata,
-    }
+    
+    return _service_to_dict(service)
 
 @router.put("/services/{service_id}")
 async def update_service(
