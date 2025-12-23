@@ -18,13 +18,21 @@ from .core.errors import (
     setup_exception_handlers,
 )
 from .core.observability.logging import configure_structured_logging, get_logger
-from .core.observability.tracing import TracingMiddleware
 from .core.observability.metrics import get_metrics
 from .adapters.registry import auto_register_builtin_adapters
-from .core.auth.anonymous_middleware import AnonymousIdentityMiddleware
-from .core.middleware.auth import AuthMiddleware, AuthConfig
-from .core.middleware.rate_limit_http import RateLimitMiddleware, RateLimitConfig
-from .core.middleware.request_logging import RequestLoggingMiddleware, RequestLogConfig
+# 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
+from .core.middleware.streaming import (
+    StreamingAnonymousMiddleware,
+    StreamingAnonymousConfig,
+    StreamingAuthMiddleware,
+    StreamingAuthConfig,
+    StreamingRateLimitMiddleware,
+    StreamingRateLimitConfig,
+    StreamingLoggingMiddleware,
+    StreamingLogConfig,
+    StreamingTracingMiddleware,
+    StreamingTracingConfig,
+)
 
 # 兼容旧的异常导入（向后兼容）
 from .core.exceptions import (
@@ -70,12 +78,22 @@ def create_app() -> FastAPI:
     # ========== 中间件配置 ==========
     # 注意：中间件执行顺序与添加顺序相反（后添加的先执行）
     # 执行顺序：Tracing -> CORS -> RequestLogging -> RateLimit -> Auth -> AnonymousIdentity
+    #
+    # 重要：使用纯 ASGI 中间件替换 BaseHTTPMiddleware，避免缓冲 StreamingResponse
+    # 这是解决首 token 延迟问题的关键
 
-    # Stable anonymous identity for guest users (cookie/header)
-    app.add_middleware(AnonymousIdentityMiddleware, settings=settings)
+    # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
+    anon_config = StreamingAnonymousConfig(
+        enabled=getattr(settings.anonymous, 'enabled', True),
+        header_name=getattr(settings.anonymous, 'header_name', 'X-AG-Anonymous-Id'),
+        cookie_name=getattr(settings.anonymous, 'cookie_name', 'ag_anon_id'),
+        ttl_days=getattr(settings.anonymous, 'ttl_days', 365),
+        same_site=getattr(settings.anonymous, 'same_site', 'lax'),
+    )
+    app.add_middleware(StreamingAnonymousMiddleware, config=anon_config)
 
-    # 统一鉴权中间件（支持 JWT、API Key、游客会话）
-    auth_config = AuthConfig(
+    # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI
+    auth_config = StreamingAuthConfig(
         jwt_enabled=settings.authentication.jwt.enabled if hasattr(settings, 'authentication') else False,
         jwt_secret=settings.authentication.jwt.secret if hasattr(settings, 'authentication') else "",
         jwt_algorithms=settings.authentication.jwt.algorithms if hasattr(settings, 'authentication') else ["HS256"],
@@ -84,10 +102,10 @@ def create_app() -> FastAPI:
         anonymous_enabled=True,
         whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"],
     )
-    app.add_middleware(AuthMiddleware, config=auth_config)
+    app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
-    # HTTP 级别限流中间件
-    rate_limit_config = RateLimitConfig(
+    # HTTP 级别限流中间件 - 纯 ASGI
+    rate_limit_config = StreamingRateLimitConfig(
         enabled=True,
         global_limit=1000,
         global_window=60,
@@ -99,18 +117,18 @@ def create_app() -> FastAPI:
         ip_window=60,
         whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics"],
     )
-    app.add_middleware(RateLimitMiddleware, config=rate_limit_config, redis_client=None)
+    app.add_middleware(StreamingRateLimitMiddleware, config=rate_limit_config)
 
-    # 请求日志中间件
-    request_log_config = RequestLogConfig(
+    # 请求日志中间件 - 纯 ASGI
+    request_log_config = StreamingLogConfig(
         enabled=True,
         log_request_body=False,
         log_response_body=False,
         exclude_paths=["/health", "/health/live", "/health/ready", "/metrics"],
     )
-    app.add_middleware(RequestLoggingMiddleware, config=request_log_config)
+    app.add_middleware(StreamingLoggingMiddleware, config=request_log_config)
 
-    # CORS 中间件
+    # CORS 中间件（Starlette 内置，已经是纯 ASGI）
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -119,14 +137,14 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 追踪中间件
-    app.add_middleware(
-        TracingMiddleware,
+    # 追踪中间件 - 纯 ASGI
+    tracing_config = StreamingTracingConfig(
         service_name="gateway",
         log_requests=True,
         log_responses=True,
-        exclude_paths=["/health", "/health/live", "/health/ready", "/metrics"],
+        exclude_paths={"/health", "/health/live", "/health/ready", "/metrics"},
     )
+    app.add_middleware(StreamingTracingMiddleware, config=tracing_config)
     
     # ========== 存储组件引用到 app.state（向后兼容）==========
     

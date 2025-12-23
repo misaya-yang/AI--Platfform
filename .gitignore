@@ -11,3 +11,6 @@ build/
 .env
 config/.env
 *.log
+.err
+.out
+logs/

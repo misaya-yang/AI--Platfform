@@ -94,18 +94,23 @@ class LangGraphInstanceSettings(BaseModel):
 class LangGraphSettings(BaseModel):
     """LangGraph 配置"""
     enabled: bool = False
-    
+
     # 负载均衡配置
     load_balancer_strategy: str = "least_connections"  # round_robin | least_connections | weighted | latency_based
     health_check_interval: int = 10
-    
+
     # LangGraph Server 实例列表
     instances: List[LangGraphInstanceSettings] = Field(default_factory=list)
-    
+
     # 也可以通过环境变量配置（逗号分隔的 URL 列表）
     # GATEWAY_LANGGRAPH__INSTANCE_URLS=http://langgraph-1:8000,http://langgraph-2:8000
     instance_urls: str = ""  # 逗号分隔的实例 URL 列表
-    
+
+    # 内部认证配置（用于网关与 LangGraph 服务通信）
+    # 如果 LangGraph 服务配置了自定义认证，需要设置此 token
+    # GATEWAY_LANGGRAPH__AUTH_TOKEN=your-internal-api-token
+    auth_token: str = ""
+
     # 用户层级限流配置
     tier_limits: Dict[str, Dict[str, int]] = Field(default_factory=lambda: {
         "anonymous": {"requests": 10, "window": 60},

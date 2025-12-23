@@ -387,6 +387,7 @@ async def stream_message(
                 assistant_id=assistant_id,
                 input_data=input_data,
                 stream_mode=data.stream_mode,
+                skip_thread_validation=True,  # 已在上面验证过
             ):
                 event_type = chunk.get("event", "message")
                 event_data = chunk.get("data", {})

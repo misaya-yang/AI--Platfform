@@ -92,6 +92,18 @@ class RedisStorage:
             return False
         return await self._client.exists(key) > 0
 
+    async def incr(self, key: str) -> int:
+        """增加计数器"""
+        if not self._client:
+            return 0
+        return await self._client.incr(key)
+
+    async def decr(self, key: str) -> int:
+        """减少计数器"""
+        if not self._client:
+            return 0
+        return await self._client.decr(key)
+
     # ===== 限流相关 =====
 
     async def incr_rate_limit(self, key: str, window: int) -> int:

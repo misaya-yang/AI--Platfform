@@ -422,11 +422,13 @@ class Container:
         
         # 创建代理
         redis = self._providers["redis"].get_sync()
+        auth_token = self.settings.langgraph.auth_token or None
         proxy = LangGraphProxy(
             load_balancer=load_balancer,
             redis_client=redis if redis.enabled else None,
+            auth_token=auth_token,
         )
-        
+
         logger.info(f"LangGraph 代理已初始化，{len(instances)} 个实例")
         return proxy
     
@@ -450,9 +452,11 @@ class Container:
             )
         
         redis = self._providers["redis"].get_sync()
+        # 注意：MultiDimensionRateLimiter 需要的是原生 redis 客户端，不是 RedisStorage 包装器
+        redis_client = redis._client if (redis and redis.enabled) else None
         return MultiDimensionRateLimiter(
             config=MultiDimensionRateLimitConfig(user_tier_limits=tier_limits),
-            redis_client=redis if redis.enabled else None,
+            redis_client=redis_client,
         )
     
     def _create_user_resolver(self):

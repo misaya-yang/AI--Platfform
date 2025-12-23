@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -179,16 +180,23 @@ class LangGraphProxy:
         "admin": float('inf'),
     }
     
+    # Thread 缓存 TTL（秒）
+    THREAD_CACHE_TTL = 60
+
     def __init__(
         self,
         load_balancer: LangGraphLoadBalancer,
         rate_limiter: Optional[Any] = None,
         redis_client: Optional[Any] = None,
+        auth_token: Optional[str] = None,
     ):
         self.lb = load_balancer
         self.rate_limiter = rate_limiter
         self.redis = redis_client
+        self.auth_token = auth_token
         self._clients: Dict[str, httpx.AsyncClient] = {}
+        # Thread 元数据缓存: {thread_id: (thread_data, timestamp)}
+        self._thread_cache: Dict[str, tuple] = {}
     
     async def _get_client(self, instance: LangGraphInstance) -> httpx.AsyncClient:
         """获取或创建实例的 HTTP 客户端"""
@@ -214,6 +222,7 @@ class LangGraphProxy:
         构建发送给 LangGraph 的 headers
 
         注入用户信息，供 LangGraph Server 的 Auth 系统使用：
+        - Authorization: Bearer token（用于 LangGraph 认证）
         - X-User-Id: 用户标识
         - X-User-Type: 用户类型 (user/guest/anonymous)
         - X-Tenant-Id: 租户标识
@@ -228,7 +237,11 @@ class LangGraphProxy:
             "X-User-Tier": user.tier,
         }
 
-        # 如果有原始 Authorization header，透传给 LangGraph
+        # 如果配置了内部认证 token，添加到 Authorization header
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
+        # 如果有原始 Authorization header，优先使用（透传给 LangGraph）
         if original_headers:
             if auth := original_headers.get("Authorization"):
                 headers["Authorization"] = auth
@@ -369,13 +382,34 @@ class LangGraphProxy:
         response.raise_for_status()
         thread = response.json()
 
+        # 预填充缓存
+        thread_id = thread.get("thread_id")
+        if thread_id:
+            cache_key = f"{thread_id}:{user.user_id}"
+            self._thread_cache[cache_key] = (thread, time.time())
+
         # 记录用户的 Thread 计数
         await self._increment_thread_count(user)
 
         return thread
 
-    async def get_thread(self, user: UserContext, thread_id: str) -> Dict[str, Any]:
-        """获取 Thread，验证所有权"""
+    async def get_thread(
+        self, user: UserContext, thread_id: str, use_cache: bool = True
+    ) -> Dict[str, Any]:
+        """获取 Thread，验证所有权
+
+        Args:
+            use_cache: 是否使用缓存（默认 True，可显著减少延迟）
+        """
+        # 检查缓存
+        if use_cache:
+            cache_key = f"{thread_id}:{user.user_id}"
+            cached = self._thread_cache.get(cache_key)
+            if cached:
+                thread_data, cached_at = cached
+                if time.time() - cached_at < self.THREAD_CACHE_TTL:
+                    return thread_data
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
@@ -389,6 +423,11 @@ class LangGraphProxy:
 
         # 验证所有权
         self._verify_ownership(thread, user)
+
+        # 更新缓存
+        if use_cache:
+            cache_key = f"{thread_id}:{user.user_id}"
+            self._thread_cache[cache_key] = (thread, time.time())
 
         return thread
 
@@ -412,6 +451,11 @@ class LangGraphProxy:
 
         response = await client.patch(f"/threads/{thread_id}", json=payload, headers=headers)
         response.raise_for_status()
+
+        # 失效缓存
+        cache_key = f"{thread_id}:{user.user_id}"
+        self._thread_cache.pop(cache_key, None)
+
         return response.json()
 
     async def delete_thread(self, user: UserContext, thread_id: str) -> None:
@@ -425,6 +469,10 @@ class LangGraphProxy:
 
         response = await client.delete(f"/threads/{thread_id}", headers=headers)
         response.raise_for_status()
+
+        # 失效缓存
+        cache_key = f"{thread_id}:{user.user_id}"
+        self._thread_cache.pop(cache_key, None)
 
         # 减少 Thread 计数
         await self._decrement_thread_count(user)
@@ -609,12 +657,18 @@ class LangGraphProxy:
         input_data: Dict[str, Any],
         config: Optional[Dict[str, Any]] = None,
         stream_mode: Optional[List[str]] = None,
+        skip_thread_validation: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """流式执行 Run"""
+        """流式执行 Run
 
-        # 如果有 thread_id，验证所有权
+        Args:
+            skip_thread_validation: 跳过 thread 所有权验证（当调用方已验证时使用）
+        """
+
+        # 如果有 thread_id 且需要验证所有权
         if thread_id:
-            await self.get_thread(user, thread_id)
+            if not skip_thread_validation:
+                await self.get_thread(user, thread_id)
             endpoint = f"/threads/{thread_id}/runs/stream"
         else:
             endpoint = "/runs/stream"
