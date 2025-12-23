@@ -464,40 +464,46 @@ class LangGraphAdapter(ProtocolAdapter):
         if client is None:
             raise ValidationFailedError("remote streaming requires HTTPConnector")
 
-        # 使用更长的超时配置用于流式响应
         import httpx
-        stream_timeout = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=60.0)
-        
+        import time
         import logging
         logger = logging.getLogger(__name__)
         
-        # 构建认证头部
+        # Use shorter connect timeout, longer read timeout for streaming
+        stream_timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)
         auth_headers = self._build_auth_headers(request)
-        logger.info(f"LangGraph stream auth headers: {auth_headers}")
+        
+        t_start = time.perf_counter()
+        first_data_time = None
+        first_yield_time = None
         
         try:
             async with client.stream(
                 "POST", endpoint, json=payload, timeout=stream_timeout, headers=auth_headers
             ) as resp:
-                # 检查响应状态
+                t_response = time.perf_counter()
+                logger.info(f"[TIMING] LangGraph HTTP response: {(t_response - t_start)*1000:.2f}ms, status={resp.status_code}")
+                
                 if resp.status_code != 200:
                     error_text = await resp.aread()
-                    logger.error(
-                        f"LangGraph stream error: {resp.status_code} - {error_text}"
-                    )
+                    logger.error(f"LangGraph stream error: {resp.status_code} - {error_text}")
                     raise ValidationFailedError(
                         f"LangGraph stream failed ({resp.status_code}) at {endpoint}: {error_text!r}"
                     )
 
                 current_event_type = ""
-                # 追踪累积内容长度，用于计算增量
                 last_content_length = 0
                 last_tool_args_length: Dict[str, int] = {}
-                # 追踪当前活动的工具调用（因为后续 chunk 可能没有 id）
                 current_tool_call_id = ""
                 current_tool_name = ""
-
+                
+                # Use aiter_lines for SSE parsing
+                line_count = 0
                 async for line in resp.aiter_lines():
+                    line_count += 1
+                    if first_data_time is None and line:
+                        first_data_time = time.perf_counter()
+                        logger.info(f"[TIMING] LangGraph first line: {(first_data_time - t_start)*1000:.2f}ms")
                     if not line:
                         current_event_type = ""
                         continue
@@ -517,6 +523,15 @@ class LangGraphAdapter(ProtocolAdapter):
                     except Exception as e:
                         logger.warning(f"Failed to parse SSE data: {e}")
                         continue
+                    
+                    # Debug: log received event type and content preview
+                    if current_event_type:
+                        content_preview = ""
+                        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                            c = data[0].get("content", "")
+                            if isinstance(c, str):
+                                content_preview = f", content_len={len(c)}"
+                        logger.debug(f"[SSE] event={current_event_type}{content_preview}")
                     # 构建完整事件对象以便统一处理
                     event = (
                         {"event": current_event_type, "data": data}
@@ -538,6 +553,9 @@ class LangGraphAdapter(ProtocolAdapter):
                         current_tool_name,
                     ) = result
                     if stream_event:
+                        if first_yield_time is None:
+                            first_yield_time = time.perf_counter()
+                            logger.info(f"[TIMING] LangGraph first yield: {(first_yield_time - t_start)*1000:.2f}ms, event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}")
                         yield stream_event
         except httpx.RequestError as exc:
             raise ValidationFailedError(
@@ -731,10 +749,19 @@ class LangGraphAdapter(ProtocolAdapter):
         确保 Thread 存在。如果 session_id 不是有效的 UUID，会生成一个新的 UUID。
         使用缓存确保同一 session_id 始终映射到同一个 thread_id。
         返回实际使用的 thread_id（UUID 格式）。
+        
+        注意：此方法会在流式响应前执行 HTTP 调用，可能影响首 token 延迟。
+        使用缓存来减少后续请求的开销。
         """
         import uuid
+        import time
+        import logging
+        import asyncio
+        logger = logging.getLogger(__name__)
         
-        # 检查缓存中是否已有映射
+        t_start = time.perf_counter()
+        
+        # 检查缓存中是否已有映射 - 快速路径
         if session_id in self._session_to_thread_map:
             return self._session_to_thread_map[session_id]
         
@@ -746,26 +773,34 @@ class LangGraphAdapter(ProtocolAdapter):
             # 不是有效 UUID，生成一个新的
             valid_thread_id = str(uuid.uuid4())
         
-        # 缓存映射关系
+        # 缓存映射关系（先缓存，后台创建 thread）
         self._session_to_thread_map[session_id] = valid_thread_id
         
-        try:
-            # 构建认证头部
-            auth_headers = self._build_auth_headers(request)
-            await self.connector.post(
-                "/threads",
-                json={
-                    "thread_id": valid_thread_id,
-                    "if_exists": "do_nothing",
-                    "metadata": {
-                        "user_id": request.user_id,
-                        "tenant_id": request.tenant_id,
-                        "original_session_id": session_id,  # 保留原始 session_id
+        # 异步创建 thread，不阻塞主流程
+        # LangGraph 的 /runs/stream 会自动创建 thread 如果不存在
+        async def create_thread_background():
+            try:
+                auth_headers = self._build_auth_headers(request)
+                await self.connector.post(
+                    "/threads",
+                    json={
+                        "thread_id": valid_thread_id,
+                        "if_exists": "do_nothing",
+                        "metadata": {
+                            "user_id": request.user_id,
+                            "tenant_id": request.tenant_id,
+                            "original_session_id": session_id,
+                        },
                     },
-                },
-                headers=auth_headers,
-            )
-        except Exception:
-            pass
+                    headers=auth_headers,
+                )
+            except Exception:
+                pass  # Thread creation is best-effort
+        
+        # Fire and forget - don't wait for thread creation
+        asyncio.create_task(create_thread_background())
+        
+        t_end = time.perf_counter()
+        logger.debug(f"[TIMING] _ensure_thread: {(t_end - t_start)*1000:.2f}ms (cached: False)")
         
         return valid_thread_id

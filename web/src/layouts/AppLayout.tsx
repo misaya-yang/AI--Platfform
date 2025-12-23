@@ -33,8 +33,8 @@ export function AppLayout() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground aurora-bg font-sans selection:bg-primary/20">
-      {/* Floating Sidebar */}
-      <aside className="hidden md:flex w-[260px] flex-col gap-4 p-4 z-50">
+      {/* Floating Sidebar - uses z-sticky to stay above content but below overlays */}
+      <aside className="hidden md:flex w-[260px] flex-col gap-4 p-4" style={{ zIndex: "var(--z-sticky)" }}>
         <div className="flex h-full flex-col rounded-2xl glass border border-white/20 dark:border-white/10 shadow-xl p-4 transition-all duration-300">
           <div className="mb-8 px-2 mt-2 flex items-center gap-2">
             <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg flex items-center justify-center">
@@ -79,7 +79,7 @@ export function AppLayout() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden relative">
-        <header className="md:hidden flex items-center justify-between border-b bg-card/80 backdrop-blur-sm px-4 py-3 z-40">
+        <header className="md:hidden flex items-center justify-between border-b bg-card/80 backdrop-blur-sm px-4 py-3" style={{ zIndex: "var(--z-sticky)" }}>
            <div className="font-semibold">AI Gateway</div>
            <Switch checked={darkMode} onCheckedChange={toggleDarkMode} />
         </header>

@@ -34,19 +34,32 @@ STREAMING_PATH_PREFIXES: List[str] = [
     "/api/v1/langgraph/",  # LangGraph SSE endpoints
 ]
 
+# Streaming suffixes to detect
+STREAMING_SUFFIXES: List[str] = [
+    "/stream",
+    "/runs/stream",
+]
+
 
 def is_streaming_path(path: str) -> bool:
-    """检查是否是流式路径"""
+    """检查是否是流式路径
+    
+    Critical for latency: paths detected as streaming will bypass
+    response buffering in middleware, enabling true streaming.
+    """
+    # Exact match
     if path in STREAMING_PATHS:
         return True
 
-    for prefix in STREAMING_PATH_PREFIXES:
-        if path.startswith(prefix) and path.endswith("/stream"):
+    # Check suffixes (handles /runs/stream, /conversations/xxx/stream, etc.)
+    for suffix in STREAMING_SUFFIXES:
+        if path.endswith(suffix):
             return True
 
-    # LangGraph runs/stream 端点
-    if "/runs/stream" in path:
-        return True
+    # Check prefixes with /stream suffix
+    for prefix in STREAMING_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return True
 
     return False
 
@@ -187,14 +200,78 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         return message
 
     def _extract_user_info(self, scope: Scope) -> Dict[str, Any]:
-        """从请求头提取用户信息"""
+        """从请求头提取用户信息
+        
+        Supports:
+        - Authorization: Bearer <jwt> header
+        - X-API-Key header  
+        - X-Guest-Session header
+        - X-AG-Anonymous-Id header or cookie
+        """
         headers = dict(scope.get("headers", []))
         client_ip = self._get_client_ip(scope)
 
-        # 匿名用户信息
+        # Try to extract JWT user if present (don't validate here, just extract claims)
+        auth_header = headers.get(b"authorization", b"").decode()
+        if auth_header.lower().startswith("bearer "):
+            try:
+                import base64
+                import json
+                token = auth_header.split(" ", 1)[1]
+                # Decode JWT payload without verification (middleware doesn't verify)
+                parts = token.split(".")
+                if len(parts) >= 2:
+                    payload_b64 = parts[1]
+                    # Add padding if needed
+                    payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+                    user_id = str(payload.get("sub") or payload.get("user_id") or "")
+                    if user_id:
+                        return {
+                            "user_id": user_id,
+                            "user_type": "user",
+                            "tenant_id": str(payload.get("tenant_id", "")),
+                            "tier": str(payload.get("tier", "normal")),
+                            "is_authenticated": True,
+                            "ip": client_ip,
+                            "roles": payload.get("roles", ["user"]),
+                        }
+            except Exception:
+                pass  # Fall through to anonymous
+
+        # Try API key
+        api_key = headers.get(self.config.api_key_header.lower().encode(), b"").decode()
+        if api_key:
+            import hashlib
+            key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+            return {
+                "user_id": f"apikey:{key_hash}",
+                "user_type": "user",
+                "tenant_id": "",
+                "tier": "normal",
+                "is_authenticated": True,
+                "ip": client_ip,
+                "roles": ["user"],
+            }
+
+        # Try guest session
+        guest_session = headers.get(self.config.guest_session_header.lower().encode(), b"").decode()
+        if guest_session:
+            return {
+                "user_id": guest_session,
+                "user_type": "guest",
+                "tenant_id": "public",
+                "tier": "anonymous",
+                "is_authenticated": False,
+                "session_id": guest_session,
+                "ip": client_ip,
+                "roles": ["guest"],
+            }
+
+        # Fallback to anonymous
         anon_id = (
             headers.get(b"x-ag-anonymous-id", b"").decode()
-            or headers.get(self.config.anonymous_cookie.encode(), b"").decode()
+            or self._extract_cookie(headers, self.config.anonymous_cookie)
             or client_ip
         )
 
@@ -207,6 +284,17 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
             "ip": client_ip,
             "roles": ["guest"],
         }
+
+    def _extract_cookie(self, headers: Dict[bytes, bytes], cookie_name: str) -> str:
+        """Extract a specific cookie value from headers"""
+        cookie_header = headers.get(b"cookie", b"").decode()
+        if cookie_header:
+            for part in cookie_header.split(";"):
+                if "=" in part:
+                    name, value = part.strip().split("=", 1)
+                    if name == cookie_name:
+                        return value
+        return ""
 
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""

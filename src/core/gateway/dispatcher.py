@@ -154,9 +154,20 @@ class GatewayDispatcher:
         roles: List[str],
         client_ip: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
+        import time
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        t0 = time.perf_counter()
+        
         service = await self._get_service(request.service_id)
+        t_service = time.perf_counter()
+        
         await self.validator.validate(request, service, roles)
+        t_validate = time.perf_counter()
+        
         await self.rate_limiter.enforce(request, service, client_ip)
+        t_rate_limit = time.perf_counter()
 
         circuit = self._get_circuit_breaker(service)
         if service.circuit_breaker_enabled:
@@ -181,14 +192,27 @@ class GatewayDispatcher:
             user_text = self._inputs_to_text(request)
             if user_text and session_id:
                 # 使用 asyncio.create_task 避免阻塞流式响应
-                import asyncio
                 asyncio.create_task(
                     self.session_manager.add_message(session_id, "user", user_text)
                 )
+        
+        t_session = time.perf_counter()
+        logger.debug(
+            f"[TIMING] dispatcher.stream preflight: "
+            f"service={((t_service - t0)*1000):.1f}ms, "
+            f"validate={((t_validate - t_service)*1000):.1f}ms, "
+            f"rate_limit={((t_rate_limit - t_validate)*1000):.1f}ms, "
+            f"session={((t_session - t_rate_limit)*1000):.1f}ms"
+        )
 
         adapter = self.registry.get_adapter(service)
+        first_chunk = True
         try:
             async for chunk in adapter.stream(request):
+                if first_chunk:
+                    t_first_chunk = time.perf_counter()
+                    logger.info(f"[TIMING] dispatcher first chunk: {((t_first_chunk - t0)*1000):.1f}ms from stream start")
+                    first_chunk = False
                 try:
                     if getattr(chunk, "event_type", None) == StreamEventType.TEXT_DELTA:
                         delta = getattr(getattr(chunk, "content", None), "data", None)

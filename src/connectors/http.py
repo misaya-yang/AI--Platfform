@@ -9,29 +9,49 @@ from ..models.service import ServiceDefinition
 
 
 class HTTPConnector(BaseConnector):
+    """
+    HTTP Connector with optimized connection pooling.
+    
+    Key optimizations for latency:
+    - Connection pooling (reuse TCP connections)
+    - Keep-alive connections
+    - Optimized timeout settings
+    - Explicit pool limits for better resource management
+    """
+    
     def __init__(self, service: ServiceDefinition):
         super().__init__(service)
         config = service.connector_config or {}
         self.base_url = str(config.get("base_url", "")).rstrip("/")
         
-        # 超时配置
+        # Timeout configuration - optimized for streaming
+        connect_timeout = config.get("connect_timeout", 5.0)  # Reduced for faster failure detection
         default_timeout = config.get("timeout", service.timeout) or 60.0
-        stream_timeout = config.get("stream_timeout", 300.0)  # 流式响应默认 5 分钟
-        connect_timeout = config.get("connect_timeout", 10.0)
+        stream_timeout = config.get("stream_timeout", 300.0)
         
-        # 使用分开的超时配置，流式响应需要更长的读取超时
         timeout = httpx.Timeout(
             connect=connect_timeout,
             read=stream_timeout,
             write=default_timeout,
-            pool=default_timeout,
+            pool=10.0,  # Short pool timeout - fail fast if pool exhausted
+        )
+        
+        # Connection pool limits
+        limits = httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=20,
+            keepalive_expiry=30.0,  # Keep connections alive for 30s
         )
         
         headers = config.get("headers") or {}
+        
+        # HTTP/2 disabled by default - can cause negotiation delays in some environments
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
+            limits=limits,
             headers=headers,
+            http2=False,
         )
 
     async def request(self, method: str, url: str, **kwargs: Any) -> Any:

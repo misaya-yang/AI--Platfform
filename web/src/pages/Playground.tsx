@@ -605,7 +605,7 @@ export function PlaygroundPage() {
 
       <div className="flex-1 flex flex-col relative">
       {/* Header / Config Bar */}
-      <div className="w-full border-b bg-background/50 backdrop-blur-sm z-10">
+      <div className="w-full border-b bg-background/50 backdrop-blur-sm" style={{ zIndex: "var(--z-base)" }}>
         <div className="mx-auto w-full max-w-4xl px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 flex-1">

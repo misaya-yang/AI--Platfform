@@ -33,6 +33,18 @@
     --ring: 226 70% 55.5%;
 
     --radius: 0.75rem;
+    
+    /* Z-index layering system - prevents overlay clipping/stacking issues */
+    --z-base: 0;
+    --z-dropdown: 50;
+    --z-sticky: 100;
+    --z-fixed: 200;
+    --z-modal-backdrop: 400;
+    --z-modal: 500;
+    --z-popover: 600;
+    --z-tooltip: 700;
+    --z-toast: 800;
+    --z-max: 9999;
   }
 
   .dark {
@@ -72,5 +84,51 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+@layer utilities {
+  /* Overlay z-index utilities following the layering system */
+  .z-dropdown { z-index: var(--z-dropdown); }
+  .z-sticky { z-index: var(--z-sticky); }
+  .z-fixed { z-index: var(--z-fixed); }
+  .z-modal-backdrop { z-index: var(--z-modal-backdrop); }
+  .z-modal { z-index: var(--z-modal); }
+  .z-popover { z-index: var(--z-popover); }
+  .z-tooltip { z-index: var(--z-tooltip); }
+  .z-toast { z-index: var(--z-toast); }
+  .z-max { z-index: var(--z-max); }
+}
+
+/* Ensure Radix UI portaled content has proper z-index */
+[data-radix-popper-content-wrapper] {
+  z-index: var(--z-popover) !important;
+}
+
+[data-radix-select-content] {
+  z-index: var(--z-popover) !important;
+}
+
+/* Dialog/Modal overlays */
+[data-radix-dialog-overlay] {
+  z-index: var(--z-modal-backdrop) !important;
+}
+
+[data-radix-dialog-content] {
+  z-index: var(--z-modal) !important;
+}
+
+/* Tooltip */
+[data-radix-tooltip-content] {
+  z-index: var(--z-tooltip) !important;
+}
+
+/* Dropdown menu */
+[data-radix-dropdown-menu-content] {
+  z-index: var(--z-popover) !important;
+}
+
+/* Toast notifications */
+[data-radix-toast-viewport] {
+  z-index: var(--z-toast) !important;
 }
 
