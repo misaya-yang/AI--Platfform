@@ -428,9 +428,34 @@ class RetrievalConfigSchema(BaseModel):
     mmr_lambda: float = 0.5
 
 
+
+
 class DatasetConfigUpdateSchema(BaseModel):
     """Update dataset configuration (chunking + retrieval)"""
     model_config = ConfigDict(extra="allow")
     
     chunking_config: Optional[ChunkingConfigSchema] = None
     retrieval_config: Optional[RetrievalConfigSchema] = None
+
+
+class ChunkPreviewRequestSchema(BaseModel):
+    """Request schema for chunk preview"""
+    model_config = ConfigDict(extra="allow")
+    
+    text: str
+    config: Optional[ChunkingConfigSchema] = None
+    document_id: Optional[str] = None
+
+
+class ChunkPreviewItemSchema(BaseModel):
+    """Single chunk item in preview"""
+    content: str
+    token_count: int
+    char_count: int
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ChunkPreviewResponseSchema(BaseModel):
+    """Response schema for chunk preview"""
+    chunks: List[ChunkPreviewItemSchema] = Field(default_factory=list)
+    total_chunks: int = 0

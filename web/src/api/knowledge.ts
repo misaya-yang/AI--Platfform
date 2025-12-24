@@ -6,11 +6,11 @@
  */
 
 import { api } from "@/lib/api";
-import type { 
-  Dataset, 
-  Document, 
-  Segment, 
-  RetrieveRequest, 
+import type {
+  Dataset,
+  Document,
+  Segment,
+  RetrieveRequest,
   RetrieveResponse,
   QARequest,
   QAResponse,
@@ -166,14 +166,14 @@ export async function qaQuery(datasetId: string, req: QARequest) {
 }
 
 export async function qaBatchTest(
-  datasetId: string, 
+  datasetId: string,
   testCases: Array<{ query: string; expected_answer?: string; expected_segments?: string[] }>,
-  options?: { 
-    top_k?: number; 
-    mode?: string; 
-    rerank?: boolean; 
-    mmr?: boolean; 
-    llm_config?: QARequest["llm_config"] 
+  options?: {
+    top_k?: number;
+    mode?: string;
+    rerank?: boolean;
+    mmr?: boolean;
+    llm_config?: QARequest["llm_config"]
   }
 ) {
   const { data } = await api.post<QABatchTestResult>(`/api/v1/knowledge/${datasetId}/qa/batch`, {
@@ -194,9 +194,9 @@ export async function getDatasetConfig(datasetId: string) {
 
 export async function updateDatasetConfig(
   datasetId: string,
-  config: { 
-    chunking_config?: Partial<ChunkingConfig>; 
-    retrieval_config?: Partial<RetrievalConfig> 
+  config: {
+    chunking_config?: Partial<ChunkingConfig>;
+    retrieval_config?: Partial<RetrievalConfig>
   }
 ) {
   const { data } = await api.put(`/api/v1/knowledge/${datasetId}/config`, config);
@@ -239,34 +239,37 @@ export async function batchEnableSegments(datasetId: string, segmentIds: string[
   return data;
 }
 
+
 // ============================================================
 // Chunk Preview API
 // ============================================================
 
 export interface ChunkPreviewItem {
-  index: number;
-  text: string;
+  content: string;
   char_count: number;
   token_count: number;
-  word_count: number;
+  metadata?: Record<string, any>;
 }
 
 export interface ChunkPreviewResponse {
   total_chunks: number;
   chunks: ChunkPreviewItem[];
-  config_used: Record<string, unknown>;
 }
 
-export async function previewChunks(
+export async function previewChunking(
   datasetId: string,
   text: string,
-  chunkingConfig?: Partial<ChunkingConfig>
+  config?: Partial<ChunkingConfig>
 ) {
+  const url = (datasetId === "create" || datasetId === "temp" || datasetId === "preview_temp")
+    ? "/api/v1/knowledge/preview"
+    : `/api/v1/knowledge/${datasetId}/chunk/preview`;
+
   const { data } = await api.post<ChunkPreviewResponse>(
-    `/api/v1/knowledge/${datasetId}/preview-chunks`,
+    url,
     {
       text,
-      chunking_config: chunkingConfig,
+      config,
     }
   );
   return data;

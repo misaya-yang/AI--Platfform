@@ -11,6 +11,8 @@ from ..schemas.knowledge import (
     BatchReindexSchema,
     ChunkingConfigSchema,
     DatasetConfigUpdateSchema,
+    ChunkPreviewRequestSchema,
+    ChunkPreviewResponseSchema,
     DatasetCreateSchema,
     DatasetPermissionGrantSchema,
     DatasetUpdateSchema,
@@ -511,6 +513,55 @@ async def update_document(
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+
+
+@router.post("/knowledge/preview")
+async def preview_chunking_generic(
+    payload: ChunkPreviewRequestSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Generic preview endpoint (no dataset context required).
+    """
+    try:
+        # Use a dummy dataset ID since we don't have one yet
+        chunks = await svc.preview_chunking(
+            user, 
+            "temp_preview", 
+            text=payload.text,
+            config=payload.config.model_dump() if payload.config else None
+        )
+        return {"chunks": chunks, "total_chunks": len(chunks)}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/chunk/preview")
+async def preview_chunking(
+    dataset_id: str,
+    payload: ChunkPreviewRequestSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Preview chunking results for a given text and configuration.
+    Does not save anything. useful for testing chunking strategies.
+    """
+    try:
+        chunks = await svc.preview_chunking(
+            user, 
+            dataset_id, 
+            text=payload.text,
+            config=payload.config.model_dump() if payload.config else None
+        )
+        return {"chunks": chunks, "total_chunks": len(chunks)}
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 # ============================================================
 # Batch Operations (Dify-style)

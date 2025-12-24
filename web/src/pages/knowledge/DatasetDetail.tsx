@@ -55,7 +55,7 @@ import {
   getDatasetConfig,
   debugDataset,
   updateDatasetConfig,
-  previewChunks,
+  previewChunking,
   type ChunkPreviewItem,
 } from "@/api/knowledge";
 import type { Document, RetrieveHit, QAResponse, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
@@ -88,8 +88,24 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, error }: { status: string; error?: string }) {
   const s = (status || "").toLowerCase();
 
   const configs: Record<string, { icon: React.ReactNode; label: string; className: string }> = {
@@ -119,20 +135,39 @@ function StatusBadge({ status }: { status: string }) {
       className: "bg-purple-50 text-purple-700 border-purple-200",
     },
   };
-  
+
   const config = configs[s] || {
     icon: <File className="h-3 w-3" />,
     label: "已上传",
     className: "bg-gray-50 text-gray-700 border-gray-200",
   };
 
-  return (
-    <Badge variant="outline" className={`text-xs font-medium ${config.className}`}>
+  const badge = (
+    <Badge variant="outline" className={`text-xs font-medium cursor-default ${config.className}`}>
       {config.icon}
       <span className="ml-1">{config.label}</span>
     </Badge>
   );
+
+  if (s === "failed" && error) {
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            {badge}
+          </TooltipTrigger>
+          <TooltipContent>
+            <p className="max-w-xs break-words text-xs">{error}</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+
+  return badge;
 }
+
+
 
 function DocumentRow({
   doc,
@@ -144,9 +179,23 @@ function DocumentRow({
   doc: Document;
   selected: boolean;
   onSelect: () => void;
-  onReindex: () => void;
-  onDelete: () => void;
+  onReindex: () => Promise<void>;
+  onDelete: () => Promise<void>;
 }) {
+  const [loading, setLoading] = useState(false);
+  const [reindexOpen, setReindexOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const handleAction = async (action: () => Promise<void>) => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      await action();
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const formatFileSize = (bytes?: number) => {
     if (!bytes) return "-";
     if (bytes < 1024) return `${bytes}B`;
@@ -170,69 +219,120 @@ function DocumentRow({
   };
 
   return (
-    <div
-      className={`
-        flex items-center px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors
-        ${selected ? "bg-indigo-50" : ""}
-      `}
-    >
-      {/* 文档图标和名称 */}
-      <div className="flex items-center gap-3 flex-1 min-w-0">
-        {getFileIcon()}
-        <span 
-          className="truncate text-indigo-600 hover:text-indigo-700 cursor-pointer font-medium text-sm"
-          onClick={onSelect}
-        >
-          {doc.title}
-        </span>
+    <>
+      <div
+        className={`
+          flex items-center px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors
+          ${selected ? "bg-indigo-50" : ""}
+        `}
+      >
+        {/* 文档图标和名称 */}
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          {getFileIcon()}
+          <span
+            className="truncate text-indigo-600 hover:text-indigo-700 cursor-pointer font-medium text-sm"
+            onClick={onSelect}
+          >
+            {doc.title}
+          </span>
+        </div>
+
+        {/* 大小 */}
+        <div className="w-24 text-sm text-gray-600 text-center">
+          {formatFileSize(doc.size_bytes)}
+        </div>
+
+        {/* 状态 */}
+        <div className="w-28 flex justify-center">
+          <StatusBadge status={doc.status} error={doc.error} />
+        </div>
+
+        {/* 所属类目 */}
+        <div className="w-28 text-sm text-gray-500 text-center">
+          默认类目
+        </div>
+
+        {/* 上传时间 */}
+        <div className="w-40 text-sm text-gray-500 text-center">
+          {doc.created_at ? new Date(doc.created_at).toLocaleString("zh-CN", {
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit"
+          }) : "-"}
+        </div>
+
+        {/* 操作 */}
+        <div className="w-48 flex justify-center gap-3 text-sm">
+          <button
+            className="text-indigo-600 hover:text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => { e.stopPropagation(); onSelect(); }}
+            disabled={loading}
+          >
+            查看切片
+          </button>
+          <button
+            className="text-indigo-600 hover:text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => {
+              e.stopPropagation();
+              setReindexOpen(true);
+            }}
+            disabled={loading}
+            title="重新索引"
+          >
+            {loading ? "处理中..." : "重建索引"}
+          </button>
+          <button
+            className="text-red-500 hover:text-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteOpen(true);
+            }}
+            disabled={loading}
+          >
+            删除
+          </button>
+        </div>
       </div>
-      
-      {/* 大小 */}
-      <div className="w-24 text-sm text-gray-600 text-center">
-        {formatFileSize(doc.size_bytes)}
-      </div>
-      
-      {/* 状态 */}
-      <div className="w-28 flex justify-center">
-        <StatusBadge status={doc.status} />
-      </div>
-      
-      {/* 所属类目 */}
-      <div className="w-28 text-sm text-gray-500 text-center">
-        默认类目
-      </div>
-      
-      {/* 上传时间 */}
-      <div className="w-40 text-sm text-gray-500 text-center">
-        {doc.created_at ? new Date(doc.created_at).toLocaleString("zh-CN", {
-          year: "numeric", month: "2-digit", day: "2-digit",
-          hour: "2-digit", minute: "2-digit"
-        }) : "-"}
-      </div>
-      
-      {/* 操作 */}
-      <div className="w-48 flex justify-center gap-3 text-sm">
-        <button 
-          className="text-indigo-600 hover:text-indigo-700"
-          onClick={(e) => { e.stopPropagation(); onSelect(); }}
-        >
-          查看切片
-        </button>
-        <button 
-          className="text-indigo-600 hover:text-indigo-700"
-          onClick={(e) => { e.stopPropagation(); onReindex(); }}
-          title="重新索引"
-        >
-          重建索引
-        </button>
-        <button 
-          className="text-red-500 hover:text-red-600"
-          onClick={(e) => { e.stopPropagation(); onDelete(); }}
-        >
-          删除
-        </button>
-      </div>
-    </div>
+
+      <AlertDialog open={reindexOpen} onOpenChange={setReindexOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认重新构建索引？</AlertDialogTitle>
+            <AlertDialogDescription>
+              这将重新解析文档 "{doc.title}" 并生成新的切片和向量索引。此操作可能需要一些时间。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              setReindexOpen(false);
+              handleAction(onReindex);
+            }}>
+              确认重建
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除文档？</AlertDialogTitle>
+            <AlertDialogDescription>
+              文档 "{doc.title}" 将被永久删除，且无法恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => {
+              setDeleteOpen(false);
+              handleAction(onDelete);
+            }}>
+              确认删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -249,7 +349,7 @@ function SegmentCard({
 }) {
   const [expanded, setExpanded] = useState(false);
   const charCount = segment.char_count || segment.text?.length || 0;
-  
+
   return (
     <div className="group border border-gray-100 rounded-xl hover:border-blue-200 hover:shadow-md transition-all duration-200 bg-white overflow-hidden">
       {/* Header */}
@@ -295,14 +395,14 @@ function SegmentCard({
           </button>
         </div>
       </div>
-      
+
       {/* Content */}
       <div className="px-4 py-3">
         <p className={`text-sm text-gray-700 whitespace-pre-wrap leading-relaxed ${expanded ? "" : "line-clamp-3"}`}>
           {segment.text}
         </p>
         {!expanded && charCount > 150 && (
-          <button 
+          <button
             onClick={() => setExpanded(true)}
             className="mt-2 text-xs text-blue-600 hover:text-blue-700"
           >
@@ -324,14 +424,14 @@ function RetrievalResultCard({
   highlightTerms?: string[];
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
-  
+
   // Highlight query terms in text
   const highlightText = (text: string, terms: string[]) => {
     if (!terms.length || !text) return text;
     const escapedTerms = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     const regex = new RegExp(`(${escapedTerms.join('|')})`, 'gi');
     const parts = text.split(regex);
-    
+
     return parts.map((part, i) => {
       const isMatch = terms.some(t => t.toLowerCase() === part.toLowerCase());
       if (isMatch) {
@@ -344,7 +444,7 @@ function RetrievalResultCard({
   const hasText = hit.text && hit.text.trim().length > 0;
   const textLength = hit.text?.length || 0;
   const showExpandButton = textLength > 200;
-  
+
   // Get score color based on value
   const getScoreColor = (score: number) => {
     if (score >= 0.8) return "bg-emerald-100 text-emerald-800 border-emerald-300";
@@ -357,7 +457,7 @@ function RetrievalResultCard({
   // Check if this result has exact match
   const hasExactMatch = hit.metadata?._exact_match === true;
   const termMatches = hit.metadata?._term_matches as number | undefined;
-  
+
   // Get rank from metadata (if available)
   const rank = hit.metadata?._rank as number | undefined;
   const displayRank = rank || (index + 1);
@@ -372,24 +472,22 @@ function RetrievalResultCard({
     }
     return String(value);
   };
-  
+
   // Check if score is available (not N/A)
   const isScoreAvailable = (value: unknown): boolean => {
     return value !== "N/A" && value !== null && value !== undefined;
   };
 
   return (
-    <div className={`bg-white rounded-xl border p-4 hover:border-blue-300 hover:shadow-md transition-all ${
-      !hasText ? "border-red-200 bg-red-50/30" : 
-      hasExactMatch ? "border-emerald-300 bg-emerald-50/30 ring-2 ring-emerald-200" : 
-      "border-gray-200"
-    }`}>
+    <div className={`bg-white rounded-xl border p-4 hover:border-blue-300 hover:shadow-md transition-all ${!hasText ? "border-red-200 bg-red-50/30" :
+      hasExactMatch ? "border-emerald-300 bg-emerald-50/30 ring-2 ring-emerald-200" :
+        "border-gray-200"
+      }`}>
       {/* Header row */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-white text-sm font-bold shadow-sm ${
-            hasExactMatch ? "bg-gradient-to-br from-emerald-500 to-teal-600" : "bg-gradient-to-br from-blue-500 to-indigo-600"
-          }`}>
+          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-white text-sm font-bold shadow-sm ${hasExactMatch ? "bg-gradient-to-br from-emerald-500 to-teal-600" : "bg-gradient-to-br from-blue-500 to-indigo-600"
+            }`}>
             {displayRank}
           </span>
           <span className="text-xs text-gray-500 font-mono">
@@ -410,13 +508,12 @@ function RetrievalResultCard({
           {hit.score.toFixed(4)}
         </Badge>
       </div>
-      
+
       {/* Text content with expand/collapse */}
       {hasText ? (
         <div className="relative">
-          <p className={`text-sm text-gray-700 whitespace-pre-wrap leading-relaxed ${
-            isExpanded ? "" : "line-clamp-4"
-          }`}>
+          <p className={`text-sm text-gray-700 whitespace-pre-wrap leading-relaxed ${isExpanded ? "" : "line-clamp-4"
+            }`}>
             {highlightTerms.length > 0 ? highlightText(hit.text, highlightTerms) : hit.text}
           </p>
           {showExpandButton && (
@@ -437,7 +534,7 @@ function RetrievalResultCard({
           ⚠️ 无文本内容 - 请重新处理该文档
         </p>
       )}
-      
+
       {/* Detailed scores - all stages */}
       {hit.metadata && (
         <div className="mt-3 pt-3 border-t border-gray-100">
@@ -449,51 +546,47 @@ function RetrievalResultCard({
                 const srcLower = src.toLowerCase();
                 const isDense = srcLower === "dense" || srcLower === "vector";
                 return (
-                  <Badge key={i} className={`ml-1 text-xs ${
-                    isDense ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"
-                  }`}>
+                  <Badge key={i} className={`ml-1 text-xs ${isDense ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"
+                    }`}>
                     {isDense ? "向量" : "BM25"}
                   </Badge>
                 );
               })}
             </div>
           )}
-          
+
           {/* Stage scores - in a table-like layout */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
             {/* Dense/Vector scores - support both old and new field names */}
             <div className="bg-gray-50 rounded p-2">
               <div className="text-gray-400 text-[10px] mb-1">Dense (向量)</div>
-              <div className={`font-mono ${
-                isScoreAvailable(hit.metadata._dense_score_norm) || isScoreAvailable(hit.metadata._vector_score)
-                  ? "text-blue-600" : "text-gray-400"
-              }`}>
+              <div className={`font-mono ${isScoreAvailable(hit.metadata._dense_score_norm) || isScoreAvailable(hit.metadata._vector_score)
+                ? "text-blue-600" : "text-gray-400"
+                }`}>
                 {formatScore(hit.metadata._dense_score_norm ?? hit.metadata._vector_score)}
               </div>
             </div>
-            
+
             {/* BM25/Keyword scores - support both old and new field names */}
             <div className="bg-gray-50 rounded p-2">
               <div className="text-gray-400 text-[10px] mb-1">BM25 (关键词)</div>
-              <div className={`font-mono ${
-                isScoreAvailable(hit.metadata._bm25_score_norm) || isScoreAvailable(hit.metadata._keyword_score)
-                  ? "text-amber-600" : "text-gray-400"
-              }`}>
+              <div className={`font-mono ${isScoreAvailable(hit.metadata._bm25_score_norm) || isScoreAvailable(hit.metadata._keyword_score)
+                ? "text-amber-600" : "text-gray-400"
+                }`}>
                 {formatScore(hit.metadata._bm25_score_norm ?? hit.metadata._keyword_score)}
               </div>
             </div>
-            
+
             {/* Fusion score */}
             <div className="bg-gray-50 rounded p-2">
               <div className="text-gray-400 text-[10px] mb-1">Fusion (融合)</div>
-              <div className={`font-mono ${
-                isScoreAvailable(hit.metadata._fusion_score) || isScoreAvailable(hit.metadata._rrf_score)
-                  ? "text-purple-600" : "text-gray-400"
-              }`}>
+              <div className={`font-mono ${isScoreAvailable(hit.metadata._fusion_score) || isScoreAvailable(hit.metadata._rrf_score)
+                ? "text-purple-600" : "text-gray-400"
+                }`}>
                 {formatScore(hit.metadata._fusion_score ?? hit.metadata._rrf_score)}
               </div>
             </div>
-            
+
             {/* Rerank score */}
             <div className="bg-gray-50 rounded p-2">
               <div className="text-gray-400 text-[10px] mb-1">Rerank (重排序)</div>
@@ -502,13 +595,13 @@ function RetrievalResultCard({
               </div>
             </div>
           </div>
-          
+
           {/* MMR info if available */}
           {(isScoreAvailable(hit.metadata._mmr_score) || isScoreAvailable(hit.metadata._mmr_relevance)) && (
             <div className="mt-2 text-xs text-gray-500">
               <span className="font-medium">MMR: </span>
-              score={formatScore(hit.metadata._mmr_score)}, 
-              relevance={formatScore(hit.metadata._mmr_relevance ?? hit.metadata._relevance_score)}, 
+              score={formatScore(hit.metadata._mmr_score)},
+              relevance={formatScore(hit.metadata._mmr_relevance ?? hit.metadata._relevance_score)},
               max_sim={formatScore(hit.metadata._mmr_max_sim)}
             </div>
           )}
@@ -551,7 +644,7 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadChunkSize, setUploadChunkSize] = useState(500);
   const [uploadChunkOverlap, setUploadChunkOverlap] = useState(50);
   const [uploadCustomConfig, setUploadCustomConfig] = useState(false);
-  
+
   // Rerank model selection
   const [rerankEnabled, setRerankEnabled] = useState(true);
   const [rerankModel, setRerankModel] = useState("gte-rerank");
@@ -608,14 +701,14 @@ export function KnowledgeDatasetDetailPage() {
   const [datasetConfig, setDatasetConfig] = useState<DatasetConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState<DatasetDebugInfo | null>(null);
-  
+
   // Config editing
   const [configEditing, setConfigEditing] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [editChunkingMode, setEditChunkingMode] = useState("automatic");
   const [editChunkSize, setEditChunkSize] = useState(500);
   const [editChunkOverlap, setEditChunkOverlap] = useState(50);
-  
+
   // Chunk preview
   const [previewText, setPreviewText] = useState("");
   const [previewChunksResult, setPreviewChunksResult] = useState<ChunkPreviewItem[]>([]);
@@ -646,7 +739,7 @@ export function KnowledgeDatasetDetailPage() {
       ]);
       setDatasetConfig(config);
       setDebugInfo(debug);
-      
+
       // Initialize edit values from config
       if (config?.chunking) {
         setEditChunkingMode(config.chunking.mode || "automatic");
@@ -659,7 +752,7 @@ export function KnowledgeDatasetDetailPage() {
       setConfigLoading(false);
     }
   }
-  
+
   async function handleSaveConfig() {
     if (!datasetId) return;
     setConfigSaving(true);
@@ -682,12 +775,12 @@ export function KnowledgeDatasetDetailPage() {
       setConfigSaving(false);
     }
   }
-  
+
   async function handlePreviewChunks() {
     if (!datasetId || !previewText.trim()) return;
     setPreviewLoading(true);
     try {
-      const result = await previewChunks(datasetId, previewText, {
+      const result = await previewChunking(datasetId, previewText, {
         mode: editChunkingMode as "automatic",
         chunk_size: editChunkSize,
         chunk_overlap: editChunkOverlap,
@@ -716,20 +809,20 @@ export function KnowledgeDatasetDetailPage() {
     }
     if (fileRef.current) fileRef.current.value = "";
   }
-  
+
   // Actual upload after config is confirmed
   async function handleConfirmUpload() {
     if (!datasetId || pendingFiles.length === 0) return;
 
     setUploading(true);
-    
+
     try {
       // Update config before upload
       console.log("Updating config:", {
         chunking: { mode: uploadChunkMode, chunk_size: uploadChunkSize, chunk_overlap: uploadChunkOverlap },
         rerank: { enabled: rerankEnabled, model: rerankModel },
       });
-      
+
       await updateDatasetConfig(datasetId, {
         chunking_config: {
           mode: uploadChunkMode as "automatic",
@@ -743,10 +836,10 @@ export function KnowledgeDatasetDetailPage() {
           },
         },
       });
-      
+
       // Small delay to ensure config is persisted before upload triggers ingest
       await new Promise(resolve => setTimeout(resolve, 200));
-      
+
       // Upload files one by one
       for (const file of pendingFiles) {
         console.log("Uploading file:", file.name);
@@ -803,8 +896,19 @@ export function KnowledgeDatasetDetailPage() {
 
   async function handleReindex(doc: Document) {
     if (!datasetId) return;
-    await reindexDocument(datasetId, doc.document_id);
-    await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+
+    try {
+      await reindexDocument(datasetId, doc.document_id);
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      // 触发一次刷新
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      }, 1000);
+    } catch (e) {
+      console.error("Reindex failed:", e);
+      // Fallback for error visibility if toast isn't set up yet
+      alert("重建索引失败: " + (e instanceof Error ? e.message : String(e)));
+    }
   }
 
   async function handleDeleteDoc(doc: Document) {
@@ -1013,15 +1117,14 @@ export function KnowledgeDatasetDetailPage() {
                   }
                 `}
               >
-                <tab.icon className={`h-4 w-4 transition-transform group-hover:scale-110 ${
-                  mainTab === tab.key ? `text-${tab.color}-600` : ""
-                }`} />
+                <tab.icon className={`h-4 w-4 transition-transform group-hover:scale-110 ${mainTab === tab.key ? `text-${tab.color}-600` : ""
+                  }`} />
                 {tab.label}
               </button>
             ))}
           </div>
         </div>
-        </div>
+      </div>
 
       {/* 主内容区 */}
       <div className="max-w-[1600px] mx-auto px-6 py-6">
@@ -1041,7 +1144,7 @@ export function KnowledgeDatasetDetailPage() {
                     <SelectItem value="id">ID</SelectItem>
                   </SelectContent>
                 </Select>
-                
+
                 {/* 搜索框 */}
                 <div className="relative">
                   <Input
@@ -1051,7 +1154,7 @@ export function KnowledgeDatasetDetailPage() {
                   <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
                 </div>
               </div>
-              
+
               <div className="flex items-center gap-2">
                 <Select defaultValue="all">
                   <SelectTrigger className="w-28 bg-white h-9">
@@ -1090,7 +1193,7 @@ export function KnowledgeDatasetDetailPage() {
                 <Button variant="outline" className="h-9 bg-white">
                   批量操作
                 </Button>
-                
+
                 {/* 上传按钮 */}
                 <input
                   ref={fileRef}
@@ -1151,8 +1254,8 @@ export function KnowledgeDatasetDetailPage() {
                 {/* 标题栏 - 带明显的返回按钮 */}
                 <div className="px-5 py-4 border-b border-gray-200 bg-gradient-to-r from-blue-50/50 via-white to-indigo-50/30 flex items-center justify-between">
                   <div className="flex items-center gap-4">
-                      <button
-                      onClick={() => setSelectedDocId(undefined)} 
+                    <button
+                      onClick={() => setSelectedDocId(undefined)}
                       className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 hover:text-blue-600 bg-white hover:bg-blue-50 border border-gray-200 hover:border-blue-200 rounded-lg transition-all shadow-sm"
                     >
                       <ArrowLeft className="h-4 w-4" />
@@ -1162,14 +1265,14 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
                         <Hash className="h-4 w-4 text-white" />
-                            </div>
+                      </div>
                       <div>
                         <h3 className="font-semibold text-gray-900">切片列表</h3>
                         <p className="text-xs text-gray-500">{selectedDoc.title}</p>
-                            </div>
-                          </div>
+                      </div>
+                    </div>
                     <Badge className="bg-indigo-100 text-indigo-700 border-indigo-200">{segments.length} 个切片</Badge>
-                        </div>
+                  </div>
                   <div className="flex items-center gap-3">
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
@@ -1181,7 +1284,7 @@ export function KnowledgeDatasetDetailPage() {
                       />
                     </div>
                   </div>
-                        </div>
+                </div>
 
                 {/* 切片网格 */}
                 <div className="max-h-[500px] overflow-auto p-4 bg-gray-50/50">
@@ -1204,12 +1307,12 @@ export function KnowledgeDatasetDetailPage() {
                           onDelete={() => handleDeleteSegment(seg.segment_id)}
                         />
                       ))}
-                      </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
+                </div>
               </Card>
             )}
-                </div>
+          </div>
         )}
 
         {/* 召回测试 Tab - 阿里云风格 */}
@@ -1358,26 +1461,26 @@ export function KnowledgeDatasetDetailPage() {
                           <Badge variant="outline" className="font-mono">
                             {String(hitMeta.mode)}
                           </Badge>
-                    </div>
+                        </div>
                         <div className="flex items-center justify-between p-2 bg-white rounded border">
                           <span className="text-gray-500">Rerank</span>
                           <Badge className={hitMeta.rerank ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}>
                             {hitMeta.rerank ? "启用" : "禁用"}
                           </Badge>
-                  </div>
+                        </div>
                         <div className="flex items-center justify-between p-2 bg-white rounded border">
                           <span className="text-gray-500">MMR</span>
                           <Badge className={hitMeta.mmr ? "bg-purple-100 text-purple-700" : "bg-gray-100 text-gray-500"}>
                             {hitMeta.mmr ? "启用" : "禁用"}
                           </Badge>
-                  </div>
+                        </div>
                         {hitMeta.score_threshold !== undefined && hitMeta.score_threshold !== null && (
                           <div className="flex items-center justify-between p-2 bg-white rounded border">
                             <span className="text-gray-500">阈值</span>
                             <span className="font-mono text-gray-700">{String(hitMeta.score_threshold)}</span>
-                      </div>
+                          </div>
                         )}
-              </div>
+                      </div>
 
                       {/* Hit counts */}
                       <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-2 gap-3">
@@ -1411,11 +1514,11 @@ export function KnowledgeDatasetDetailPage() {
                           错误: {hitMeta.error}
                         </div>
                       )}
-                                </div>
+                    </div>
                   )}
-                              </div>
+                </div>
               </Card>
-                              </div>
+            </div>
 
             {/* 右侧：结果 */}
             <div className="col-span-8">
@@ -1428,7 +1531,7 @@ export function KnowledgeDatasetDetailPage() {
                         {hitResults.length} 条
                       </Badge>
                     )}
-                            </div>
+                  </div>
                   {hitResults.length > 0 && (
                     <div className="flex items-center gap-2 text-xs text-gray-500">
                       <span>最高分: {Math.max(...hitResults.map(h => h.score)).toFixed(4)}</span>
@@ -1436,13 +1539,13 @@ export function KnowledgeDatasetDetailPage() {
                       <span>最低分: {Math.min(...hitResults.map(h => h.score)).toFixed(4)}</span>
                     </div>
                   )}
-                          </div>
+                </div>
 
                 <div className="p-5 space-y-4 overflow-auto h-[calc(100%-70px)] bg-gray-50/50">
                   {hitResults.map((hit, i) => (
-                    <RetrievalResultCard 
-                      key={`${hit.segment_id}-${i}`} 
-                      hit={hit} 
+                    <RetrievalResultCard
+                      key={`${hit.segment_id}-${i}`}
+                      hit={hit}
                       index={i}
                       highlightTerms={query.trim().split(/\s+/).filter(t => t.length > 0)}
                     />
@@ -1451,10 +1554,10 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="text-center py-20">
                       <div className="w-20 h-20 mx-auto rounded-2xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center mb-4">
                         <Search className="h-10 w-10 text-emerald-400" />
-                          </div>
+                      </div>
                       <p className="text-lg font-medium text-gray-600">暂无结果</p>
                       <p className="text-sm text-gray-400 mt-2 max-w-sm mx-auto">
-                        {Object.keys(hitMeta).length > 0 
+                        {Object.keys(hitMeta).length > 0
                           ? `向量命中: ${hitMeta.vector_hits_count ?? 0}, 关键词命中: ${hitMeta.keyword_hits_count ?? 0}`
                           : "输入查询内容并运行测试，查看检索效果"
                         }
@@ -1464,11 +1567,11 @@ export function KnowledgeDatasetDetailPage() {
                           {hitMeta.error}
                         </div>
                       )}
-                          </div>
-                        )}
-                      </div>
-              </Card>
                     </div>
+                  )}
+                </div>
+              </Card>
+            </div>
           </div>
         )}
 
@@ -1491,7 +1594,7 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="p-5 space-y-5">
                   <div>
                     <Label className="font-medium text-gray-700">问题</Label>
-                      <Textarea
+                    <Textarea
                       placeholder="输入您的问题，AI 将基于知识库内容回答..."
                       value={qaQueryInput}
                       onChange={(e) => setQaQueryInput(e.target.value)}
@@ -1501,32 +1604,32 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
-                        <div>
+                    <div>
                       <Label className="text-xs font-medium text-gray-600">Top K</Label>
-                          <Input
+                      <Input
                         type="number"
                         value={topK}
-                            onChange={(e) => setTopK(Number(e.target.value || 5))}
+                        onChange={(e) => setTopK(Number(e.target.value || 5))}
                         className="mt-1.5 border-gray-200"
                         min={1}
                         max={20}
                       />
-                        </div>
-                        <div>
+                    </div>
+                    <div>
                       <Label className="text-xs font-medium text-gray-600">检索模式</Label>
-                          <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
+                      <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
                         <SelectTrigger className="mt-1.5 border-gray-200">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
                           <SelectItem value="hybrid">Hybrid (混合)</SelectItem>
                           <SelectItem value="dense">Dense Only (向量)</SelectItem>
                           <SelectItem value="bm25">BM25 Only (关键词)</SelectItem>
-                            </SelectContent>
-                          </Select>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
-                  
+
                   {/* Hybrid mode weights */}
                   {mode === "hybrid" && (
                     <div className="space-y-4 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
@@ -1542,7 +1645,7 @@ export function KnowledgeDatasetDetailPage() {
                           </SelectContent>
                         </Select>
                       </div>
-                      
+
                       <div>
                         <div className="flex items-center justify-between mb-1">
                           <Label className="text-xs text-blue-700">Dense (向量)</Label>
@@ -1561,7 +1664,7 @@ export function KnowledgeDatasetDetailPage() {
                           className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
                         />
                       </div>
-                      
+
                       <div>
                         <div className="flex items-center justify-between mb-1">
                           <Label className="text-xs text-amber-700">BM25 (关键词)</Label>
@@ -1593,9 +1696,9 @@ export function KnowledgeDatasetDetailPage() {
                       <Switch checked={mmr} onCheckedChange={setMmr} />
                       <span className="text-sm font-medium text-gray-700">MMR</span>
                     </label>
-                        </div>
+                  </div>
 
-                            <Button
+                  <Button
                     onClick={runQA}
                     disabled={qaLoading || !qaQueryInput.trim()}
                     className="w-full h-11 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-md shadow-purple-500/20 text-white font-medium"
@@ -1605,7 +1708,7 @@ export function KnowledgeDatasetDetailPage() {
                     ) : (
                       <><Send className="h-4 w-4 mr-2" /> 发送问题</>
                     )}
-                            </Button>
+                  </Button>
                 </div>
 
                 {/* 历史记录 */}
@@ -1649,10 +1752,10 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="flex-1 flex flex-col items-center justify-center">
                     <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-purple-100 to-pink-100 flex items-center justify-center mb-4">
                       <Brain className="h-10 w-10 text-purple-400" />
-                              </div>
+                    </div>
                     <p className="text-lg font-medium text-gray-600">等待问题</p>
                     <p className="text-sm text-gray-400 mt-1">输入问题后将显示 RAG 回答结果</p>
-                            </div>
+                  </div>
                 ) : (
                   <>
                     {/* 回答区 */}
@@ -1660,12 +1763,12 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="flex items-center gap-2 mb-3">
                         <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
                           <Sparkles className="h-4 w-4 text-white" />
-                          </div>
+                        </div>
                         <h3 className="font-semibold text-gray-900">AI 回答</h3>
                         <Badge variant="outline" className="ml-auto font-mono text-xs">
                           {qaResponse.model}
                         </Badge>
-                          </div>
+                      </div>
                       <div className="p-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl border border-purple-100">
                         <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
                           {qaResponse.answer}
@@ -1685,7 +1788,7 @@ export function KnowledgeDatasetDetailPage() {
                           <span>Tokens: {qaResponse.tokens_used}</span>
                         )}
                       </div>
-                          </div>
+                    </div>
 
                     {/* 上下文 */}
                     <div className="flex-1 overflow-hidden flex flex-col">
@@ -1720,8 +1823,8 @@ export function KnowledgeDatasetDetailPage() {
                   </>
                 )}
               </Card>
-                      </div>
-                    </div>
+            </div>
+          </div>
         )}
 
         {/* 配置 Tab */}
@@ -1735,39 +1838,39 @@ export function KnowledgeDatasetDetailPage() {
                   分块配置
                 </h3>
                 {!configEditing && (
-                  <Button 
-                    variant="outline" 
-                              size="sm"
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={() => setConfigEditing(true)}
                   >
                     <Edit3 className="h-3 w-3 mr-1" />
                     编辑
-                            </Button>
+                  </Button>
                 )}
-                          </div>
+              </div>
 
               {configLoading ? (
                 <div className="py-12 text-center">
                   <Loader2 className="h-8 w-8 animate-spin mx-auto text-gray-400" />
-                        </div>
+                </div>
               ) : configEditing ? (
                 <div className="space-y-4">
-                        <div>
+                  <div>
                     <Label className="text-sm">分块模式</Label>
                     <Select value={editChunkingMode} onValueChange={setEditChunkingMode}>
                       <SelectTrigger className="mt-1">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
                         <SelectItem value="automatic">智能切分</SelectItem>
                         <SelectItem value="fixed_size">按长度切分</SelectItem>
                         <SelectItem value="paragraph">按段落切分</SelectItem>
                         <SelectItem value="heading">按标题切分</SelectItem>
                         <SelectItem value="separator">按符号切分</SelectItem>
                         <SelectItem value="recursive">递归切分</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <div>
                     <div className="flex justify-between items-center">
                       <Label className="text-sm">块大小</Label>
@@ -1799,15 +1902,15 @@ export function KnowledgeDatasetDetailPage() {
                     />
                   </div>
                   <div className="flex gap-2 pt-2">
-                          <Button
+                    <Button
                       onClick={handleSaveConfig}
                       disabled={configSaving}
                       className="bg-blue-600 hover:bg-blue-700"
                     >
                       {configSaving ? "保存中..." : "保存配置"}
-                          </Button>
-                            <Button
-                      variant="outline" 
+                    </Button>
+                    <Button
+                      variant="outline"
                       onClick={() => {
                         setConfigEditing(false);
                         if (datasetConfig?.chunking) {
@@ -1818,7 +1921,7 @@ export function KnowledgeDatasetDetailPage() {
                       }}
                     >
                       取消
-                            </Button>
+                    </Button>
                   </div>
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
                     ⚠️ 修改分块配置后需要重新索引文档才能生效
@@ -1885,7 +1988,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <p className="font-medium text-gray-900">Rerank</p>
                         <p className="text-xs text-gray-500">重排序优化结果</p>
-                        </div>
+                      </div>
                       <Badge variant={datasetConfig.retrieval?.rerank?.enabled ? "default" : "outline"}>
                         {datasetConfig.retrieval?.rerank?.enabled ? "启用" : "禁用"}
                       </Badge>
@@ -1921,7 +2024,7 @@ export function KnowledgeDatasetDetailPage() {
                       <p className="font-medium text-gray-900 mt-1">
                         {datasetConfig.embedding?.provider}
                       </p>
-                      </div>
+                    </div>
                     <div className="p-3 bg-gray-50 rounded-lg">
                       <p className="text-xs text-gray-500">Model</p>
                       <p className="font-medium text-gray-900 mt-1">
@@ -1984,7 +2087,7 @@ export function KnowledgeDatasetDetailPage() {
               ) : (
                 <p className="text-gray-500 text-center py-4">加载统计信息...</p>
               )}
-              
+
               {datasetConfig?.statistics?.segment_count === 0 && (
                 <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
                   ⚠️ 该知识库暂无片段。请确保文档已成功处理完成。
@@ -1998,7 +2101,7 @@ export function KnowledgeDatasetDetailPage() {
                 <Eye className="h-5 w-5 text-cyan-600" />
                 分块预览
               </h3>
-              
+
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-3">
                   <Textarea
@@ -2009,7 +2112,7 @@ export function KnowledgeDatasetDetailPage() {
                     className="font-mono text-sm"
                   />
                   <div className="flex items-center gap-2">
-                      <Button
+                    <Button
                       onClick={handlePreviewChunks}
                       disabled={previewLoading || !previewText.trim()}
                       className="bg-cyan-600 hover:bg-cyan-700"
@@ -2019,12 +2122,12 @@ export function KnowledgeDatasetDetailPage() {
                       ) : (
                         <><Play className="h-4 w-4 mr-2" /> 预览分块</>
                       )}
-                      </Button>
+                    </Button>
                     <span className="text-xs text-gray-500">
                       使用当前配置: {editChunkingMode}, 块大小 {editChunkSize}, 重叠 {editChunkOverlap}
                     </span>
-                        </div>
-                      </div>
+                  </div>
+                </div>
                 <div className="border rounded-lg p-3 bg-gray-50 max-h-[300px] overflow-auto">
                   {previewChunksResult.length > 0 ? (
                     <div className="space-y-2">
@@ -2034,12 +2137,12 @@ export function KnowledgeDatasetDetailPage() {
                       {previewChunksResult.map((chunk, i) => (
                         <div key={i} className="p-2 bg-white rounded border text-xs">
                           <div className="flex items-center gap-2 mb-1">
-                            <Badge variant="secondary">#{chunk.index + 1}</Badge>
+                            <Badge variant="secondary">#{i + 1}</Badge>
                             <span className="text-gray-400">{chunk.char_count} 字符</span>
                             <span className="text-gray-400">~{chunk.token_count} tokens</span>
                           </div>
                           <div className="text-gray-700 whitespace-pre-wrap line-clamp-3">
-                            {chunk.text}
+                            {chunk.content}
                           </div>
                         </div>
                       ))}
@@ -2060,7 +2163,7 @@ export function KnowledgeDatasetDetailPage() {
                   <HelpCircle className="h-5 w-5 text-gray-500" />
                   调试信息
                 </h3>
-                
+
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div className={`p-3 rounded-lg ${debugInfo.has_segments ? "bg-emerald-50" : "bg-red-50"}`}>
@@ -2076,7 +2179,7 @@ export function KnowledgeDatasetDetailPage() {
                       </p>
                     </div>
                   </div>
-                  
+
                   {Array.isArray(debugInfo.sample_segments) && debugInfo.sample_segments.length > 0 && (
                     <div>
                       <p className="text-xs text-gray-500 mb-2">示例片段</p>
@@ -2085,12 +2188,12 @@ export function KnowledgeDatasetDetailPage() {
                           <div key={i} className="p-2 bg-gray-50 rounded text-xs font-mono">
                             <div className="text-gray-500">ID: {String(seg.segment_id).slice(0, 16)}...</div>
                             <div className="text-gray-700 mt-1">{String(seg.text_preview)}</div>
-                        </div>
+                          </div>
                         ))}
                       </div>
                     </div>
                   )}
-                  
+
                   {!debugInfo.has_segments && (
                     <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
                       <p className="font-medium">问题诊断：</p>
@@ -2109,7 +2212,7 @@ export function KnowledgeDatasetDetailPage() {
       </div>
 
       {/* Dialogs */}
-      
+
       {/* Upload Config Dialog - Step-based like Alibaba Cloud */}
       <Dialog open={uploadDialogOpen} onOpenChange={(open) => {
         if (!open && !uploading) {
@@ -2127,7 +2230,7 @@ export function KnowledgeDatasetDetailPage() {
           <DialogHeader>
             <DialogTitle className="text-xl font-semibold">上传文档</DialogTitle>
           </DialogHeader>
-          
+
           {/* Step indicator */}
           <div className="flex items-center justify-center py-4 border-b mb-4">
             <div className="flex items-center gap-2">
@@ -2150,13 +2253,13 @@ export function KnowledgeDatasetDetailPage() {
               </div>
               <span className={`text-sm ${uploadStep === 3 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>完成</span>
             </div>
-                    </div>
+          </div>
 
           {/* Step 1: Select files */}
           {uploadStep === 1 && (
             <div className="space-y-4 min-h-[200px]">
               {/* Upload area */}
-              <div 
+              <div
                 className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors cursor-pointer bg-gray-50"
                 onClick={() => fileRef.current?.click()}
               >
@@ -2164,7 +2267,7 @@ export function KnowledgeDatasetDetailPage() {
                 <p className="text-gray-600 mb-2">点击或拖拽上传文件</p>
                 <p className="text-xs text-gray-400">支持 .pdf, .doc, .docx, .txt, .md 等格式</p>
                 <p className="text-xs text-gray-400">单文档最大 100MB，最多支持 100 个</p>
-                          </div>
+              </div>
 
               {/* File list */}
               {pendingFiles.length > 0 && (
@@ -2175,7 +2278,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div key={i} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border">
                         <div className="w-10 h-10 rounded bg-red-50 flex items-center justify-center">
                           <FileText className="h-5 w-5 text-red-500" />
-                          </div>
+                        </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium truncate">{file.name}</p>
                           <p className="text-xs text-gray-400">{(file.size / 1024).toFixed(1)} KB</p>
@@ -2192,12 +2295,12 @@ export function KnowledgeDatasetDetailPage() {
                         </Button>
                       </div>
                     ))}
-                        </div>
+                  </div>
                 </div>
               )}
             </div>
           )}
-          
+
           {/* Step 2: Parse settings */}
           {uploadStep === 2 && (
             <div className="space-y-5 min-h-[200px] max-h-[60vh] overflow-y-auto pr-2">
@@ -2215,7 +2318,7 @@ export function KnowledgeDatasetDetailPage() {
                     <span className="text-xs text-gray-500">自定义</span>
                   </label>
                 </div>
-                
+
                 {uploadCustomConfig ? (
                   <div className="space-y-4">
                     {/* Chunking mode */}
@@ -2272,7 +2375,7 @@ export function KnowledgeDatasetDetailPage() {
                 ) : (
                   <p className="text-xs text-gray-400">使用知识库默认配置</p>
                 )}
-                  </div>
+              </div>
 
               {/* Current Embedding Model - Read only info */}
               <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
@@ -2286,7 +2389,7 @@ export function KnowledgeDatasetDetailPage() {
                     <p className="text-xs text-gray-500">{dataset?.embedding_dimension || 1024}维 · 嵌入模型在创建时设置</p>
                   </div>
                 </div>
-          </div>
+              </div>
 
               {/* Rerank Model - Can be modified */}
               <div className="p-4 bg-gray-50 rounded-lg border">
@@ -2301,7 +2404,7 @@ export function KnowledgeDatasetDetailPage() {
                     />
                     <span className="text-xs text-gray-500">启用</span>
                   </label>
-        </div>
+                </div>
                 {rerankEnabled && (
                   <select
                     value={rerankModel}
@@ -2315,7 +2418,7 @@ export function KnowledgeDatasetDetailPage() {
               </div>
             </div>
           )}
-          
+
           {/* Step 3: Processing */}
           {uploadStep === 3 && (
             <div className="py-8 text-center min-h-[200px] flex flex-col items-center justify-center">
@@ -2329,14 +2432,14 @@ export function KnowledgeDatasetDetailPage() {
                 <>
                   <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-4">
                     <Check className="h-6 w-6 text-green-600" />
-      </div>
+                  </div>
                   <p className="text-lg font-medium text-green-600">上传完成！</p>
                   <p className="text-sm text-gray-500 mt-2">文档正在后台处理中</p>
                 </>
               )}
             </div>
           )}
-          
+
           <DialogFooter className="mt-4 pt-4 border-t flex gap-2">
             {uploadStep > 1 && uploadStep < 3 && (
               <Button variant="outline" onClick={() => setUploadStep(uploadStep - 1)}>
@@ -2509,7 +2612,7 @@ export function KnowledgeDatasetDetailPage() {
                 className="mt-1"
               />
             </div>
-            </div>
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSettingsOpen(false)}>
               取消

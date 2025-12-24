@@ -120,8 +120,8 @@ class ChunkingConfig:
         
         return cls(
             mode=mode,
-            chunk_size=int(data.get("chunk_size") or data.get("max_segment_length") or 500),
-            chunk_overlap=int(data.get("chunk_overlap") or data.get("overlap") or 50),
+            chunk_size=int(data.get("chunk_size")) if data.get("chunk_size") is not None else 500,
+            chunk_overlap=int(data.get("chunk_overlap")) if data.get("chunk_overlap") is not None else 50,
             max_chunk_size=int(data.get("max_chunk_size", 1000)),
             min_chunk_size=int(data.get("min_chunk_size", 50)),
             use_token_count=bool(data.get("use_token_count", False)),
@@ -340,7 +340,8 @@ class BaseChunker(ABC):
             
             # Move start forward - ensure we make progress
             # The step should be at least (chunk_size - overlap) to avoid excessive overlap
-            step = max(chunk_size - overlap, chunk_size // 2, 100)
+            # The step should be at least (chunk_size - overlap) to avoid excessive overlap
+            step = max(chunk_size - overlap, 1)
             new_start = start + step
             
             # If we didn't reach the end, use the actual end minus overlap
@@ -456,8 +457,9 @@ class PageChunker(BaseChunker):
         return chunks
 
 
+
 class HeadingChunker(BaseChunker):
-    """Split by document headings/sections"""
+    """Split by document headings/sections with recursive fallback"""
     
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
@@ -500,6 +502,8 @@ class HeadingChunker(BaseChunker):
         
         # Create chunks from sections
         chunks = []
+        recursive_chunker = RecursiveChunker(self.config)
+        
         for i, section in enumerate(sections):
             section_text = section["content"].strip()
             if section["heading"]:
@@ -515,17 +519,17 @@ class HeadingChunker(BaseChunker):
                     {"heading": section["heading"]}
                 ))
             else:
-                # Split large sections
-                sub_chunks = self._split_with_overlap(
-                    section_text,
-                    self.config.chunk_size,
-                    self.config.chunk_overlap
-                )
+                # Split large sections using RecursiveChunker for better semantic preservation
+                sub_chunks = recursive_chunker.chunk(section_text)
                 for sub in sub_chunks:
+                    # Update metadata with heading info
+                    sub_meta = sub.metadata.copy()
+                    sub_meta["heading"] = section["heading"]
+                    
                     chunks.append(self._create_chunk(
-                        sub,
+                        sub.text,
                         len(chunks),
-                        {"heading": section["heading"]}
+                        sub_meta
                     ))
         
         return chunks
@@ -540,16 +544,16 @@ class RegexChunker(BaseChunker):
         
         pattern = self.config.regex_pattern
         if not pattern:
-            # Fallback to paragraph chunking
-            return ParagraphChunker(self.config).chunk(text)
+            return RecursiveChunker(self.config).chunk(text)
         
         try:
             parts = re.split(pattern, text)
         except re.error:
-            # Invalid regex, fallback
-            return ParagraphChunker(self.config).chunk(text)
+            return RecursiveChunker(self.config).chunk(text)
         
         chunks = []
+        recursive_chunker = RecursiveChunker(self.config)
+        
         for i, part in enumerate(parts):
             part = part.strip()
             if not part:
@@ -558,63 +562,44 @@ class RegexChunker(BaseChunker):
             if len(part) <= self.config.chunk_size:
                 chunks.append(self._create_chunk(part, len(chunks)))
             else:
-                sub_chunks = self._split_with_overlap(
-                    part,
-                    self.config.chunk_size,
-                    self.config.chunk_overlap
-                )
+                sub_chunks = recursive_chunker.chunk(part)
                 for sub in sub_chunks:
-                    chunks.append(self._create_chunk(sub, len(chunks)))
+                    sub.index = len(chunks)
+                    chunks.append(sub)
         
         return chunks
 
 
 class SeparatorChunker(BaseChunker):
-    """Split by custom separators"""
+    """Split by custom separators with recursive fallback"""
     
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
         
         separators = self.config.separators or ["\n\n", "\n", " "]
-        
         # Use primary separator first
         sep = self.config.primary_separator or separators[0]
-        parts = text.split(sep)
+        try:
+            parts = text.split(sep)
+        except Exception:
+            return RecursiveChunker(self.config).chunk(text)
         
         chunks = []
-        current = ""
+        recursive_chunker = RecursiveChunker(self.config)
         
         for part in parts:
             part = part.strip()
             if not part:
                 continue
-            
-            if len(current) + len(part) + len(sep) <= self.config.chunk_size:
-                current = f"{current}{sep}{part}" if current else part
-            else:
-                if current:
-                    chunks.append(self._create_chunk(current, len(chunks)))
                 
-                if len(part) > self.config.chunk_size:
-                    # Try next separator level
-                    sub_config = ChunkingConfig(
-                        chunk_size=self.config.chunk_size,
-                        chunk_overlap=self.config.chunk_overlap,
-                        separators=separators[1:] if len(separators) > 1 else [],
-                        primary_separator=separators[1] if len(separators) > 1 else " "
-                    )
-                    sub_chunker = SeparatorChunker(sub_config) if separators[1:] else FixedSizeChunker(sub_config)
-                    sub_chunks = sub_chunker.chunk(part)
-                    for sub in sub_chunks:
-                        sub.index = len(chunks)
-                        chunks.append(sub)
-                    current = ""
-                else:
-                    current = part
-        
-        if current:
-            chunks.append(self._create_chunk(current, len(chunks)))
+            if len(part) <= self.config.chunk_size:
+                chunks.append(self._create_chunk(part, len(chunks)))
+            else:
+                 sub_chunks = recursive_chunker.chunk(part)
+                 for sub in sub_chunks:
+                    sub.index = len(chunks)
+                    chunks.append(sub)
         
         return chunks
 
@@ -625,12 +610,9 @@ class RecursiveChunker(BaseChunker):
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
-        
-        return self._recursive_split(
-            text,
-            self.config.separators or ["\n\n", "\n", "。", ".", " ", ""],
-            0
-        )
+            
+        separators = self.config.separators or ["\n\n", "\n", "。", ".", " ", ""]
+        return self._recursive_split(text, separators, 0)
     
     def _recursive_split(
         self, 
@@ -642,11 +624,12 @@ class RecursiveChunker(BaseChunker):
         if not text.strip():
             return []
         
+        # Base case: text fits in chunk size
         if len(text) <= self.config.chunk_size:
             return [self._create_chunk(text, 0)]
         
+        # No more separators: fall back to fixed size split
         if not separators:
-            # No more separators, force split
             return [
                 self._create_chunk(t, i) 
                 for i, t in enumerate(self._split_with_overlap(
@@ -659,8 +642,8 @@ class RecursiveChunker(BaseChunker):
         sep = separators[0]
         remaining_seps = separators[1:]
         
+        # Special case for empty separator (char split)
         if sep == "":
-            # Character-level split
             return [
                 self._create_chunk(t, i)
                 for i, t in enumerate(self._split_with_overlap(
@@ -669,38 +652,55 @@ class RecursiveChunker(BaseChunker):
                     self.config.chunk_overlap
                 ))
             ]
-        
+            
+        # Try splitting with current separator
         parts = text.split(sep)
         
+        # Include separator in chunks if desired, but for now simple split
+        # We need to re-assemble parts into chunks < size
+        
         chunks = []
-        current = ""
+        current_chunk_parts = []
+        current_len = 0
         
         for part in parts:
-            test_chunk = f"{current}{sep}{part}" if current else part
+            part_len = len(part)
+            sep_len = len(sep)
             
-            if len(test_chunk) <= self.config.chunk_size:
-                current = test_chunk
-            else:
-                if current:
-                    chunks.append(self._create_chunk(current, len(chunks)))
+            # If single part is too big, it needs to be processed recursively
+            if part_len > self.config.chunk_size:
+                # First, flush current buffer if any
+                if current_chunk_parts:
+                    completed_text = sep.join(current_chunk_parts)
+                    chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    current_chunk_parts = []
+                    current_len = 0
                 
-                if len(part) > self.config.chunk_size:
-                    # Recursively split with next separator
-                    sub_chunks = self._recursive_split(part, remaining_seps, depth + 1)
-                    for sub in sub_chunks:
-                        sub.index = len(chunks)
-                        chunks.append(sub)
-                    current = ""
+                # Recursively split this large part
+                sub_chunks = self._recursive_split(part, remaining_seps, depth + 1)
+                for sub in sub_chunks:
+                    sub.index = len(chunks)
+                    chunks.append(sub)
+                    
+            else:
+                # If adding this part exceeds size, flush buffer
+                if current_len + sep_len + part_len > self.config.chunk_size:
+                    if current_chunk_parts:
+                        completed_text = sep.join(current_chunk_parts)
+                        chunks.append(self._create_chunk(completed_text, len(chunks)))
+                    current_chunk_parts = [part]
+                    current_len = part_len
                 else:
-                    current = part
-        
-        if current:
-            chunks.append(self._create_chunk(current, len(chunks)))
-        
-        # Re-index all chunks
-        for i, chunk in enumerate(chunks):
-            chunk.index = i
-        
+                    if current_chunk_parts:
+                        current_len += sep_len
+                    current_chunk_parts.append(part)
+                    current_len += part_len
+                    
+        # Flush final buffer
+        if current_chunk_parts:
+            completed_text = sep.join(current_chunk_parts)
+            chunks.append(self._create_chunk(completed_text, len(chunks)))
+            
         return chunks
 
 
@@ -711,7 +711,7 @@ class HierarchicalChunker(BaseChunker):
         if not text:
             return []
         
-        # First create parent chunks
+        # First create parent chunks using Recursive (more stable than Paragraph)
         parent_config = ChunkingConfig(
             chunk_size=self.config.parent_chunk_size,
             chunk_overlap=self.config.parent_overlap,
@@ -722,35 +722,33 @@ class HierarchicalChunker(BaseChunker):
             parents = [self._create_chunk(text, 0)]
         elif self.config.parent_mode == "section":
             parents = HeadingChunker(parent_config).chunk(text)
-        else:  # paragraph (default)
-            parents = ParagraphChunker(parent_config).chunk(text)
+        else:
+            parents = RecursiveChunker(parent_config).chunk(text)
         
         # Create child chunks for each parent
+        all_chunks = []
+        
+        # Child config
         child_config = ChunkingConfig(
             chunk_size=self.config.child_chunk_size,
             chunk_overlap=int(self.config.child_chunk_size * 0.1),
+            separators=self.config.separators,
         )
-        
-        all_chunks = []
+        child_chunker = RecursiveChunker(child_config)
         
         for parent in parents:
             parent.metadata["is_parent"] = True
             all_chunks.append(parent)
             
-            # Create children
-            child_texts = self._split_with_overlap(
-                parent.text,
-                self.config.child_chunk_size,
-                int(self.config.child_chunk_size * 0.1)
-            )
+            # Create children using recursive splitter on parent text
+            children = child_chunker.chunk(parent.text)
             
-            for j, child_text in enumerate(child_texts):
-                child = self._create_chunk(
-                    child_text,
-                    len(all_chunks),
-                    {"is_child": True, "parent_index": parent.index},
-                    parent_id=parent.hash_id
-                )
+            for child in children:
+                child.index = len(all_chunks)
+                child.metadata["is_child"] = True
+                child.metadata["parent_index"] = parent.index
+                child.parent_id = parent.hash_id
+                
                 parent.children.append(child)
                 all_chunks.append(child)
         
@@ -758,27 +756,21 @@ class HierarchicalChunker(BaseChunker):
 
 
 class AutomaticChunker(BaseChunker):
-    """Automatically detect and use best chunking strategy"""
+    """Automatically detect and use best chunking strategy with strict fallbacks"""
     
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
         
-        # Analyze text characteristics
+        # 1. Try Structure-Aware (Heading) first if Markdown/Headings detected
         has_headings = bool(re.search(r'^#{1,6}\s+|^第[一二三四五六七八九十\d]+[章节]', text, re.MULTILINE))
-        has_pages = '\f' in text or bool(re.search(r'---\s*Page\s*\d+', text))
-        paragraph_count = len(re.split(r'\n\s*\n', text))
-        avg_para_length = len(text) / max(paragraph_count, 1)
-        
-        # Choose strategy based on document characteristics
-        if has_pages:
-            return PageChunker(self.config).chunk(text)
-        elif has_headings:
+        if has_headings:
+            # HeadingChunker now has Recursive fallback for content
             return HeadingChunker(self.config).chunk(text)
-        elif avg_para_length < self.config.chunk_size * 0.8:
-            return ParagraphChunker(self.config).chunk(text)
-        else:
-            return RecursiveChunker(self.config).chunk(text)
+            
+        # 2. Try Recursive (General purpose high quality)
+        # This handles paragraphs/sentences automatically
+        return RecursiveChunker(self.config).chunk(text)
 
 
 def create_chunker(config: ChunkingConfig) -> BaseChunker:
@@ -793,7 +785,7 @@ def create_chunker(config: ChunkingConfig) -> BaseChunker:
         ChunkingMode.SEPARATOR: SeparatorChunker,
         ChunkingMode.RECURSIVE: RecursiveChunker,
         ChunkingMode.HIERARCHICAL: HierarchicalChunker,
-        ChunkingMode.QA: ParagraphChunker,  # QA mode uses paragraph for now
+        ChunkingMode.QA: ParagraphChunker,
     }
     
     chunker_cls = chunker_map.get(config.mode, RecursiveChunker)

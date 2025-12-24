@@ -139,6 +139,56 @@ class KnowledgeService:
                 visible.append(ds)
         return visible
 
+
+    async def preview_chunking(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        text: str,
+        config: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        # Verify dataset access (viewer is enough for preview, though ideally check if member)
+        if dataset_id != "temp_preview":
+            await self.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Parse config or use dataset default
+        chunking_config: ChunkingConfig
+        if config:
+            chunking_config = ChunkingConfig.from_dict(config)
+        else:
+            if dataset_id == "temp_preview":
+                 chunking_config = ChunkingConfig() # Default config
+            else:
+                # Fallback to dataset default if no config provided
+                dataset = await self._get_dataset_or_404(dataset_id)
+                index_config = _ensure_dict(dataset.get("index_config"))
+                chunking_config = ChunkingConfig.from_dict(index_config.get("chunking", {}))
+
+        # Process text
+        # Use a dummy document_id for preview
+        doc_id = f"preview_{uuid.uuid4().hex[:8]}"
+        
+        # We need to run this in a thread pool as it might be CPU intensive
+        chunks = await asyncio.to_thread(
+            process_document, 
+            text, 
+            chunking_config, 
+            doc_id
+        )
+        
+        # Flatten and format
+        flat_chunks = flatten_chunks(chunks)
+        
+        return [
+            {
+                "content": c.text,
+                "token_count": c.token_count,
+                "char_count": c.char_count,
+                "metadata": c.metadata
+            }
+            for c in flat_chunks
+        ]
+
     async def create_dataset(self, user: UserContext, data: Dict[str, Any]) -> Dict[str, Any]:
         _require_not_guest(user)
 
@@ -1416,6 +1466,13 @@ class KnowledgeService:
         # Final sort by _final_score to ensure correct ordering
         final_sorted = sorted(final[:top_k] if final else [], key=lambda c: float(c.get("_final_score") or 0.0), reverse=True)
         
+        # Apply score threshold to final results
+        if effective_score_threshold > 0.0:
+            original_count = len(final_sorted)
+            final_sorted = [c for c in final_sorted if float(c.get("_final_score") or 0.0) >= effective_score_threshold]
+            if len(final_sorted) < original_count:
+                meta["pipeline_stages"].append(f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results")
+        
         results: List[RetrieveResult] = []
         for rank, c in enumerate(final_sorted, 1):
             seg_id = str(c.get("segment_id") or "")
@@ -1609,30 +1666,41 @@ class KnowledgeService:
         falls back to pypdf for basic text extraction.
         """
         from io import BytesIO
+        import traceback
+        import logging
+        logger = logging.getLogger(__name__)
         
         # Try pdfplumber first (better table extraction)
         try:
+            # Explicit import check
+            import pdfplumber
             text = self._extract_pdf_with_pdfplumber(BytesIO(content))
             return self._clean_pdf_content(self._sanitize_text_for_db(normalize_text(text)))
-        except ImportError:
-            pass
-        except Exception:
+        except ImportError as e:
+            logger.warning(f"pdfplumber import failed: {e}")
+        except Exception as e:
+            logger.warning(f"pdfplumber extraction failed: {e}")
+            traceback.print_exc()
             # Fall back to pypdf if pdfplumber fails
-            pass
         
         # Fallback to pypdf
         try:
             from pypdf import PdfReader  # type: ignore
-        except Exception as exc:
+        except ImportError as exc:
+            logger.error(f"pypdf import failed: {exc}")
             raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf) or pdfplumber") from exc
+        except Exception as exc:
+             logger.error(f"pypdf import/init failed: {exc}")
+             raise ValidationFailedError(f"PDF parsing error: {exc}") from exc
 
         try:
             reader = PdfReader(BytesIO(content))
             parts: List[str] = []
-            for page in reader.pages:
+            for i, page in enumerate(reader.pages):
                 try:
                     t = page.extract_text() or ""
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to extract text from page {i}: {e}")
                     t = ""
                 if t:
                     parts.append(t)
@@ -1640,6 +1708,8 @@ class KnowledgeService:
             text = self._sanitize_text_for_db(normalize_text(text))
             return self._clean_pdf_content(text)
         except Exception as exc:
+            logger.error(f"pypdf parsing failed: {exc}")
+            traceback.print_exc()
             raise ValidationFailedError(f"Failed to parse PDF: {exc}") from exc
     
     def _extract_pdf_with_pdfplumber(self, pdf_stream) -> str:

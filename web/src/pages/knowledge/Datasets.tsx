@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { useDatasets } from "@/hooks/useKnowledge";
+import { deleteDataset } from "@/api/knowledge";
 import type { Dataset } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
@@ -28,15 +29,28 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Edit3, Trash2 } from "lucide-react";
+
 // 知识库卡片组件 - 阿里云风格
-function DatasetCard({ 
-  dataset, 
-  onViewDetail, 
-  onHitTest 
-}: { 
-  dataset: Dataset; 
+function DatasetCard({
+  dataset,
+  onViewDetail,
+  onHitTest,
+  onEdit,
+  onDelete
+}: {
+  dataset: Dataset;
   onViewDetail: () => void;
   onHitTest: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -127,13 +141,33 @@ function DatasetCard({
           >
             命中测试
           </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-9 w-9 border-gray-300"
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 border-gray-300"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-[120px]">
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onEdit(); }}>
+                <Edit3 className="mr-2 h-3.5 w-3.5 text-gray-500" />
+                编辑
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="text-red-600 focus:text-red-700 focus:bg-red-50"
+              >
+                <Trash2 className="mr-2 h-3.5 w-3.5" />
+                删除
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       )}
     </div>
@@ -149,9 +183,9 @@ export function KnowledgeDatasetsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [visibilityFilter, setVisibilityFilter] = useState<string>("all");
   const [typeFilter, setTypeFilter] = useState<string>("all");
-  
+
   const filteredDatasets = datasets.filter((d) => {
-    const matchesSearch = 
+    const matchesSearch =
       d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       d.dataset_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (d.description || "").toLowerCase().includes(searchQuery.toLowerCase());
@@ -181,7 +215,7 @@ export function KnowledgeDatasetsPage() {
                   {datasets.length}
                 </Badge>
               </div>
-              
+
               {/* 类型Tab */}
               <div className="flex items-center bg-gray-100 rounded-lg p-1">
                 {typeTabs.map((tab) => (
@@ -202,7 +236,7 @@ export function KnowledgeDatasetsPage() {
                 ))}
               </div>
             </div>
-            
+
             {/* 右侧：操作按钮 */}
             <div className="flex items-center gap-3">
               <Button
@@ -239,7 +273,7 @@ export function KnowledgeDatasetsPage() {
               className="pl-10 bg-white border-gray-300 h-10"
             />
           </div>
-          
+
           <div className="flex items-center gap-3">
             <Select value={visibilityFilter} onValueChange={setVisibilityFilter}>
               <SelectTrigger className="w-36 bg-white h-10">
@@ -263,6 +297,17 @@ export function KnowledgeDatasetsPage() {
               dataset={dataset}
               onViewDetail={() => nav(`/knowledge/${dataset.dataset_id}`)}
               onHitTest={() => nav(`/knowledge/${dataset.dataset_id}?tab=retrieval`)}
+              onEdit={() => nav(`/knowledge/${dataset.dataset_id}?tab=settings`)}
+              onDelete={async () => {
+                if (confirm(`确认删除知识库 "${dataset.name}" 吗？此操作不可恢复。`)) {
+                  try {
+                    await deleteDataset(dataset.dataset_id);
+                    await qc.invalidateQueries({ queryKey: ["kb-datasets"] });
+                  } catch (e) {
+                    alert("删除失败: " + (e instanceof Error ? e.message : String(e)));
+                  }
+                }
+              }}
             />
           ))}
         </div>
