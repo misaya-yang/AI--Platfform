@@ -6,6 +6,30 @@ AI Service Gateway 应用入口
 
 from __future__ import annotations
 
+# Load environment variables from .env file FIRST
+import os
+from pathlib import Path
+
+# Try to load .env file if it exists
+env_file = Path(__file__).parent.parent / ".env"
+if env_file.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_file)
+    except ImportError:
+        # Manual loading if python-dotenv not installed
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    # Remove quotes if present
+                    if value and value[0] in ('"', "'") and value[-1] == value[0]:
+                        value = value[1:-1]
+                    os.environ.setdefault(key, value)
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse

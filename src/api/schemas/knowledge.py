@@ -144,10 +144,20 @@ class RetrieveRequestSchema(BaseModel):
 
     query: str
     top_k: int = 5
-    mode: str = "hybrid"  # keyword|hybrid|vector
+    mode: str = "hybrid"  # dense|bm25|hybrid (also accepts: keyword|vector for backwards compat)
     document_id: Optional[str] = None
-    # Used when fusion=alpha; leave unset to use dataset defaults.
+    
+    # Fusion weights for hybrid mode (0-1, sum to 1)
+    dense_weight: Optional[float] = None   # Weight for dense (vector) scores
+    bm25_weight: Optional[float] = None    # Weight for BM25 (keyword) scores
+    fusion_method: Optional[str] = None    # "weighted" or "rrf"
+    
+    # Legacy alpha parameter (converted to weights: alpha = dense_weight)
     alpha: Optional[float] = None
+    
+    # Score threshold to filter out low-relevance results (0.0 - 1.0)
+    # Default 0.0 means no filtering. Recommended: 0.3-0.5 for keyword, 0.5-0.7 for vector
+    score_threshold: Optional[float] = None
 
     # Advanced retrieval options (request-level overrides; dataset defaults in index_config.retrieval)
     vector_top_k: Optional[int] = None
@@ -155,9 +165,9 @@ class RetrieveRequestSchema(BaseModel):
     candidate_top_k: Optional[int] = None
     keyword_candidate_k: Optional[int] = None
 
-    fusion: Optional[str] = None  # rrf|alpha (hybrid only)
+    fusion: Optional[str] = None  # Legacy: rrf|alpha (hybrid only)
     rrf_k: Optional[int] = None
-    rrf_weights: Dict[str, float] = Field(default_factory=dict)
+    rrf_weights: Dict[str, float] = Field(default_factory=dict)  # Legacy
 
     rerank: Optional[bool] = None
     rerank_model: Optional[str] = None
@@ -280,3 +290,147 @@ class BatchOperationResultSchema(BaseModel):
     failed_count: int = 0
     failed_ids: List[str] = Field(default_factory=list)
     errors: Dict[str, str] = Field(default_factory=dict)
+
+
+# ============================================================
+# QA Testing Schemas
+# ============================================================
+
+class LLMConfigSchema(BaseModel):
+    """LLM configuration for QA testing"""
+    model_config = ConfigDict(extra="allow")
+    
+    provider: str = "deepseek"  # deepseek | openai | dashscope
+    model: str = "deepseek-chat"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: float = 0.1
+    max_tokens: int = 2048
+
+
+class QAQuerySchema(BaseModel):
+    """Request schema for QA query"""
+    model_config = ConfigDict(extra="allow")
+    
+    query: str
+    top_k: int = 5
+    mode: str = "hybrid"
+    document_id: Optional[str] = None
+    rerank: bool = False
+    mmr: bool = False
+    
+    # LLM config override
+    llm_config: Optional[LLMConfigSchema] = None
+    
+    # Include raw retrieval results
+    include_raw_results: bool = False
+
+
+class QAResultSchema(BaseModel):
+    """Response schema for QA query"""
+    query: str
+    answer: str
+    context_segments: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieval_metadata: Dict[str, Any] = Field(default_factory=dict)
+    timing: Dict[str, int] = Field(default_factory=dict)
+    model: str
+    tokens_used: Optional[int] = None
+
+
+class QATestCaseSchema(BaseModel):
+    """Test case for QA evaluation"""
+    model_config = ConfigDict(extra="allow")
+    
+    query: str
+    expected_answer: Optional[str] = None
+    expected_segments: Optional[List[str]] = None  # segment_ids
+
+
+class QABatchTestSchema(BaseModel):
+    """Batch QA test request"""
+    model_config = ConfigDict(extra="allow")
+    
+    test_cases: List[QATestCaseSchema]
+    top_k: int = 5
+    mode: str = "hybrid"
+    rerank: bool = False
+    mmr: bool = False
+    
+    # LLM config
+    llm_config: Optional[LLMConfigSchema] = None
+
+
+class QATestResultSchema(BaseModel):
+    """Single test result"""
+    test_case: QATestCaseSchema
+    result: QAResultSchema
+    answer_correct: Optional[bool] = None
+    retrieval_recall: Optional[float] = None
+    retrieval_precision: Optional[float] = None
+
+
+class QABatchTestResultSchema(BaseModel):
+    """Batch test results"""
+    results: List[QATestResultSchema] = Field(default_factory=list)
+    summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ============================================================
+# Chunking Configuration Schemas
+# ============================================================
+
+class ChunkingConfigSchema(BaseModel):
+    """Chunking configuration schema"""
+    model_config = ConfigDict(extra="allow")
+    
+    mode: str = "automatic"  # automatic | custom | hierarchical
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+    separator: str = "\n"
+    
+    # Hierarchical mode
+    parent_mode: Optional[str] = None  # paragraph | full_doc | section
+    child_chunk_size: Optional[int] = None
+    
+    # Pre-processing
+    remove_extra_spaces: bool = True
+    remove_urls_emails: bool = False
+
+
+class RetrievalConfigSchema(BaseModel):
+    """Retrieval pipeline configuration schema"""
+    model_config = ConfigDict(extra="allow")
+    
+    mode: str = "hybrid"  # vector | keyword | hybrid
+    top_k: int = 5
+    score_threshold: Optional[float] = None
+    
+    # Vector search
+    vector_enabled: bool = True
+    vector_top_k: int = 20
+    
+    # Keyword search
+    keyword_enabled: bool = True
+    keyword_top_k: int = 20
+    
+    # Fusion
+    fusion_strategy: str = "rrf"  # rrf | weighted
+    rrf_k: int = 60
+    alpha: float = 0.75
+    
+    # Rerank
+    rerank_enabled: bool = False
+    rerank_model: str = "gte-rerank"
+    rerank_top_n: Optional[int] = None
+    
+    # MMR
+    mmr_enabled: bool = False
+    mmr_lambda: float = 0.5
+
+
+class DatasetConfigUpdateSchema(BaseModel):
+    """Update dataset configuration (chunking + retrieval)"""
+    model_config = ConfigDict(extra="allow")
+    
+    chunking_config: Optional[ChunkingConfigSchema] = None
+    retrieval_config: Optional[RetrievalConfigSchema] = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import asyncio
 import uuid
 import tempfile
@@ -15,8 +16,9 @@ from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...persistence.database import DatabaseStorage
+from .chunking import ChunkingConfig, process_document, flatten_chunks
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding
-from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize
+from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
 from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
 
@@ -388,8 +390,10 @@ class KnowledgeService:
 
         max_bytes = 10 * 1024 * 1024  # 10MB safety limit
         headers = {
-            "User-Agent": "AI-Gateway-KBMS/1.0 (+https://github.com)",
-            "Accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+            "Accept-Encoding": "gzip, deflate",
         }
 
         content_type: Optional[str] = None
@@ -589,7 +593,28 @@ class KnowledgeService:
                 return
 
             await self.db.update_document_status(document_id, status="segmenting", progress=25)
-            chunks = split_into_segments(text)
+            
+            # Get chunking configuration from dataset's index_config
+            index_config = _ensure_dict(dataset.get("index_config"))
+            chunking_config_dict = _ensure_dict(index_config.get("chunking"))
+            
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Chunking config for document {document_id}: {chunking_config_dict}")
+            
+            chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
+            logger.info(f"Parsed chunking config: mode={chunking_config.mode.value}, chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}")
+            
+            # Use the new configurable chunking module
+            chunk_objects = process_document(text, chunking_config, document_id)
+            logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
+            
+            # Flatten hierarchical chunks if needed
+            flat_chunks = flatten_chunks(chunk_objects)
+            
+            # Convert to the format expected by the rest of the pipeline
+            chunks = [(c.text, c.token_count) for c in flat_chunks]
+            
             if not chunks:
                 await self.db.update_document_status(
                     document_id, status="failed", progress=100, error="no segments generated"
@@ -657,17 +682,31 @@ class KnowledgeService:
             try:
                 from qdrant_client.http import models as qmodels  # type: ignore
 
-                batch_size = 32
+                # Use smaller batch size for DashScope compatibility (max 10 per API call)
+                batch_size = 8
                 total = len(chunks)
                 embedded = 0
+                
+                import logging
+                logger = logging.getLogger(__name__)
 
                 for i in range(0, total, batch_size):
                     batch = chunks[i : i + batch_size]
                     texts = [t for t, _ in batch]
-                    vectors = await asyncio.wait_for(
-                        embedder.embed_documents(texts),
-                        timeout=float(econf.timeout_seconds) + 10.0,
-                    )
+                    
+                    try:
+                        vectors = await asyncio.wait_for(
+                            embedder.embed_documents(texts),
+                            timeout=float(econf.timeout_seconds) + 30.0,
+                        )
+                    except Exception as embed_err:
+                        # Log detailed error for debugging
+                        text_lengths = [len(t) for t in texts]
+                        logger.error(
+                            f"Embedding failed for batch {i // batch_size + 1}: {embed_err}. "
+                            f"Text lengths: {text_lengths}, Provider: {embedding_provider}, Model: {embedding_model}"
+                        )
+                        raise
 
                     for j, (chunk_text, token_count) in enumerate(batch):
                         pos = i + j
@@ -744,16 +783,22 @@ class KnowledgeService:
         dataset_id: str,
         query: str,
         top_k: int = 5,
-        mode: str = "hybrid",
+        mode: str = "hybrid",  # "dense" | "bm25" | "hybrid"
         document_id: Optional[str] = None,
+        # Fusion parameters
+        dense_weight: Optional[float] = None,  # [0, 1] weight for dense scores
+        bm25_weight: Optional[float] = None,   # [0, 1] weight for BM25 scores
+        fusion_method: Optional[str] = None,   # "weighted" | "rrf"
+        rrf_k: Optional[int] = None,           # RRF constant
+        # Legacy alpha parameter (converted to weights)
         alpha: Optional[float] = None,
+        score_threshold: Optional[float] = None,  # Filter results below this score
         vector_top_k: Optional[int] = None,
         keyword_top_k: Optional[int] = None,
         candidate_top_k: Optional[int] = None,
         keyword_candidate_k: Optional[int] = None,
-        fusion: Optional[str] = None,  # rrf | alpha
-        rrf_k: Optional[int] = None,
-        rrf_weights: Optional[Dict[str, float]] = None,
+        fusion: Optional[str] = None,  # Legacy: rrf | alpha
+        rrf_weights: Optional[Dict[str, float]] = None,  # Legacy
         rerank: Optional[bool] = None,
         rerank_model: Optional[str] = None,
         rerank_top_n: Optional[int] = None,
@@ -772,28 +817,59 @@ class KnowledgeService:
         index_config = _ensure_dict(dataset.get("index_config"))
         retrieval_defaults = _ensure_dict(index_config.get("retrieval"))
 
+        # Mode: dense, bm25, or hybrid
         effective_mode = str(mode or retrieval_defaults.get("mode") or "hybrid").lower()
-        if effective_mode not in {"keyword", "vector", "hybrid"}:
-            raise ValidationFailedError("mode must be keyword|vector|hybrid")
+        # Normalize mode names
+        if effective_mode in ("keyword", "bm25"):
+            effective_mode = "bm25"
+        elif effective_mode in ("vector", "dense"):
+            effective_mode = "dense"
+        elif effective_mode == "hybrid":
+            effective_mode = "hybrid"
+        else:
+            raise ValidationFailedError("mode must be dense|bm25|hybrid")
 
-        # Fusion defaults (hybrid only).
-        effective_fusion = str(
-            (fusion if fusion is not None else retrieval_defaults.get("fusion"))
-            or ("rrf" if effective_mode == "hybrid" else "")
+        # Fusion method and weights
+        effective_fusion_method = str(
+            (fusion_method if fusion_method is not None else 
+             fusion if fusion is not None else 
+             retrieval_defaults.get("fusion_method") or retrieval_defaults.get("fusion"))
+            or "weighted"
         ).lower()
-        if effective_mode == "hybrid" and effective_fusion not in {"rrf", "alpha"}:
-            raise ValidationFailedError("fusion must be rrf|alpha")
+        if effective_fusion_method == "alpha":
+            effective_fusion_method = "weighted"  # Normalize
+        if effective_fusion_method not in {"weighted", "rrf"}:
+            effective_fusion_method = "weighted"
+        
+        # Weights (default 0.5/0.5 for balanced hybrid)
+        # Support legacy 'alpha' parameter (alpha = dense_weight)
+        if alpha is not None:
+            effective_dense_weight = float(alpha)
+            effective_bm25_weight = 1.0 - float(alpha)
+        else:
+            effective_dense_weight = float(
+                dense_weight if dense_weight is not None
+                else retrieval_defaults.get("dense_weight", 0.5)
+            )
+            effective_bm25_weight = float(
+                bm25_weight if bm25_weight is not None
+                else retrieval_defaults.get("bm25_weight", 0.5)
+            )
+        # Legacy rrf_weights support
+        if rrf_weights and isinstance(rrf_weights, dict):
+            effective_dense_weight = float(rrf_weights.get("vector", effective_dense_weight))
+            effective_bm25_weight = float(rrf_weights.get("keyword", effective_bm25_weight))
 
         top_k = max(int(top_k), 1)
         vector_k = int(
             vector_top_k
             if vector_top_k is not None
-            else retrieval_defaults.get("vector_top_k") or max(top_k * 4, top_k)
+            else retrieval_defaults.get("vector_top_k") or max(top_k * 4, 20)
         )
         keyword_k = int(
             keyword_top_k
             if keyword_top_k is not None
-            else retrieval_defaults.get("keyword_top_k") or max(top_k * 4, top_k)
+            else retrieval_defaults.get("keyword_top_k") or max(top_k * 4, 20)
         )
         candidate_k = int(
             candidate_top_k
@@ -816,11 +892,6 @@ class KnowledgeService:
         rrf_k_value = int(
             rrf_k if rrf_k is not None else retrieval_defaults.get("rrf_k") or 60
         )
-        rrf_weights_value: Dict[str, float] = {}
-        if isinstance(retrieval_defaults.get("rrf_weights"), dict):
-            rrf_weights_value.update(retrieval_defaults.get("rrf_weights") or {})
-        if isinstance(rrf_weights, dict):
-            rrf_weights_value.update(rrf_weights)
 
         # Rerank params (bool or dict in index_config)
         rerank_cfg = retrieval_defaults.get("rerank")
@@ -854,14 +925,23 @@ class KnowledgeService:
             effective_mmr_lambda = float(mmr_lambda if mmr_lambda is not None else 0.5)
             effective_mmr_threshold = float(mmr_threshold) if mmr_threshold is not None else None
 
+        # Score threshold - filter out low-relevance results
+        # NOTE: This threshold only applies to vector retrieval, not BM25
+        effective_score_threshold = float(
+            score_threshold if score_threshold is not None 
+            else retrieval_defaults.get("score_threshold") or 0.0
+        )
+        # Ensure threshold is within valid range (0 = no filtering)
+        effective_score_threshold = max(0.0, min(1.0, effective_score_threshold))
+
         embedding_provider = str(dataset.get("embedding_provider") or "local")
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
         dim = int(dataset.get("embedding_dimension") or 0) or None
         collection = str(dataset.get("collection_name") or "")
 
-        # Decide if we need query embedding (vector/hybrid, or MMR without rerank).
-        need_query_vector = effective_mode in {"vector", "hybrid"} or (mmr_enabled and not rerank_enabled)
+        # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
+        need_query_vector = effective_mode in {"dense", "hybrid"} or (mmr_enabled and not rerank_enabled)
 
         qvec: Optional[List[float]] = None
         if need_query_vector:
@@ -882,28 +962,59 @@ class KnowledgeService:
                 if embedder:
                     await embedder.close()
 
-        # --- Vector retrieval ---
-        vector_hits = []
-        if effective_mode in {"vector", "hybrid"}:
+        # --- Dense (Vector) retrieval ---
+        dense_hits = []
+        dense_hits_raw_count = 0
+        if effective_mode in {"dense", "hybrid"}:
             if not qvec:
-                raise ValidationFailedError("vector retrieval requires query embedding")
+                raise ValidationFailedError("dense retrieval requires query embedding")
             if not collection:
                 raise ValidationFailedError("dataset collection_name is missing")
-            vector_hits = await self.vector_store.search(
-                collection_name=collection,
-                query_vector=qvec,
-                top_k=vector_k,
-                document_id=document_id,
-                with_payload=True,
-            )
+            try:
+                raw_dense_hits = await self.vector_store.search(
+                    collection_name=collection,
+                    query_vector=qvec,
+                    top_k=vector_k,
+                    document_id=document_id,
+                    with_payload=True,
+                )
+                dense_hits_raw_count = len(raw_dense_hits)
+                
+                # Filter by score threshold if set, and filter out empty text results
+                for h in raw_dense_hits:
+                    payload = dict(h.payload or {})
+                    text = str(payload.get("text") or "").strip()
+                    
+                    # Skip results without text content
+                    if not text:
+                        continue
+                    
+                    # Apply score threshold for vector results
+                    if effective_score_threshold > 0.0 and h.score < effective_score_threshold:
+                        continue
+                    
+                    dense_hits.append(h)
+                    
+            except Exception as vec_err:
+                # Log but continue to keyword search if available
+                import logging
+                logging.getLogger(__name__).warning(f"Dense search failed: {vec_err}")
+                if effective_mode == "dense":
+                    raise ValidationFailedError(f"Dense search failed: {vec_err}")
 
-        # --- Keyword retrieval (BM25 on DB candidates) ---
-        keyword_hits: List[Dict[str, Any]] = []
-        if effective_mode in {"keyword", "hybrid"}:
+        # --- BM25 (Keyword) retrieval ---
+        bm25_hits: List[Dict[str, Any]] = []
+        bm25_hits_raw_count = 0
+        if effective_mode in {"bm25", "hybrid"}:
             query_tokens = tokenize(q)
+            # Use original query as a term if tokenization didn't produce anything useful
             terms = list(dict.fromkeys(query_tokens))[:12]
             if not terms:
-                terms = [q]
+                terms = [q.strip()]
+            
+            # Also add original query (lowercased) to help with short words
+            if q.strip().lower() not in [t.lower() for t in terms]:
+                terms.append(q.strip().lower())
 
             rows = await self.db.search_segments_like_any(
                 dataset_id=dataset_id,
@@ -911,31 +1022,45 @@ class KnowledgeService:
                 document_id=document_id,
                 limit=keyword_pool_k,
             )
+            bm25_hits_raw_count = len(rows)
 
-            doc_tokens = [tokenize(str(r.get("text") or "")) for r in rows]
+            # Filter out rows with empty text first
+            valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
+
+            doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
             scores = bm25_scores(query_tokens, doc_tokens)
 
-            for row, score in zip(rows, scores):
+            for row, score in zip(valid_rows, scores):
                 seg_id = str(row.get("segment_id") or "")
                 if not seg_id:
                     continue
-                keyword_hits.append(
+                    
+                text = str(row.get("text") or "").strip()
+                if not text:
+                    continue
+                
+                # For BM25 hits, we use raw BM25 score
+                # Only filter if score is 0 (no term matches)
+                if score <= 0.0:
+                    continue
+                    
+                bm25_hits.append(
                     {
                         "segment_id": seg_id,
                         "document_id": str(row.get("document_id") or ""),
-                        "text": str(row.get("text") or ""),
-                        "metadata": dict(row.get("metadata") or {}),
-                        "keyword_score": float(score),
+                        "text": text,
+                        "metadata": _ensure_dict(row.get("metadata")),
+                        "bm25_score": float(score),
                     }
                 )
 
-            keyword_hits.sort(key=lambda x: x.get("keyword_score", 0.0), reverse=True)
-            keyword_hits = keyword_hits[:keyword_k]
+            bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+            bm25_hits = bm25_hits[:keyword_k]
 
-        # --- Merge candidates ---
+        # --- Merge candidates with clear score tracking ---
         candidates: Dict[str, Dict[str, Any]] = {}
-        vector_ranked_ids: List[str] = []
-        keyword_ranked_ids: List[str] = []
+        dense_ranked_ids: List[str] = []
+        bm25_ranked_ids: List[str] = []
 
         def upsert_candidate(
             segment_id: str,
@@ -944,8 +1069,8 @@ class KnowledgeService:
             metadata: Dict[str, Any],
             *,
             source: str,
-            vector_score: Optional[float] = None,
-            keyword_score: Optional[float] = None,
+            dense_score: Optional[float] = None,
+            bm25_score: Optional[float] = None,
         ) -> None:
             seg_id = str(segment_id or "").strip()
             if not seg_id:
@@ -958,9 +1083,22 @@ class KnowledgeService:
                     "text": str(text or ""),
                     "metadata": dict(metadata or {}),
                     "_sources": set(),
-                    "_vector_score": None,
-                    "_keyword_score": None,
-                    "_score": 0.0,
+                    # Stage 1: Raw scores (None = N/A)
+                    "_dense_score": None,
+                    "_bm25_score": None,
+                    # Stage 2: Normalized scores
+                    "_dense_score_norm": None,
+                    "_bm25_score_norm": None,
+                    # Stage 3: Fusion score
+                    "_fusion_score": None,
+                    # Stage 4: MMR score
+                    "_mmr_score": None,
+                    "_mmr_relevance": None,
+                    "_mmr_max_sim": None,
+                    # Stage 5: Rerank score
+                    "_rerank_score": None,
+                    # Final score for display
+                    "_final_score": 0.0,
                 }
                 candidates[seg_id] = cand
             if document_id and not cand.get("document_id"):
@@ -968,19 +1106,19 @@ class KnowledgeService:
             if text and not cand.get("text"):
                 cand["text"] = str(text)
             if isinstance(metadata, dict) and metadata:
-                # Merge without clobbering existing keys.
-                merged = dict(cand.get("metadata") or {})
+                merged = _ensure_dict(cand.get("metadata"))
                 for k, v in metadata.items():
                     merged.setdefault(k, v)
                 cand["metadata"] = merged
 
             cand["_sources"].add(source)
-            if vector_score is not None:
-                cand["_vector_score"] = float(vector_score)
-            if keyword_score is not None:
-                cand["_keyword_score"] = float(keyword_score)
+            if dense_score is not None:
+                cand["_dense_score"] = float(dense_score)
+            if bm25_score is not None:
+                cand["_bm25_score"] = float(bm25_score)
 
-        for h in vector_hits:
+        # Add dense hits
+        for h in dense_hits:
             payload = dict(h.payload or {})
             seg_id = str(payload.get("segment_id") or h.point_id)
             doc_id = str(payload.get("document_id") or "")
@@ -990,54 +1128,107 @@ class KnowledgeService:
                 doc_id,
                 text,
                 payload,
-                source="vector",
-                vector_score=float(h.score),
+                source="dense",
+                dense_score=float(h.score),
             )
-            vector_ranked_ids.append(seg_id)
+            dense_ranked_ids.append(seg_id)
 
-        for h in keyword_hits:
+        # Add BM25 hits
+        for h in bm25_hits:
             seg_id = str(h.get("segment_id") or "")
             upsert_candidate(
                 seg_id,
                 str(h.get("document_id") or ""),
                 str(h.get("text") or ""),
                 dict(h.get("metadata") or {}),
-                source="keyword",
-                keyword_score=float(h.get("keyword_score") or 0.0),
+                source="bm25",
+                bm25_score=float(h.get("bm25_score") or 0.0),
             )
-            keyword_ranked_ids.append(seg_id)
+            bm25_ranked_ids.append(seg_id)
 
-        # --- Score candidates ---
-        if effective_mode == "vector":
-            for cid, cand in candidates.items():
-                cand["_score"] = float(cand.get("_vector_score") or 0.0)
-        elif effective_mode == "keyword":
-            for cid, cand in candidates.items():
-                cand["_score"] = float(cand.get("_keyword_score") or 0.0)
-        else:
-            # hybrid
-            if effective_fusion == "rrf":
-                fused = reciprocal_rank_fusion(
-                    {"vector": vector_ranked_ids, "keyword": keyword_ranked_ids},
-                    k=rrf_k_value,
-                    weights=rrf_weights_value or None,
-                )
-                for cid, cand in candidates.items():
-                    cand["_rrf_score"] = float(fused.get(cid, 0.0))
-                    cand["_score"] = float(fused.get(cid, 0.0))
+        # --- Stage 2: Normalize scores to [0, 1] ---
+        dense_scores = [float(c.get("_dense_score") or 0) for c in candidates.values() if c.get("_dense_score") is not None]
+        bm25_scores_list = [float(c.get("_bm25_score") or 0) for c in candidates.values() if c.get("_bm25_score") is not None]
+        
+        dense_max = max(dense_scores) if dense_scores else 1.0
+        dense_min = min(dense_scores) if dense_scores else 0.0
+        bm25_max = max(bm25_scores_list) if bm25_scores_list else 1.0
+        bm25_min = min(bm25_scores_list) if bm25_scores_list else 0.0
+        
+        for cid, cand in candidates.items():
+            # Normalize dense score
+            if cand.get("_dense_score") is not None:
+                if dense_max - dense_min > 1e-9:
+                    cand["_dense_score_norm"] = (cand["_dense_score"] - dense_min) / (dense_max - dense_min)
+                else:
+                    cand["_dense_score_norm"] = 1.0
+            
+            # Normalize BM25 score
+            if cand.get("_bm25_score") is not None:
+                if bm25_max - bm25_min > 1e-9:
+                    cand["_bm25_score_norm"] = (cand["_bm25_score"] - bm25_min) / (bm25_max - bm25_min)
+                else:
+                    cand["_bm25_score_norm"] = 1.0
+
+        # --- Compute text match info (for display only, not scoring) ---
+        for cid, cand in candidates.items():
+            text = str(cand.get("text") or "")
+            match_score, match_info = compute_text_match_score(q, text)
+            cand["_text_match_score"] = match_score
+            cand["_exact_match"] = match_info["exact_match"]
+            cand["_term_matches"] = match_info["term_matches"]
+            cand["_term_ratio"] = match_info.get("term_ratio", 0.0)
+        
+        # --- Stage 3: Fusion (combine dense and BM25 scores) ---
+        for cid, cand in candidates.items():
+            dense_norm = cand.get("_dense_score_norm")
+            bm25_norm = cand.get("_bm25_score_norm")
+            
+            if effective_mode == "dense":
+                # Dense only: use dense score
+                cand["_fusion_score"] = dense_norm if dense_norm is not None else 0.0
+                
+            elif effective_mode == "bm25":
+                # BM25 only: use BM25 score
+                cand["_fusion_score"] = bm25_norm if bm25_norm is not None else 0.0
+                
             else:
-                # alpha fusion with min/max normalization
-                alpha_val = alpha if alpha is not None else retrieval_defaults.get("alpha", 0.75)
-                alpha_val = max(0.0, min(1.0, float(alpha_val)))
-                v_max = max((float(c.get("_vector_score") or 0.0) for c in candidates.values()), default=0.0)
-                k_max = max((float(c.get("_keyword_score") or 0.0) for c in candidates.values()), default=0.0)
-                for cid, cand in candidates.items():
-                    v = float(cand.get("_vector_score") or 0.0) / (v_max or 1.0)
-                    kscore = float(cand.get("_keyword_score") or 0.0) / (k_max or 1.0)
-                    cand["_score"] = alpha_val * v + (1.0 - alpha_val) * kscore
-                    cand["_alpha_score"] = float(cand["_score"])
+                # Hybrid mode: fuse scores
+                if effective_fusion_method == "rrf":
+                    # RRF fusion
+                    fused = reciprocal_rank_fusion(
+                        {"dense": dense_ranked_ids, "bm25": bm25_ranked_ids},
+                        k=rrf_k_value,
+                        weights={"dense": effective_dense_weight, "bm25": effective_bm25_weight},
+                    )
+                    rrf_max = max(fused.values()) if fused else 1.0
+                    rrf_score = float(fused.get(cid, 0.0)) / (rrf_max or 1.0)
+                    cand["_rrf_score"] = rrf_score
+                    cand["_fusion_score"] = rrf_score
+                else:
+                    # Weighted average fusion
+                    d_val = dense_norm if dense_norm is not None else 0.0
+                    b_val = bm25_norm if bm25_norm is not None else 0.0
+                    
+                    # Normalize weights
+                    total_w = effective_dense_weight + effective_bm25_weight
+                    d_weight = effective_dense_weight / total_w if total_w > 0 else 0.5
+                    b_weight = effective_bm25_weight / total_w if total_w > 0 else 0.5
+                    
+                    # If only one source, penalize the missing score
+                    sources = cand.get("_sources", set())
+                    if "dense" in sources and "bm25" not in sources:
+                        cand["_fusion_score"] = d_val * d_weight
+                    elif "bm25" in sources and "dense" not in sources:
+                        cand["_fusion_score"] = b_val * b_weight
+                    else:
+                        cand["_fusion_score"] = d_val * d_weight + b_val * b_weight
+            
+            # Set initial final score to fusion score
+            cand["_final_score"] = cand.get("_fusion_score") or 0.0
 
-        ranked = sorted(candidates.values(), key=lambda c: float(c.get("_score") or 0.0), reverse=True)
+        # Sort by fusion score
+        ranked = sorted(candidates.values(), key=lambda c: float(c.get("_final_score") or 0.0), reverse=True)
         ranked = ranked[:candidate_k]
 
         meta: Dict[str, Any] = {
@@ -1045,20 +1236,50 @@ class KnowledgeService:
             "mode": effective_mode,
             "top_k": int(top_k),
             "document_id": document_id,
-            "vector_top_k": int(vector_k),
-            "keyword_top_k": int(keyword_k),
+            # Retrieval counts (for backward compatibility with frontend)
+            "vector_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
+            "keyword_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
+            "dense_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
+            "dense_hits_raw_count": dense_hits_raw_count if effective_mode in {"dense", "hybrid"} else None,
+            "bm25_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
+            "bm25_hits_raw_count": bm25_hits_raw_count if effective_mode in {"bm25", "hybrid"} else None,
+            # Top K settings
+            "dense_top_k": int(vector_k) if effective_mode in {"dense", "hybrid"} else None,
+            "bm25_top_k": int(keyword_k) if effective_mode in {"bm25", "hybrid"} else None,
             "candidate_top_k": int(candidate_k),
-            "fusion": effective_fusion if effective_mode == "hybrid" else None,
-            "rrf_k": int(rrf_k_value) if effective_fusion == "rrf" else None,
-            "rrf_weights": rrf_weights_value or None,
+            # Fusion config
+            "fusion_method": effective_fusion_method if effective_mode == "hybrid" else None,
+            "dense_weight": effective_dense_weight if effective_mode == "hybrid" else None,
+            "bm25_weight": effective_bm25_weight if effective_mode == "hybrid" else None,
+            "rrf_k": int(rrf_k_value) if effective_fusion_method == "rrf" else None,
+            # Post-processing config
             "rerank": bool(rerank_enabled),
             "rerank_model": effective_rerank_model if rerank_enabled else None,
             "mmr": bool(mmr_enabled),
             "mmr_lambda": float(effective_mmr_lambda) if mmr_enabled else None,
             "mmr_threshold": float(effective_mmr_threshold) if (mmr_enabled and effective_mmr_threshold is not None) else None,
+            "score_threshold": float(effective_score_threshold) if effective_score_threshold > 0 else None,
+            # Embedding info
+            "collection_name": collection or None,
+            "embedding_provider": embedding_provider,
+            "embedding_model": embedding_model,
+            # Total candidates after merge
+            "total_candidates": len(candidates),
+            # Pipeline stages
+            "pipeline_stages": [],
         }
+        
+        # Log pipeline stages with details
+        if effective_mode in {"dense", "hybrid"}:
+            filtered_msg = f" (filtered {dense_hits_raw_count - len(dense_hits)} by threshold)" if effective_score_threshold > 0 and dense_hits_raw_count > len(dense_hits) else ""
+            meta["pipeline_stages"].append(f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results{filtered_msg}")
+        if effective_mode in {"bm25", "hybrid"}:
+            meta["pipeline_stages"].append(f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results")
+        meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
+        if effective_mode == "hybrid":
+            meta["pipeline_stages"].append(f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}")
 
-        # --- Optional rerank (DashScope cross-encoder) ---
+        # --- Stage 4: Optional rerank (DashScope cross-encoder) ---
         if rerank_enabled and ranked:
             try:
                 import asyncio
@@ -1112,15 +1333,18 @@ class KnowledgeService:
                         if 0 <= idx < len(ranked):
                             c = ranked[idx]
                             c["_rerank_score"] = score
+                            c["_final_score"] = score  # Rerank score becomes final score
                             reranked.append(c)
-                # Fall back to original order if parsing fails.
+                
+                # Sort by rerank score
                 if reranked:
-                    ranked = reranked
+                    ranked = sorted(reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True)
+                    meta["pipeline_stages"].append(f"Rerank ({effective_rerank_model}): {len(reranked)} results")
                 meta["rerank_top_n"] = effective_rerank_top_n
             except Exception as exc:
                 meta["rerank_error"] = str(exc)
 
-        # --- Optional MMR diversification ---
+        # --- Stage 5: Optional MMR diversification ---
         final: List[Dict[str, Any]] = ranked
         if mmr_enabled and ranked:
             if not collection:
@@ -1135,12 +1359,15 @@ class KnowledgeService:
                         cid = str(c.get("segment_id") or "")
                         if not cid:
                             continue
+                        # Use the best available relevance score
                         if c.get("_rerank_score") is not None:
                             relevance[cid] = float(c.get("_rerank_score") or 0.0)
+                        elif c.get("_fusion_score") is not None:
+                            relevance[cid] = float(c.get("_fusion_score") or 0.0)
                         elif qvec is not None and cid in vectors:
                             relevance[cid] = cosine_similarity(qvec, vectors[cid])
                         else:
-                            relevance[cid] = float(c.get("_score") or 0.0)
+                            relevance[cid] = float(c.get("_final_score") or 0.0)
 
                     ordered_ids = sorted(ids, key=lambda x: float(relevance.get(x, 0.0)), reverse=True)
                     selected_ids, picks = mmr_select(
@@ -1172,47 +1399,91 @@ class KnowledgeService:
                         pick = picks.get(cid)
                         if pick is not None:
                             c["_mmr_score"] = float(pick.mmr_score)
-                            c["_relevance_score"] = float(pick.relevance)
+                            c["_mmr_relevance"] = float(pick.relevance)
                             c["_mmr_max_sim"] = float(pick.max_sim_to_selected)
+                            # MMR relevance becomes final score (mmr_score can be negative)
+                            c["_final_score"] = float(pick.relevance)
                         else:
-                            c["_relevance_score"] = float(relevance.get(cid, 0.0))
+                            c["_mmr_relevance"] = float(relevance.get(cid, 0.0))
+                            c["_final_score"] = float(relevance.get(cid, 0.0))
                         out.append(c)
                     final = out
+                    meta["pipeline_stages"].append(f"MMR diversification: {len(out)} results (lambda={effective_mmr_lambda})")
                 except Exception as exc:
                     meta["mmr_error"] = str(exc)
 
         # --- Build response ---
+        # Final sort by _final_score to ensure correct ordering
+        final_sorted = sorted(final[:top_k] if final else [], key=lambda c: float(c.get("_final_score") or 0.0), reverse=True)
+        
         results: List[RetrieveResult] = []
-        for c in (final[:top_k] if final else []):
+        for rank, c in enumerate(final_sorted, 1):
             seg_id = str(c.get("segment_id") or "")
             payload = dict(c.get("metadata") or {})
 
-            # Attach debug metadata (kept under _* keys)
+            # Attach sources - convert set to sorted list
             sources = c.get("_sources") or set()
             if isinstance(sources, set):
+                # Keep original source names for frontend compatibility
                 payload["_sources"] = sorted(str(s) for s in sources)
             elif isinstance(sources, list):
                 payload["_sources"] = sources
+            else:
+                payload["_sources"] = []
 
-            for k in (
-                "_vector_score",
-                "_keyword_score",
-                "_rrf_score",
-                "_alpha_score",
-                "_rerank_score",
-                "_relevance_score",
-                "_mmr_score",
-                "_mmr_max_sim",
-            ):
-                if c.get(k) is not None:
-                    payload[k] = c.get(k)
+            # Stage 1: Raw scores (keep both new and old field names for compatibility)
+            dense_raw = c.get("_dense_score")
+            bm25_raw = c.get("_bm25_score")
+            
+            # New field names
+            payload["_dense_score"] = round(dense_raw, 4) if dense_raw is not None else "N/A"
+            payload["_bm25_score"] = round(bm25_raw, 4) if bm25_raw is not None else "N/A"
+            
+            # OLD field names for backward compatibility
+            if dense_raw is not None:
+                payload["_vector_score"] = round(dense_raw, 4)
+            if bm25_raw is not None:
+                payload["_keyword_score"] = round(bm25_raw, 4)
+            
+            # Stage 2: Normalized scores
+            dense_norm = c.get("_dense_score_norm")
+            bm25_norm = c.get("_bm25_score_norm")
+            payload["_dense_score_norm"] = round(dense_norm, 4) if dense_norm is not None else "N/A"
+            payload["_bm25_score_norm"] = round(bm25_norm, 4) if bm25_norm is not None else "N/A"
+            
+            # Stage 3: Fusion score
+            fusion = c.get("_fusion_score")
+            payload["_fusion_score"] = round(fusion, 4) if fusion is not None else "N/A"
+            if c.get("_rrf_score") is not None:
+                payload["_rrf_score"] = round(c.get("_rrf_score"), 4)
+            
+            # Stage 4: Rerank score
+            rerank = c.get("_rerank_score")
+            payload["_rerank_score"] = round(rerank, 4) if rerank is not None else "N/A"
+            
+            # Stage 5: MMR scores
+            mmr = c.get("_mmr_score")
+            mmr_rel = c.get("_mmr_relevance")
+            mmr_max = c.get("_mmr_max_sim")
+            payload["_mmr_score"] = round(mmr, 4) if mmr is not None else "N/A"
+            payload["_mmr_relevance"] = round(mmr_rel, 4) if mmr_rel is not None else "N/A"
+            payload["_mmr_max_sim"] = round(mmr_max, 4) if mmr_max is not None else "N/A"
+            
+            # Also keep old name for compatibility
+            if mmr_rel is not None:
+                payload["_relevance_score"] = round(mmr_rel, 4)
+            
+            # Text match info
+            payload["_text_match_score"] = c.get("_text_match_score")
+            payload["_exact_match"] = c.get("_exact_match")
+            payload["_term_matches"] = c.get("_term_matches")
+            payload["_term_ratio"] = c.get("_term_ratio")
+            
+            # Rank
+            payload["_rank"] = rank
 
-            # Decide final exposed score.
-            score = float(c.get("_score") or 0.0)
-            if c.get("_rerank_score") is not None:
-                score = float(c.get("_rerank_score") or 0.0)
-            if c.get("_mmr_score") is not None:
-                score = float(c.get("_mmr_score") or 0.0)
+            # Final score for display
+            score = float(c.get("_final_score") or 0.0)
 
             results.append(
                 RetrieveResult(
@@ -1254,15 +1525,108 @@ class KnowledgeService:
                 continue
         raise ValidationFailedError("Unable to decode uploaded file as text")
 
+    def _clean_pdf_content(self, text: str) -> str:
+        """Clean PDF extracted content, removing TOC lines and noise."""
+        if not text:
+            return ""
+        
+        lines = text.split("\n")
+        cleaned_lines = []
+        
+        # Track if we're in TOC section
+        toc_indicators = 0
+        
+        for line in lines:
+            original_line = line
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Skip lines that look like TOC entries - VERY aggressive patterns
+            # Pattern: any combination of dots followed by page numbers
+            if re.search(r'\.{2,}\s*\d+\s*$', line):  # ....2
+                toc_indicators += 1
+                continue
+            if re.search(r'(\.\s+){2,}\d+\s*$', line):  # . . . 2
+                toc_indicators += 1
+                continue
+            if re.search(r'·{2,}\s*\d+\s*$', line):  # ···2
+                toc_indicators += 1
+                continue
+            if re.search(r'…+\s*\d+\s*$', line):  # …2
+                toc_indicators += 1
+                continue
+            
+            # Skip lines starting with dots (like "......2")
+            if re.match(r'^[\.·…\s]+\d+', line):
+                toc_indicators += 1
+                continue
+            
+            # Skip lines that contain excessive dots anywhere
+            dot_count = len(re.findall(r'[\.·…]', line))
+            if len(line) > 5 and dot_count > 3:
+                # More than 3 dots in a short line, likely TOC
+                if dot_count / len(line) > 0.15:
+                    toc_indicators += 1
+                    continue
+            
+            # Skip very short lines that are just page numbers or section numbers
+            if re.match(r'^[\d\.\s]+$', line) and len(line) < 10:
+                continue
+            
+            # Skip lines that look like "2.1 2.1标题..."
+            if re.match(r'^\d+(\.\d+)*\s+\d+(\.\d+)*', line):
+                continue
+            
+            # Clean up remaining dots sequences in the line
+            line = re.sub(r'\.{3,}', ' ', line)
+            line = re.sub(r'(\.\s+){2,}', ' ', line)
+            line = re.sub(r'·{2,}', ' ', line)
+            line = re.sub(r'…{1,}', ' ', line)
+            
+            # Clean up repeated spaces
+            line = re.sub(r'\s{2,}', ' ', line)
+            
+            line = line.strip()
+            if line and len(line) > 2:  # Skip very short remnants
+                cleaned_lines.append(line)
+        
+        result = "\n".join(cleaned_lines)
+        
+        # If a large portion of content was TOC-like, we may have a TOC-heavy doc
+        # Log this for debugging
+        if toc_indicators > 10:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Cleaned {toc_indicators} TOC-like lines from PDF")
+        
+        return result
+
     def _extract_text_from_pdf_bytes(self, content: bytes) -> str:
+        """Extract text from PDF with table-to-markdown conversion.
+        
+        Uses pdfplumber if available for better table extraction, 
+        falls back to pypdf for basic text extraction.
+        """
+        from io import BytesIO
+        
+        # Try pdfplumber first (better table extraction)
+        try:
+            text = self._extract_pdf_with_pdfplumber(BytesIO(content))
+            return self._clean_pdf_content(self._sanitize_text_for_db(normalize_text(text)))
+        except ImportError:
+            pass
+        except Exception:
+            # Fall back to pypdf if pdfplumber fails
+            pass
+        
+        # Fallback to pypdf
         try:
             from pypdf import PdfReader  # type: ignore
         except Exception as exc:
-            raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf)") from exc
+            raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf) or pdfplumber") from exc
 
         try:
-            from io import BytesIO
-
             reader = PdfReader(BytesIO(content))
             parts: List[str] = []
             for page in reader.pages:
@@ -1273,11 +1637,79 @@ class KnowledgeService:
                 if t:
                     parts.append(t)
             text = "\n".join(parts)
-            return self._sanitize_text_for_db(normalize_text(text))
+            text = self._sanitize_text_for_db(normalize_text(text))
+            return self._clean_pdf_content(text)
         except Exception as exc:
             raise ValidationFailedError(f"Failed to parse PDF: {exc}") from exc
+    
+    def _extract_pdf_with_pdfplumber(self, pdf_stream) -> str:
+        """Extract PDF content using pdfplumber with table detection."""
+        import pdfplumber  # type: ignore
+        
+        parts: List[str] = []
+        
+        with pdfplumber.open(pdf_stream) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                page_parts: List[str] = []
+                
+                # Extract tables first
+                tables = page.extract_tables() or []
+                table_bboxes = []
+                
+                for table in tables:
+                    if table and len(table) > 0:
+                        md_table = self._pdf_table_to_markdown(table)
+                        if md_table:
+                            page_parts.append("\n" + md_table + "\n")
+                
+                # Extract text (excluding table areas if possible)
+                text = page.extract_text() or ""
+                if text.strip():
+                    # If we have tables, the text might include table content
+                    # Still add it but tables are now properly formatted
+                    page_parts.insert(0, text)
+                
+                if page_parts:
+                    parts.append("\n".join(page_parts))
+        
+        text = "\n\n".join(parts)
+        return self._sanitize_text_for_db(normalize_text(text))
+    
+    def _pdf_table_to_markdown(self, table: List[List]) -> str:
+        """Convert a PDF table (list of rows) to Markdown format."""
+        if not table or len(table) == 0:
+            return ""
+        
+        # Filter out empty rows
+        table = [row for row in table if row and any(cell for cell in row)]
+        if not table:
+            return ""
+        
+        # Get max columns
+        total_cols = max(len(row) for row in table)
+        if total_cols == 0:
+            return ""
+        
+        md_lines: List[str] = []
+        
+        for i, row in enumerate(table):
+            # Pad row to total_cols
+            cells = list(row) + [""] * (total_cols - len(row))
+            # Clean cell content
+            cells = [
+                str(cell or "").strip().replace("|", "\\|").replace("\n", " ")
+                for cell in cells
+            ]
+            md_lines.append("| " + " | ".join(cells) + " |")
+            
+            # Add separator after header
+            if i == 0:
+                md_lines.append("| " + " | ".join(["---"] * total_cols) + " |")
+        
+        return "\n".join(md_lines)
 
     def _extract_text_from_docx_bytes(self, content: bytes) -> str:
+        """Extract text from DOCX with table-to-markdown conversion."""
         try:
             from docx import Document  # type: ignore
         except Exception as exc:
@@ -1288,19 +1720,36 @@ class KnowledgeService:
 
             doc = Document(BytesIO(content))
             parts: List[str] = []
-
-            for p in getattr(doc, "paragraphs", []) or []:
-                t = (p.text or "").strip()
-                if t:
-                    parts.append(t)
-
-            # Tables (best-effort)
-            for table in getattr(doc, "tables", []) or []:
-                for row in getattr(table, "rows", []) or []:
-                    cells = [str(getattr(c, "text", "") or "").strip() for c in getattr(row, "cells", []) or []]
-                    line = " | ".join([c for c in cells if c])
-                    if line.strip():
-                        parts.append(line)
+            
+            # Get all paragraphs and tables in document order
+            paragraphs = list(getattr(doc, "paragraphs", []) or [])
+            tables = list(getattr(doc, "tables", []) or [])
+            
+            para_idx = 0
+            table_idx = 0
+            
+            # Process document body in order (paragraphs and tables interleaved)
+            for element in doc.element.body:
+                tag = getattr(element, "tag", None)
+                if tag is None:
+                    continue
+                tag_str = str(tag)
+                
+                if tag_str.endswith("}p"):  # Paragraph
+                    if para_idx < len(paragraphs):
+                        para = paragraphs[para_idx]
+                        t = (para.text or "").strip()
+                        if t:
+                            parts.append(t)
+                        para_idx += 1
+                        
+                elif tag_str.endswith("}tbl"):  # Table
+                    if table_idx < len(tables):
+                        table = tables[table_idx]
+                        md_table = self._table_to_markdown(table)
+                        if md_table:
+                            parts.append("\n" + md_table + "\n")
+                        table_idx += 1
 
             text = "\n".join(parts)
             text = normalize_text(text)
@@ -1311,6 +1760,64 @@ class KnowledgeService:
             raise
         except Exception as exc:
             raise ValidationFailedError(f"Failed to parse DOCX: {exc}") from exc
+    
+    def _table_to_markdown(self, table) -> str:
+        """Convert a python-docx table to Markdown format."""
+        try:
+            rows = list(getattr(table, "rows", []) or [])
+            if not rows:
+                return ""
+            
+            # Calculate total columns (handle merged cells)
+            total_cols = max(len(list(getattr(row, "cells", []) or [])) for row in rows) if rows else 0
+            if total_cols == 0:
+                return ""
+            
+            md_lines: List[str] = []
+            
+            # Header row
+            header_row = rows[0]
+            headers = self._parse_table_row(header_row, total_cols)
+            md_lines.append("| " + " | ".join(headers) + " |")
+            md_lines.append("| " + " | ".join(["---"] * total_cols) + " |")
+            
+            # Data rows
+            for row in rows[1:]:
+                cells = self._parse_table_row(row, total_cols)
+                md_lines.append("| " + " | ".join(cells) + " |")
+            
+            return "\n".join(md_lines)
+        except Exception:
+            return ""
+    
+    def _parse_table_row(self, row, total_cols: int) -> List[str]:
+        """Parse a table row into a list of cell texts."""
+        cells = list(getattr(row, "cells", []) or [])
+        row_cells = [""] * total_cols
+        col_idx = 0
+        
+        for cell in cells:
+            if col_idx >= total_cols:
+                break
+            # Skip already filled cells (from previous merged cells)
+            while col_idx < total_cols and row_cells[col_idx]:
+                col_idx += 1
+            if col_idx >= total_cols:
+                break
+                
+            # Get cell text
+            cell_text = str(getattr(cell, "text", "") or "").strip()
+            # Clean up cell text for markdown (escape pipes, remove newlines)
+            cell_text = cell_text.replace("|", "\\|").replace("\n", " ")
+            
+            # Handle grid span (column merging)
+            grid_span = getattr(cell, "grid_span", 1) or 1
+            for i in range(grid_span):
+                if col_idx + i < total_cols:
+                    row_cells[col_idx + i] = cell_text if i == 0 else ""
+            col_idx += grid_span
+        
+        return row_cells
 
     def _extract_text_from_doc_bytes(self, content: bytes) -> str:
         try:
@@ -1337,24 +1844,78 @@ class KnowledgeService:
             raise ValidationFailedError(f"Failed to parse DOC: {exc}") from exc
 
     def _extract_text_from_html(self, html: str) -> str:
+        """Extract text from HTML with improved handling of various content types."""
         try:
-            from bs4 import BeautifulSoup  # type: ignore
+            from bs4 import BeautifulSoup, NavigableString  # type: ignore
         except Exception as exc:
             raise ValidationFailedError(
                 "HTML parsing requires beautifulsoup4 (pip install beautifulsoup4 lxml)"
             ) from exc
 
         soup = BeautifulSoup(html or "", "lxml")
-        for tag in soup(["script", "style", "noscript"]):
+        
+        # Remove non-content elements
+        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "iframe", "form"]):
             try:
                 tag.decompose()
             except Exception:
                 pass
-
-        text = soup.get_text(separator="\n", strip=True)
-        lines = [ln.strip() for ln in (text or "").splitlines()]
-        lines = [ln for ln in lines if ln]
-        return self._sanitize_text_for_db(normalize_text("\n".join(lines)))
+        
+        # Try to find main content area
+        main_content = None
+        for selector in ["main", "article", "[role='main']", ".content", "#content", ".post", ".article"]:
+            try:
+                main_content = soup.select_one(selector)
+                if main_content:
+                    break
+            except Exception:
+                continue
+        
+        # Use main content if found, otherwise use full body
+        content_root = main_content or soup.body or soup
+        
+        parts: List[str] = []
+        
+        # Extract title
+        title_tag = soup.find("title")
+        if title_tag and title_tag.string:
+            parts.append(f"# {title_tag.string.strip()}")
+        
+        # Extract headings and paragraphs
+        for element in content_root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "blockquote", "pre", "code"]):
+            text = element.get_text(separator=" ", strip=True)
+            if text:
+                tag_name = element.name
+                if tag_name in ["h1", "h2", "h3", "h4", "h5", "h6"]:
+                    level = int(tag_name[1])
+                    parts.append("#" * level + " " + text)
+                elif tag_name == "li":
+                    parts.append("• " + text)
+                elif tag_name in ["td", "th"]:
+                    continue  # Handle tables separately
+                else:
+                    parts.append(text)
+        
+        # Handle tables
+        for table in content_root.find_all("table"):
+            table_rows: List[str] = []
+            for tr in table.find_all("tr"):
+                cells = [cell.get_text(separator=" ", strip=True) for cell in tr.find_all(["th", "td"])]
+                if any(cells):
+                    table_rows.append(" | ".join(c if c else "-" for c in cells))
+            if table_rows:
+                parts.append("\n".join(table_rows))
+        
+        # Fallback: if no structured content found, use simple text extraction
+        if not parts:
+            text = content_root.get_text(separator="\n", strip=True)
+            lines = [ln.strip() for ln in (text or "").splitlines()]
+            lines = [ln for ln in lines if ln]
+            return self._sanitize_text_for_db(normalize_text("\n".join(lines)))
+        
+        result = "\n\n".join(parts)
+        result = normalize_text(result)
+        return self._sanitize_text_for_db(result)
 
     def _extract_text_from_bytes(
         self,

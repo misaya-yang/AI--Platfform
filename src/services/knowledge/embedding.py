@@ -131,6 +131,11 @@ class DashScopeEmbedding(BaseEmbedding):
 
     Uses the official `dashscope` SDK when installed, and runs calls in a thread
     to avoid blocking the event loop.
+    
+    API Limits:
+    - Max 25 texts per batch
+    - Max 2048 tokens per text for v1/v2, 8192 for v3/v4
+    - Max ~6000 characters per text (safe estimate)
     """
 
     MODEL_DIMENSIONS: Dict[str, int] = {
@@ -139,6 +144,20 @@ class DashScopeEmbedding(BaseEmbedding):
         "text-embedding-v3": 1024,
         "text-embedding-v4": 1024,  # DashScope v4 default dimension
     }
+    
+    # Max characters per text (conservative: ~2.5 chars/token)
+    # DashScope v1/v2: max 2048 tokens, v3: max 8192 tokens
+    # But in practice, shorter is safer to avoid InvalidParameter errors
+    MODEL_MAX_CHARS: Dict[str, int] = {
+        "text-embedding-v1": 4000,
+        "text-embedding-v2": 4000,
+        "text-embedding-v3": 8000,   # More conservative for v3
+        "text-embedding-v4": 8000,
+    }
+    
+    # DashScope API limit: max 10 texts per batch for v3, 25 for v1/v2
+    # Use 6 to be safe across all models
+    MAX_BATCH_SIZE = 6
 
     def __init__(
         self,
@@ -154,6 +173,7 @@ class DashScopeEmbedding(BaseEmbedding):
             raise EmbeddingError("DashScope api_key is required")
         self.api_key = api_key
         self.base_url = base_url
+        self.max_chars = self.MODEL_MAX_CHARS.get(model) or self.MODEL_MAX_CHARS.get(model.lower()) or 6000
         try:
             from dashscope import TextEmbedding  # type: ignore
             import dashscope
@@ -167,35 +187,94 @@ class DashScopeEmbedding(BaseEmbedding):
                 "dashscope package is required for DashScopeEmbedding (pip install dashscope)"
             ) from exc
 
+    def _truncate_text(self, text: str) -> str:
+        """Truncate text to max allowed characters."""
+        if not text:
+            return ""
+        text = text.strip()
+        if len(text) > self.max_chars:
+            # Truncate at word boundary if possible
+            truncated = text[:self.max_chars]
+            last_space = truncated.rfind(" ")
+            if last_space > self.max_chars * 0.8:  # Keep at least 80% of content
+                truncated = truncated[:last_space]
+            return truncated
+        return text
+
+    def _sanitize_text(self, text: str) -> str:
+        """Clean text to avoid API errors."""
+        if not text:
+            return "empty"  # DashScope doesn't accept empty strings
+        
+        # Remove NULL bytes and control characters
+        text = text.replace("\x00", "")
+        # Remove other control characters except newline/tab
+        text = "".join(c if c.isprintable() or c in "\n\t" else " " for c in text)
+        
+        # Normalize line endings
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        
+        # Collapse multiple newlines and spaces
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+        text = re.sub(r'\n[ \t]+', '\n', text)  # Remove leading spaces on lines
+        
+        # Remove very long sequences of repeated characters (often from PDF extraction errors)
+        text = re.sub(r'(.)\1{20,}', r'\1\1\1', text)
+        
+        text = text.strip()
+        return text if text else "empty"
+
     async def embed_texts(
         self, texts: List[str], text_type: Optional[str] = None
     ) -> List[List[float]]:
         if not texts:
             return []
 
+        # Sanitize and truncate all texts
+        processed_texts = [self._truncate_text(self._sanitize_text(t)) for t in texts]
+
         kwargs: Dict[str, Any] = {}
         if text_type in {"query", "document"}:
             kwargs["text_type"] = text_type
 
-        resp = await asyncio.to_thread(
-            self._TextEmbedding.call,
-            model=self.model,
-            input=texts,
-            api_key=self.api_key,
-            **kwargs,
-        )
+        # Process in batches of MAX_BATCH_SIZE
+        all_vectors: List[List[float]] = []
+        for i in range(0, len(processed_texts), self.MAX_BATCH_SIZE):
+            batch = processed_texts[i:i + self.MAX_BATCH_SIZE]
+            
+            try:
+                resp = await asyncio.to_thread(
+                    self._TextEmbedding.call,
+                    model=self.model,
+                    input=batch,
+                    api_key=self.api_key,
+                    **kwargs,
+                )
 
-        status_code = int(getattr(resp, "status_code", 0) or 0)
-        if status_code and status_code >= 400:
-            code = getattr(resp, "code", "") or ""
-            message = getattr(resp, "message", "") or ""
-            raise EmbeddingError(f"DashScope embeddings failed: {status_code} {code} {message}")
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    # Log which batch failed for debugging
+                    batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}, texts {i}-{i + len(batch) - 1}"
+                    raise EmbeddingError(
+                        f"DashScope embeddings failed ({batch_info}): {status_code} {code} {message}"
+                    )
 
-        output = getattr(resp, "output", None)
-        vectors = _parse_dashscope_embeddings(output)
-        if self._dimension is None and vectors:
-            self._dimension = len(vectors[0])
-        return vectors
+                output = getattr(resp, "output", None)
+                vectors = _parse_dashscope_embeddings(output)
+                all_vectors.extend(vectors)
+                
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
+                raise EmbeddingError(f"DashScope embedding error ({batch_info}): {exc}") from exc
+
+        if self._dimension is None and all_vectors:
+            self._dimension = len(all_vectors[0])
+        return all_vectors
 
 
 class LocalHashEmbedding(BaseEmbedding):

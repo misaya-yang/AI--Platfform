@@ -1034,6 +1034,7 @@ class DatabaseStorage:
         if not cleaned:
             return []
 
+        # Start with base query - only filter by enabled if the column exists
         query = "SELECT * FROM segments WHERE dataset_id = $1"
         params: List[Any] = [dataset_id]
         param_idx = 2
@@ -1043,20 +1044,27 @@ class DatabaseStorage:
             params.append(document_id)
             param_idx += 1
 
-        # ILIKE any term
+        # ILIKE any term (case-insensitive search)
         parts = []
         for t in cleaned:
             parts.append(f"text ILIKE ${param_idx}")
             params.append(f"%{t}%")
             param_idx += 1
-        query += " AND (" + " OR ".join(parts) + ")"
+        
+        if parts:
+            query += " AND (" + " OR ".join(parts) + ")"
 
         query += f" LIMIT ${param_idx}"
         params.append(int(limit))
 
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(query, *params)
-            return [self._row_to_dict(row) for row in rows]
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+                return [self._row_to_dict(row) for row in rows]
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"search_segments_like_any error: {e}, query: {query}, params: {params[:2]}...")
+            return []
 
     async def get_segment(self, segment_id: str) -> Optional[Dict[str, Any]]:
         """获取 Segment"""
@@ -1942,12 +1950,26 @@ class DatabaseStorage:
     # =========================================================================
 
     def _row_to_dict(self, row) -> Dict[str, Any]:
-        """将数据库行转换为字典"""
+        """将数据库行转换为字典，正确处理 JSON 和 datetime 字段"""
         if not row:
             return {}
         result = dict(row)
-        # 处理 datetime 类型
+        
+        # JSON 字段列表 - 需要解析为 Python 对象
+        json_fields = {"metadata", "embedding_config", "index_config", "history", "roles", "keywords"}
+        
         for key, value in result.items():
+            # 处理 datetime 类型
             if isinstance(value, datetime):
                 result[key] = value.isoformat()
+            # 处理 JSON 字段 - 确保它们是 Python 字典/列表
+            elif key in json_fields and value is not None:
+                if isinstance(value, str):
+                    try:
+                        result[key] = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        result[key] = {}
+                elif not isinstance(value, (dict, list)):
+                    # 如果既不是字符串也不是字典/列表，设为空字典
+                    result[key] = {}
         return result
