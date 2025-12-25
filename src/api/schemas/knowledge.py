@@ -380,17 +380,50 @@ class QABatchTestResultSchema(BaseModel):
 # ============================================================
 
 class ChunkingConfigSchema(BaseModel):
-    """Chunking configuration schema"""
+    """Chunking configuration schema
+    
+    Supports multiple chunking modes:
+    - automatic: Smart detection of best strategy
+    - fixed_size: Fixed character count with overlap
+    - paragraph: Split by paragraphs
+    - heading: Split by document headings
+    - hierarchical: Parent-child dual-layer chunking
+    - separator: Split by custom separators
+    - regex: Split by regex pattern
+    - recursive: Recursive multi-level splitting
+    - qa: Question-answer pair format
+    """
     model_config = ConfigDict(extra="allow")
     
-    mode: str = "automatic"  # automatic | custom | hierarchical
+    mode: str = "automatic"
     chunk_size: int = 500
     chunk_overlap: int = 50
+    
+    # Separator mode
     separator: str = "\n"
+    primary_separator: Optional[str] = None
+    keep_separator: Optional[bool] = None
+    
+    # Regex mode
+    regex_pattern: Optional[str] = None
+    
+    # Heading mode
+    heading_level: Optional[str] = None  # h1 | h2 | h3 etc
+    heading_patterns: Optional[List[str]] = None
+    
+    # Paragraph mode
+    min_paragraph_length: Optional[int] = None
+    merge_short_paragraphs: Optional[bool] = None
     
     # Hierarchical mode
     parent_mode: Optional[str] = None  # paragraph | full_doc | section
+    parent_chunk_size: Optional[int] = None
     child_chunk_size: Optional[int] = None
+    child_overlap: Optional[int] = None
+    
+    # QA mode
+    question_prefix: Optional[str] = None
+    answer_prefix: Optional[str] = None
     
     # Pre-processing
     remove_extra_spaces: bool = True

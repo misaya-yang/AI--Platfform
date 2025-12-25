@@ -3,11 +3,40 @@
 
 import asyncio
 import asyncpg
+import os
+import sys
+from pathlib import Path
+
+# Add project root to path for settings import
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+
+def _get_dsn() -> str:
+    """Get database DSN from environment or settings."""
+    # 1) Explicit environment variable takes priority
+    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    if dsn:
+        return dsn
+
+    # 2) Try loading from project Settings (auto-loads config/.env etc.)
+    try:
+        from src.config.settings import Settings
+
+        settings = Settings()
+        if getattr(settings, "database", None) and settings.database.dsn:
+            return settings.database.dsn
+    except Exception:
+        pass
+
+    # 3) Fallback default (use 127.0.0.1 instead of localhost for Windows compatibility)
+    return "postgresql://postgres:111111@127.0.0.1:5432/gateway"
 
 
 async def run_migration():
-    dsn = "postgresql://postgres:111111@localhost:5433/gateway"
+    dsn = _get_dsn()
     
+    print(f"Database DSN: {dsn.replace(':111111@', ':******@')}")
     print("Connecting to database...")
     conn = await asyncpg.connect(dsn)
     

@@ -32,7 +32,6 @@ import {
   Play,
   BarChart3,
   X,
-  Check,
   Target,
   ImageIcon,
   ChevronUp,
@@ -651,14 +650,54 @@ export function KnowledgeDatasetDetailPage() {
   // Upload state
   const [uploading, setUploading] = useState(false);
 
-  // Upload config dialog - step-based
+  // Upload config dialog
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
-  const [uploadStep, setUploadStep] = useState(1);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  
+  // Chunking config for upload
   const [uploadChunkMode, setUploadChunkMode] = useState("automatic");
   const [uploadChunkSize, setUploadChunkSize] = useState(500);
   const [uploadChunkOverlap, setUploadChunkOverlap] = useState(50);
-  const [uploadCustomConfig, setUploadCustomConfig] = useState(false);
+  
+  // Fixed size mode specific
+  // (uses uploadChunkSize and uploadChunkOverlap)
+  
+  // Paragraph mode specific
+  const [uploadMinParagraphLength, setUploadMinParagraphLength] = useState(50);
+  const [uploadMergeShortParagraphs, setUploadMergeShortParagraphs] = useState(true);
+  
+  // Heading mode specific
+  const [uploadHeadingLevel, setUploadHeadingLevel] = useState<"h1" | "h2" | "h3">("h2");
+  
+  // Hierarchical mode specific
+  const [uploadParentChunkSize, setUploadParentChunkSize] = useState(1500);
+  const [uploadChildChunkSize, setUploadChildChunkSize] = useState(300);
+  const [uploadChildOverlap, setUploadChildOverlap] = useState(50);
+  
+  // Separator mode specific
+  const [uploadSeparator, setUploadSeparator] = useState("\\n\\n");
+  const [uploadKeepSeparator, setUploadKeepSeparator] = useState(false);
+  
+  // Regex mode specific
+  const [uploadRegexPattern, setUploadRegexPattern] = useState("");
+  
+  // QA mode specific
+  const [uploadQuestionPrefix, setUploadQuestionPrefix] = useState("Q:");
+  const [uploadAnswerPrefix, setUploadAnswerPrefix] = useState("A:");
+  
+  // Metadata enhancement config
+  const [uploadMetadataEnabled, setUploadMetadataEnabled] = useState(false);
+  const [uploadExtractTitle, setUploadExtractTitle] = useState(true);
+  const [uploadExtractSummary, setUploadExtractSummary] = useState(false);
+  const [uploadExtractKeywords, setUploadExtractKeywords] = useState(true);
+  const [uploadExtractEntities, setUploadExtractEntities] = useState(false);
+  const [uploadDetectLanguage, setUploadDetectLanguage] = useState(true);
+  
+  // Table processing config
+  const [uploadTableEnabled, setUploadTableEnabled] = useState(false);
+  const [uploadTableMode, setUploadTableMode] = useState<"markdown" | "row_based" | "structured">("markdown");
+  const [uploadTableIncludeHeaders, setUploadTableIncludeHeaders] = useState(true);
+  const [uploadTableGenerateSummary, setUploadTableGenerateSummary] = useState(false);
 
   // Rerank model selection
   const [rerankEnabled, setRerankEnabled] = useState(true);
@@ -895,10 +934,58 @@ export function KnowledgeDatasetDetailPage() {
     } else {
       // Open dialog with selected files
       setPendingFiles(newFiles);
-      setUploadStep(1);
       setUploadDialogOpen(true);
     }
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  // Build chunking config based on mode
+  function buildChunkingConfig() {
+    const baseConfig: Record<string, unknown> = {
+      mode: uploadChunkMode,
+    };
+    
+    switch (uploadChunkMode) {
+      case "fixed_size":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.chunk_overlap = uploadChunkOverlap;
+        break;
+      case "paragraph":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.min_paragraph_length = uploadMinParagraphLength;
+        baseConfig.merge_short_paragraphs = uploadMergeShortParagraphs;
+        break;
+      case "heading":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.heading_level = uploadHeadingLevel;
+        break;
+      case "hierarchical":
+        baseConfig.parent_chunk_size = uploadParentChunkSize;
+        baseConfig.child_chunk_size = uploadChildChunkSize;
+        baseConfig.child_overlap = uploadChildOverlap;
+        break;
+      case "separator":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.primary_separator = uploadSeparator;
+        baseConfig.keep_separator = uploadKeepSeparator;
+        break;
+      case "regex":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.regex_pattern = uploadRegexPattern;
+        break;
+      case "qa":
+        baseConfig.question_prefix = uploadQuestionPrefix;
+        baseConfig.answer_prefix = uploadAnswerPrefix;
+        break;
+      case "recursive":
+        baseConfig.chunk_size = uploadChunkSize;
+        baseConfig.chunk_overlap = uploadChunkOverlap;
+        break;
+      default: // automatic
+        break;
+    }
+    
+    return baseConfig;
   }
 
   // Actual upload after config is confirmed
@@ -908,18 +995,30 @@ export function KnowledgeDatasetDetailPage() {
     setUploading(true);
 
     try {
-      // Update config before upload
+      // Build chunking config based on mode
+      const chunkingConfig = buildChunkingConfig();
+      
       console.log("Updating config:", {
-        chunking: { mode: uploadChunkMode, chunk_size: uploadChunkSize, chunk_overlap: uploadChunkOverlap },
+        chunking: chunkingConfig,
         rerank: { enabled: rerankEnabled, model: rerankModel },
+        metadata_enhancement: uploadMetadataEnabled ? {
+          enabled: true,
+          extract_title: uploadExtractTitle,
+          extract_summary: uploadExtractSummary,
+          extract_keywords: uploadExtractKeywords,
+          extract_entities: uploadExtractEntities,
+          detect_language: uploadDetectLanguage,
+        } : { enabled: false },
+        table_processing: uploadTableEnabled ? {
+          enabled: true,
+          mode: uploadTableMode,
+          include_headers: uploadTableIncludeHeaders,
+          generate_summary: uploadTableGenerateSummary,
+        } : { enabled: false },
       });
 
       await updateDatasetConfig(datasetId, {
-        chunking_config: {
-          mode: uploadChunkMode as "automatic",
-          chunk_size: uploadChunkSize,
-          chunk_overlap: uploadChunkOverlap,
-        },
+        chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
         retrieval_config: {
           rerank: {
             enabled: rerankEnabled,
@@ -941,7 +1040,6 @@ export function KnowledgeDatasetDetailPage() {
       setPendingFiles([]);
     } catch (err) {
       console.error("Upload failed:", err);
-      setUploadStep(1);
       setUploadDialogOpen(false);
       alert("上传失败: " + (err instanceof Error ? err.message : String(err)));
     } finally {
@@ -2559,280 +2657,616 @@ export function KnowledgeDatasetDetailPage() {
 
       {/* Dialogs */}
 
-      {/* Upload Config Dialog - Step-based like Alibaba Cloud */}
+      {/* Upload Config Dialog - Single page compact layout */}
       <Dialog open={uploadDialogOpen} onOpenChange={(open) => {
         if (!open && !uploading) {
           setUploadDialogOpen(false);
-          // Reset state when closing
-          if (!uploading) {
-            setPendingFiles([]);
-            setUploadStep(1);
-          }
+          setPendingFiles([]);
         } else {
           setUploadDialogOpen(open);
         }
       }}>
-        <DialogContent className="max-w-3xl bg-white">
-          <DialogHeader>
+        <DialogContent className="max-w-4xl bg-white max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader className="flex-shrink-0">
             <DialogTitle className="text-xl font-semibold">上传文档</DialogTitle>
           </DialogHeader>
 
-          {/* Step indicator */}
-          <div className="flex items-center justify-center py-4 border-b mb-4">
-            <div className="flex items-center gap-2">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${uploadStep === 1 ? 'bg-blue-600 text-white' : 'bg-green-500 text-white'}`}>
-                {uploadStep > 1 ? '✓' : '1'}
-              </div>
-              <span className={`text-sm ${uploadStep === 1 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>选择文件</span>
+          {uploading ? (
+            <div className="py-12 text-center flex flex-col items-center justify-center">
+              <Loader2 className="h-12 w-12 text-blue-600 animate-spin mb-4" />
+              <p className="text-lg font-medium">正在上传并处理文档...</p>
+              <p className="text-sm text-gray-500 mt-2">这可能需要几分钟，请勿关闭窗口</p>
             </div>
-            <div className="w-16 h-0.5 bg-gray-200 mx-2" />
-            <div className="flex items-center gap-2">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${uploadStep === 2 ? 'bg-blue-600 text-white' : uploadStep > 2 ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
-                {uploadStep > 2 ? '✓' : '2'}
-              </div>
-              <span className={`text-sm ${uploadStep === 2 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>解析设置</span>
-            </div>
-            <div className="w-16 h-0.5 bg-gray-200 mx-2" />
-            <div className="flex items-center gap-2">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${uploadStep === 3 ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-500'}`}>
-                3
-              </div>
-              <span className={`text-sm ${uploadStep === 3 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>完成</span>
-            </div>
-          </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+              {/* Compact File Upload Area */}
+              <div className="flex gap-4">
+                {/* Upload zone - compact */}
+                <div
+                  className="flex-shrink-0 w-48 border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-blue-400 transition-colors cursor-pointer bg-gray-50"
+                  onClick={() => fileRef.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleFilesSelected(e.dataTransfer.files);
+                  }}
+                >
+                  <Upload className="h-8 w-8 mx-auto text-gray-400 mb-2" />
+                  <p className="text-sm text-gray-600">点击或拖拽上传</p>
+                  <p className="text-xs text-gray-400 mt-1">PDF、Word、TXT、MD</p>
+                </div>
 
-          {/* Step 1: Select files */}
-          {uploadStep === 1 && (
-            <div className="space-y-4 min-h-[200px]">
-              {/* Upload area */}
-              <div
-                className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-400 transition-colors cursor-pointer bg-gray-50"
-                onClick={() => fileRef.current?.click()}
-              >
-                <Upload className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-                <p className="text-gray-600 mb-2">点击或拖拽上传文件</p>
-                <p className="text-xs text-gray-400">支持 .pdf, .doc, .docx, .txt, .md 等格式</p>
-                <p className="text-xs text-gray-400">单文档最大 100MB，最多支持 100 个</p>
-              </div>
-
-              {/* File list */}
-              {pendingFiles.length > 0 && (
-                <div className="space-y-2">
-                  <Label className="text-sm font-medium">已选文件 ({pendingFiles.length})</Label>
-                  <div className="max-h-48 overflow-auto space-y-2">
+                {/* File list - horizontal compact */}
+                <div className="flex-1 min-w-0">
+                  <Label className="text-sm font-medium text-gray-700">已选文件 ({pendingFiles.length})</Label>
+                  <div className="mt-2 flex flex-wrap gap-2 max-h-24 overflow-auto">
                     {pendingFiles.map((file, i) => (
-                      <div key={i} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border">
-                        <div className="w-10 h-10 rounded bg-red-50 flex items-center justify-center">
-                          <FileText className="h-5 w-5 text-red-500" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{file.name}</p>
-                          <p className="text-xs text-gray-400">{(file.size / 1024).toFixed(1)} KB</p>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
+                      <Badge key={i} variant="secondary" className="flex items-center gap-1 py-1 px-2 max-w-[200px]">
+                        <FileText className="h-3 w-3 flex-shrink-0" />
+                        <span className="truncate text-xs">{file.name}</span>
+                        <button
                           onClick={(e) => {
                             e.stopPropagation();
                             setPendingFiles(pendingFiles.filter((_, idx) => idx !== i));
                           }}
+                          className="ml-1 hover:text-red-600"
                         >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </div>
+                          <X className="h-3 w-3" />
+                        </button>
+                      </Badge>
                     ))}
+                    {pendingFiles.length === 0 && (
+                      <p className="text-sm text-gray-400">请选择要上传的文件</p>
+                    )}
                   </div>
                 </div>
-              )}
-            </div>
-          )}
+              </div>
 
-          {/* Step 2: Parse settings */}
-          {uploadStep === 2 && (
-            <div className="space-y-5 min-h-[200px] max-h-[60vh] overflow-y-auto pr-2">
-              {/* Chunking Settings */}
-              <div className="p-4 bg-gray-50 rounded-lg border">
-                <div className="flex items-center justify-between mb-3">
-                  <Label className="text-sm font-medium">切片设置</Label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={uploadCustomConfig}
-                      onChange={(e) => setUploadCustomConfig(e.target.checked)}
-                      className="w-4 h-4 rounded text-blue-600"
-                    />
-                    <span className="text-xs text-gray-500">自定义</span>
-                  </label>
+              {/* Chunking Mode Selection - Card Grid */}
+              <div className="border rounded-lg p-4">
+                <Label className="text-sm font-medium text-gray-900 mb-3 block">切片方式</Label>
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  {[
+                    { id: "automatic", name: "智能切分", desc: "自动检测最优策略" },
+                    { id: "fixed_size", name: "按长度切分", desc: "固定字符数分块" },
+                    { id: "paragraph", name: "按段落切分", desc: "保持段落完整性" },
+                    { id: "heading", name: "按标题切分", desc: "按章节标题划分" },
+                    { id: "hierarchical", name: "父子切分", desc: "大块含小块结构" },
+                    { id: "separator", name: "按分隔符切分", desc: "自定义分隔符" },
+                    { id: "regex", name: "正则切分", desc: "正则表达式匹配" },
+                    { id: "recursive", name: "递归切分", desc: "层级递归分割" },
+                    { id: "qa", name: "QA切分", desc: "问答对格式" },
+                  ].map((mode) => (
+                    <div
+                      key={mode.id}
+                      className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                        uploadChunkMode === mode.id
+                          ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
+                          : "border-gray-200 hover:border-gray-300"
+                      }`}
+                      onClick={() => setUploadChunkMode(mode.id)}
+                    >
+                      <p className="text-sm font-medium text-gray-900">{mode.name}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">{mode.desc}</p>
+                    </div>
+                  ))}
                 </div>
 
-                {uploadCustomConfig ? (
-                  <div className="space-y-4">
-                    {/* Chunking mode */}
-                    <div>
-                      <Label className="text-xs text-gray-500">切片方式</Label>
-                      <select
-                        value={uploadChunkMode}
-                        onChange={(e) => setUploadChunkMode(e.target.value)}
-                        className="mt-1 w-full p-2 border rounded-md bg-white text-sm"
-                      >
-                        <option value="automatic">智能切分</option>
-                        <option value="fixed_size">按长度切分</option>
-                        <option value="paragraph">按段落切分</option>
-                        <option value="heading">按标题切分</option>
-                        <option value="recursive">递归切分</option>
-                        <option value="hierarchical">父子切分</option>
-                      </select>
-                    </div>
+                {/* Mode-specific Configuration */}
+                <div className="bg-gray-50 rounded-lg p-4">
+                  {/* Automatic mode */}
+                  {uploadChunkMode === "automatic" && (
+                    <p className="text-sm text-gray-600">
+                      自动模式会根据文档类型智能选择最佳切分策略，无需额外配置
+                    </p>
+                  )}
 
-                    {/* Chunk size */}
-                    <div>
-                      <div className="flex justify-between items-center">
-                        <Label className="text-xs text-gray-500">分段长度</Label>
-                        <span className="text-xs font-medium text-blue-600">{uploadChunkSize}</span>
+                  {/* Fixed size mode */}
+                  {uploadChunkMode === "fixed_size" && (
+                    <div className="space-y-4">
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">块大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={100}
+                          max={2000}
+                          step={50}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
                       </div>
-                      <input
-                        type="range"
-                        min={100}
-                        max={2000}
-                        step={50}
-                        value={uploadChunkSize}
-                        onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                        className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mt-2"
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">重叠大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkOverlap}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={500}
+                          step={10}
+                          value={uploadChunkOverlap}
+                          onChange={(e) => setUploadChunkOverlap(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Paragraph mode */}
+                  {uploadChunkMode === "paragraph" && (
+                    <div className="space-y-4">
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">最大块大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={200}
+                          max={2000}
+                          step={50}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">最小段落长度</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadMinParagraphLength}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={20}
+                          max={200}
+                          step={10}
+                          value={uploadMinParagraphLength}
+                          onChange={(e) => setUploadMinParagraphLength(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="merge-short"
+                          checked={uploadMergeShortParagraphs}
+                          onChange={(e) => setUploadMergeShortParagraphs(e.target.checked)}
+                          className="w-4 h-4 rounded text-blue-600"
+                        />
+                        <Label htmlFor="merge-short" className="text-sm cursor-pointer">合并短段落</Label>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Heading mode */}
+                  {uploadChunkMode === "heading" && (
+                    <div className="space-y-4">
+                      <div>
+                        <Label className="text-sm mb-2 block">标题级别</Label>
+                        <Select value={uploadHeadingLevel} onValueChange={(v) => setUploadHeadingLevel(v as "h1" | "h2" | "h3")}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="h1">H1 - 一级标题</SelectItem>
+                            <SelectItem value="h2">H2 - 二级标题</SelectItem>
+                            <SelectItem value="h3">H3 - 三级标题</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">最大块大小</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={200}
+                          max={3000}
+                          step={100}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Hierarchical mode */}
+                  {uploadChunkMode === "hierarchical" && (
+                    <div className="space-y-4">
+                      <div className="p-3 bg-blue-50 rounded-lg mb-2">
+                        <p className="text-sm text-blue-700">
+                          层级切分会生成父块和子块，父块用于提供上下文，子块用于精确检索
+                        </p>
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">父块大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadParentChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={500}
+                          max={4000}
+                          step={100}
+                          value={uploadParentChunkSize}
+                          onChange={(e) => setUploadParentChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">子块大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChildChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={100}
+                          max={1000}
+                          step={50}
+                          value={uploadChildChunkSize}
+                          onChange={(e) => setUploadChildChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">子块重叠 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChildOverlap}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={200}
+                          step={10}
+                          value={uploadChildOverlap}
+                          onChange={(e) => setUploadChildOverlap(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Separator mode */}
+                  {uploadChunkMode === "separator" && (
+                    <div className="space-y-4">
+                      <div>
+                        <Label className="text-sm mb-2 block">分隔符</Label>
+                        <Input
+                          value={uploadSeparator}
+                          onChange={(e) => setUploadSeparator(e.target.value)}
+                          placeholder="例如: \n\n 或 ---"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">支持转义字符：\n(换行) \t(制表符)</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="keep-sep"
+                          checked={uploadKeepSeparator}
+                          onChange={(e) => setUploadKeepSeparator(e.target.checked)}
+                          className="w-4 h-4 rounded text-blue-600"
+                        />
+                        <Label htmlFor="keep-sep" className="text-sm cursor-pointer">保留分隔符</Label>
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">最大块大小</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={200}
+                          max={2000}
+                          step={50}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Regex mode */}
+                  {uploadChunkMode === "regex" && (
+                    <div className="space-y-4">
+                      <div>
+                        <Label className="text-sm mb-2 block">正则表达式模式</Label>
+                        <Input
+                          value={uploadRegexPattern}
+                          onChange={(e) => setUploadRegexPattern(e.target.value)}
+                          placeholder="例如: (?=第[一二三四五六七八九十]+章)"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          使用正向前瞻 (?=...) 保留匹配内容，使用普通模式则删除匹配内容
+                        </p>
+                      </div>
+                      <div>
+                        <Label className="text-sm mb-2 block">预设模式</Label>
+                        <Select onValueChange={(v) => setUploadRegexPattern(v)}>
+                          <SelectTrigger>
+                            <SelectValue placeholder="选择预设模式" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="(?=第[一二三四五六七八九十]+章)">按"第X章"切分</SelectItem>
+                            <SelectItem value="(?=\\d+\\.)">按数字编号切分</SelectItem>
+                            <SelectItem value="(?=#{1,3}\\s)">按 Markdown 标题切分</SelectItem>
+                            <SelectItem value="\n\n+">按空行切分</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">最大块大小</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={200}
+                          max={2000}
+                          step={50}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Recursive mode */}
+                  {uploadChunkMode === "recursive" && (
+                    <div className="space-y-4">
+                      <p className="text-sm text-gray-600 mb-2">
+                        递归切分会按段落、句子逐级细分，确保每个块不超过限制
+                      </p>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">块大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={100}
+                          max={2000}
+                          step={50}
+                          value={uploadChunkSize}
+                          onChange={(e) => setUploadChunkSize(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <Label className="text-sm">重叠大小 (字符数)</Label>
+                          <span className="text-sm font-medium text-blue-600">{uploadChunkOverlap}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={500}
+                          step={10}
+                          value={uploadChunkOverlap}
+                          onChange={(e) => setUploadChunkOverlap(Number(e.target.value))}
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* QA mode */}
+                  {uploadChunkMode === "qa" && (
+                    <div className="space-y-4">
+                      <div className="p-3 bg-amber-50 rounded-lg">
+                        <p className="text-sm text-amber-700">
+                          QA切分会将文档转换为问答对格式，适合FAQ类文档
+                        </p>
+                      </div>
+                      <div>
+                        <Label className="text-sm mb-2 block">问题标识符</Label>
+                        <Input
+                          value={uploadQuestionPrefix}
+                          onChange={(e) => setUploadQuestionPrefix(e.target.value)}
+                          placeholder="Q:"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-sm mb-2 block">答案标识符</Label>
+                        <Input
+                          value={uploadAnswerPrefix}
+                          onChange={(e) => setUploadAnswerPrefix(e.target.value)}
+                          placeholder="A:"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Advanced Settings - Collapsible */}
+              <div className="border rounded-lg">
+                <button
+                  className="w-full p-4 flex items-center justify-between text-left"
+                  onClick={() => {
+                    const el = document.getElementById('advanced-settings');
+                    if (el) el.classList.toggle('hidden');
+                  }}
+                >
+                  <span className="text-sm font-medium text-gray-900">高级设置</span>
+                  <ChevronDown className="h-4 w-4 text-gray-500" />
+                </button>
+                <div id="advanced-settings" className="hidden px-4 pb-4 space-y-4">
+                  {/* Metadata Enhancement */}
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <Label className="text-sm font-medium">元数据增强</Label>
+                        <p className="text-xs text-gray-500">自动提取和丰富文档元数据</p>
+                      </div>
+                      <Switch
+                        checked={uploadMetadataEnabled}
+                        onCheckedChange={setUploadMetadataEnabled}
                       />
                     </div>
-
-                    {/* Chunk overlap */}
-                    <div>
-                      <div className="flex justify-between items-center">
-                        <Label className="text-xs text-gray-500">重叠长度</Label>
-                        <span className="text-xs font-medium text-blue-600">{uploadChunkOverlap}</span>
+                    {uploadMetadataEnabled && (
+                      <div className="pl-4 border-l-2 border-indigo-200 space-y-2 mt-3">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadExtractTitle}
+                            onChange={(e) => setUploadExtractTitle(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">自动提取文档标题</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadExtractSummary}
+                            onChange={(e) => setUploadExtractSummary(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">自动生成摘要</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadExtractKeywords}
+                            onChange={(e) => setUploadExtractKeywords(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">自动提取关键词</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadExtractEntities}
+                            onChange={(e) => setUploadExtractEntities(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">自动识别命名实体</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadDetectLanguage}
+                            onChange={(e) => setUploadDetectLanguage(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">自动检测语言</span>
+                        </label>
                       </div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={200}
-                        step={10}
-                        value={uploadChunkOverlap}
-                        onChange={(e) => setUploadChunkOverlap(Number(e.target.value))}
-                        className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600 mt-2"
+                    )}
+                  </div>
+
+                  {/* Table Processing */}
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <Label className="text-sm font-medium">表格处理增强</Label>
+                        <p className="text-xs text-gray-500">优化表格内容的解析和检索</p>
+                      </div>
+                      <Switch
+                        checked={uploadTableEnabled}
+                        onCheckedChange={setUploadTableEnabled}
                       />
                     </div>
+                    {uploadTableEnabled && (
+                      <div className="pl-4 border-l-2 border-indigo-200 space-y-3 mt-3">
+                        <div>
+                          <Label className="text-sm mb-2 block">表格处理模式</Label>
+                          <Select value={uploadTableMode} onValueChange={(v) => setUploadTableMode(v as typeof uploadTableMode)}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="markdown">转换为 Markdown 表格</SelectItem>
+                              <SelectItem value="row_based">按行拆分（每行一个块）</SelectItem>
+                              <SelectItem value="structured">结构化 JSON</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadTableIncludeHeaders}
+                            onChange={(e) => setUploadTableIncludeHeaders(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">每行包含表头信息</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={uploadTableGenerateSummary}
+                            onChange={(e) => setUploadTableGenerateSummary(e.target.checked)}
+                            className="w-4 h-4 rounded text-blue-600"
+                          />
+                          <span className="text-sm">生成表格摘要</span>
+                        </label>
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <p className="text-xs text-gray-400">使用知识库默认配置</p>
-                )}
-              </div>
 
-              {/* Current Embedding Model - Read only info */}
-              <div className="p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <Label className="text-sm font-medium mb-2 block">当前知识库配置</Label>
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-purple-500 rounded-lg flex items-center justify-center text-white text-xs font-bold">
-                    {dataset?.embedding_provider === "openai" ? "GPT" : "阿里"}
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium">{dataset?.embedding_model || "text-embedding-v4"}</p>
-                    <p className="text-xs text-gray-500">{dataset?.embedding_dimension || 1024}维 · 嵌入模型在创建时设置</p>
+                  {/* Rerank Model */}
+                  <div className="p-4 bg-gray-50 rounded-lg">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <Label className="text-sm font-medium">排序模型</Label>
+                        <p className="text-xs text-gray-500">使用交叉编码器优化检索排序</p>
+                      </div>
+                      <Switch
+                        checked={rerankEnabled}
+                        onCheckedChange={setRerankEnabled}
+                      />
+                    </div>
+                    {rerankEnabled && (
+                      <Select value={rerankModel} onValueChange={setRerankModel}>
+                        <SelectTrigger className="mt-2">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="gte-rerank">通义排序 (gte-rerank)</SelectItem>
+                          <SelectItem value="bge-reranker-v2-m3">BGE Reranker v2</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Rerank Model - Can be modified */}
-              <div className="p-4 bg-gray-50 rounded-lg border">
-                <div className="flex items-center justify-between mb-3">
-                  <Label className="text-sm font-medium">排序模型</Label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={rerankEnabled}
-                      onChange={(e) => setRerankEnabled(e.target.checked)}
-                      className="w-4 h-4 rounded text-blue-600"
-                    />
-                    <span className="text-xs text-gray-500">启用</span>
-                  </label>
+              {/* Current embedding model info */}
+              <div className="p-3 bg-blue-50 rounded-lg border border-blue-200 flex items-center gap-3">
+                <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                  {dataset?.embedding_provider === "openai" ? "O" : "阿"}
                 </div>
-                {rerankEnabled && (
-                  <select
-                    value={rerankModel}
-                    onChange={(e) => setRerankModel(e.target.value)}
-                    className="w-full p-2 border rounded-md bg-white text-sm"
-                  >
-                    <option value="gte-rerank">通义排序 (gte-rerank)</option>
-                    <option value="bge-reranker-v2-m3">BGE Reranker v2</option>
-                  </select>
-                )}
+                <div className="text-sm">
+                  <span className="font-medium">{dataset?.embedding_model || "text-embedding-v4"}</span>
+                  <span className="text-gray-500 ml-2">{dataset?.embedding_dimension || 1024}维</span>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Step 3: Processing */}
-          {uploadStep === 3 && (
-            <div className="py-8 text-center min-h-[200px] flex flex-col items-center justify-center">
-              {uploading ? (
-                <>
-                  <Loader2 className="h-12 w-12 text-blue-600 animate-spin mb-4" />
-                  <p className="text-lg font-medium">正在上传并处理文档...</p>
-                  <p className="text-sm text-gray-500 mt-2">这可能需要几分钟，请勿关闭窗口</p>
-                </>
-              ) : (
-                <>
-                  <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-4">
-                    <Check className="h-6 w-6 text-green-600" />
-                  </div>
-                  <p className="text-lg font-medium text-green-600">上传完成！</p>
-                  <p className="text-sm text-gray-500 mt-2">文档正在后台处理中</p>
-                </>
-              )}
-            </div>
-          )}
-
-          <DialogFooter className="mt-4 pt-4 border-t flex gap-2">
-            {uploadStep > 1 && uploadStep < 3 && (
-              <Button variant="outline" onClick={() => setUploadStep(uploadStep - 1)}>
-                上一步
-              </Button>
-            )}
-            <div className="flex-1" />
+          <DialogFooter className="mt-4 pt-4 border-t flex-shrink-0">
             <Button variant="outline" onClick={() => {
               setUploadDialogOpen(false);
               setPendingFiles([]);
-              setUploadStep(1);
             }}>
               取消
             </Button>
-            {uploadStep === 1 && (
-              <Button
-                onClick={() => setUploadStep(2)}
-                disabled={pendingFiles.length === 0}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                下一步
-              </Button>
-            )}
-            {uploadStep === 2 && (
-              <Button
-                onClick={() => {
-                  setUploadStep(3);
-                  handleConfirmUpload();
-                }}
-                disabled={uploading}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                开始上传
-              </Button>
-            )}
-            {uploadStep === 3 && !uploading && (
-              <Button
-                onClick={() => {
-                  setUploadDialogOpen(false);
-                  setPendingFiles([]);
-                  setUploadStep(1);
-                }}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                完成
-              </Button>
-            )}
+            <Button
+              onClick={handleConfirmUpload}
+              disabled={uploading || pendingFiles.length === 0}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              {uploading ? "上传中..." : `上传 ${pendingFiles.length} 个文件`}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

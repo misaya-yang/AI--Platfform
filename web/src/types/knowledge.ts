@@ -113,21 +113,32 @@ export interface ChunkingConfig {
   use_token_count?: boolean;
   token_limit?: number;
   
-  // Separators
+  // Separators (for separator mode)
   separators?: string[];
   primary_separator?: string;
+  keep_separator?: boolean;
   
   // Regex mode
   regex_pattern?: string;
   
   // Heading mode
   heading_patterns?: string[];
+  heading_level?: "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+  
+  // Paragraph mode
+  min_paragraph_length?: number;
+  merge_short_paragraphs?: boolean;
   
   // Hierarchical mode
   parent_chunk_size?: number;
   parent_overlap?: number;
   child_chunk_size?: number;
+  child_overlap?: number;
   parent_mode?: "full_doc" | "paragraph" | "section";
+  
+  // QA mode
+  question_prefix?: string;
+  answer_prefix?: string;
   
   // Preprocessing
   remove_extra_spaces?: boolean;
@@ -138,6 +149,31 @@ export interface ChunkingConfig {
   // Metadata extraction
   extract_metadata?: boolean;
   metadata_fields?: string[];
+}
+
+// ============================================================
+// Metadata Enhancement Configuration Types
+// ============================================================
+
+export interface MetadataEnhancementConfig {
+  enabled: boolean;
+  extract_title?: boolean;
+  extract_summary?: boolean;
+  extract_keywords?: boolean;
+  extract_entities?: boolean;
+  detect_language?: boolean;
+}
+
+// ============================================================
+// Table Processing Configuration Types
+// ============================================================
+
+export interface TableProcessingConfig {
+  enabled: boolean;
+  mode?: "markdown" | "row_based" | "cell_based" | "structured" | "natural_language";
+  include_headers?: boolean;
+  generate_summary?: boolean;
+  max_rows?: number;
 }
 
 // ============================================================
