@@ -54,6 +54,7 @@ function DatasetCard({
 }) {
   const [copied, setCopied] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const copyId = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -126,7 +127,7 @@ function DatasetCard({
       </div>
 
       {/* Hover Actions - 阿里云风格 */}
-      {hovered && (
+      {(hovered || dropdownOpen) && (
         <div className="absolute inset-x-0 bottom-0 bg-white border-t border-gray-200 rounded-b-xl p-3 flex items-center gap-2 shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
           <Button
             onClick={onViewDetail}
@@ -142,7 +143,7 @@ function DatasetCard({
             命中测试
           </Button>
 
-          <DropdownMenu>
+          <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="outline"
@@ -154,13 +155,13 @@ function DatasetCard({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[120px]">
-              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onEdit(); }}>
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setDropdownOpen(false); onEdit(); }}>
                 <Edit3 className="mr-2 h-3.5 w-3.5 text-gray-500" />
                 编辑
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                onClick={(e) => { e.stopPropagation(); setDropdownOpen(false); onDelete(); }}
                 className="text-red-600 focus:text-red-700 focus:bg-red-50"
               >
                 <Trash2 className="mr-2 h-3.5 w-3.5" />

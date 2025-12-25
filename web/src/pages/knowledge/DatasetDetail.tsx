@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -105,8 +105,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 
-function StatusBadge({ status, error }: { status: string; error?: string }) {
+function StatusBadge({ status, error, progress }: { status: string; error?: string; progress?: number }) {
   const s = (status || "").toLowerCase();
+
+  // 格式化进度显示（后端返回的已经是百分比值如 35，不需要乘100）
+  const formatProgress = (p?: number) => {
+    if (p === undefined || p === null) return "";
+    return ` ${Math.round(p)}%`;
+  };
 
   const configs: Record<string, { icon: React.ReactNode; label: string; className: string }> = {
     completed: {
@@ -121,17 +127,17 @@ function StatusBadge({ status, error }: { status: string; error?: string }) {
     },
     embedding: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: "向量化中",
+      label: `向量化中${formatProgress(progress)}`,
       className: "bg-blue-50 text-blue-700 border-blue-200",
     },
     segmenting: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: "分段中",
+      label: `分段中${formatProgress(progress)}`,
       className: "bg-amber-50 text-amber-700 border-amber-200",
     },
     parsing: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: "解析中",
+      label: `解析中${formatProgress(progress)}`,
       className: "bg-purple-50 text-purple-700 border-purple-200",
     },
   };
@@ -244,7 +250,7 @@ function DocumentRow({
 
         {/* 状态 */}
         <div className="w-28 flex justify-center">
-          <StatusBadge status={doc.status} error={doc.error} />
+          <StatusBadge status={doc.status} error={doc.error} progress={doc.progress} />
         </div>
 
         {/* 所属类目 */}
@@ -297,8 +303,13 @@ function DocumentRow({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>确认重新构建索引？</AlertDialogTitle>
-            <AlertDialogDescription>
-              这将重新解析文档 "{doc.title}" 并生成新的切片和向量索引。此操作可能需要一些时间。
+            <AlertDialogDescription className="space-y-2">
+              <span className="block">
+                这将重新解析文档 "{doc.title}" 并生成新的切片和向量索引。
+              </span>
+              <span className="block text-xs text-gray-400">
+                将使用知识库当前的分段配置。如需修改配置，请先在"配置"页面调整。
+              </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -631,7 +642,11 @@ export function KnowledgeDatasetDetailPage() {
   const segmentsQuery = useSegments(datasetId, selectedDocId, segmentSearch);
   const segments = segmentsQuery.data || [];
 
-  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "settings">("documents");
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "settings" | null;
+  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "settings">(
+    initialTab && ["documents", "retrieval", "qa", "settings"].includes(initialTab) ? initialTab : "documents"
+  );
 
   // Upload state
   const [uploading, setUploading] = useState(false);
@@ -906,7 +921,6 @@ export function KnowledgeDatasetDetailPage() {
       }, 1000);
     } catch (e) {
       console.error("Reindex failed:", e);
-      // Fallback for error visibility if toast isn't set up yet
       alert("重建索引失败: " + (e instanceof Error ? e.message : String(e)));
     }
   }
