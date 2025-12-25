@@ -7,7 +7,11 @@ import os
 
 
 async def run_migration():
-    dsn = os.environ.get("DATABASE_DSN", "postgresql://postgres:111111@localhost:5433/gateway")
+    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    if not dsn:
+        raise RuntimeError(
+            "Database DSN not configured. Set GATEWAY_DATABASE__DSN environment variable."
+        )
     
     print(f"Connecting to database...")
     conn = await asyncpg.connect(dsn)

@@ -717,12 +717,24 @@ export function KnowledgeDatasetDetailPage() {
   const [configLoading, setConfigLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState<DatasetDebugInfo | null>(null);
 
-  // Config editing
+  // Config editing - Chunking
   const [configEditing, setConfigEditing] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [editChunkingMode, setEditChunkingMode] = useState("automatic");
   const [editChunkSize, setEditChunkSize] = useState(500);
   const [editChunkOverlap, setEditChunkOverlap] = useState(50);
+
+  // Config editing - Retrieval
+  const [retrievalEditing, setRetrievalEditing] = useState(false);
+  const [editRetrievalMode, setEditRetrievalMode] = useState<"vector" | "keyword" | "hybrid">("hybrid");
+  const [editTopK, setEditTopK] = useState(5);
+  const [editFusionStrategy, setEditFusionStrategy] = useState<"weighted" | "rrf">("rrf");
+  const [editDenseWeight, setEditDenseWeight] = useState(0.7);
+  const [editBm25Weight, setEditBm25Weight] = useState(0.3);
+  const [editRerankEnabled, setEditRerankEnabled] = useState(false);
+  const [editRerankModel, setEditRerankModel] = useState("gte-rerank");
+  const [editMmrEnabled, setEditMmrEnabled] = useState(false);
+  const [editMmrLambda, setEditMmrLambda] = useState(0.5);
 
   // Chunk preview
   const [previewText, setPreviewText] = useState("");
@@ -761,6 +773,29 @@ export function KnowledgeDatasetDetailPage() {
         setEditChunkSize(config.chunking.chunk_size || 500);
         setEditChunkOverlap(config.chunking.chunk_overlap || 50);
       }
+      // Initialize retrieval config
+      if (config?.retrieval) {
+        // Map mode names (dense -> vector, bm25 -> keyword)
+        const modeMap: Record<string, "vector" | "keyword" | "hybrid"> = {
+          dense: "vector", vector: "vector",
+          bm25: "keyword", keyword: "keyword",
+          hybrid: "hybrid"
+        };
+        setEditRetrievalMode(modeMap[config.retrieval.mode] || "hybrid");
+        setEditTopK(config.retrieval.top_k || 5);
+        // Fusion config
+        const fusion = config.retrieval.fusion;
+        setEditFusionStrategy(fusion?.strategy === "weighted" ? "weighted" : "rrf");
+        // Alpha -> weights: alpha is dense weight, (1-alpha) is bm25 weight
+        const alpha = fusion?.alpha ?? 0.7;
+        setEditDenseWeight(alpha);
+        setEditBm25Weight(1 - alpha);
+        // Rerank & MMR
+        setEditRerankEnabled(config.retrieval.rerank?.enabled ?? false);
+        setEditRerankModel(config.retrieval.rerank?.model || "gte-rerank");
+        setEditMmrEnabled(config.retrieval.mmr?.enabled ?? false);
+        setEditMmrLambda(config.retrieval.mmr?.lambda ?? 0.5);
+      }
     } catch (e) {
       console.error("Failed to load config:", e);
     } finally {
@@ -786,6 +821,47 @@ export function KnowledgeDatasetDetailPage() {
     } catch (e) {
       console.error("Failed to save config:", e);
       alert("保存配置失败: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setConfigSaving(false);
+    }
+  }
+
+  async function handleSaveRetrievalConfig() {
+    if (!datasetId) return;
+    setConfigSaving(true);
+    try {
+      // Map UI mode to API mode
+      const modeMap: Record<string, "vector" | "keyword" | "hybrid"> = {
+        vector: "vector",
+        keyword: "keyword",
+        hybrid: "hybrid"
+      };
+      await updateDatasetConfig(datasetId, {
+        retrieval_config: {
+          mode: modeMap[editRetrievalMode] || "hybrid",
+          top_k: editTopK,
+          fusion: {
+            strategy: editFusionStrategy,
+            alpha: editDenseWeight,
+            rrf_k: 60,
+          },
+          rerank: {
+            enabled: editRerankEnabled,
+            model: editRerankModel,
+          },
+          mmr: {
+            enabled: editMmrEnabled,
+            lambda: editMmrLambda,
+          },
+        },
+      });
+      setRetrievalEditing(false);
+      // Reload config
+      const config = await getDatasetConfig(datasetId);
+      setDatasetConfig(config);
+    } catch (e) {
+      console.error("Failed to save retrieval config:", e);
+      alert("保存检索配置失败: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setConfigSaving(false);
     }
@@ -1876,45 +1952,113 @@ export function KnowledgeDatasetDetailPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="automatic">智能切分</SelectItem>
-                        <SelectItem value="fixed_size">按长度切分</SelectItem>
-                        <SelectItem value="paragraph">按段落切分</SelectItem>
-                        <SelectItem value="heading">按标题切分</SelectItem>
-                        <SelectItem value="separator">按符号切分</SelectItem>
-                        <SelectItem value="recursive">递归切分</SelectItem>
+                        <SelectItem value="automatic">
+                          <div className="flex flex-col">
+                            <span>智能切分</span>
+                            <span className="text-xs text-gray-500">自动检测最优策略</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="fixed_size">
+                          <div className="flex flex-col">
+                            <span>按长度切分</span>
+                            <span className="text-xs text-gray-500">固定字符数分块</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="paragraph">
+                          <div className="flex flex-col">
+                            <span>按段落切分</span>
+                            <span className="text-xs text-gray-500">尊重段落边界</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="heading">
+                          <div className="flex flex-col">
+                            <span>按标题切分</span>
+                            <span className="text-xs text-gray-500">按章节/标题划分</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="hierarchical">
+                          <div className="flex flex-col">
+                            <span>父子分块</span>
+                            <span className="text-xs text-gray-500">大块包含小块，保留上下文</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="recursive">
+                          <div className="flex flex-col">
+                            <span>递归切分</span>
+                            <span className="text-xs text-gray-500">多层级递归分割</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="separator">
+                          <div className="flex flex-col">
+                            <span>按符号切分</span>
+                            <span className="text-xs text-gray-500">自定义分隔符</span>
+                          </div>
+                        </SelectItem>
                       </SelectContent>
                     </Select>
+                    {/* 模式说明 */}
+                    <p className="text-xs text-gray-500 mt-1">
+                      {editChunkingMode === "automatic" && "根据文档结构自动选择最优切分策略"}
+                      {editChunkingMode === "fixed_size" && "按固定字符数切分，适合规整内容"}
+                      {editChunkingMode === "paragraph" && "保持段落完整性，适合文章报告"}
+                      {editChunkingMode === "heading" && "按标题/章节划分，适合结构化文档"}
+                      {editChunkingMode === "hierarchical" && "父块提供上下文，子块用于精确检索"}
+                      {editChunkingMode === "recursive" && "递归分层切分，高质量分块"}
+                      {editChunkingMode === "separator" && "使用自定义分隔符切分"}
+                    </p>
                   </div>
-                  <div>
-                    <div className="flex justify-between items-center">
-                      <Label className="text-sm">块大小</Label>
-                      <span className="text-sm text-gray-500">{editChunkSize}</span>
+
+                  {/* 基础参数 - 非automatic模式显示 */}
+                  {editChunkingMode !== "automatic" && (
+                    <>
+                      <div>
+                        <div className="flex justify-between items-center">
+                          <Label className="text-sm">
+                            {editChunkingMode === "hierarchical" ? "子块大小" : "块大小"}
+                          </Label>
+                          <span className="text-sm text-gray-500">{editChunkSize} 字符</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={100}
+                          max={2000}
+                          step={50}
+                          value={editChunkSize}
+                          onChange={(e) => setEditChunkSize(Number(e.target.value))}
+                          className="w-full mt-2"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center">
+                          <Label className="text-sm">重叠大小</Label>
+                          <span className="text-sm text-gray-500">{editChunkOverlap} 字符</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={200}
+                          step={10}
+                          value={editChunkOverlap}
+                          onChange={(e) => setEditChunkOverlap(Number(e.target.value))}
+                          className="w-full mt-2"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* hierarchical模式特有参数 */}
+                  {editChunkingMode === "hierarchical" && (
+                    <div className="p-3 bg-purple-50 rounded-lg space-y-3">
+                      <Label className="text-sm font-medium text-purple-800">父子分块配置</Label>
+                      <div>
+                        <div className="flex justify-between items-center">
+                          <Label className="text-xs text-gray-600">父块大小</Label>
+                          <span className="text-xs text-gray-500">2000 字符</span>
+                        </div>
+                        <p className="text-xs text-gray-400 mt-1">父块包含多个子块，提供更完整的上下文</p>
+                      </div>
                     </div>
-                    <input
-                      type="range"
-                      min={100}
-                      max={2000}
-                      step={50}
-                      value={editChunkSize}
-                      onChange={(e) => setEditChunkSize(Number(e.target.value))}
-                      className="w-full mt-2"
-                    />
-                  </div>
-                  <div>
-                    <div className="flex justify-between items-center">
-                      <Label className="text-sm">重叠大小</Label>
-                      <span className="text-sm text-gray-500">{editChunkOverlap}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={200}
-                      step={10}
-                      value={editChunkOverlap}
-                      onChange={(e) => setEditChunkOverlap(Number(e.target.value))}
-                      className="w-full mt-2"
-                    />
-                  </div>
+                  )}
                   <div className="flex gap-2 pt-2">
                     <Button
                       onClick={handleSaveConfig}
@@ -1971,14 +2115,184 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 检索配置 */}
             <Card className="p-5">
-              <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <Search className="h-5 w-5 text-emerald-600" />
-                检索配置
-              </h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                  <Search className="h-5 w-5 text-emerald-600" />
+                  检索配置
+                </h3>
+                {!retrievalEditing && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRetrievalEditing(true)}
+                  >
+                    <Edit3 className="h-3.5 w-3.5 mr-1" />
+                    编辑
+                  </Button>
+                )}
+              </div>
 
               {configLoading ? (
                 <div className="py-12 text-center">
                   <Loader2 className="h-8 w-8 animate-spin mx-auto text-gray-400" />
+                </div>
+              ) : retrievalEditing ? (
+                <div className="space-y-4">
+                  {/* 检索模式 */}
+                  <div>
+                    <Label className="text-sm">检索模式</Label>
+                    <Select value={editRetrievalMode} onValueChange={(v) => setEditRetrievalMode(v as typeof editRetrievalMode)}>
+                      <SelectTrigger className="mt-1">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="hybrid">混合检索 (推荐)</SelectItem>
+                        <SelectItem value="vector">向量检索</SelectItem>
+                        <SelectItem value="keyword">关键词检索 (BM25)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Top K */}
+                  <div>
+                    <div className="flex justify-between items-center">
+                      <Label className="text-sm">返回数量 (Top K)</Label>
+                      <span className="text-sm text-gray-500">{editTopK}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      value={editTopK}
+                      onChange={(e) => setEditTopK(Number(e.target.value))}
+                      className="w-full mt-2"
+                    />
+                  </div>
+
+                  {/* 融合配置 - 仅hybrid模式 */}
+                  {editRetrievalMode === "hybrid" && (
+                    <div className="p-3 bg-blue-50 rounded-lg space-y-3">
+                      <Label className="text-sm font-medium text-blue-800">融合策略</Label>
+                      <Select value={editFusionStrategy} onValueChange={(v) => setEditFusionStrategy(v as typeof editFusionStrategy)}>
+                        <SelectTrigger className="bg-white">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="rrf">RRF (Reciprocal Rank Fusion)</SelectItem>
+                          <SelectItem value="weighted">加权融合</SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      {/* 权重滑块 */}
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-xs text-gray-600">
+                          <span>向量权重: {(editDenseWeight * 100).toFixed(0)}%</span>
+                          <span>BM25权重: {(editBm25Weight * 100).toFixed(0)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={editDenseWeight * 100}
+                          onChange={(e) => {
+                            const v = Number(e.target.value) / 100;
+                            setEditDenseWeight(v);
+                            setEditBm25Weight(1 - v);
+                          }}
+                          className="w-full"
+                        />
+                        <div className="flex justify-between text-xs">
+                          <span className="text-blue-600">向量 (语义)</span>
+                          <span className="text-amber-600">BM25 (关键词)</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Rerank */}
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div>
+                      <p className="font-medium text-gray-900">Rerank 重排序</p>
+                      <p className="text-xs text-gray-500">使用交叉编码器优化排序</p>
+                    </div>
+                    <Switch
+                      checked={editRerankEnabled}
+                      onCheckedChange={setEditRerankEnabled}
+                    />
+                  </div>
+                  {editRerankEnabled && (
+                    <div className="ml-3">
+                      <Label className="text-xs text-gray-500">Rerank 模型</Label>
+                      <Select value={editRerankModel} onValueChange={setEditRerankModel}>
+                        <SelectTrigger className="mt-1 h-8 text-sm">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="gte-rerank">GTE Rerank (阿里)</SelectItem>
+                          <SelectItem value="bge-reranker-v2-m3">BGE Reranker</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+
+                  {/* MMR */}
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div>
+                      <p className="font-medium text-gray-900">MMR 多样性</p>
+                      <p className="text-xs text-gray-500">最大边际相关性去重</p>
+                    </div>
+                    <Switch
+                      checked={editMmrEnabled}
+                      onCheckedChange={setEditMmrEnabled}
+                    />
+                  </div>
+                  {editMmrEnabled && (
+                    <div className="ml-3">
+                      <div className="flex justify-between items-center">
+                        <Label className="text-xs text-gray-500">Lambda (相关性 vs 多样性)</Label>
+                        <span className="text-xs text-gray-500">{editMmrLambda.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={editMmrLambda * 100}
+                        onChange={(e) => setEditMmrLambda(Number(e.target.value) / 100)}
+                        className="w-full mt-1"
+                      />
+                      <div className="flex justify-between text-xs mt-1">
+                        <span className="text-purple-600">多样性优先</span>
+                        <span className="text-green-600">相关性优先</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 保存/取消按钮 */}
+                  <div className="flex gap-2 pt-2">
+                    <Button
+                      onClick={handleSaveRetrievalConfig}
+                      disabled={configSaving}
+                      className="bg-emerald-600 hover:bg-emerald-700"
+                    >
+                      {configSaving ? "保存中..." : "保存配置"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setRetrievalEditing(false);
+                        // Reset values
+                        if (datasetConfig?.retrieval) {
+                          const modeMap: Record<string, "vector" | "keyword" | "hybrid"> = {
+                            dense: "vector", vector: "vector", bm25: "keyword", keyword: "keyword", hybrid: "hybrid"
+                          };
+                          setEditRetrievalMode(modeMap[datasetConfig.retrieval.mode] || "hybrid");
+                          setEditTopK(datasetConfig.retrieval.top_k || 5);
+                        }
+                      }}
+                    >
+                      取消
+                    </Button>
+                  </div>
                 </div>
               ) : datasetConfig ? (
                 <div className="space-y-4">
@@ -1986,7 +2300,7 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="p-3 bg-gray-50 rounded-lg">
                       <p className="text-xs text-gray-500">检索模式</p>
                       <p className="font-medium text-gray-900 mt-1">
-                        {datasetConfig.retrieval?.mode || "hybrid"}
+                        {{vector: "向量检索", dense: "向量检索", keyword: "关键词检索", bm25: "关键词检索", hybrid: "混合检索"}[datasetConfig.retrieval?.mode || "hybrid"]}
                       </p>
                     </div>
                     <div className="p-3 bg-gray-50 rounded-lg">
@@ -1996,6 +2310,24 @@ export function KnowledgeDatasetDetailPage() {
                       </p>
                     </div>
                   </div>
+
+                  {/* 融合权重显示 */}
+                  {(datasetConfig.retrieval?.mode === "hybrid") && (
+                    <div className="p-3 bg-blue-50 rounded-lg">
+                      <p className="text-xs text-blue-600 mb-2">融合权重</p>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 bg-blue-200 rounded-full h-2">
+                          <div
+                            className="bg-blue-600 h-2 rounded-full"
+                            style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
+                          />
+                        </div>
+                        <span className="text-xs text-gray-600">
+                          向量 {((datasetConfig.retrieval.fusion?.alpha || 0.7) * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="space-y-2">
                     <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">

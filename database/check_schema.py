@@ -3,10 +3,16 @@
 
 import asyncio
 import asyncpg
+import os
 
 
 async def check():
-    conn = await asyncpg.connect('postgresql://postgres:111111@localhost:5433/gateway')
+    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    if not dsn:
+        raise RuntimeError(
+            "Database DSN not configured. Set GATEWAY_DATABASE__DSN environment variable."
+        )
+    conn = await asyncpg.connect(dsn)
     
     # Get all tables
     tables = await conn.fetch("""

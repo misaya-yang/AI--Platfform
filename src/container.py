@@ -452,8 +452,8 @@ class Container:
             )
         
         redis = self._providers["redis"].get_sync()
-        # 注意：MultiDimensionRateLimiter 需要的是原生 redis 客户端，不是 RedisStorage 包装器
-        redis_client = redis._client if (redis and redis.enabled) else None
+        # MultiDimensionRateLimiter needs the native redis client, not the RedisStorage wrapper
+        redis_client = redis.get_native_client() if redis else None
         return MultiDimensionRateLimiter(
             config=MultiDimensionRateLimitConfig(user_tier_limits=tier_limits),
             redis_client=redis_client,

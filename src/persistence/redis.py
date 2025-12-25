@@ -32,6 +32,18 @@ class RedisStorage:
             decode_responses=True,
         )
 
+    def get_native_client(self) -> Optional[Any]:
+        """
+        Return the underlying native redis client for advanced use cases.
+        
+        This is needed by components like MultiDimensionRateLimiter that
+        require direct access to the redis client rather than the wrapper.
+        
+        Returns:
+            The native redis.asyncio client, or None if not connected/enabled.
+        """
+        return self._client if self.enabled else None
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()

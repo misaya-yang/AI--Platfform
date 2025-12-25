@@ -794,11 +794,13 @@ class LangGraphAdapter(ProtocolAdapter):
                     },
                     headers=auth_headers,
                 )
-            except Exception:
-                pass  # Thread creation is best-effort
+            except Exception as e:
+                # Thread creation is best-effort, but log failures for debugging
+                logger.debug(f"Background thread creation failed (non-critical): {e}")
         
-        # Fire and forget - don't wait for thread creation
-        asyncio.create_task(create_thread_background())
+        # Fire and forget - but track the task to avoid silent exception loss
+        task = asyncio.create_task(create_thread_background())
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
         
         t_end = time.perf_counter()
         logger.debug(f"[TIMING] _ensure_thread: {(t_end - t_start)*1000:.2f}ms (cached: False)")

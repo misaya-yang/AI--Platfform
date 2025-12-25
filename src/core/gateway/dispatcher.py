@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import AsyncIterator, Dict, List, Optional
 
 from ...models.enums import ContentType, StreamEventType
+
+logger = logging.getLogger(__name__)
 from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
@@ -155,8 +158,6 @@ class GatewayDispatcher:
         client_ip: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         import time
-        import logging
-        logger = logging.getLogger(__name__)
         
         t0 = time.perf_counter()
         
@@ -176,25 +177,29 @@ class GatewayDispatcher:
         session_id: Optional[str] = None
         acc_text: str = ""
         if service.session_enabled:
-            # 如果 session_id 已由上层（stream.py）设置，直接使用，避免重复的会话操作
-            if request.session_id:
-                session_id = request.session_id
-            else:
-                session = await self.session_manager.get_or_create(
-                    request.session_id,
-                    user_id=request.user_id or "local",
-                    tenant_id=request.tenant_id or "local",
-                    service_id=service.service_id,
-                )
-                session_id = session.session_id
-                request.session_id = session_id
-            # 添加用户消息到历史（异步不阻塞）
+            # Always validate/create session via get_or_create to ensure it exists
+            # Even if session_id is pre-set, we need to verify the session is valid
+            session = await self.session_manager.get_or_create(
+                request.session_id,
+                user_id=request.user_id or "local",
+                tenant_id=request.tenant_id or "local",
+                service_id=service.service_id,
+            )
+            session_id = session.session_id
+            request.session_id = session_id
+            
+            # 添加用户消息到历史（异步不阻塞，但捕获错误）
             user_text = self._inputs_to_text(request)
             if user_text and session_id:
-                # 使用 asyncio.create_task 避免阻塞流式响应
-                asyncio.create_task(
-                    self.session_manager.add_message(session_id, "user", user_text)
-                )
+                async def _add_user_message():
+                    try:
+                        await self.session_manager.add_message(session_id, "user", user_text)
+                    except Exception as e:
+                        logger.error(f"Failed to persist user message to session {session_id}: {e}")
+                
+                # Fire and forget with error handling
+                task = asyncio.create_task(_add_user_message())
+                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
         
         t_session = time.perf_counter()
         logger.debug(
