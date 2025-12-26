@@ -123,6 +123,14 @@ export function StreamOutput({
     );
   }
 
+  if (!enableTypingEffect) {
+    return (
+      <div className="prose prose-sm max-w-none dark:prose-invert">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      </div>
+    );
+  }
+
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayedText || text}</ReactMarkdown>

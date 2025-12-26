@@ -5,6 +5,8 @@ import type { ToolCall } from "@/types/gateway";
 interface ToolCallBlockProps {
   toolCall: ToolCall;
   result?: string;
+  argsText?: string;
+  argsValid?: boolean;
 }
 
 const statusLabels: Record<string, string> = {
@@ -45,16 +47,27 @@ const statusIcons: Record<string, JSX.Element> = {
   ),
 };
 
-export function ToolCallBlock({ toolCall, result }: ToolCallBlockProps) {
+export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCallBlockProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  let parsedArgs: Record<string, unknown> | null = null;
-  try {
-    if (toolCall.arguments) {
-      parsedArgs = JSON.parse(toolCall.arguments);
+  const rawArgs = argsText ?? toolCall.arguments ?? "";
+  const hasValidArgs = argsValid ?? (rawArgs ? (() => {
+    try {
+      JSON.parse(rawArgs);
+      return true;
+    } catch {
+      return false;
     }
-  } catch {
-    // Keep raw string if parsing fails.
+  })() : false);
+  const argsValue = hasValidArgs ? rawArgs : "";
+
+  let parsedArgs: Record<string, unknown> | null = null;
+  if (argsValue) {
+    try {
+      parsedArgs = JSON.parse(argsValue);
+    } catch {
+      parsedArgs = null;
+    }
   }
 
   let parsedResult: unknown = result;
@@ -66,11 +79,11 @@ export function ToolCallBlock({ toolCall, result }: ToolCallBlockProps) {
     // Keep raw string if parsing fails.
   }
 
-  const argsPreview = parsedArgs ? JSON.stringify(parsedArgs) : (toolCall.arguments || "");
+  const argsPreview = parsedArgs ? JSON.stringify(parsedArgs) : (argsValue || rawArgs);
   const resultPreview = typeof parsedResult === "object" && parsedResult !== null
     ? JSON.stringify(parsedResult)
     : (result ? String(result) : "");
-  const previewSource = argsPreview || resultPreview;
+  const previewSource = argsPreview || resultPreview || (rawArgs ? "Parameters pending..." : "");
   const preview = previewSource.length > 160 ? `${previewSource.slice(0, 160)}...` : previewSource;
 
   const statusClass = statusColors[toolCall.status] || "bg-muted text-muted-foreground border-border/50";
@@ -134,17 +147,22 @@ export function ToolCallBlock({ toolCall, result }: ToolCallBlockProps) {
 
       {isExpanded && (
         <div className="border-t border-border/50 bg-muted/20">
-          {toolCall.arguments && (
+          {rawArgs && (
             <div className="border-b border-border/40 px-3 py-2">
               <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                 <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16l-4-4m0 0l4-4m-4 4h18" />
                 </svg>
-                Arguments
+                {hasValidArgs ? "Arguments" : "Arguments (partial)"}
               </div>
               <pre className="max-h-40 overflow-x-auto overflow-y-auto rounded bg-muted/50 p-2 text-xs font-mono">
-                {parsedArgs ? JSON.stringify(parsedArgs, null, 2) : toolCall.arguments}
+                {parsedArgs ? JSON.stringify(parsedArgs, null, 2) : rawArgs}
               </pre>
+              {!hasValidArgs && (
+                <div className="mt-1 text-[10px] text-muted-foreground">
+                  Arguments are still streaming.
+                </div>
+              )}
             </div>
           )}
 

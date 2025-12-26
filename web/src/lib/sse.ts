@@ -8,15 +8,23 @@ export async function* sseFetch<T>(
   url: string,
   init: SSEFetchOptions
 ): AsyncGenerator<T, void, void> {
+  const debug =
+    import.meta.env.DEV && import.meta.env.VITE_SSE_DEBUG === "true";
   const startTime = performance.now();
-  console.log(`[SSE] Starting fetch to ${url}`);
+  if (debug) {
+    console.log(`[SSE] Starting fetch to ${url}`);
+  }
   
   const resp = await fetch(url, {
     ...init,
     signal: init.signal,
   });
   
-  console.log(`[SSE] Response received in ${(performance.now() - startTime).toFixed(0)}ms, status=${resp.status}`);
+  if (debug) {
+    console.log(
+      `[SSE] Response received in ${(performance.now() - startTime).toFixed(0)}ms, status=${resp.status}`
+    );
+  }
   
   if (!resp.ok || !resp.body) {
     throw new Error(`SSE request failed: ${resp.status}`);
@@ -33,11 +41,19 @@ export async function* sseFetch<T>(
       
       if (value && firstChunkTime === null) {
         firstChunkTime = performance.now();
-        console.log(`[SSE] First data chunk received at ${(firstChunkTime - startTime).toFixed(0)}ms, size=${value.length}`);
+        if (debug) {
+          console.log(
+            `[SSE] First data chunk received at ${(firstChunkTime - startTime).toFixed(0)}ms, size=${value.length}`
+          );
+        }
       }
       
       if (done) {
-        console.log(`[SSE] Stream done. Total chunks: ${chunkCount}, duration: ${(performance.now() - startTime).toFixed(0)}ms`);
+        if (debug) {
+          console.log(
+            `[SSE] Stream done. Total chunks: ${chunkCount}, duration: ${(performance.now() - startTime).toFixed(0)}ms`
+          );
+        }
         // 处理缓冲区中剩余的数据
         if (buffer.trim()) {
           const line = buffer.split("\n").find((l) => l.startsWith("data:"));
@@ -72,12 +88,16 @@ export async function* sseFetch<T>(
         try {
           const parsed = JSON.parse(jsonStr);
           chunkCount++;
-          if (chunkCount <= 3 || chunkCount % 50 === 0) {
-            console.log(`[SSE] Yielding chunk #${chunkCount} at ${(performance.now() - startTime).toFixed(0)}ms`);
+          if (debug && (chunkCount <= 3 || chunkCount % 50 === 0)) {
+            console.log(
+              `[SSE] Yielding chunk #${chunkCount} at ${(performance.now() - startTime).toFixed(0)}ms`
+            );
           }
           yield parsed as T;
         } catch (e) {
-          console.warn("SSE parse error:", e, jsonStr);
+          if (debug) {
+            console.warn("SSE parse error:", e, jsonStr);
+          }
           continue;
         }
       }

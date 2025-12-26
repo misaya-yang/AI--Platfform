@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, startTransition } from "react";
 
 import { useServices } from "@/hooks/useServices";
 import { invokeService } from "@/api/gateway";
@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
 
@@ -31,6 +32,11 @@ type UsageStats = {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+};
+
+type ToolCallState = ToolCallWithResult & {
+  argsText: string;
+  argsValid: boolean;
 };
 
 function toNumber(value: unknown): number | undefined {
@@ -68,7 +74,38 @@ function mergeToolArguments(current: string, incoming: string): string {
   if (!incoming) return current;
   if (incoming.startsWith(current)) return incoming;
   if (current.startsWith(incoming)) return current;
+
+  const maxOverlap = Math.min(current.length, incoming.length);
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    if (current.endsWith(incoming.slice(0, size))) {
+      return current + incoming.slice(size);
+    }
+  }
   return current + incoming;
+}
+
+function tryParseJson(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function resolveToolArguments(current: string, incoming: string, currentValid: boolean): { text: string; isValid: boolean } {
+  if (!incoming) return { text: current, isValid: currentValid };
+  if (!current) {
+    const parsed = tryParseJson(incoming);
+    return { text: incoming, isValid: parsed !== null };
+  }
+
+  const merged = mergeToolArguments(current, incoming);
+  const incomingParsed = tryParseJson(incoming);
+  if (incomingParsed !== null) {
+    return { text: incoming, isValid: true };
+  }
+  const mergedParsed = tryParseJson(merged);
+  return { text: merged, isValid: mergedParsed !== null };
 }
 
 function normalizeHistoryContent(value: unknown): string {
@@ -123,6 +160,13 @@ export function PlaygroundPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
+  const [showToolCalls, setShowToolCalls] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const stored = window.localStorage.getItem("showToolCalls");
+    return stored ? stored === "true" : false;
+  });
 
   // 会话管理状态（用于左侧历史列表 & 多轮上下文）
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -222,16 +266,42 @@ export function PlaygroundPage() {
     await refreshSessions();
   }, [serviceId, refreshSessions, setActiveSessionId]);
 
+  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (behavior === "auto") {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        el.scrollTo({ top: el.scrollHeight, behavior });
+      }
+    });
+  }, []);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    const handleScroll = () => {
+      const offset = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stickToBottomRef.current = offset < 120;
+    };
+    handleScroll();
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", handleScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (!stickToBottomRef.current) return;
     const last = messages[messages.length - 1];
     const isStreaming = last?.role === "assistant" && last?.isStreaming;
-    el.scrollTo({
-      top: el.scrollHeight,
-      behavior: isStreaming ? "auto" : "smooth",
-    });
-  }, [messages]);
+    scheduleScrollToBottom(isStreaming ? "auto" : "smooth");
+  }, [messages, scheduleScrollToBottom]);
 
   // 组件卸载时取消正在进行的请求
   useEffect(() => {
@@ -240,8 +310,17 @@ export function PlaygroundPage() {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("showToolCalls", showToolCalls ? "true" : "false");
+  }, [showToolCalls]);
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
@@ -304,6 +383,7 @@ export function PlaygroundPage() {
     if (!text) return;
     const inputText = String(text);
     const estimatedInputTokens = estimateTokens(inputText);
+    stickToBottomRef.current = true;
 
     // 取消之前进行中的流式请求
     if (abortControllerRef.current) {
@@ -374,7 +454,7 @@ export function PlaygroundPage() {
 
       let acc = "";
       let streamed = false;
-      const toolCallsMap = new Map<string, ToolCallWithResult>();
+      const toolCallsMap = new Map<string, ToolCallState>();
       let usageStats: UsageStats | null = null;
       let rafId: number | null = null;
 
@@ -385,20 +465,30 @@ export function PlaygroundPage() {
 
       const flushAssistant = (overrides?: Partial<ChatMessage>) => {
         if (!isRequestValid()) return;
-        const toolCalls = Array.from(toolCallsMap.values());
-        setMessages((m) => {
-          const next = [...m];
-          if (next[assistantIndex]) {
-            next[assistantIndex] = {
-              ...next[assistantIndex],
-              content: acc,
-              toolCalls,
-              isThinking: false,
-              isStreaming: true,
-              ...overrides,
-            };
-          }
-          return next;
+        const toolCalls = Array.from(toolCallsMap.values()).map((tc) => ({
+          toolCall: {
+            ...tc.toolCall,
+            arguments: tc.argsValid ? tc.argsText : "",
+          },
+          result: tc.result,
+          argsText: tc.argsText,
+          argsValid: tc.argsValid,
+        }));
+        startTransition(() => {
+          setMessages((m) => {
+            const next = [...m];
+            if (next[assistantIndex]) {
+              next[assistantIndex] = {
+                ...next[assistantIndex],
+                content: acc,
+                toolCalls,
+                isThinking: false,
+                isStreaming: true,
+                ...overrides,
+              };
+            }
+            return next;
+          });
         });
       };
 
@@ -468,25 +558,35 @@ export function PlaygroundPage() {
               const existingTc = toolCallsMap.get(tcId);
               const incomingArgs = tc.arguments || "";
               if (existingTc) {
-                const mergedArgs = mergeToolArguments(existingTc.toolCall.arguments, incomingArgs);
+                const resolvedArgs = resolveToolArguments(
+                  existingTc.argsText,
+                  incomingArgs,
+                  existingTc.argsValid
+                );
                 const updatedTc: ToolCall = {
                   ...existingTc.toolCall,
                   name: tc.name || existingTc.toolCall.name,
-                  arguments: mergedArgs,
+                  arguments: resolvedArgs.text,
                   status: tc.status || existingTc.toolCall.status,
                 };
                 toolCallsMap.set(tcId, {
                   toolCall: updatedTc,
                   result: existingTc.result,
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
                 });
               } else {
+                const resolvedArgs = resolveToolArguments("", incomingArgs, false);
                 toolCallsMap.set(tcId, {
                   toolCall: {
                     tool_call_id: tcId,
                     name: tc.name || "",
-                    arguments: incomingArgs,
+                    arguments: resolvedArgs.text,
                     status: tc.status || "running",
                   },
+                  result: undefined,
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
                 });
               }
               scheduleFlush();
@@ -500,13 +600,35 @@ export function PlaygroundPage() {
             if (tc) {
               const tcId = tc.tool_call_id || "unknown";
               const existingTc = toolCallsMap.get(tcId);
+              const incomingArgs = tc.arguments || "";
               if (existingTc) {
+                const resolvedArgs = resolveToolArguments(
+                  existingTc.argsText,
+                  incomingArgs,
+                  existingTc.argsValid
+                );
                 toolCallsMap.set(tcId, {
                   toolCall: {
                     ...existingTc.toolCall,
+                    arguments: resolvedArgs.text,
                     status: "completed",
                   },
                   result: existingTc.result,
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
+                });
+              } else {
+                const resolvedArgs = resolveToolArguments("", incomingArgs, false);
+                toolCallsMap.set(tcId, {
+                  toolCall: {
+                    tool_call_id: tcId,
+                    name: tc.name || "",
+                    arguments: resolvedArgs.text,
+                    status: "completed",
+                  },
+                  result: undefined,
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
                 });
               }
               scheduleFlush();
@@ -522,23 +644,35 @@ export function PlaygroundPage() {
             if (tc) {
               const tcId = tc.tool_call_id || "unknown";
               const existingTc = toolCallsMap.get(tcId);
+              const incomingArgs = tc.arguments || "";
               if (existingTc) {
+                const resolvedArgs = resolveToolArguments(
+                  existingTc.argsText,
+                  incomingArgs,
+                  existingTc.argsValid
+                );
                 toolCallsMap.set(tcId, {
                   toolCall: {
                     ...existingTc.toolCall,
+                    arguments: resolvedArgs.text,
                     status: "completed",
                   },
                   result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
                 });
               } else {
+                const resolvedArgs = resolveToolArguments("", tc.arguments || "", false);
                 toolCallsMap.set(tcId, {
                   toolCall: {
                     tool_call_id: tcId,
                     name: tc.name || "",
-                    arguments: tc.arguments || "",
+                    arguments: resolvedArgs.text,
                     status: "completed",
                   },
                   result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                  argsText: resolvedArgs.text,
+                  argsValid: resolvedArgs.isValid,
                 });
               }
               scheduleFlush();
@@ -818,7 +952,7 @@ export function PlaygroundPage() {
               : "Type a message to start."}
           </div>
         ) : (
-          <ChatWindow messages={messages} />
+          <ChatWindow messages={messages} showToolCalls={showToolCalls} />
         )}
       </div>
 
@@ -830,6 +964,16 @@ export function PlaygroundPage() {
             disabled={!serviceId || loading}
             includeFiles={false} // Would be true if backend supported
           />
+        </div>
+        <div className="mx-auto mt-3 flex w-full max-w-4xl items-center gap-2 text-xs text-muted-foreground">
+          <Switch
+            id="toggle-tool-calls"
+            checked={showToolCalls}
+            onCheckedChange={setShowToolCalls}
+          />
+          <label htmlFor="toggle-tool-calls" className="cursor-pointer select-none">
+            Show tool calls
+          </label>
         </div>
         <div className="mt-2 text-center text-[10px] text-muted-foreground/60">
           AI generated responses may be inaccurate.
