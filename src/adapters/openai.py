@@ -4,7 +4,7 @@ import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ..core.exceptions import ValidationFailedError
-from ..models.enums import ContentType, ServiceType
+from ..models.enums import ContentType, ServiceType, StreamEventType
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, UnifiedResponse
 from .base import ProtocolAdapter
@@ -61,12 +61,15 @@ class OpenAIAdapter(ProtocolAdapter):
             "stream": True,
         }
         payload.update({k: v for k, v in params.items() if k != "model"})
+        if "stream_options" not in payload:
+            payload["stream_options"] = {"include_usage": True}
 
         client = getattr(self.connector, "_client", None)
         if client is None:
             raise ValidationFailedError("stream requires HTTPConnector")
 
         chunk_index = 0
+        usage: Optional[Dict[str, Any]] = None
         async with client.stream(
             "POST", "/v1/chat/completions", json=payload
         ) as resp:
@@ -80,6 +83,8 @@ class OpenAIAdapter(ProtocolAdapter):
                     evt = json.loads(data_str)
                 except Exception:
                     continue
+                if isinstance(evt, dict) and isinstance(evt.get("usage"), dict):
+                    usage = evt.get("usage")
                 delta = (
                     evt.get("choices", [{}])[0]
                     .get("delta", {})
@@ -98,6 +103,8 @@ class OpenAIAdapter(ProtocolAdapter):
             chunk_index=chunk_index,
             content=ContentItem(type=ContentType.TEXT, data=""),
             is_final=True,
+            event_type=StreamEventType.FINAL,
+            metadata={"usage": usage} if usage else None,
         )
 
     def _extract_text(self, inputs: List[ContentItem]) -> str:

@@ -15,6 +15,7 @@ export type ChatMessage = {
   content: string;
   toolCalls?: ToolCallWithResult[];
   isThinking?: boolean; // 显示"AI思考中"状态
+  isStreaming?: boolean;
   // 统计信息
   stats?: {
     durationMs?: number;     // 响应耗时（毫秒）
@@ -27,9 +28,10 @@ export type ChatMessage = {
 
 export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-8">
+    <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8">
       {messages.map((m, i) => {
         const isUser = m.role === "user";
+        const hasToolCalls = !isUser && m.toolCalls && m.toolCalls.length > 0;
         return (
           <motion.div
             key={i}
@@ -64,18 +66,37 @@ export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
                     : "bg-white dark:bg-zinc-900 border border-border/50 rounded-tl-sm"
                 )}
               >
+                {!isUser && hasToolCalls && (
+                  <div className="mb-3 rounded-xl border border-border/50 bg-muted/40 p-2">
+                    <div className="mb-2 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />
+                      Tool Calls
+                    </div>
+                    <div className="space-y-2">
+                      {m.toolCalls?.map((tc, idx) => (
+                        <ToolCallBlock
+                          key={tc.toolCall.tool_call_id || idx}
+                          toolCall={tc.toolCall}
+                          result={tc.result}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {m.content ? (
                   <div className={cn("leading-relaxed", isUser ? "text-white" : "text-foreground")}>
-                    {isUser ? <div className="whitespace-pre-wrap">{m.content}</div> : <StreamOutput text={m.content} />}
+                    {isUser ? <div className="whitespace-pre-wrap">{m.content}</div> : (
+                      <StreamOutput text={m.content} isStreaming={!!m.isStreaming} enableTypingEffect={false} />
+                    )}
                   </div>
                 ) : null}
 
                 {/* AI Thinking / Loading Indicator */}
-                {!m.content && (!m.toolCalls || m.toolCalls.length === 0) && !isUser && (
+                {!m.content && !hasToolCalls && !isUser && (
                   <div className="flex items-center gap-2 h-6">
                     {m.isThinking ? (
                       <>
-                        <span className="text-sm text-muted-foreground">AI 思考中</span>
+                        <span className="text-sm text-muted-foreground">Thinking...</span>
                         <div className="flex items-center gap-1">
                           <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
                           <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
@@ -92,19 +113,6 @@ export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
                   </div>
                 )}
               </div>
-
-              {/* Tool Calls Area */}
-              {m.toolCalls && m.toolCalls.length > 0 && (
-                <div className="w-full space-y-2 mt-1">
-                  {m.toolCalls.map((tc, idx) => (
-                    <ToolCallBlock
-                      key={tc.toolCall.tool_call_id || idx}
-                      toolCall={tc.toolCall}
-                      result={tc.result}
-                    />
-                  ))}
-                </div>
-              )}
 
               {/* Stats (仅助手消息显示) */}
               {!isUser && m.stats && !m.isThinking && m.content && (
@@ -129,7 +137,7 @@ export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
                       {m.stats.totalTokens} tokens
                       {m.stats.inputTokens != null && m.stats.outputTokens != null && (
                         <span className="text-muted-foreground/40">
-                          ({m.stats.inputTokens}↓ {m.stats.outputTokens}↑)
+                          ({m.stats.inputTokens} in / {m.stats.outputTokens} out)
                         </span>
                       )}
                     </span>

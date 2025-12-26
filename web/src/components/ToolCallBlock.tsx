@@ -8,77 +8,85 @@ interface ToolCallBlockProps {
 }
 
 const statusLabels: Record<string, string> = {
-  pending: "等待中",
-  running: "执行中",
-  completed: "已完成",
-  error: "错误",
+  pending: "Pending",
+  running: "Running",
+  completed: "Done",
+  error: "Error",
+};
+
+const statusColors: Record<string, string> = {
+  pending: "bg-amber-500/10 text-amber-600 border-amber-500/20",
+  running: "bg-blue-500/10 text-blue-600 border-blue-500/20",
+  completed: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
+  error: "bg-red-500/10 text-red-600 border-red-500/20",
+};
+
+const statusIcons: Record<string, JSX.Element> = {
+  pending: (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  ),
+  running: (
+    <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  ),
+  completed: (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+    </svg>
+  ),
+  error: (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+    </svg>
+  ),
 };
 
 export function ToolCallBlock({ toolCall, result }: ToolCallBlockProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // 解析参数
   let parsedArgs: Record<string, unknown> | null = null;
   try {
     if (toolCall.arguments) {
       parsedArgs = JSON.parse(toolCall.arguments);
     }
   } catch {
-    // 保持原始字符串
+    // Keep raw string if parsing fails.
   }
 
-  // 解析结果
   let parsedResult: unknown = result;
   try {
     if (result) {
       parsedResult = JSON.parse(result);
     }
   } catch {
-    // 保持原始字符串
+    // Keep raw string if parsing fails.
   }
 
-  const statusColors = {
-    pending: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-    running: "bg-blue-500/10 text-blue-600 border-blue-500/20",
-    completed: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
-    error: "bg-red-500/10 text-red-600 border-red-500/20",
-  };
+  const argsPreview = parsedArgs ? JSON.stringify(parsedArgs) : (toolCall.arguments || "");
+  const resultPreview = typeof parsedResult === "object" && parsedResult !== null
+    ? JSON.stringify(parsedResult)
+    : (result ? String(result) : "");
+  const previewSource = argsPreview || resultPreview;
+  const preview = previewSource.length > 160 ? `${previewSource.slice(0, 160)}...` : previewSource;
 
-  const statusIcons = {
-    pending: (
-      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
-    running: (
-      <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-      </svg>
-    ),
-    completed: (
-      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-      </svg>
-    ),
-    error: (
-      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-      </svg>
-    ),
-  };
+  const statusClass = statusColors[toolCall.status] || "bg-muted text-muted-foreground border-border/50";
+  const statusLabel = statusLabels[toolCall.status] || toolCall.status;
+  const statusIcon = statusIcons[toolCall.status];
 
   return (
-    <div className="my-2 rounded-xl border border-border/40 bg-white/50 dark:bg-black/30 backdrop-blur-sm overflow-hidden shadow-sm transition-all hover:shadow-md">
-      {/* 头部 */}
+    <div className="rounded-lg border border-border/50 bg-background/60 shadow-sm transition-shadow hover:shadow-md">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted/50 transition-colors text-left"
+        className="flex w-full items-start gap-3 px-3 py-2 text-left"
+        type="button"
       >
-        {/* 展开/折叠图标 */}
         <svg
           className={cn(
-            "w-4 h-4 text-muted-foreground transition-transform",
+            "mt-1 h-4 w-4 text-muted-foreground transition-transform",
             isExpanded && "rotate-90"
           )}
           fill="none"
@@ -88,69 +96,68 @@ export function ToolCallBlock({ toolCall, result }: ToolCallBlockProps) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
         </svg>
 
-        {/* 工具图标 */}
-        <div className="flex items-center justify-center w-6 h-6 rounded bg-violet-500/10 text-violet-600">
-          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-            />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <div className="flex h-6 w-6 items-center justify-center rounded bg-violet-500/10 text-violet-600">
+              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </div>
+            <span className="min-w-0 truncate font-mono text-xs font-semibold">
+              {toolCall.name || "Unknown tool"}
+            </span>
+          </div>
+
+          {!isExpanded && preview && (
+            <div className="truncate text-[11px] text-muted-foreground">
+              {preview}
+            </div>
+          )}
         </div>
 
-        {/* 工具名称 */}
-        <span className="font-mono text-sm font-medium flex-1 truncate">
-          {toolCall.name || "未知工具"}
-        </span>
-
-        {/* 状态标签 */}
         <span
           className={cn(
-            "flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border",
-            statusColors[toolCall.status]
+            "mt-1 flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+            statusClass
           )}
         >
-          {statusIcons[toolCall.status]}
-          {statusLabels[toolCall.status] || toolCall.status}
+          {statusIcon}
+          {statusLabel}
         </span>
       </button>
 
-      {/* 展开内容 */}
       {isExpanded && (
-        <div className="border-t bg-background/50">
-          {/* 参数 */}
+        <div className="border-t border-border/50 bg-muted/20">
           {toolCall.arguments && (
-            <div className="px-3 py-2 border-b">
-              <div className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
-                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="border-b border-border/40 px-3 py-2">
+              <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16l-4-4m0 0l4-4m-4 4h18" />
                 </svg>
-                输入参数
+                Arguments
               </div>
-              <pre className="text-xs font-mono bg-muted/50 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-                {parsedArgs
-                  ? JSON.stringify(parsedArgs, null, 2)
-                  : toolCall.arguments}
+              <pre className="max-h-40 overflow-x-auto overflow-y-auto rounded bg-muted/50 p-2 text-xs font-mono">
+                {parsedArgs ? JSON.stringify(parsedArgs, null, 2) : toolCall.arguments}
               </pre>
             </div>
           )}
 
-          {/* 结果 */}
           {result && (
             <div className="px-3 py-2">
-              <div className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
-                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div className="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
                 </svg>
-                执行结果
+                Result
               </div>
-              <pre className="text-xs font-mono bg-muted/50 rounded p-2 overflow-x-auto max-h-40 overflow-y-auto">
-                {typeof parsedResult === "object"
-                  ? JSON.stringify(parsedResult, null, 2)
-                  : String(result)}
+              <pre className="max-h-40 overflow-x-auto overflow-y-auto rounded bg-muted/50 p-2 text-xs font-mono">
+                {typeof parsedResult === "object" ? JSON.stringify(parsedResult, null, 2) : String(result)}
               </pre>
             </div>
           )}

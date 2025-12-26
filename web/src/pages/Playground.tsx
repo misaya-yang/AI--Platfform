@@ -9,6 +9,7 @@ import {
   listSessions,
   updateSession,
   type SessionSummary,
+  type SessionMessage,
 } from "@/api/sessions";
 import { sseFetch } from "@/lib/sse";
 import { cn } from "@/lib/utils";
@@ -25,6 +26,86 @@ import {
 import { Button } from "@/components/ui/button";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
+
+type UsageStats = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeUsage(usage?: Record<string, unknown>): UsageStats | null {
+  if (!usage) return null;
+  const input = toNumber(usage.input_tokens ?? usage.prompt_tokens);
+  const output = toNumber(usage.output_tokens ?? usage.completion_tokens);
+  const total = toNumber(usage.total_tokens);
+  if (input == null && output == null && total == null) return null;
+  const resolvedTotal = total ?? (input ?? 0) + (output ?? 0);
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: resolvedTotal,
+  };
+}
+
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  const cjkCount = text.match(/[\u4E00-\u9FFF]/g)?.length ?? 0;
+  const nonCjkCount = Math.max(text.length - cjkCount, 0);
+  return Math.max(1, Math.ceil(cjkCount / 2) + Math.ceil(nonCjkCount / 4));
+}
+
+function mergeToolArguments(current: string, incoming: string): string {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  if (incoming.startsWith(current)) return incoming;
+  if (current.startsWith(incoming)) return current;
+  return current + incoming;
+}
+
+function normalizeHistoryContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function dedupeHistory(history: SessionMessage[]): SessionMessage[] {
+  const next: SessionMessage[] = [];
+  for (const msg of history) {
+    const prev = next[next.length - 1];
+    if (!prev) {
+      next.push(msg);
+      continue;
+    }
+    const prevContent = normalizeHistoryContent(prev.content);
+    const currContent = normalizeHistoryContent(msg.content);
+    if (prev.role === msg.role && prevContent === currContent) {
+      const prevTime = Date.parse(prev.timestamp ?? "");
+      const currTime = Date.parse(msg.timestamp ?? "");
+      if (Number.isFinite(prevTime) && Number.isFinite(currTime)) {
+        if (Math.abs(currTime - prevTime) <= 3000) {
+          continue;
+        }
+      } else {
+        continue;
+      }
+    }
+    next.push(msg);
+  }
+  return next;
+}
 
 export function PlaygroundPage() {
   const servicesQuery = useServices();
@@ -104,7 +185,8 @@ export function PlaygroundPage() {
         return;
       }
 
-      const nextMessages: ChatMessage[] = history.map((m) => ({
+      const normalizedHistory = dedupeHistory(history);
+      const nextMessages: ChatMessage[] = normalizedHistory.map((m) => ({
         role: m.role === "user" ? "user" : "assistant",
         content:
           typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
@@ -141,11 +223,15 @@ export function PlaygroundPage() {
   }, [serviceId, refreshSessions, setActiveSessionId]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
+    const el = scrollRef.current;
+    if (!el) return;
+    const last = messages[messages.length - 1];
+    const isStreaming = last?.role === "assistant" && last?.isStreaming;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: isStreaming ? "auto" : "smooth",
     });
-  }, [messages, loading]);
+  }, [messages]);
 
   // 组件卸载时取消正在进行的请求
   useEffect(() => {
@@ -216,6 +302,8 @@ export function PlaygroundPage() {
     if (!serviceId) return;
     const text = inputs.find((i) => i.type === "text")?.data || "";
     if (!text) return;
+    const inputText = String(text);
+    const estimatedInputTokens = estimateTokens(inputText);
 
     // 取消之前进行中的流式请求
     if (abortControllerRef.current) {
@@ -237,8 +325,8 @@ export function PlaygroundPage() {
     setMessages((prev) => {
       const next = [
         ...prev,
-        { role: "user" as const, content: String(text) },
-        { role: "assistant" as const, content: "", toolCalls: [], isThinking: true },
+        { role: "user" as const, content: inputText },
+        { role: "assistant" as const, content: "", toolCalls: [], isThinking: true, isStreaming: true },
       ];
       assistantIndex = next.length - 1;
       return next;
@@ -269,7 +357,7 @@ export function PlaygroundPage() {
 
       // 为会话设置标题：使用第一条消息的前40个字符
       if (effectiveSessionId && !localTitles[effectiveSessionId]) {
-        const titleText = String(text).trim().split('\n')[0].slice(0, 40);
+        const titleText = inputText.trim().split('\n')[0].slice(0, 40);
         if (titleText) {
           setLocalTitles(prev => ({ ...prev, [effectiveSessionId!]: titleText }));
           // 异步更新后端会话标题（不阻塞发送）
@@ -280,18 +368,53 @@ export function PlaygroundPage() {
 
       const req = {
         service_id: serviceId,
-        inputs: [{ type: "text" as const, data: String(text) }],
+        inputs: [{ type: "text" as const, data: inputText }],
         session_id: effectiveSessionId,
       };
 
       let acc = "";
       let streamed = false;
       const toolCallsMap = new Map<string, ToolCallWithResult>();
+      let usageStats: UsageStats | null = null;
+      let rafId: number | null = null;
 
-      // 用于检查当前请求是否仍有效
       const isRequestValid = () => {
         return !abortController.signal.aborted &&
           currentRequestSessionRef.current === effectiveSessionId;
+      };
+
+      const flushAssistant = (overrides?: Partial<ChatMessage>) => {
+        if (!isRequestValid()) return;
+        const toolCalls = Array.from(toolCallsMap.values());
+        setMessages((m) => {
+          const next = [...m];
+          if (next[assistantIndex]) {
+            next[assistantIndex] = {
+              ...next[assistantIndex],
+              content: acc,
+              toolCalls,
+              isThinking: false,
+              isStreaming: true,
+              ...overrides,
+            };
+          }
+          return next;
+        });
+      };
+
+      const scheduleFlush = () => {
+        if (rafId !== null) return;
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          flushAssistant();
+        });
+      };
+
+      const cancelFlush = () => {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
       };
 
       try {
@@ -309,6 +432,14 @@ export function PlaygroundPage() {
 
           const eventType = chunk?.event_type || "text_delta";
 
+          const usage = chunk?.metadata?.usage;
+          if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+            const normalized = normalizeUsage(usage as Record<string, unknown>);
+            if (normalized) {
+              usageStats = normalized;
+            }
+          }
+
           // thinking 事件：保持思考状态，不做其他处理
           if (eventType === "thinking") {
             continue;
@@ -324,17 +455,7 @@ export function PlaygroundPage() {
               }
               streamed = true;
               acc += delta;
-              setMessages((m) => {
-                const next = [...m];
-                if (next[assistantIndex]) {
-                  next[assistantIndex] = {
-                    ...next[assistantIndex],
-                    content: acc,
-                    isThinking: false,
-                  };
-                }
-                return next;
-              });
+              scheduleFlush();
             }
           }
 
@@ -345,11 +466,13 @@ export function PlaygroundPage() {
             if (tc) {
               const tcId = tc.tool_call_id || "unknown";
               const existingTc = toolCallsMap.get(tcId);
+              const incomingArgs = tc.arguments || "";
               if (existingTc) {
+                const mergedArgs = mergeToolArguments(existingTc.toolCall.arguments, incomingArgs);
                 const updatedTc: ToolCall = {
                   ...existingTc.toolCall,
                   name: tc.name || existingTc.toolCall.name,
-                  arguments: existingTc.toolCall.arguments + (tc.arguments || ""),
+                  arguments: mergedArgs,
                   status: tc.status || existingTc.toolCall.status,
                 };
                 toolCallsMap.set(tcId, {
@@ -361,24 +484,12 @@ export function PlaygroundPage() {
                   toolCall: {
                     tool_call_id: tcId,
                     name: tc.name || "",
-                    arguments: tc.arguments || "",
+                    arguments: incomingArgs,
                     status: tc.status || "running",
                   },
                 });
               }
-
-              setMessages((m) => {
-                const next = [...m];
-                if (next[assistantIndex]) {
-                  next[assistantIndex] = {
-                    ...next[assistantIndex],
-                    content: acc,
-                    toolCalls: Array.from(toolCallsMap.values()),
-                    isThinking: false,
-                  };
-                }
-                return next;
-              });
+              scheduleFlush();
             }
           }
 
@@ -398,19 +509,7 @@ export function PlaygroundPage() {
                   result: existingTc.result,
                 });
               }
-
-              setMessages((m) => {
-                const next = [...m];
-                if (next[assistantIndex]) {
-                  next[assistantIndex] = {
-                    ...next[assistantIndex],
-                    content: acc,
-                    toolCalls: Array.from(toolCallsMap.values()),
-                    isThinking: false,
-                  };
-                }
-                return next;
-              });
+              scheduleFlush();
             }
           }
 
@@ -442,19 +541,7 @@ export function PlaygroundPage() {
                   result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
                 });
               }
-
-              setMessages((m) => {
-                const next = [...m];
-                if (next[assistantIndex]) {
-                  next[assistantIndex] = {
-                    ...next[assistantIndex],
-                    content: acc,
-                    toolCalls: Array.from(toolCallsMap.values()),
-                    isThinking: false,
-                  };
-                }
-                return next;
-              });
+              scheduleFlush();
             }
           }
 
@@ -464,6 +551,7 @@ export function PlaygroundPage() {
         // 忽略取消导致的错误
         if (streamErr instanceof Error && streamErr.name === 'AbortError') {
           console.log("Stream aborted");
+          cancelFlush();
           return;
         }
         console.error("Stream error:", streamErr);
@@ -472,6 +560,8 @@ export function PlaygroundPage() {
         }
       }
 
+      cancelFlush();
+
       // 检查请求是否仍有效
       if (!isRequestValid()) return;
 
@@ -479,27 +569,21 @@ export function PlaygroundPage() {
       const endTime = performance.now();
       const durationMs = Math.round(endTime - startTime);
       const firstTokenMs = firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined;
-      
-      if (isRequestValid()) {
-        setMessages((m) => {
-          const next = [...m];
-          if (next[assistantIndex]) {
-            const currentContent = next[assistantIndex].content || acc;
-            next[assistantIndex] = {
-              ...next[assistantIndex],
-              content: currentContent,
-              isThinking: false,
-              stats: {
-                durationMs,
-                firstTokenMs,
-                // Token 统计：粗略估算（中文约 2 字符/token，英文约 4 字符/token）
-                outputTokens: Math.ceil(currentContent.length / 2),
-              },
-            };
-          }
-          return next;
-        });
-      }
+      const estimatedOutputTokens = estimateTokens(acc);
+      const inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
+      const outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
+      const totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
+
+      flushAssistant({
+        isStreaming: false,
+        stats: {
+          durationMs,
+          firstTokenMs,
+          inputTokens,
+          outputTokens,
+          totalTokens,
+        },
+      });
 
       if (!streamed) {
         // 流式失败，尝试同步调用
@@ -510,6 +594,10 @@ export function PlaygroundPage() {
 
           const out = resp.outputs?.[0]?.data ?? "";
           acc = String(out);
+          const usage = normalizeUsage(resp.usage as Record<string, unknown> | undefined);
+          const outputTokens = usage?.outputTokens ?? estimateTokens(acc);
+          const inputTokens = usage?.inputTokens ?? estimatedInputTokens;
+          const totalTokens = usage?.totalTokens ?? (inputTokens + outputTokens);
           const syncEndTime = performance.now();
           setMessages((m) => {
             const next = [...m];
@@ -518,9 +606,12 @@ export function PlaygroundPage() {
                 ...next[assistantIndex],
                 content: acc,
                 isThinking: false,
+                isStreaming: false,
                 stats: {
                   durationMs: Math.round(syncEndTime - startTime),
-                  outputTokens: Math.ceil(acc.length / 4),
+                  inputTokens,
+                  outputTokens,
+                  totalTokens,
                 },
               };
             }
@@ -543,6 +634,7 @@ export function PlaygroundPage() {
             ...next[assistantIndex],
             content: message,
             isThinking: false,
+            isStreaming: false,
           };
         } else {
           next.push({ role: "assistant", content: message });
@@ -704,7 +796,7 @@ export function PlaygroundPage() {
       </div>
 
       {/* Chat Area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-smooth pb-32">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto pb-32">
         {!serviceId ? (
           <div className="flex h-full flex-col items-center justify-center p-8 text-center opacity-0 animate-in fade-in duration-500 delay-100 fill-mode-forwards" style={{ opacity: 1 }}>
             <div className="mb-6 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 p-6 shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5">
@@ -732,7 +824,7 @@ export function PlaygroundPage() {
 
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background via-background/80 to-transparent pt-10 pb-6 px-4">
-        <div className="mx-auto w-full max-w-3xl shadow-2xl rounded-3xl border border-black/5 dark:border-white/10 bg-background/80 backdrop-blur-xl transition-all focus-within:ring-2 ring-primary/20">
+        <div className="mx-auto w-full max-w-4xl shadow-2xl rounded-3xl border border-black/5 dark:border-white/10 bg-background/80 backdrop-blur-xl transition-all focus-within:ring-2 ring-primary/20">
           <MultimodalInput
             onSend={handleSend}
             disabled={!serviceId || loading}

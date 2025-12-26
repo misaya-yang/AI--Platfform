@@ -4,6 +4,8 @@ import remarkGfm from "remark-gfm";
 
 interface StreamOutputProps {
   text: string;
+  /** Render as plain text while streaming to reduce reflow */
+  isStreaming?: boolean;
   /** Enable typing animation for text that arrives all at once */
   enableTypingEffect?: boolean;
   /** Characters per frame for typing effect (higher = faster) */
@@ -12,6 +14,7 @@ interface StreamOutputProps {
 
 export function StreamOutput({ 
   text, 
+  isStreaming = false,
   enableTypingEffect = true,
   typingSpeed = 8 
 }: StreamOutputProps) {
@@ -22,6 +25,15 @@ export function StreamOutput({
   
   useEffect(() => {
     targetTextRef.current = text;
+
+    if (isStreaming) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      setDisplayedText(text);
+      prevTextRef.current = text;
+      return;
+    }
     
     // If text was cleared, reset immediately
     if (!text) {
@@ -39,6 +51,10 @@ export function StreamOutput({
     
     // Calculate how much new text was added
     const prevText = prevTextRef.current;
+    if (prevText === text) {
+      setDisplayedText(text);
+      return;
+    }
     
     // If this is incremental (streaming), just append directly
     if (text.startsWith(prevText) && text.length > prevText.length) {
@@ -88,7 +104,7 @@ export function StreamOutput({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [text, enableTypingEffect, typingSpeed]);
+  }, [text, enableTypingEffect, typingSpeed, isStreaming]);
   
   // Cleanup on unmount
   useEffect(() => {
@@ -98,6 +114,14 @@ export function StreamOutput({
       }
     };
   }, []);
+
+  if (isStreaming) {
+    return (
+      <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+        {text}
+      </div>
+    );
+  }
 
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert">

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from ..core.exceptions import ValidationFailedError
 from ..models.enums import ContentType, ConnectorType, StreamEventType
@@ -152,6 +152,7 @@ class LangGraphAdapter(ProtocolAdapter):
     async def stream(self, request: UnifiedRequest) -> AsyncIterator[StreamChunk]:
         messages = self._build_messages(request.inputs)
         idx = 0
+        usage_metadata: Optional[Dict[str, Any]] = None
         if not self.remote:
             if not hasattr(self.graph, "astream_events"):
                 raise ValidationFailedError("graph does not support streaming")
@@ -160,6 +161,11 @@ class LangGraphAdapter(ProtocolAdapter):
             seen_content_ids: set = set()
 
             async for event in self.graph.astream_events({"messages": messages}, run_config, version="v2"):
+                if isinstance(event, dict) and event.get("event") == "metadata":
+                    data = event.get("data") or {}
+                    if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+                        usage_metadata = data.get("usage")
+                    continue
                 stream_event = self._extract_stream_event(event, seen_content_ids)
                 if stream_event:
                     yield StreamChunk(
@@ -174,7 +180,11 @@ class LangGraphAdapter(ProtocolAdapter):
                     )
                     idx += 1
         else:
-            async for stream_event in self._remote_stream(request, messages):
+            def _capture_usage(usage: Dict[str, Any]) -> None:
+                nonlocal usage_metadata
+                usage_metadata = usage
+
+            async for stream_event in self._remote_stream(request, messages, usage_handler=_capture_usage):
                 if stream_event:
                     yield StreamChunk(
                         request_id=request.request_id,
@@ -194,6 +204,7 @@ class LangGraphAdapter(ProtocolAdapter):
             content=ContentItem(type=ContentType.TEXT, data=""),
             is_final=True,
             event_type=StreamEventType.FINAL,
+            metadata={"usage": usage_metadata} if usage_metadata else None,
         )
 
     async def health_check(self) -> bool:
@@ -433,7 +444,10 @@ class LangGraphAdapter(ProtocolAdapter):
             raise
 
     async def _remote_stream(
-        self, request: UnifiedRequest, messages: List[Dict[str, Any]]
+        self,
+        request: UnifiedRequest,
+        messages: List[Dict[str, Any]],
+        usage_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> AsyncIterator[StreamEvent]:
         input_payload: Dict[str, Any] = {"messages": messages}
         params = request.parameters or {}
@@ -531,6 +545,13 @@ class LangGraphAdapter(ProtocolAdapter):
                             data = json.loads(data_str)
                         except Exception as e:
                             logger.warning(f"Failed to parse SSE data: {e}")
+                            continue
+
+                        if current_event_type == "metadata":
+                            if isinstance(data, dict):
+                                usage = data.get("usage")
+                                if isinstance(usage, dict) and usage_handler:
+                                    usage_handler(usage)
                             continue
                         
                         # Debug: log received event type and content preview
