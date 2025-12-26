@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..deps import get_knowledge_service, get_knowledge_worker, get_user_context
@@ -807,7 +809,13 @@ async def qa_query(
                 mode=payload.mode,
                 document_id=payload.document_id,
                 rerank=payload.rerank,
+                rerank_top_n=payload.rerank_top_n,
                 mmr=payload.mmr,
+                mmr_lambda=payload.mmr_lambda,
+                fusion_method=payload.fusion_method,
+                dense_weight=payload.dense_weight,
+                bm25_weight=payload.bm25_weight,
+                score_threshold=payload.score_threshold,
                 include_raw_results=payload.include_raw_results,
             )
             
@@ -833,6 +841,69 @@ async def qa_query(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"QA query failed: {str(exc)}")
+
+
+@router.post("/knowledge/{dataset_id}/qa/stream")
+async def qa_query_stream(
+    request: Request,
+    dataset_id: str,
+    payload: QAQuerySchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Stream QA query: retrieve → stream LLM answer.
+    """
+    from ...services.knowledge.qa_service import QAService, LLMConfig
+
+    llm_config = None
+    if payload.llm_config:
+        llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
+
+    qa_service = QAService(svc, llm_config)
+
+    async def event_generator():
+        try:
+            async for event in qa_service.query_stream(
+                user_context=user,
+                dataset_id=dataset_id,
+                query=payload.query,
+                top_k=payload.top_k,
+                mode=payload.mode,
+                document_id=payload.document_id,
+                rerank=payload.rerank,
+                rerank_top_n=payload.rerank_top_n,
+                mmr=payload.mmr,
+                mmr_lambda=payload.mmr_lambda,
+                fusion_method=payload.fusion_method,
+                dense_weight=payload.dense_weight,
+                bm25_weight=payload.bm25_weight,
+                score_threshold=payload.score_threshold,
+                include_raw_results=payload.include_raw_results,
+            ):
+                payload_json = json.dumps(event, ensure_ascii=False)
+                yield f"data: {payload_json}\n\n"
+        except PermissionDeniedError as exc:
+            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            yield f"data: {payload_json}\n\n"
+        except ValidationFailedError as exc:
+            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            yield f"data: {payload_json}\n\n"
+        except Exception as exc:
+            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            yield f"data: {payload_json}\n\n"
+        finally:
+            await qa_service.close()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/knowledge/{dataset_id}/qa/batch")

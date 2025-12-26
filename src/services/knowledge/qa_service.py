@@ -280,6 +280,64 @@ class LLMClient:
             logger.error(f"LLM request failed: {e}")
             raise
 
+    async def chat_completion_stream(
+        self,
+        messages: List[Dict[str, str]],
+        **kwargs,
+    ):
+        """
+        Stream chat completion deltas.
+
+        Yields dict events:
+        - {"type": "delta", "content": "..."}
+        - {"type": "usage", "tokens": int}
+        """
+        client = await self._get_client()
+        payload = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.temperature),
+            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+            "stream": True,
+        }
+
+        try:
+            async with client.stream("POST", "/chat/completions", json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        data = line[len("data:"):].strip()
+                    else:
+                        data = line.strip()
+                    if not data:
+                        continue
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    usage = chunk.get("usage") or {}
+                    tokens = usage.get("total_tokens")
+                    if tokens is not None:
+                        yield {"type": "usage", "tokens": tokens}
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {}).get("content")
+                    if delta:
+                        yield {"type": "delta", "content": delta}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"LLM stream API error: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"LLM stream request failed: {e}")
+            raise
+
 
 class QAService:
     """
@@ -454,6 +512,105 @@ Please answer the question based on the context provided above."""
             model=config.model,
             tokens_used=tokens,
         )
+
+    async def query_stream(
+        self,
+        user_context: Any,  # UserContext from auth
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
+        mode: str = "hybrid",
+        rerank: bool = False,
+        mmr: bool = False,
+        document_id: Optional[str] = None,
+        llm_config: Optional[LLMConfig] = None,
+        include_raw_results: bool = False,
+        **retrieval_kwargs,
+    ):
+        """
+        Stream QA flow: retrieve → stream LLM answer.
+
+        Yields dict events:
+        - {"event": "retrieval", "data": {...}}
+        - {"event": "delta", "data": {"content": "..." }}
+        - {"event": "done", "data": {"result": {...}}}
+        """
+        start_time = time.time()
+
+        retrieval_start = time.time()
+        results, meta = await self.kb.retrieve(
+            user=user_context,
+            dataset_id=dataset_id,
+            query=query,
+            top_k=top_k,
+            mode=mode,
+            document_id=document_id,
+            rerank=rerank,
+            mmr=mmr,
+            **retrieval_kwargs,
+        )
+        retrieval_time = int((time.time() - retrieval_start) * 1000)
+
+        context_segments = [
+            {
+                "segment_id": r.segment_id,
+                "document_id": r.document_id,
+                "text": r.text,
+                "score": r.score,
+                "metadata": r.metadata if include_raw_results else {},
+            }
+            for r in results
+        ]
+
+        yield {
+            "event": "retrieval",
+            "data": {
+                "query": query,
+                "context_segments": context_segments,
+                "retrieval_metadata": meta,
+                "timing": {"retrieval_ms": retrieval_time},
+            },
+        }
+
+        context = self._format_context(results)
+        config = llm_config or self.llm_config
+        client = self._get_llm_client() if llm_config is None else LLMClient(config)
+        llm_start = time.time()
+        tokens_used: Optional[int] = None
+        answer_parts: List[str] = []
+
+        try:
+            messages = self._build_messages(query, context)
+            async for chunk in client.chat_completion_stream(messages):
+                if chunk.get("type") == "usage":
+                    tokens_used = chunk.get("tokens")
+                    continue
+                if chunk.get("type") == "delta":
+                    delta = chunk.get("content") or ""
+                    if delta:
+                        answer_parts.append(delta)
+                        yield {"event": "delta", "data": {"content": delta}}
+        finally:
+            if llm_config is not None:
+                await client.close()
+
+        llm_time = int((time.time() - llm_start) * 1000)
+        total_time = int((time.time() - start_time) * 1000)
+        answer = "".join(answer_parts)
+
+        result = QAResult(
+            query=query,
+            answer=answer,
+            context_segments=context_segments,
+            retrieval_metadata=meta,
+            retrieval_time_ms=retrieval_time,
+            llm_time_ms=llm_time,
+            total_time_ms=total_time,
+            model=config.model,
+            tokens_used=tokens_used,
+        )
+
+        yield {"event": "done", "data": {"result": result.to_dict()}}
     
     async def evaluate_answer(
         self,

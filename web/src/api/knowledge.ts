@@ -6,6 +6,7 @@
  */
 
 import { api } from "@/lib/api";
+import { sseFetch } from "@/lib/sse";
 import type {
   Dataset,
   Document,
@@ -14,6 +15,7 @@ import type {
   RetrieveResponse,
   QARequest,
   QAResponse,
+  QAStreamEvent,
   QABatchTestResult,
   DatasetConfig,
   DatasetDebugInfo,
@@ -163,6 +165,22 @@ export async function hitTest(datasetId: string, req: RetrieveRequest) {
 export async function qaQuery(datasetId: string, req: QARequest) {
   const { data } = await api.post<QAResponse>(`/api/v1/knowledge/${datasetId}/qa`, req);
   return data;
+}
+
+export async function* qaQueryStream(
+  datasetId: string,
+  req: QARequest,
+  signal?: AbortSignal
+) {
+  const url = `/api/v1/knowledge/${datasetId}/qa/stream`;
+  for await (const chunk of sseFetch<QAStreamEvent>(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+    signal,
+  })) {
+    yield chunk;
+  }
 }
 
 export async function qaBatchTest(

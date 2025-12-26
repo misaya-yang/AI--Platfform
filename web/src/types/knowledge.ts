@@ -303,12 +303,16 @@ export interface LLMConfig {
   base_url?: string;
   temperature?: number;
   max_tokens?: number;
+  system_prompt?: string;
 }
 
 export interface QARequest {
   query: string;
   top_k?: number;
   mode?: RetrieveMode;
+  fusion_method?: "weighted" | "rrf";
+  dense_weight?: number;
+  bm25_weight?: number;
   document_id?: string | null;
   rerank?: boolean;
   mmr?: boolean;
@@ -337,6 +341,37 @@ export interface QAResponse {
   model: string;
   tokens_used?: number;
 }
+
+export type QAStreamEvent =
+  | {
+      event: "retrieval";
+      data: {
+        query: string;
+        context_segments: QAContextSegment[];
+        retrieval_metadata: Record<string, unknown>;
+        timing: {
+          retrieval_ms: number;
+        };
+      };
+    }
+  | {
+      event: "delta";
+      data: {
+        content: string;
+      };
+    }
+  | {
+      event: "done";
+      data: {
+        result: QAResponse;
+      };
+    }
+  | {
+      event: "error";
+      data: {
+        message: string;
+      };
+    };
 
 export interface QATestCase {
   query: string;

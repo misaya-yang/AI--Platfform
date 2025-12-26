@@ -306,6 +306,7 @@ class LLMConfigSchema(BaseModel):
     base_url: Optional[str] = None
     temperature: float = 0.1
     max_tokens: int = 2048
+    system_prompt: Optional[str] = None
 
 
 class QAQuerySchema(BaseModel):
@@ -315,9 +316,15 @@ class QAQuerySchema(BaseModel):
     query: str
     top_k: int = 5
     mode: str = "hybrid"
+    fusion_method: Optional[str] = None
+    dense_weight: Optional[float] = None
+    bm25_weight: Optional[float] = None
+    score_threshold: Optional[float] = None
     document_id: Optional[str] = None
     rerank: bool = False
+    rerank_top_n: Optional[int] = None
     mmr: bool = False
+    mmr_lambda: Optional[float] = None
     
     # LLM config override
     llm_config: Optional[LLMConfigSchema] = None

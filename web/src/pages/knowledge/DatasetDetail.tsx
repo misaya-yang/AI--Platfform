@@ -19,6 +19,7 @@ import {
   Sliders,
   Zap,
   Brain,
+  Bot,
   Database,
   Send,
   Eye,
@@ -33,6 +34,7 @@ import {
   BarChart3,
   X,
   Target,
+  User,
   ImageIcon,
   ChevronUp,
   ChevronDown,
@@ -51,13 +53,14 @@ import {
   deleteDataset,
   updateDataset,
   qaQuery,
+  qaQueryStream,
   getDatasetConfig,
   debugDataset,
   updateDatasetConfig,
   previewChunking,
   type ChunkPreviewItem,
 } from "@/api/knowledge";
-import type { Document, RetrieveHit, QAResponse, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
+import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -66,6 +69,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { StreamOutput } from "@/components/StreamOutput";
 import {
   Dialog,
   DialogContent,
@@ -103,6 +107,26 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+type QAChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  status: "pending" | "done" | "error";
+  response?: QAResponse;
+};
+
+const QA_MODEL_OPTIONS = [
+  { value: "deepseek-chat", label: "DeepSeek Chat" },
+  { value: "deepseek-reasoner", label: "DeepSeek Reasoner" },
+];
+
+const QA_SYSTEM_PROMPTS = {
+  strict:
+    "你是知识库问答测试助手。只能基于“上下文”回答问题。若上下文不足或无关，回复“在当前知识库中未检索到相关信息”。回答与问题同语言，简洁、准确，不要编造。",
+  flexible:
+    "你是知识库问答助手。优先基于“上下文”回答；若上下文不足，可根据通用知识给出简要回答，并明确标注“以下为通用知识，非来自知识库”。回答与问题同语言，简洁、准确。",
+};
 
 function StatusBadge({ status, error, progress }: { status: string; error?: string; progress?: number }) {
   const s = (status || "").toLowerCase();
@@ -626,6 +650,7 @@ export function KnowledgeDatasetDetailPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const qaChatEndRef = useRef<HTMLDivElement | null>(null);
 
   const dsQuery = useDataset(datasetId);
   const docsQuery = useDocuments(datasetId);
@@ -748,8 +773,14 @@ export function KnowledgeDatasetDetailPage() {
   // QA Testing
   const [qaQueryInput, setQaQueryInput] = useState("");
   const [qaLoading, setQaLoading] = useState(false);
-  const [qaResponse, setQaResponse] = useState<QAResponse | null>(null);
+  const [qaMessages, setQaMessages] = useState<QAChatMessage[]>([]);
   const [qaHistory, setQaHistory] = useState<Array<{ query: string; response: QAResponse }>>([]);
+  const [qaModel, setQaModel] = useState(QA_MODEL_OPTIONS[0].value);
+  const [qaTemperature, setQaTemperature] = useState(0.1);
+  const [qaMaxTokens, setQaMaxTokens] = useState(2048);
+  const [qaShowSources, setQaShowSources] = useState(true);
+  const [qaAutoScroll, setQaAutoScroll] = useState(true);
+  const [qaStrictMode, setQaStrictMode] = useState(false);
 
   // Config
   const [datasetConfig, setDatasetConfig] = useState<DatasetConfig | null>(null);
@@ -794,6 +825,11 @@ export function KnowledgeDatasetDetailPage() {
       loadConfig();
     }
   }, [mainTab, datasetId]);
+
+  useEffect(() => {
+    if (!qaAutoScroll) return;
+    qaChatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [qaMessages, qaLoading, qaAutoScroll]);
 
   async function loadConfig() {
     if (!datasetId) return;
@@ -1197,22 +1233,126 @@ export function KnowledgeDatasetDetailPage() {
 
   async function runQA() {
     if (!datasetId || !qaQueryInput.trim()) return;
+    const queryText = qaQueryInput.trim();
+    const userMessageId = `user-${Date.now()}`;
+    const assistantMessageId = `assistant-${Date.now()}`;
+    const requestPayload = {
+      query: queryText,
+      top_k: topK,
+      mode,
+      fusion_method: mode === "hybrid" ? fusionMethod : undefined,
+      dense_weight: mode === "hybrid" ? denseWeight : undefined,
+      bm25_weight: mode === "hybrid" ? bm25Weight : undefined,
+      rerank,
+      mmr,
+      llm_config: {
+        provider: "deepseek",
+        model: qaModel,
+        temperature: qaTemperature,
+        max_tokens: qaMaxTokens,
+        system_prompt: qaSystemPrompt,
+      },
+      include_raw_results: true,
+    };
+
+    setQaQueryInput("");
     setQaLoading(true);
+    setQaMessages((prev) => [
+      ...prev,
+      { id: userMessageId, role: "user", content: queryText, status: "done" },
+      { id: assistantMessageId, role: "assistant", content: "", status: "pending" },
+    ]);
+    const updateAssistant = (patch: Partial<QAChatMessage>) => {
+      setQaMessages((prev) =>
+        prev.map((msg) => (msg.id === assistantMessageId ? { ...msg, ...patch } : msg))
+      );
+    };
+
+    let acc = "";
+    let streamed = false;
+    let finalResponse: QAResponse | null = null;
+    let streamError: Error | null = null;
+
     try {
-      const res = await qaQuery(datasetId, {
-        query: qaQueryInput.trim(),
-        top_k: topK,
-        mode,
-        rerank,
-        mmr,
-        include_raw_results: true,
-      });
-      setQaResponse(res);
-      setQaHistory((prev) => [...prev, { query: qaQueryInput.trim(), response: res }]);
+      try {
+        for await (const chunk of qaQueryStream(datasetId, requestPayload)) {
+          const event = (chunk as QAStreamEvent).event;
+          if (event === "delta") {
+            const delta = chunk.data?.content;
+            if (typeof delta === "string" && delta) {
+              streamed = true;
+              acc += delta;
+              updateAssistant({ content: acc });
+            }
+          } else if (event === "done") {
+            finalResponse = chunk.data?.result ?? null;
+            break;
+          } else if (event === "error") {
+            throw new Error(chunk.data?.message || "QA stream error");
+          }
+        }
+      } catch (err) {
+        streamError = err instanceof Error ? err : new Error(String(err));
+      }
+
+      if (!streamed && !finalResponse) {
+        try {
+          const res = await qaQuery(datasetId, requestPayload);
+          finalResponse = res;
+          acc = res.answer;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          updateAssistant({ content: message, status: "error" });
+          return;
+        }
+      }
+
+      if (finalResponse) {
+        updateAssistant({ content: finalResponse.answer || acc, response: finalResponse, status: "done" });
+        setQaHistory((prev) => [...prev, { query: queryText, response: finalResponse }]);
+        return;
+      }
+
+      if (streamed) {
+        updateAssistant({ content: acc, status: "done" });
+        return;
+      }
+
+      if (streamError) {
+        updateAssistant({ content: streamError.message, status: "error" });
+      }
     } finally {
       setQaLoading(false);
     }
   }
+
+  function handleQaKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!qaLoading) runQA();
+    }
+  }
+
+  function handleClearQaChat() {
+    setQaMessages([]);
+  }
+
+  const lastQaResponse = useMemo(() => {
+    for (let i = qaMessages.length - 1; i >= 0; i -= 1) {
+      const msg = qaMessages[i];
+      if (msg.response) return msg.response;
+    }
+    return null;
+  }, [qaMessages]);
+
+  const qaTurns = useMemo(
+    () => qaMessages.filter((msg) => msg.role === "assistant").length,
+    [qaMessages]
+  );
+  const qaSystemPrompt = useMemo(
+    () => (qaStrictMode ? QA_SYSTEM_PROMPTS.strict : QA_SYSTEM_PROMPTS.flexible),
+    [qaStrictMode]
+  );
 
   const dataset = dsQuery.data;
 
@@ -1765,251 +1905,417 @@ export function KnowledgeDatasetDetailPage() {
 
         {/* QA 测试 Tab */}
         {mainTab === "qa" && (
-          <div className="grid grid-cols-12 gap-6">
-            {/* 左侧：查询 */}
-            <div className="col-span-4">
-              <Card className="p-0 overflow-hidden shadow-lg border-purple-100">
-                <div className="px-5 py-4 bg-gradient-to-r from-purple-50 to-pink-50 border-b border-purple-100">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+            {/* 左侧：配置 */}
+            <div className="space-y-6 lg:col-span-4">
+              <Card className="p-0 overflow-hidden shadow-lg border-slate-200">
+                <div className="px-5 py-4 bg-gradient-to-r from-slate-50 via-white to-indigo-50 border-b border-slate-100">
                   <h3 className="font-bold text-gray-900 flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center">
-                      <MessageSquare className="h-4 w-4 text-white" />
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-slate-800 flex items-center justify-center">
+                      <Sliders className="h-4 w-4 text-white" />
                     </div>
-                    QA 测试
+                    QA 配置
                   </h3>
-                  <p className="text-xs text-gray-500 mt-1">RAG 问答测试，验证知识库效果</p>
+                  <p className="text-xs text-gray-500 mt-1">配置检索参数与模型，右侧进行流式对话测试</p>
                 </div>
 
-                <div className="p-5 space-y-5">
-                  <div>
-                    <Label className="font-medium text-gray-700">问题</Label>
-                    <Textarea
-                      placeholder="输入您的问题，AI 将基于知识库内容回答..."
-                      value={qaQueryInput}
-                      onChange={(e) => setQaQueryInput(e.target.value)}
-                      rows={4}
-                      className="mt-2 resize-none border-gray-200 focus:border-purple-400 focus:ring-purple-400"
-                    />
+                <div className="p-5 space-y-6">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium text-gray-700">模型</Label>
+                      <Badge variant="outline" className="text-xs">DeepSeek</Badge>
+                    </div>
+                    <Select value={qaModel} onValueChange={setQaModel}>
+                      <SelectTrigger className="border-gray-200">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {QA_MODEL_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <Label className="text-xs text-gray-600">温度</Label>
+                        <Input
+                          type="number"
+                          step={0.1}
+                          min={0}
+                          max={1}
+                          value={qaTemperature}
+                          onChange={(e) => {
+                            const value = e.target.valueAsNumber;
+                            setQaTemperature((prev) => (Number.isNaN(value) ? prev : value));
+                          }}
+                          className="mt-1.5 border-gray-200"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-gray-600">Max Tokens</Label>
+                        <Input
+                          type="number"
+                          min={256}
+                          max={4096}
+                          step={128}
+                          value={qaMaxTokens}
+                          onChange={(e) => {
+                            const value = e.target.valueAsNumber;
+                            setQaMaxTokens((prev) => (Number.isNaN(value) ? prev : value));
+                          }}
+                          className="mt-1.5 border-gray-200"
+                        />
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-xs font-medium text-gray-600">Top K</Label>
-                      <Input
-                        type="number"
-                        value={topK}
-                        onChange={(e) => setTopK(Number(e.target.value || 5))}
-                        className="mt-1.5 border-gray-200"
-                        min={1}
-                        max={20}
-                      />
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium text-gray-700">检索设置</Label>
+                      <Badge variant="outline" className="text-xs font-mono">{mode}</Badge>
                     </div>
-                    <div>
-                      <Label className="text-xs font-medium text-gray-600">检索模式</Label>
-                      <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
-                        <SelectTrigger className="mt-1.5 border-gray-200">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="hybrid">Hybrid (混合)</SelectItem>
-                          <SelectItem value="dense">Dense Only (向量)</SelectItem>
-                          <SelectItem value="bm25">BM25 Only (关键词)</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-
-                  {/* Hybrid mode weights */}
-                  {mode === "hybrid" && (
-                    <div className="space-y-4 p-3 bg-blue-50/50 rounded-lg border border-blue-100">
-                      <div className="flex items-center justify-between text-xs text-gray-600">
-                        <span className="font-medium">权重配置</span>
-                        <Select value={fusionMethod} onValueChange={(v) => setFusionMethod(v as typeof fusionMethod)}>
-                          <SelectTrigger className="h-7 w-28 text-xs">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Label className="text-xs font-medium text-gray-600">Top K</Label>
+                        <Input
+                          type="number"
+                          value={topK}
+                          onChange={(e) => setTopK(Number(e.target.value || 5))}
+                          className="mt-1.5 border-gray-200"
+                          min={1}
+                          max={20}
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs font-medium text-gray-600">检索模式</Label>
+                        <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
+                          <SelectTrigger className="mt-1.5 border-gray-200">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="weighted">加权平均</SelectItem>
-                            <SelectItem value="rrf">RRF</SelectItem>
+                            <SelectItem value="hybrid">Hybrid (混合)</SelectItem>
+                            <SelectItem value="dense">Dense Only (向量)</SelectItem>
+                            <SelectItem value="bm25">BM25 Only (关键词)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <Label className="text-xs text-blue-700">Dense (向量)</Label>
-                          <span className="text-xs font-mono text-blue-600">{(denseWeight * 100).toFixed(0)}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={denseWeight * 100}
-                          onChange={(e) => {
-                            const newDense = Number(e.target.value) / 100;
-                            setDenseWeight(newDense);
-                            setBm25Weight(1 - newDense);
-                          }}
-                          className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <Label className="text-xs text-amber-700">BM25 (关键词)</Label>
-                          <span className="text-xs font-mono text-amber-600">{(bm25Weight * 100).toFixed(0)}%</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={bm25Weight * 100}
-                          onChange={(e) => {
-                            const newBm25 = Number(e.target.value) / 100;
-                            setBm25Weight(newBm25);
-                            setDenseWeight(1 - newBm25);
-                          }}
-                          className="w-full h-2 bg-amber-200 rounded-lg appearance-none cursor-pointer accent-amber-600"
-                        />
-                      </div>
                     </div>
-                  )}
 
-                  <div className="flex items-center gap-4 p-3 bg-gray-50 rounded-lg">
-                    <label className="flex items-center gap-2 cursor-pointer flex-1">
-                      <Switch checked={rerank} onCheckedChange={setRerank} />
-                      <span className="text-sm font-medium text-gray-700">Rerank</span>
-                    </label>
-                    <div className="w-px h-6 bg-gray-200" />
-                    <label className="flex items-center gap-2 cursor-pointer flex-1">
-                      <Switch checked={mmr} onCheckedChange={setMmr} />
-                      <span className="text-sm font-medium text-gray-700">MMR</span>
-                    </label>
-                  </div>
+                    {mode === "hybrid" && (
+                      <div className="space-y-4 p-3 bg-blue-50/60 rounded-lg border border-blue-100">
+                        <div className="flex items-center justify-between text-xs text-gray-600">
+                          <span className="font-medium">权重配置</span>
+                          <Select value={fusionMethod} onValueChange={(v) => setFusionMethod(v as typeof fusionMethod)}>
+                            <SelectTrigger className="h-7 w-28 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="weighted">加权平均</SelectItem>
+                              <SelectItem value="rrf">RRF</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
 
-                  <Button
-                    onClick={runQA}
-                    disabled={qaLoading || !qaQueryInput.trim()}
-                    className="w-full h-11 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 shadow-md shadow-purple-500/20 text-white font-medium"
-                  >
-                    {qaLoading ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 生成回答中...</>
-                    ) : (
-                      <><Send className="h-4 w-4 mr-2" /> 发送问题</>
-                    )}
-                  </Button>
-                </div>
-
-                {/* 历史记录 */}
-                {qaHistory.length > 0 && (
-                  <div className="px-5 pb-5 pt-4 border-t border-gray-100">
-                    <h4 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                      <Clock className="h-4 w-4 text-gray-400" />
-                      历史记录
-                    </h4>
-                    <div className="space-y-2 max-h-48 overflow-auto">
-                      {qaHistory.slice().reverse().map((h, i) => (
-                        <button
-                          key={i}
-                          className="w-full text-left p-3 rounded-lg bg-gray-50 hover:bg-purple-50 border border-transparent hover:border-purple-200 transition-all"
-                          onClick={() => {
-                            setQaQueryInput(h.query);
-                            setQaResponse(h.response);
-                          }}
-                        >
-                          <p className="text-sm text-gray-700 truncate font-medium">{h.query}</p>
-                          <div className="flex items-center gap-2 mt-1">
-                            <Badge variant="outline" className="text-xs font-mono">
-                              {h.response.timing.total_ms}ms
-                            </Badge>
-                            <span className="text-xs text-gray-400">
-                              {h.response.context_segments.length} 片段
-                            </span>
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <Label className="text-xs text-blue-700">Dense (向量)</Label>
+                            <span className="text-xs font-mono text-blue-600">{(denseWeight * 100).toFixed(0)}%</span>
                           </div>
-                        </button>
-                      ))}
-                    </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={denseWeight * 100}
+                            onChange={(e) => {
+                              const newDense = Number(e.target.value) / 100;
+                              setDenseWeight(newDense);
+                              setBm25Weight(1 - newDense);
+                            }}
+                            className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          />
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <Label className="text-xs text-amber-700">BM25 (关键词)</Label>
+                            <span className="text-xs font-mono text-amber-600">{(bm25Weight * 100).toFixed(0)}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="100"
+                            value={bm25Weight * 100}
+                            onChange={(e) => {
+                              const newBm25 = Number(e.target.value) / 100;
+                              setBm25Weight(newBm25);
+                              setDenseWeight(1 - newBm25);
+                            }}
+                            className="w-full h-2 bg-amber-200 rounded-lg appearance-none cursor-pointer accent-amber-600"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
+
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium text-gray-700">策略</Label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                        <Switch checked={rerank} onCheckedChange={setRerank} />
+                        <span className="text-sm font-medium text-gray-700">Rerank</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                        <Switch checked={mmr} onCheckedChange={setMmr} />
+                        <span className="text-sm font-medium text-gray-700">MMR</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                        <Switch checked={qaShowSources} onCheckedChange={setQaShowSources} />
+                        <span className="text-sm font-medium text-gray-700">显示引用</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                        <Switch checked={qaAutoScroll} onCheckedChange={setQaAutoScroll} />
+                        <span className="text-sm font-medium text-gray-700">自动滚动</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                        <Switch checked={qaStrictMode} onCheckedChange={setQaStrictMode} />
+                        <span className="text-sm font-medium text-gray-700">严格模式</span>
+                      </label>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      严格模式仅基于知识库回答；关闭时允许通用知识补充。
+                    </p>
+                  </div>
+
+                  <div className="space-y-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span>会话统计</span>
+                      {lastQaResponse?.timing?.total_ms && (
+                        <span className="font-mono">最近 {lastQaResponse.timing.total_ms}ms</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs text-slate-500">消息数</p>
+                        <p className="text-lg font-semibold text-slate-800">{qaMessages.length}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs text-slate-500">对话轮次</p>
+                        <p className="text-lg font-semibold text-slate-800">{qaTurns}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs text-slate-500">最近 Tokens</p>
+                        <p className="text-lg font-semibold text-slate-800">{lastQaResponse?.tokens_used ?? "-"}</p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <p className="text-xs text-slate-500">检索片段</p>
+                        <p className="text-lg font-semibold text-slate-800">{lastQaResponse?.context_segments?.length ?? 0}</p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={handleClearQaChat}
+                      disabled={qaMessages.length === 0}
+                    >
+                      清空对话
+                    </Button>
+                  </div>
+                </div>
               </Card>
+
+              {qaHistory.length > 0 && (
+                <Card className="p-0 overflow-hidden border-slate-200">
+                  <div className="px-5 py-4 border-b border-slate-100 bg-white flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-slate-400" />
+                    <h4 className="text-sm font-semibold text-gray-700">最近问题</h4>
+                  </div>
+                  <div className="p-4 space-y-2 max-h-64 overflow-auto">
+                    {qaHistory.slice().reverse().map((h, i) => (
+                      <button
+                        key={`${h.query}-${i}`}
+                        className="w-full text-left p-3 rounded-lg bg-slate-50 hover:bg-indigo-50 border border-transparent hover:border-indigo-200 transition-all"
+                        onClick={() => setQaQueryInput(h.query)}
+                      >
+                        <p className="text-sm text-gray-700 truncate font-medium">{h.query}</p>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          <Badge variant="outline" className="text-xs font-mono">
+                            {h.response.timing.total_ms}ms
+                          </Badge>
+                          <span className="text-xs text-gray-400">
+                            {h.response.context_segments.length} 片段
+                          </span>
+                          <span className="text-xs text-gray-400 font-mono">
+                            {h.response.model}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </Card>
+              )}
             </div>
 
-            {/* 右侧：回答 */}
-            <div className="col-span-8">
-              <Card className="p-5 h-[calc(100vh-200px)] flex flex-col">
-                {!qaResponse ? (
-                  <div className="flex-1 flex flex-col items-center justify-center">
-                    <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-purple-100 to-pink-100 flex items-center justify-center mb-4">
-                      <Brain className="h-10 w-10 text-purple-400" />
+            {/* 右侧：对话 */}
+            <div className="lg:col-span-8">
+              <Card className="p-0 h-[calc(100vh-200px)] flex flex-col overflow-hidden border-slate-200">
+                <div className="px-5 py-4 border-b border-slate-100 bg-white/90 backdrop-blur flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-slate-800 flex items-center justify-center">
+                      <MessageSquare className="h-4 w-4 text-white" />
                     </div>
-                    <p className="text-lg font-medium text-gray-600">等待问题</p>
-                    <p className="text-sm text-gray-400 mt-1">输入问题后将显示 RAG 回答结果</p>
+                    <div>
+                      <h3 className="font-semibold text-gray-900">QA 对话</h3>
+                      <p className="text-xs text-gray-500">流式回答 + 引用上下文</p>
+                    </div>
                   </div>
-                ) : (
-                  <>
-                    {/* 回答区 */}
-                    <div className="mb-6">
-                      <div className="flex items-center gap-2 mb-3">
-                        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-                          <Sparkles className="h-4 w-4 text-white" />
-                        </div>
-                        <h3 className="font-semibold text-gray-900">AI 回答</h3>
-                        <Badge variant="outline" className="ml-auto font-mono text-xs">
-                          {qaResponse.model}
-                        </Badge>
-                      </div>
-                      <div className="p-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl border border-purple-100">
-                        <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                          {qaResponse.answer}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
-                        <span className="flex items-center gap-1">
-                          <Zap className="h-3 w-3" />
-                          检索: {qaResponse.timing.retrieval_ms}ms
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Brain className="h-3 w-3" />
-                          LLM: {qaResponse.timing.llm_ms}ms
-                        </span>
-                        <span>总计: {qaResponse.timing.total_ms}ms</span>
-                        {qaResponse.tokens_used && (
-                          <span>Tokens: {qaResponse.tokens_used}</span>
-                        )}
-                      </div>
-                    </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <Badge variant="outline" className="font-mono">{qaModel}</Badge>
+                    {qaLoading && (
+                      <Badge className="bg-indigo-50 text-indigo-600 border-indigo-200">生成中</Badge>
+                    )}
+                  </div>
+                </div>
 
-                    {/* 上下文 */}
-                    <div className="flex-1 overflow-hidden flex flex-col">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Database className="h-4 w-4 text-gray-500" />
-                        <h4 className="font-medium text-gray-700">检索上下文</h4>
-                        <Badge variant="outline" className="text-xs">
-                          {qaResponse.context_segments.length} 片段
-                        </Badge>
+                <div className="flex-1 overflow-auto bg-gradient-to-b from-white via-white to-slate-50 px-4 py-6">
+                  {qaMessages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center text-center h-full">
+                      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-100 to-slate-100 flex items-center justify-center mb-4">
+                        <Sparkles className="h-10 w-10 text-indigo-400" />
                       </div>
-                      <div className="flex-1 overflow-auto space-y-3">
-                        {qaResponse.context_segments.map((seg, i) => (
-                          <div
-                            key={seg.segment_id}
-                            className="p-4 bg-white rounded-xl border border-gray-200"
+                      <p className="text-lg font-medium text-gray-700">开始一段 QA 测试</p>
+                      <p className="text-sm text-gray-400 mt-1 max-w-md">
+                        输入问题后将触发检索与模型回答，支持流式展示与引用片段
+                      </p>
+                      <div className="mt-5 flex flex-wrap gap-2 justify-center">
+                        {[
+                          "知识库覆盖了哪些核心主题？",
+                          "总结一下文档中的主要结论。",
+                          "给我一个基于资料的步骤清单。",
+                        ].map((suggestion) => (
+                          <button
+                            key={suggestion}
+                            className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                            onClick={() => setQaQueryInput(suggestion)}
                           >
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-blue-100 text-blue-700 text-xs font-medium">
-                                {i + 1}
-                              </span>
-                              <Badge className="bg-blue-50 text-blue-700 font-mono text-xs">
-                                {seg.score.toFixed(4)}
-                              </Badge>
-                            </div>
-                            <p className="text-sm text-gray-600 line-clamp-3 whitespace-pre-wrap">
-                              {seg.text}
-                            </p>
-                          </div>
+                            {suggestion}
+                          </button>
                         ))}
                       </div>
                     </div>
-                  </>
-                )}
+                  ) : (
+                    <div className="space-y-5">
+                      {qaMessages.map((msg) => {
+                        const isUser = msg.role === "user";
+                        const bubbleStyles = isUser
+                          ? "bg-indigo-600 text-white rounded-tr-sm"
+                          : msg.status === "error"
+                            ? "bg-red-50 text-red-700 border border-red-200"
+                            : "bg-white text-slate-700 border border-slate-200";
+
+                        return (
+                          <div key={msg.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                            <div className={`max-w-[85%] flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
+                              <div className={`h-9 w-9 rounded-full flex items-center justify-center ${isUser ? "bg-indigo-600 text-white" : "bg-white border border-slate-200"}`}>
+                                {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4 text-indigo-500" />}
+                              </div>
+                              <div className="flex flex-col gap-2">
+                                <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${bubbleStyles}`}>
+                                  {msg.role === "assistant" ? (
+                                    msg.content ? (
+                                      <StreamOutput text={msg.content} />
+                                    ) : (
+                                      <div className="flex items-center gap-2 text-sm text-slate-500">
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                        正在生成回答...
+                                      </div>
+                                    )
+                                  ) : (
+                                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                                  )}
+                                </div>
+
+                                {msg.role === "assistant" && msg.response && (
+                                  <div className="space-y-2">
+                                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                      <Badge variant="outline" className="font-mono text-xs">
+                                        {msg.response.model}
+                                      </Badge>
+                                      <span className="flex items-center gap-1">
+                                        <Zap className="h-3 w-3" />
+                                        检索 {msg.response.timing.retrieval_ms}ms
+                                      </span>
+                                      <span className="flex items-center gap-1">
+                                        <Brain className="h-3 w-3" />
+                                        LLM {msg.response.timing.llm_ms}ms
+                                      </span>
+                                      <span>总计 {msg.response.timing.total_ms}ms</span>
+                                      {msg.response.tokens_used && <span>Tokens {msg.response.tokens_used}</span>}
+                                    </div>
+
+                                    {qaShowSources && msg.response.context_segments.length > 0 && (
+                                      <details className="rounded-lg border border-slate-200 bg-slate-50">
+                                        <summary className="cursor-pointer px-3 py-2 text-xs text-slate-600 flex items-center gap-2">
+                                          <Database className="h-3.5 w-3.5" />
+                                          引用片段 ({msg.response.context_segments.length})
+                                        </summary>
+                                        <div className="px-3 pb-3 space-y-2">
+                                          {msg.response.context_segments.map((seg, segIndex) => (
+                                            <div key={seg.segment_id} className="rounded-md border border-slate-200 bg-white p-2 text-xs text-slate-600">
+                                              <div className="flex items-center justify-between mb-1">
+                                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-indigo-100 text-indigo-600 text-[10px] font-semibold">
+                                                  {segIndex + 1}
+                                                </span>
+                                                <Badge className="bg-indigo-50 text-indigo-600 font-mono text-[10px]">
+                                                  {seg.score.toFixed(4)}
+                                                </Badge>
+                                              </div>
+                                              <p className="line-clamp-3 whitespace-pre-wrap">{seg.text}</p>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </details>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div ref={qaChatEndRef} />
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-slate-100 bg-white p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row">
+                    <Textarea
+                      placeholder="输入你的问题，Shift+Enter 换行..."
+                      value={qaQueryInput}
+                      onChange={(e) => setQaQueryInput(e.target.value)}
+                      onKeyDown={handleQaKeyDown}
+                      rows={2}
+                      className="flex-1 resize-none border-slate-200 focus:border-indigo-400 focus:ring-indigo-400"
+                    />
+                    <Button
+                      onClick={runQA}
+                      disabled={qaLoading || !qaQueryInput.trim()}
+                      className="h-11 bg-indigo-600 hover:bg-indigo-700 text-white"
+                    >
+                      {qaLoading ? (
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 生成中</>
+                      ) : (
+                        <><Send className="h-4 w-4 mr-2" /> 发送</>
+                      )}
+                    </Button>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
+                    <span>Enter 发送，Shift+Enter 换行</span>
+                    <span className="font-mono">TopK {topK} · {mode}</span>
+                  </div>
+                </div>
               </Card>
             </div>
           </div>
