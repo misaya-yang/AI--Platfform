@@ -22,6 +22,7 @@ class LangGraphServiceCreate(BaseModel):
     langsmith_api_key: Optional[str] = Field(None, description="LangSmith API Key（可选）")
     session_enabled: bool = Field(True, description="是否启用会话")
     description: Optional[str] = None
+    proxy_mode: str = Field("transparent", description="代理模式: transparent | adapter")
 
 
 class RateLimitRule(BaseModel):
@@ -78,18 +79,29 @@ async def create_langgraph_service(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """快速注册 LangGraph 服务"""
+    """快速注册 LangGraph 服务（支持透明代理模式）"""
     registry = request.app.state.registry
     # 权限：需要 service:manage 或 admin
     request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
 
-    # 构建完整的服务定义
+    # 构建连接器配置
     connector_config = {
         "base_url": body.deployment_url.rstrip("/"),
         "graph_id": body.graph_id,
         "assistant_id": body.graph_id,
+        # 透明代理配置
+        "proxy_mode": body.proxy_mode,
+        "upstream_url": body.deployment_url.rstrip("/"),
+        "forward_auth": True,
+        "timeout_connect": 5,
+        "timeout_read": 300,
+        "timeout_write": 60,
+        "load_balance_strategy": "round_robin",
     }
+    
+    # 认证 Token
     if body.langsmith_api_key:
+        connector_config["auth_token"] = body.langsmith_api_key
         connector_config["headers"] = {
             "X-Api-Key": body.langsmith_api_key,
         }
@@ -98,15 +110,17 @@ async def create_langgraph_service(
         "service_id": body.service_id,
         "name": body.name,
         "description": body.description or f"LangGraph service: {body.name}",
-        "service_type": "conversational",
+        "service_type": "langgraph",  # 使用专门的 langgraph 类型
         "connector_type": "http",
         "connector_config": connector_config,
         "supported_modes": ["sync", "stream"],
         "accepted_content_types": ["text"],
         "output_content_types": ["text"],
         "session_enabled": body.session_enabled,
+        "status": "active",  # 默认激活
         "metadata": {
             "adapter_type": "langgraph",
+            "proxy_mode": body.proxy_mode,
         },
     }
 
@@ -120,7 +134,21 @@ async def create_langgraph_service(
         if db and db.enabled:
             await db.save_service(service_def)
 
-        return {"status": "success", "service_id": body.service_id, "message": "服务注册成功"}
+        # 返回代理路由信息
+        proxy_route = f"/api/v1/proxy/{body.service_id}" if body.proxy_mode == "transparent" else None
+        
+        return {
+            "status": "success",
+            "service_id": body.service_id,
+            "message": "服务注册成功",
+            "proxy_mode": body.proxy_mode,
+            "proxy_route": proxy_route,
+            "example_endpoints": {
+                "list_assistants": f"{proxy_route}/assistants" if proxy_route else None,
+                "create_thread": f"{proxy_route}/threads" if proxy_route else None,
+                "stream_run": f"{proxy_route}/threads/{{thread_id}}/runs/stream" if proxy_route else None,
+            } if proxy_route else None,
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

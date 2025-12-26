@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Settings,
-  PlaySquare,
+  Sparkles,
   ServerCog,
   ListChecks,
   Database,
@@ -17,7 +17,7 @@ const navItems = [
   { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { to: "/services", label: "服务管理", icon: ServerCog },
   { to: "/knowledge", label: "知识库", icon: Database },
-  { to: "/playground", label: "对话测试", icon: PlaySquare },
+  { to: "/playground", label: "智能对话", icon: Sparkles },
   { to: "/tasks", label: "任务管理", icon: ListChecks },
   { to: "/settings", label: "系统设置", icon: Settings },
 ];

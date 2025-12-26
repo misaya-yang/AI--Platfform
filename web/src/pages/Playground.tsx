@@ -228,6 +228,10 @@ export function PlaygroundPage() {
 
     setLoading(true);
 
+    // 统计追踪
+    const startTime = performance.now();
+    let firstTokenTime: number | null = null;
+
     // **立即显示用户消息和"AI思考中"状态，不等待任何网络请求**
     let assistantIndex = 0;
     setMessages((prev) => {
@@ -314,6 +318,10 @@ export function PlaygroundPage() {
           if (eventType === "text_delta") {
             const delta = chunk?.content?.data;
             if (typeof delta === "string" && delta) {
+              // 记录首 token 时间
+              if (firstTokenTime === null) {
+                firstTokenTime = performance.now();
+              }
               streamed = true;
               acc += delta;
               setMessages((m) => {
@@ -467,6 +475,32 @@ export function PlaygroundPage() {
       // 检查请求是否仍有效
       if (!isRequestValid()) return;
 
+      // 更新最终统计信息
+      const endTime = performance.now();
+      const durationMs = Math.round(endTime - startTime);
+      const firstTokenMs = firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined;
+      
+      if (isRequestValid()) {
+        setMessages((m) => {
+          const next = [...m];
+          if (next[assistantIndex]) {
+            const currentContent = next[assistantIndex].content || acc;
+            next[assistantIndex] = {
+              ...next[assistantIndex],
+              content: currentContent,
+              isThinking: false,
+              stats: {
+                durationMs,
+                firstTokenMs,
+                // Token 统计：粗略估算（中文约 2 字符/token，英文约 4 字符/token）
+                outputTokens: Math.ceil(currentContent.length / 2),
+              },
+            };
+          }
+          return next;
+        });
+      }
+
       if (!streamed) {
         // 流式失败，尝试同步调用
         console.log("Falling back to sync invoke");
@@ -476,6 +510,7 @@ export function PlaygroundPage() {
 
           const out = resp.outputs?.[0]?.data ?? "";
           acc = String(out);
+          const syncEndTime = performance.now();
           setMessages((m) => {
             const next = [...m];
             if (next[assistantIndex]) {
@@ -483,6 +518,10 @@ export function PlaygroundPage() {
                 ...next[assistantIndex],
                 content: acc,
                 isThinking: false,
+                stats: {
+                  durationMs: Math.round(syncEndTime - startTime),
+                  outputTokens: Math.ceil(acc.length / 4),
+                },
               };
             }
             return next;
@@ -609,11 +648,11 @@ export function PlaygroundPage() {
         <div className="mx-auto w-full max-w-4xl px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 flex-1">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-100 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" x2="12" y1="19" y2="22" /></svg>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
               </div>
               <div className="flex flex-col">
-                <span className="text-xs font-medium text-muted-foreground">Model</span>
+                <span className="text-xs font-medium text-muted-foreground">Agent</span>
                 <Select value={serviceId} onValueChange={setServiceId}>
                   <SelectTrigger className="h-7 w-[200px] border-0 bg-transparent p-0 text-sm font-semibold focus:ring-0">
                     <SelectValue placeholder="Select an Agent" />

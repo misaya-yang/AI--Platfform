@@ -11,24 +11,38 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConfigEditor } from "@/components/ConfigEditor";
 import { registerService } from "@/api/gateway";
 import { api } from "@/lib/api";
 
-const defaultYaml = `service_id: your-agent
-name: "Your Agent"
-service_type: conversational
+const defaultYaml = `# 透明代理模式配置示例
+service_id: my-langgraph-agent
+name: "My LangGraph Agent"
+description: "LangGraph 透明代理服务"
+service_type: langgraph
 supported_modes: [sync, stream]
+status: active
 
 connector_type: http
 connector_config:
-  base_url: "http://127.0.0.1:2024"
-  graph_id: "your_graph_id"
-
-accepted_content_types: [text]
-output_content_types: [text]
+  # 透明代理配置
+  proxy_mode: transparent  # transparent | adapter
+  upstream_url: "http://localhost:2024"
+  assistant_id: "agent"  # LangGraph assistant ID
+  
+  # 认证配置（可选）
+  auth_token: ""  # LangSmith API Key 或内部 token
+  forward_auth: true  # 是否转发原始 Authorization 头
+  
+  # 超时配置
+  timeout_connect: 5
+  timeout_read: 300
+  timeout_write: 60
+  
+  # 负载均衡（可选，多实例时使用）
+  # upstream_urls: ["http://server1:2024", "http://server2:2024"]
+  load_balance_strategy: round_robin  # round_robin | least_connections | random
 
 session_enabled: true
 
@@ -37,12 +51,9 @@ metadata:
 `;
 
 interface LangGraphFormData {
-  serviceId: string;
-  name: string;
   deploymentUrl: string;
   graphId: string;
   langsmithApiKey: string;
-  sessionEnabled: boolean;
 }
 
 export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
@@ -52,43 +63,41 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
-  // 简化表单数据
+  // 简化表单数据 - 只需要两个核心字段
   const [formData, setFormData] = useState<LangGraphFormData>({
-    serviceId: "",
-    name: "",
     deploymentUrl: "http://localhost:2024",
     graphId: "agent",
     langsmithApiKey: "",
-    sessionEnabled: true,
   });
 
   async function handleSimpleRegister() {
-    if (!formData.serviceId || !formData.name || !formData.deploymentUrl || !formData.graphId) {
-      setError("请填写所有必填字段");
+    if (!formData.deploymentUrl || !formData.graphId) {
+      setError("请填写 Deployment URL 和 Assistant ID");
       return;
     }
 
     setSaving(true);
     setError(null);
     try {
+      // 自动生成 service_id 和 name
+      const serviceId = formData.graphId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      
       await api.post("/api/v1/config/services/langgraph", {
-        service_id: formData.serviceId,
-        name: formData.name,
+        service_id: serviceId,
+        name: formData.graphId,
         deployment_url: formData.deploymentUrl,
         graph_id: formData.graphId,
         langsmith_api_key: formData.langsmithApiKey || undefined,
-        session_enabled: formData.sessionEnabled,
+        session_enabled: true,
+        proxy_mode: "transparent",
       });
       onRegistered?.();
       setOpen(false);
       // 重置表单
       setFormData({
-        serviceId: "",
-        name: "",
         deploymentUrl: "http://localhost:2024",
         graphId: "agent",
         langsmithApiKey: "",
-        sessionEnabled: true,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "注册失败";
@@ -138,39 +147,14 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                 </svg>
                 LangGraph 服务快速注册
               </div>
+              <p className="text-xs text-muted-foreground mb-4">
+                只需填写两个必填项，网关将自动为您配置透明代理转发
+              </p>
 
               <div className="grid gap-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="serviceId">
-                      服务 ID <span className="text-red-500">*</span>
-                    </Label>
-                    <Input
-                      id="serviceId"
-                      placeholder="my-agent"
-                      value={formData.serviceId}
-                      onChange={(e) => setFormData({ ...formData, serviceId: e.target.value })}
-                    />
-                    <p className="text-xs text-muted-foreground">唯一标识符，用于 API 调用</p>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="name">
-                      服务名称 <span className="text-red-500">*</span>
-                    </Label>
-                    <Input
-                      id="name"
-                      placeholder="My Agent"
-                      value={formData.name}
-                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    />
-                    <p className="text-xs text-muted-foreground">显示名称</p>
-                  </div>
-                </div>
-
                 <div className="space-y-2">
                   <Label htmlFor="deploymentUrl">
-                    部署地址 <span className="text-red-500">*</span>
+                    Deployment URL <span className="text-red-500">*</span>
                   </Label>
                   <Input
                     id="deploymentUrl"
@@ -178,12 +162,14 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     value={formData.deploymentUrl}
                     onChange={(e) => setFormData({ ...formData, deploymentUrl: e.target.value })}
                   />
-                  <p className="text-xs text-muted-foreground">LangGraph 服务的 URL</p>
+                  <p className="text-xs text-muted-foreground">
+                    LangGraph 服务的部署地址，本地或云端均可
+                  </p>
                 </div>
 
                 <div className="space-y-2">
                   <Label htmlFor="graphId">
-                    Graph ID <span className="text-red-500">*</span>
+                    Assistant / Graph ID <span className="text-red-500">*</span>
                   </Label>
                   <Input
                     id="graphId"
@@ -191,11 +177,13 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     value={formData.graphId}
                     onChange={(e) => setFormData({ ...formData, graphId: e.target.value })}
                   />
-                  <p className="text-xs text-muted-foreground">Graph 或 Assistant 的 ID</p>
+                  <p className="text-xs text-muted-foreground">
+                    Graph 名称或 Assistant ID，用于调用时自动注入
+                  </p>
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="langsmithApiKey">LangSmith API Key（可选）</Label>
+                  <Label htmlFor="langsmithApiKey">LangSmith API Key</Label>
                   <Input
                     id="langsmithApiKey"
                     type="password"
@@ -203,21 +191,9 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     value={formData.langsmithApiKey}
                     onChange={(e) => setFormData({ ...formData, langsmithApiKey: e.target.value })}
                   />
-                  <p className="text-xs text-muted-foreground">本地部署无需填写</p>
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border p-3">
-                  <div>
-                    <Label htmlFor="sessionEnabled">启用会话</Label>
-                    <p className="text-xs text-muted-foreground">保持多轮对话上下文</p>
-                  </div>
-                  <Switch
-                    id="sessionEnabled"
-                    checked={formData.sessionEnabled}
-                    onCheckedChange={(checked) =>
-                      setFormData({ ...formData, sessionEnabled: checked })
-                    }
-                  />
+                  <p className="text-xs text-muted-foreground">
+                    <strong>本地部署无需填写</strong>，仅云端 LangGraph 需要
+                  </p>
                 </div>
               </div>
             </div>

@@ -15,6 +15,14 @@ export type ChatMessage = {
   content: string;
   toolCalls?: ToolCallWithResult[];
   isThinking?: boolean; // 显示"AI思考中"状态
+  // 统计信息
+  stats?: {
+    durationMs?: number;     // 响应耗时（毫秒）
+    inputTokens?: number;    // 输入 tokens
+    outputTokens?: number;   // 输出 tokens
+    totalTokens?: number;    // 总 tokens
+    firstTokenMs?: number;   // 首 token 延迟
+  };
 };
 
 export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
@@ -95,6 +103,37 @@ export function ChatWindow({ messages }: { messages: ChatMessage[] }) {
                       result={tc.result}
                     />
                   ))}
+                </div>
+              )}
+
+              {/* Stats (仅助手消息显示) */}
+              {!isUser && m.stats && !m.isThinking && m.content && (
+                <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60 mt-1 ml-1">
+                  {m.stats.durationMs != null && (
+                    <span className="flex items-center gap-1">
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <polyline points="12 6 12 12 16 14"/>
+                      </svg>
+                      {(m.stats.durationMs / 1000).toFixed(2)}s
+                    </span>
+                  )}
+                  {m.stats.firstTokenMs != null && (
+                    <span>TTFT: {m.stats.firstTokenMs}ms</span>
+                  )}
+                  {m.stats.totalTokens != null && (
+                    <span className="flex items-center gap-1">
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                      </svg>
+                      {m.stats.totalTokens} tokens
+                      {m.stats.inputTokens != null && m.stats.outputTokens != null && (
+                        <span className="text-muted-foreground/40">
+                          ({m.stats.inputTokens}↓ {m.stats.outputTokens}↑)
+                        </span>
+                      )}
+                    </span>
+                  )}
                 </div>
               )}
             </div>

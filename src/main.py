@@ -268,6 +268,13 @@ def create_app() -> FastAPI:
         await container.health_monitor.start()
         await container.task_worker.start(settings.task_worker_concurrency)
 
+        # 启动计费拦截器（如果启用）
+        if settings.proxy.enabled and settings.proxy.billing_enabled:
+            billing_interceptor = container.billing_interceptor
+            if billing_interceptor:
+                await billing_interceptor.start()
+                logger.info("计费拦截器已启动")
+
         # 启动 Knowledge Base (KBMS) 后台任务
         if getattr(settings, "knowledge", None) and settings.knowledge.enabled:
             from .services.knowledge.knowledge_service import KnowledgeService
@@ -345,6 +352,12 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.langgraph_proxy = container.langgraph_proxy
     app.state.multi_rate_limiter = container.multi_rate_limiter
     app.state.user_resolver = container.user_resolver
+
+    # 透明代理相关
+    app.state.transparent_proxy = container.transparent_proxy
+    app.state.proxy_config_loader = container.proxy_config_loader
+    app.state.billing_interceptor = container.billing_interceptor
+    app.state.context_injector = container.context_injector
 
     # Knowledge Base (KBMS)
     app.state.knowledge_service = None

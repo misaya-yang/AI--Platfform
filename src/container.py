@@ -195,6 +195,28 @@ class Container:
         self._providers["user_resolver"] = Provider(
             self._create_user_resolver, singleton=True
         )
+        
+        # ========== 透明代理相关 ==========
+        
+        # 代理配置加载器
+        self._providers["proxy_config_loader"] = Provider(
+            self._create_proxy_config_loader, singleton=True
+        )
+        
+        # 计费拦截器
+        self._providers["billing_interceptor"] = Provider(
+            self._create_billing_interceptor, singleton=True
+        )
+        
+        # 上下文注入器
+        self._providers["context_injector"] = Provider(
+            self._create_context_injector, singleton=True
+        )
+        
+        # 透明代理
+        self._providers["transparent_proxy"] = Provider(
+            self._create_transparent_proxy, singleton=True
+        )
     
     # ========== 工厂方法 ==========
     
@@ -473,6 +495,68 @@ class Container:
             api_key_header=self.settings.authentication.api_key.header_name,
         ))
     
+    # ========== 透明代理工厂方法 ==========
+    
+    def _create_proxy_config_loader(self):
+        """创建代理配置加载器"""
+        from .proxy.config_loader import ProxyConfigLoader
+        
+        database = self._providers["database"].get_sync()
+        redis = self._providers["redis"].get_sync()
+        
+        return ProxyConfigLoader(
+            database=database if database.enabled else None,
+            redis=redis if redis.enabled else None,
+            cache_ttl=self.settings.proxy.config_cache_ttl,
+        )
+    
+    def _create_billing_interceptor(self):
+        """创建计费拦截器"""
+        if not self.settings.proxy.billing_enabled:
+            return None
+        
+        from .proxy.billing_interceptor import BillingInterceptor
+        
+        redis = self._providers["redis"].get_sync()
+        
+        return BillingInterceptor(
+            redis_client=redis if redis.enabled else None,
+            buffer_size=self.settings.proxy.billing_buffer_size,
+            flush_interval=self.settings.proxy.billing_flush_interval,
+        )
+    
+    def _create_context_injector(self):
+        """创建上下文注入器"""
+        from .proxy.context_injector import ContextInjector
+        
+        return ContextInjector(
+            inject_user_info=self.settings.proxy.inject_user_info,
+            inject_request_info=self.settings.proxy.inject_request_info,
+            forward_auth=self.settings.proxy.forward_auth,
+            custom_headers=self.settings.proxy.custom_headers,
+        )
+    
+    def _create_transparent_proxy(self):
+        """创建透明代理"""
+        if not self.settings.proxy.enabled:
+            return None
+        
+        from .proxy.transparent_proxy import TransparentProxy
+        
+        config_loader = self._providers["proxy_config_loader"].get_sync()
+        context_injector = self._providers["context_injector"].get_sync()
+        billing_interceptor = self._providers["billing_interceptor"].get_sync()
+        
+        proxy = TransparentProxy(
+            config_loader=config_loader,
+            context_injector=context_injector,
+            billing_interceptor=billing_interceptor,
+            default_timeout=self.settings.proxy.timeout_read,
+        )
+        
+        logger.info("透明代理已初始化")
+        return proxy
+    
     # ========== 生命周期管理 ==========
     
     async def initialize(self) -> None:
@@ -535,6 +619,16 @@ class Container:
         langgraph_proxy = self._providers.get("langgraph_proxy")
         if langgraph_proxy and langgraph_proxy._instance:
             await langgraph_proxy._instance.close()
+        
+        # 关闭透明代理
+        transparent_proxy = self._providers.get("transparent_proxy")
+        if transparent_proxy and transparent_proxy._instance:
+            await transparent_proxy._instance.close()
+        
+        # 停止计费拦截器
+        billing_interceptor = self._providers.get("billing_interceptor")
+        if billing_interceptor and billing_interceptor._instance:
+            await billing_interceptor._instance.stop()
         
         # 关闭数据库连接
         database = self._providers.get("database")
@@ -610,6 +704,26 @@ class Container:
     def user_resolver(self):
         """获取用户解析器"""
         return self._providers["user_resolver"].get_sync()
+    
+    @property
+    def proxy_config_loader(self):
+        """获取代理配置加载器"""
+        return self._providers["proxy_config_loader"].get_sync()
+    
+    @property
+    def billing_interceptor(self):
+        """获取计费拦截器"""
+        return self._providers["billing_interceptor"].get_sync()
+    
+    @property
+    def context_injector(self):
+        """获取上下文注入器"""
+        return self._providers["context_injector"].get_sync()
+    
+    @property
+    def transparent_proxy(self):
+        """获取透明代理"""
+        return self._providers["transparent_proxy"].get_sync()
     
     # ========== 测试支持 ==========
     

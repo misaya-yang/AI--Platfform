@@ -141,6 +141,33 @@ class KnowledgeSettings(BaseModel):
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
 
 
+class ProxySettings(BaseModel):
+    """透明代理配置"""
+    enabled: bool = True
+    
+    # 默认超时配置
+    timeout_connect: float = 5.0
+    timeout_read: float = 300.0
+    timeout_write: float = 60.0
+    timeout_pool: float = 60.0
+    
+    # 配置缓存 TTL（秒）
+    config_cache_ttl: float = 60.0
+    
+    # 计费配置
+    billing_enabled: bool = True
+    billing_buffer_size: int = 100
+    billing_flush_interval: float = 5.0
+    
+    # 上下文注入配置
+    inject_user_info: bool = True
+    inject_request_info: bool = True
+    forward_auth: bool = True
+    
+    # 自定义头部（所有请求都会注入）
+    custom_headers: Dict[str, str] = Field(default_factory=dict)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GATEWAY_",
@@ -181,6 +208,9 @@ class Settings(BaseSettings):
 
     # Knowledge Base (KBMS)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+
+    # 透明代理配置
+    proxy: ProxySettings = Field(default_factory=ProxySettings)
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

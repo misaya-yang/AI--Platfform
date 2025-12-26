@@ -497,66 +497,79 @@ class LangGraphAdapter(ProtocolAdapter):
                 current_tool_call_id = ""
                 current_tool_name = ""
                 
-                # Use aiter_lines for SSE parsing
+                # Use aiter_bytes for real-time streaming (aiter_lines can buffer)
                 line_count = 0
-                async for line in resp.aiter_lines():
-                    line_count += 1
-                    if first_data_time is None and line:
+                buffer = ""
+                async for chunk in resp.aiter_bytes():
+                    if first_data_time is None:
                         first_data_time = time.perf_counter()
-                        logger.info(f"[TIMING] LangGraph first line: {(first_data_time - t_start)*1000:.2f}ms")
-                    if not line:
-                        current_event_type = ""
-                        continue
-                    # 解析 SSE event 类型
-                    if line.startswith("event:"):
-                        current_event_type = line[6:].strip()
-                        logger.debug(f"SSE event type: {current_event_type}")
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    data_str = line[5:].strip()
-                    if not data_str or data_str == "[DONE]":
-                        logger.debug("SSE stream done")
-                        continue
-                    try:
-                        data = json.loads(data_str)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse SSE data: {e}")
-                        continue
+                        logger.info(f"[TIMING] LangGraph first chunk: {(first_data_time - t_start)*1000:.2f}ms")
                     
-                    # Debug: log received event type and content preview
-                    if current_event_type:
-                        content_preview = ""
-                        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-                            c = data[0].get("content", "")
-                            if isinstance(c, str):
-                                content_preview = f", content_len={len(c)}"
-                        logger.debug(f"[SSE] event={current_event_type}{content_preview}")
-                    # 构建完整事件对象以便统一处理
-                    event = (
-                        {"event": current_event_type, "data": data}
-                        if current_event_type
-                        else data
-                    )
-                    result = self._extract_remote_stream_event(
-                        event,
-                        last_content_length,
-                        last_tool_args_length,
-                        current_tool_call_id,
-                        current_tool_name,
-                    )
-                    (
-                        stream_event,
-                        last_content_length,
-                        last_tool_args_length,
-                        current_tool_call_id,
-                        current_tool_name,
-                    ) = result
-                    if stream_event:
-                        if first_yield_time is None:
+                    # Decode and buffer
+                    buffer += chunk.decode("utf-8", errors="ignore")
+                    
+                    # Process complete lines (SSE events end with \n\n or \n)
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        line_count += 1
+                        if not line:
+                            current_event_type = ""
+                            continue
+                        # 解析 SSE event 类型
+                        if line.startswith("event:"):
+                            current_event_type = line[6:].strip()
+                            logger.debug(f"SSE event type: {current_event_type}")
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            logger.debug("SSE stream done")
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse SSE data: {e}")
+                            continue
+                        
+                        # Debug: log received event type and content preview
+                        if current_event_type:
+                            content_preview = ""
+                            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                                c = data[0].get("content", "")
+                                if isinstance(c, str):
+                                    content_preview = f", content_len={len(c)}"
+                            logger.debug(f"[SSE] event={current_event_type}{content_preview}")
+                        # 构建完整事件对象以便统一处理
+                        event = (
+                            {"event": current_event_type, "data": data}
+                            if current_event_type
+                            else data
+                        )
+                        # 立即发送 thinking 事件让前端知道我们在处理
+                        if first_yield_time is None and current_event_type:
                             first_yield_time = time.perf_counter()
-                            logger.info(f"[TIMING] LangGraph first yield: {(first_yield_time - t_start)*1000:.2f}ms, event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}")
-                        yield stream_event
+                            logger.info(f"[TIMING] LangGraph sending thinking signal: {(first_yield_time - t_start)*1000:.2f}ms, event_type={current_event_type}")
+                            yield StreamEvent(event_type=StreamEventType.THINKING)
+                        
+                        result = self._extract_remote_stream_event(
+                            event,
+                            last_content_length,
+                            last_tool_args_length,
+                            current_tool_call_id,
+                            current_tool_name,
+                        )
+                        (
+                            stream_event,
+                            last_content_length,
+                            last_tool_args_length,
+                            current_tool_call_id,
+                            current_tool_name,
+                        ) = result
+                        if stream_event:
+                            logger.debug(f"[TIMING] LangGraph yield: event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}")
+                            yield stream_event
         except httpx.RequestError as exc:
             raise ValidationFailedError(
                 f"LangGraph stream request error at {endpoint}: {exc}"
@@ -573,11 +586,26 @@ class LangGraphAdapter(ProtocolAdapter):
         current_tool_name: str,
     ) -> tuple[Optional[StreamEvent], int, Dict[str, int], str, str]:
         """从远程 LangGraph API 的流式事件中提取流事件（返回增量）"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if not isinstance(event, dict):
             return None, last_content_length, last_tool_args_length, current_tool_call_id, current_tool_name
 
         event_type = event.get("event", "")
         data = event.get("data") if "event" in event else event
+        
+        # 详细调试日志 - 显示每个收到的事件
+        if event_type:
+            # 提取消息类型和内容长度用于调试
+            debug_info = f"event_type={event_type}"
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                msg = data[0]
+                msg_type = msg.get("type", "unknown")
+                content = msg.get("content", "")
+                content_len = len(content) if isinstance(content, str) else 0
+                debug_info += f", msg_type={msg_type}, content_len={content_len}, last_len={last_content_length}"
+            logger.debug(f"[STREAM] Processing: {debug_info}")
 
         # 处理 messages/complete 事件 - 重置状态
         if event_type == "messages/complete":
@@ -703,10 +731,23 @@ class LangGraphAdapter(ProtocolAdapter):
                 # 处理 AI 消息类型的文本（累积内容，需要计算增量）
                 if msg_type in ("ai", "AIMessage", "AIMessageChunk"):
                     content = msg.get("content", "")
+                    
+                    # 处理 content 为 list 的情况（多模态内容）
+                    if isinstance(content, list):
+                        # 提取文本部分
+                        text_parts = []
+                        for item in content:
+                            if isinstance(item, str):
+                                text_parts.append(item)
+                            elif isinstance(item, dict) and item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                        content = "".join(text_parts)
+                    
                     if isinstance(content, str) and len(content) > last_content_length:
                         # 只返回新增的部分
                         delta = content[last_content_length:]
                         new_length = len(content)
+                        logger.debug(f"[STREAM] TEXT_DELTA: delta_len={len(delta)}, total_len={new_length}")
                         return StreamEvent(
                             event_type=StreamEventType.TEXT_DELTA,
                             text=delta,
@@ -750,20 +791,21 @@ class LangGraphAdapter(ProtocolAdapter):
         使用缓存确保同一 session_id 始终映射到同一个 thread_id。
         返回实际使用的 thread_id（UUID 格式）。
         
-        注意：此方法会在流式响应前执行 HTTP 调用，可能影响首 token 延迟。
+        重要：此方法会同步等待 thread 创建完成，以避免后续请求因 thread 不存在而失败。
         使用缓存来减少后续请求的开销。
         """
         import uuid
         import time
         import logging
-        import asyncio
         logger = logging.getLogger(__name__)
         
         t_start = time.perf_counter()
         
         # 检查缓存中是否已有映射 - 快速路径
         if session_id in self._session_to_thread_map:
-            return self._session_to_thread_map[session_id]
+            cached_id = self._session_to_thread_map[session_id]
+            logger.debug(f"[TIMING] _ensure_thread: cached hit for {session_id}")
+            return cached_id
         
         # 验证是否为有效 UUID
         try:
@@ -773,36 +815,32 @@ class LangGraphAdapter(ProtocolAdapter):
             # 不是有效 UUID，生成一个新的
             valid_thread_id = str(uuid.uuid4())
         
-        # 缓存映射关系（先缓存，后台创建 thread）
+        # 同步创建 thread - 确保 thread 存在再继续
+        # 这会增加首次请求的延迟，但确保后续流式请求不会失败
+        try:
+            auth_headers = self._build_auth_headers(request)
+            await self.connector.post(
+                "/threads",
+                json={
+                    "thread_id": valid_thread_id,
+                    "if_exists": "do_nothing",
+                    "metadata": {
+                        "user_id": request.user_id,
+                        "tenant_id": request.tenant_id,
+                        "original_session_id": session_id,
+                    },
+                },
+                headers=auth_headers,
+            )
+            logger.debug(f"Thread created successfully: {valid_thread_id}")
+        except Exception as e:
+            # 如果创建失败，记录但不阻止 - LangGraph 某些版本可能会自动创建
+            logger.warning(f"Thread creation failed (will retry with stream): {e}")
+        
+        # 缓存映射关系
         self._session_to_thread_map[session_id] = valid_thread_id
         
-        # 异步创建 thread，不阻塞主流程
-        # LangGraph 的 /runs/stream 会自动创建 thread 如果不存在
-        async def create_thread_background():
-            try:
-                auth_headers = self._build_auth_headers(request)
-                await self.connector.post(
-                    "/threads",
-                    json={
-                        "thread_id": valid_thread_id,
-                        "if_exists": "do_nothing",
-                        "metadata": {
-                            "user_id": request.user_id,
-                            "tenant_id": request.tenant_id,
-                            "original_session_id": session_id,
-                        },
-                    },
-                    headers=auth_headers,
-                )
-            except Exception as e:
-                # Thread creation is best-effort, but log failures for debugging
-                logger.debug(f"Background thread creation failed (non-critical): {e}")
-        
-        # Fire and forget - but track the task to avoid silent exception loss
-        task = asyncio.create_task(create_thread_background())
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
-        
         t_end = time.perf_counter()
-        logger.debug(f"[TIMING] _ensure_thread: {(t_end - t_start)*1000:.2f}ms (cached: False)")
+        logger.info(f"[TIMING] _ensure_thread: {(t_end - t_start)*1000:.2f}ms (new thread)")
         
         return valid_thread_id

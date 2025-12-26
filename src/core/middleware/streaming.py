@@ -32,6 +32,7 @@ STREAMING_PATHS: Set[str] = {
 STREAMING_PATH_PREFIXES: List[str] = [
     "/api/v1/conversations/",  # /api/v1/conversations/{id}/stream
     "/api/v1/langgraph/",  # LangGraph SSE endpoints
+    "/api/v1/proxy/",  # 透明代理 SSE endpoints
 ]
 
 # Streaming suffixes to detect
