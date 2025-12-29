@@ -187,24 +187,24 @@ export function SettingsPage() {
       </div>
 
       {/* 配置层级说明 */}
-      <Card className="border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/20">
+      <Card className="border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10">
         <CardContent className="pt-4">
           <div className="flex items-start gap-3">
-            <div className="mt-0.5 p-1.5 rounded-full bg-blue-100 dark:bg-blue-900/50">
-              <svg className="h-4 w-4 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="mt-0.5 p-1.5 rounded-full bg-primary/10 dark:bg-primary/20">
+              <svg className="h-4 w-4 text-primary dark:text-primary/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
             <div className="space-y-1">
-              <h4 className="text-sm font-medium text-blue-900 dark:text-blue-100">配置层级说明</h4>
-              <p className="text-sm text-blue-700 dark:text-blue-300">
+              <h4 className="text-sm font-medium text-primary dark:text-primary/90">配置层级说明</h4>
+              <p className="text-sm text-primary/90 dark:text-primary/70">
                 网关支持<strong>两个配置层级</strong>：
               </p>
-              <ul className="text-sm text-blue-600 dark:text-blue-400 list-disc list-inside space-y-0.5">
+              <ul className="text-sm text-primary dark:text-primary/70 list-disc list-inside space-y-0.5">
                 <li><strong>全局配置</strong>（此页面）：对所有服务生效的默认配置</li>
                 <li><strong>服务配置</strong>（服务管理页面）：点击服务卡片上的齿轮图标，为单个服务配置独立的鉴权、限流、缓存等</li>
               </ul>
-              <p className="text-xs text-blue-500 dark:text-blue-500 mt-2">
+              <p className="text-xs text-primary dark:text-primary mt-2">
                 服务级别配置优先级高于全局配置
               </p>
             </div>

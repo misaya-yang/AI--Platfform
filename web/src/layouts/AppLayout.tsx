@@ -34,13 +34,13 @@ export function AppLayout() {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground aurora-bg font-sans selection:bg-primary/20">
       {/* Floating Sidebar - uses z-sticky to stay above content but below overlays */}
-      <aside className="hidden md:flex w-[260px] flex-col gap-4 p-4" style={{ zIndex: "var(--z-sticky)" }}>
-        <div className="flex h-full flex-col rounded-2xl glass border border-white/20 dark:border-white/10 shadow-xl p-4 transition-all duration-300">
-          <div className="mb-8 px-2 mt-2 flex items-center gap-2">
-            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg flex items-center justify-center">
-              <ServerCog className="h-5 w-5 text-white" />
+      <aside className="hidden md:flex w-[252px] flex-col gap-4 p-4" style={{ zIndex: "var(--z-sticky)" }}>
+        <div className="flex h-full flex-col rounded-2xl bg-card border border-border/70 shadow-sm p-4 transition-all duration-300">
+          <div className="mb-8 px-2 mt-2 flex items-center gap-3">
+            <div className="h-9 w-9 rounded-xl bg-primary/10 flex items-center justify-center">
+              <ServerCog className="h-5 w-5 text-primary" />
             </div>
-            <span className="text-lg font-bold tracking-tight bg-gradient-to-r from-indigo-500 to-purple-600 bg-clip-text text-transparent">
+            <span className="text-lg font-semibold tracking-tight text-foreground">
               AI Gateway
             </span>
           </div>
@@ -56,8 +56,8 @@ export function AppLayout() {
                     cn(
                       "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 outline-none",
                       isActive 
-                        ? "bg-primary text-primary-foreground shadow-md" 
-                        : "text-muted-foreground hover:bg-white/50 dark:hover:bg-white/10 hover:text-foreground"
+                        ? "bg-primary/10 text-primary border border-primary/20"
+                        : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
                     )
                   }
                 >
@@ -68,8 +68,8 @@ export function AppLayout() {
             })}
           </nav>
 
-          <div className="mt-auto pt-4 border-t border-border/50">
-             <div className="flex items-center justify-between rounded-xl p-2 hover:bg-white/50 dark:hover:bg-white/10 transition-colors">
+          <div className="mt-auto pt-4 border-t border-border/60">
+             <div className="flex items-center justify-between rounded-xl p-2 hover:bg-muted/40 transition-colors">
                 <span className="text-xs font-medium text-muted-foreground ml-1">Dark Mode</span>
                 <Switch checked={darkMode} onCheckedChange={toggleDarkMode} className="scale-75" />
              </div>
@@ -79,8 +79,8 @@ export function AppLayout() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden relative">
-        <header className="md:hidden flex items-center justify-between border-b bg-card/80 backdrop-blur-sm px-4 py-3" style={{ zIndex: "var(--z-sticky)" }}>
-           <div className="font-semibold">AI Gateway</div>
+        <header className="md:hidden flex items-center justify-between border-b bg-card px-4 py-3" style={{ zIndex: "var(--z-sticky)" }}>
+           <div className="text-base font-semibold">AI Gateway</div>
            <Switch checked={darkMode} onCheckedChange={toggleDarkMode} />
         </header>
         

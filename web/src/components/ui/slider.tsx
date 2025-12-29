@@ -27,11 +27,11 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
           value={value[0]}
           onChange={(e) => onValueChange([Number(e.target.value)])}
           disabled={disabled}
-          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer 
+          className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer 
                      [&::-webkit-slider-thumb]:appearance-none
                      [&::-webkit-slider-thumb]:w-4
                      [&::-webkit-slider-thumb]:h-4
-                     [&::-webkit-slider-thumb]:bg-blue-600
+                     [&::-webkit-slider-thumb]:bg-primary
                      [&::-webkit-slider-thumb]:rounded-full
                      [&::-webkit-slider-thumb]:cursor-pointer
                      [&::-webkit-slider-thumb]:shadow-md
@@ -39,13 +39,13 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
                      [&::-webkit-slider-thumb]:hover:scale-110
                      [&::-moz-range-thumb]:w-4
                      [&::-moz-range-thumb]:h-4
-                     [&::-moz-range-thumb]:bg-blue-600
+                     [&::-moz-range-thumb]:bg-primary
                      [&::-moz-range-thumb]:border-0
                      [&::-moz-range-thumb]:rounded-full
                      [&::-moz-range-thumb]:cursor-pointer
                      disabled:opacity-50 disabled:cursor-not-allowed"
           style={{
-            background: `linear-gradient(to right, #2563eb 0%, #2563eb ${percentage}%, #e5e7eb ${percentage}%, #e5e7eb 100%)`,
+            background: `linear-gradient(to right, hsl(var(--primary)) 0%, hsl(var(--primary)) ${percentage}%, hsl(var(--muted)) ${percentage}%, hsl(var(--muted)) 100%)`,
           }}
         />
       </div>

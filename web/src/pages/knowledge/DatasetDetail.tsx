@@ -10,10 +10,7 @@ import {
   FileText,
   Edit3,
   Plus,
-  CheckCircle,
-  AlertCircle,
   Loader2,
-  File,
   Sparkles,
   MessageSquare,
   Sliders,
@@ -36,7 +33,6 @@ import {
   Target,
   User,
   ImageIcon,
-  ChevronUp,
   ChevronDown,
 } from "lucide-react";
 
@@ -91,22 +87,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
+import { SegmentCard } from "@/pages/knowledge/detail/SegmentCard";
+import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
 
 type QAChatMessage = {
   id: string;
@@ -127,523 +110,6 @@ const QA_SYSTEM_PROMPTS = {
   flexible:
     "你是知识库问答助手。优先基于“上下文”回答；若上下文不足，可根据通用知识给出简要回答，并明确标注“以下为通用知识，非来自知识库”。回答与问题同语言，简洁、准确。",
 };
-
-function StatusBadge({ status, error, progress }: { status: string; error?: string; progress?: number }) {
-  const s = (status || "").toLowerCase();
-
-  // 格式化进度显示（后端返回的已经是百分比值如 35，不需要乘100）
-  const formatProgress = (p?: number) => {
-    if (p === undefined || p === null) return "";
-    return ` ${Math.round(p)}%`;
-  };
-
-  const configs: Record<string, { icon: React.ReactNode; label: string; className: string }> = {
-    completed: {
-      icon: <CheckCircle className="h-3 w-3" />,
-      label: "已完成",
-      className: "bg-emerald-50 text-emerald-700 border-emerald-200",
-    },
-    failed: {
-      icon: <AlertCircle className="h-3 w-3" />,
-      label: "失败",
-      className: "bg-red-50 text-red-700 border-red-200",
-    },
-    embedding: {
-      icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `向量化中${formatProgress(progress)}`,
-      className: "bg-blue-50 text-blue-700 border-blue-200",
-    },
-    segmenting: {
-      icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `分段中${formatProgress(progress)}`,
-      className: "bg-amber-50 text-amber-700 border-amber-200",
-    },
-    parsing: {
-      icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `解析中${formatProgress(progress)}`,
-      className: "bg-purple-50 text-purple-700 border-purple-200",
-    },
-  };
-
-  const config = configs[s] || {
-    icon: <File className="h-3 w-3" />,
-    label: "已上传",
-    className: "bg-gray-50 text-gray-700 border-gray-200",
-  };
-
-  const badge = (
-    <Badge variant="outline" className={`text-xs font-medium cursor-default ${config.className}`}>
-      {config.icon}
-      <span className="ml-1">{config.label}</span>
-    </Badge>
-  );
-
-  if (s === "failed" && error) {
-    return (
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            {badge}
-          </TooltipTrigger>
-          <TooltipContent>
-            <p className="max-w-xs break-words text-xs">{error}</p>
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-    );
-  }
-
-  return badge;
-}
-
-
-
-function DocumentRow({
-  doc,
-  selected,
-  onSelect,
-  onReindex,
-  onDelete,
-}: {
-  doc: Document;
-  selected: boolean;
-  onSelect: () => void;
-  onReindex: () => Promise<void>;
-  onDelete: () => Promise<void>;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [reindexOpen, setReindexOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-
-  const handleAction = async (action: () => Promise<void>) => {
-    if (loading) return;
-    setLoading(true);
-    try {
-      await action();
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const formatFileSize = (bytes?: number) => {
-    if (!bytes) return "-";
-    if (bytes < 1024) return `${bytes}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
-  };
-
-  // Get file icon based on extension
-  const getFileIcon = () => {
-    const ext = doc.title?.split('.').pop()?.toLowerCase() || '';
-    if (['pdf'].includes(ext)) {
-      return <div className="w-6 h-6 rounded bg-red-500 flex items-center justify-center text-white text-xs font-bold">P</div>;
-    }
-    if (['doc', 'docx'].includes(ext)) {
-      return <div className="w-6 h-6 rounded bg-blue-500 flex items-center justify-center text-white text-xs font-bold">W</div>;
-    }
-    if (['xls', 'xlsx'].includes(ext)) {
-      return <div className="w-6 h-6 rounded bg-green-500 flex items-center justify-center text-white text-xs font-bold">X</div>;
-    }
-    return <div className="w-6 h-6 rounded bg-gray-500 flex items-center justify-center text-white text-xs font-bold">T</div>;
-  };
-
-  return (
-    <>
-      <div
-        className={`
-          flex items-center px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors
-          ${selected ? "bg-indigo-50" : ""}
-        `}
-      >
-        {/* 文档图标和名称 */}
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          {getFileIcon()}
-          <span
-            className="truncate text-indigo-600 hover:text-indigo-700 cursor-pointer font-medium text-sm"
-            onClick={onSelect}
-          >
-            {doc.title}
-          </span>
-        </div>
-
-        {/* 大小 */}
-        <div className="w-24 text-sm text-gray-600 text-center">
-          {formatFileSize(doc.size_bytes)}
-        </div>
-
-        {/* 状态 */}
-        <div className="w-28 flex justify-center">
-          <StatusBadge status={doc.status} error={doc.error} progress={doc.progress} />
-        </div>
-
-        {/* 所属类目 */}
-        <div className="w-28 text-sm text-gray-500 text-center">
-          默认类目
-        </div>
-
-        {/* 上传时间 */}
-        <div className="w-40 text-sm text-gray-500 text-center">
-          {doc.created_at ? new Date(doc.created_at).toLocaleString("zh-CN", {
-            year: "numeric", month: "2-digit", day: "2-digit",
-            hour: "2-digit", minute: "2-digit"
-          }) : "-"}
-        </div>
-
-        {/* 操作 */}
-        <div className="w-48 flex justify-center gap-3 text-sm">
-          <button
-            className="text-indigo-600 hover:text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(e) => { e.stopPropagation(); onSelect(); }}
-            disabled={loading}
-          >
-            查看切片
-          </button>
-          <button
-            className="text-indigo-600 hover:text-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(e) => {
-              e.stopPropagation();
-              setReindexOpen(true);
-            }}
-            disabled={loading}
-            title="重新索引"
-          >
-            {loading ? "处理中..." : "重建索引"}
-          </button>
-          <button
-            className="text-red-500 hover:text-red-600 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(e) => {
-              e.stopPropagation();
-              setDeleteOpen(true);
-            }}
-            disabled={loading}
-          >
-            删除
-          </button>
-        </div>
-      </div>
-
-      <AlertDialog open={reindexOpen} onOpenChange={setReindexOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认重新构建索引？</AlertDialogTitle>
-            <AlertDialogDescription className="space-y-2">
-              <span className="block">
-                这将重新解析文档 "{doc.title}" 并生成新的切片和向量索引。
-              </span>
-              <span className="block text-xs text-gray-400">
-                将使用知识库当前的分段配置。如需修改配置，请先在"配置"页面调整。
-              </span>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => {
-              setReindexOpen(false);
-              handleAction(onReindex);
-            }}>
-              确认重建
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认删除文档？</AlertDialogTitle>
-            <AlertDialogDescription>
-              文档 "{doc.title}" 将被永久删除，且无法恢复。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => {
-              setDeleteOpen(false);
-              handleAction(onDelete);
-            }}>
-              确认删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
-}
-
-function SegmentCard({
-  segment,
-  index,
-  onEdit,
-  onDelete,
-}: {
-  segment: any;
-  index: number;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const charCount = segment.char_count || segment.text?.length || 0;
-
-  return (
-    <div className="group border border-gray-100 rounded-xl hover:border-blue-200 hover:shadow-md transition-all duration-200 bg-white overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-gradient-to-r from-gray-50 to-slate-50 border-b border-gray-100">
-        <div className="flex items-center gap-3">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 text-white text-xs font-bold shadow-sm">
-            {String(index + 1).padStart(2, '0')}
-          </span>
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className="text-xs font-mono bg-white">
-              {charCount} 字符
-            </Badge>
-            {segment.token_count && (
-              <Badge variant="outline" className="text-xs font-mono bg-white">
-                ~{segment.token_count} tokens
-              </Badge>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            className="px-2.5 py-1 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-md transition-colors"
-            onClick={onEdit}
-          >
-            <Edit3 className="h-3 w-3 inline mr-1" />
-            编辑
-          </button>
-          <button
-            className="px-2.5 py-1 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-md transition-colors"
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? (
-              <><EyeOff className="h-3 w-3 inline mr-1" />收起</>
-            ) : (
-              <><Eye className="h-3 w-3 inline mr-1" />展开</>
-            )}
-          </button>
-          <button
-            className="px-2.5 py-1 text-xs font-medium text-red-500 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
-            onClick={onDelete}
-          >
-            <Trash2 className="h-3 w-3" />
-          </button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="px-4 py-3">
-        <p className={`text-sm text-gray-700 whitespace-pre-wrap leading-relaxed ${expanded ? "" : "line-clamp-3"}`}>
-          {segment.text}
-        </p>
-        {!expanded && charCount > 150 && (
-          <button
-            onClick={() => setExpanded(true)}
-            className="mt-2 text-xs text-blue-600 hover:text-blue-700"
-          >
-            显示全部内容...
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function RetrievalResultCard({
-  hit,
-  index,
-  highlightTerms = [],
-}: {
-  hit: RetrieveHit;
-  index: number;
-  highlightTerms?: string[];
-}) {
-  const [isExpanded, setIsExpanded] = React.useState(false);
-
-  // Highlight query terms in text
-  const highlightText = (text: string, terms: string[]) => {
-    if (!terms.length || !text) return text;
-    const escapedTerms = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    const regex = new RegExp(`(${escapedTerms.join('|')})`, 'gi');
-    const parts = text.split(regex);
-
-    return parts.map((part, i) => {
-      const isMatch = terms.some(t => t.toLowerCase() === part.toLowerCase());
-      if (isMatch) {
-        return <mark key={i} className="bg-yellow-200 px-0.5 rounded font-medium">{part}</mark>;
-      }
-      return part;
-    });
-  };
-
-  const hasText = hit.text && hit.text.trim().length > 0;
-  const textLength = hit.text?.length || 0;
-  const showExpandButton = textLength > 200;
-
-  // Get score color based on value
-  const getScoreColor = (score: number) => {
-    if (score >= 0.8) return "bg-emerald-100 text-emerald-800 border-emerald-300";
-    if (score >= 0.6) return "bg-green-50 text-green-700 border-green-200";
-    if (score >= 0.4) return "bg-blue-50 text-blue-700 border-blue-200";
-    if (score >= 0.2) return "bg-yellow-50 text-yellow-700 border-yellow-200";
-    return "bg-red-50 text-red-700 border-red-200";
-  };
-
-  // Check if this result has exact match
-  const hasExactMatch = hit.metadata?._exact_match === true;
-  const termMatches = hit.metadata?._term_matches as number | undefined;
-
-  // Get rank from metadata (if available)
-  const rank = hit.metadata?._rank as number | undefined;
-  const displayRank = rank || (index + 1);
-
-  // Format score display - handle "N/A" string values
-  const formatScore = (value: unknown): string => {
-    if (value === "N/A" || value === null || value === undefined) return "N/A";
-    if (typeof value === "number") return value.toFixed(4);
-    if (typeof value === "string") {
-      const num = parseFloat(value);
-      return isNaN(num) ? value : num.toFixed(4);
-    }
-    return String(value);
-  };
-
-  // Check if score is available (not N/A)
-  const isScoreAvailable = (value: unknown): boolean => {
-    return value !== "N/A" && value !== null && value !== undefined;
-  };
-
-  return (
-    <div className={`bg-white rounded-xl border p-4 hover:border-blue-300 hover:shadow-md transition-all ${!hasText ? "border-red-200 bg-red-50/30" :
-      hasExactMatch ? "border-emerald-300 bg-emerald-50/30 ring-2 ring-emerald-200" :
-        "border-gray-200"
-      }`}>
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-white text-sm font-bold shadow-sm ${hasExactMatch ? "bg-gradient-to-br from-emerald-500 to-teal-600" : "bg-gradient-to-br from-blue-500 to-indigo-600"
-            }`}>
-            {displayRank}
-          </span>
-          <span className="text-xs text-gray-500 font-mono">
-            {hit.segment_id.slice(0, 10)}...
-          </span>
-          {hasExactMatch && (
-            <Badge className="bg-emerald-100 text-emerald-700 border-emerald-300 text-xs font-medium">
-              ✓ 精确匹配
-            </Badge>
-          )}
-          {!hasExactMatch && termMatches !== undefined && termMatches > 0 && (
-            <Badge className="bg-blue-100 text-blue-700 border-blue-200 text-xs">
-              {termMatches} 词匹配
-            </Badge>
-          )}
-        </div>
-        <Badge className={`font-mono text-xs px-2 py-1 ${getScoreColor(hit.score)}`}>
-          {hit.score.toFixed(4)}
-        </Badge>
-      </div>
-
-      {/* Text content with expand/collapse */}
-      {hasText ? (
-        <div className="relative">
-          <p className={`text-sm text-gray-700 whitespace-pre-wrap leading-relaxed ${isExpanded ? "" : "line-clamp-4"
-            }`}>
-            {highlightTerms.length > 0 ? highlightText(hit.text, highlightTerms) : hit.text}
-          </p>
-          {showExpandButton && (
-            <button
-              onClick={() => setIsExpanded(!isExpanded)}
-              className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
-            >
-              {isExpanded ? (
-                <>收起 <ChevronUp className="h-3 w-3" /></>
-              ) : (
-                <>展开全部 ({textLength} 字符) <ChevronDown className="h-3 w-3" /></>
-              )}
-            </button>
-          )}
-        </div>
-      ) : (
-        <p className="text-sm text-red-500 italic">
-          ⚠️ 无文本内容 - 请重新处理该文档
-        </p>
-      )}
-
-      {/* Detailed scores - all stages */}
-      {hit.metadata && (
-        <div className="mt-3 pt-3 border-t border-gray-100">
-          {/* Sources */}
-          {Array.isArray(hit.metadata._sources) && hit.metadata._sources.length > 0 && (
-            <div className="mb-2 text-xs">
-              <span className="text-gray-500 font-medium">来源: </span>
-              {(hit.metadata._sources as string[]).map((src, i) => {
-                const srcLower = src.toLowerCase();
-                const isDense = srcLower === "dense" || srcLower === "vector";
-                return (
-                  <Badge key={i} className={`ml-1 text-xs ${isDense ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"
-                    }`}>
-                    {isDense ? "向量" : "BM25"}
-                  </Badge>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Stage scores - in a table-like layout */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-            {/* Dense/Vector scores - support both old and new field names */}
-            <div className="bg-gray-50 rounded p-2">
-              <div className="text-gray-400 text-[10px] mb-1">Dense (向量)</div>
-              <div className={`font-mono ${isScoreAvailable(hit.metadata._dense_score_norm) || isScoreAvailable(hit.metadata._vector_score)
-                ? "text-blue-600" : "text-gray-400"
-                }`}>
-                {formatScore(hit.metadata._dense_score_norm ?? hit.metadata._vector_score)}
-              </div>
-            </div>
-
-            {/* BM25/Keyword scores - support both old and new field names */}
-            <div className="bg-gray-50 rounded p-2">
-              <div className="text-gray-400 text-[10px] mb-1">BM25 (关键词)</div>
-              <div className={`font-mono ${isScoreAvailable(hit.metadata._bm25_score_norm) || isScoreAvailable(hit.metadata._keyword_score)
-                ? "text-amber-600" : "text-gray-400"
-                }`}>
-                {formatScore(hit.metadata._bm25_score_norm ?? hit.metadata._keyword_score)}
-              </div>
-            </div>
-
-            {/* Fusion score */}
-            <div className="bg-gray-50 rounded p-2">
-              <div className="text-gray-400 text-[10px] mb-1">Fusion (融合)</div>
-              <div className={`font-mono ${isScoreAvailable(hit.metadata._fusion_score) || isScoreAvailable(hit.metadata._rrf_score)
-                ? "text-purple-600" : "text-gray-400"
-                }`}>
-                {formatScore(hit.metadata._fusion_score ?? hit.metadata._rrf_score)}
-              </div>
-            </div>
-
-            {/* Rerank score */}
-            <div className="bg-gray-50 rounded p-2">
-              <div className="text-gray-400 text-[10px] mb-1">Rerank (重排序)</div>
-              <div className={`font-mono ${isScoreAvailable(hit.metadata._rerank_score) ? "text-pink-600" : "text-gray-400"}`}>
-                {formatScore(hit.metadata._rerank_score)}
-              </div>
-            </div>
-          </div>
-
-          {/* MMR info if available */}
-          {(isScoreAvailable(hit.metadata._mmr_score) || isScoreAvailable(hit.metadata._mmr_relevance)) && (
-            <div className="mt-2 text-xs text-gray-500">
-              <span className="font-medium">MMR: </span>
-              score={formatScore(hit.metadata._mmr_score)},
-              relevance={formatScore(hit.metadata._mmr_relevance ?? hit.metadata._relevance_score)},
-              max_sim={formatScore(hit.metadata._mmr_max_sim)}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 export function KnowledgeDatasetDetailPage() {
   const { datasetId } = useParams();
@@ -1362,25 +828,40 @@ export function KnowledgeDatasetDetailPage() {
     public: <Globe className="h-4 w-4" />,
   };
 
+  const tabStyles = {
+    documents: "border-primary text-primary bg-primary/10",
+    retrieval: "border-primary text-primary bg-primary/10",
+    qa: "border-primary text-primary bg-primary/10",
+    settings: "border-primary text-primary bg-primary/10",
+  } as const;
+
+  const tabIconStyles = {
+    documents: "text-primary",
+    retrieval: "text-primary",
+    qa: "text-primary",
+    settings: "text-primary",
+  } as const;
+
+
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-background">
       {/* 顶部导航栏 */}
-      <div className="bg-white border-b border-gray-200 sticky top-0 z-20">
+      <div className="bg-card border-b border-border sticky top-0 z-20">
         <div className="max-w-[1600px] mx-auto px-6">
           <div className="flex items-center justify-between h-14">
             {/* 左侧：面包屑导航 */}
             <div className="flex items-center gap-3">
               <button
                 onClick={() => nav("/knowledge")}
-                className="text-indigo-600 hover:text-indigo-700 font-medium text-sm flex items-center gap-1"
+                className="text-primary hover:text-primary/90 font-medium text-sm flex items-center gap-1"
               >
                 <ArrowLeft className="h-4 w-4" />
                 知识库
               </button>
-              <span className="text-gray-400">/</span>
-              <span className="font-semibold text-gray-900">{dataset?.name || "加载中..."}</span>
+              <span className="text-muted-foreground/70">/</span>
+              <span className="font-semibold text-foreground">{dataset?.name || "加载中..."}</span>
               {dataset?.visibility && (
-                <Badge variant="outline" className="text-xs bg-gray-50 text-gray-600 border-gray-200 flex items-center gap-1">
+                <Badge variant="outline" className="text-xs bg-muted/40 text-muted-foreground border-border flex items-center gap-1">
                   {visibilityIcons[dataset.visibility]}
                   <span>{dataset.visibility === "private" ? "私有" : dataset.visibility === "tenant" ? "租户" : "公开"}</span>
                 </Badge>
@@ -1396,14 +877,14 @@ export function KnowledgeDatasetDetailPage() {
                   qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
                   qc.invalidateQueries({ queryKey: ["kb-dataset", datasetId] });
                 }}
-                className="h-9 w-9 bg-white"
+                className="h-9 w-9 bg-card"
                 title="刷新数据"
               >
                 <RefreshCcw className={`h-4 w-4 ${docsQuery.isFetching ? "animate-spin" : ""}`} />
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button className="bg-indigo-600 hover:bg-indigo-700 text-white">
+                  <Button className="bg-primary hover:bg-primary/90 text-white">
                     <Edit3 className="h-4 w-4 mr-1.5" />
                     编辑
                   </Button>
@@ -1429,10 +910,10 @@ export function KnowledgeDatasetDetailPage() {
           {/* Tabs */}
           <div className="flex items-center gap-1 -mb-px mt-1">
             {[
-              { key: "documents", label: "文档管理", icon: FileText, color: "blue" },
-              { key: "retrieval", label: "召回测试", icon: Search, color: "emerald" },
-              { key: "qa", label: "QA 测试", icon: MessageSquare, color: "purple" },
-              { key: "settings", label: "配置", icon: Sliders, color: "amber" },
+              { key: "documents", label: "文档管理", icon: FileText },
+              { key: "retrieval", label: "召回测试", icon: Search },
+              { key: "qa", label: "QA 测试", icon: MessageSquare },
+              { key: "settings", label: "配置", icon: Sliders },
             ].map((tab) => (
               <button
                 key={tab.key}
@@ -1440,12 +921,12 @@ export function KnowledgeDatasetDetailPage() {
                 className={`
                   group flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all duration-200
                   ${mainTab === tab.key
-                    ? `border-${tab.color}-600 text-${tab.color}-600 bg-${tab.color}-50/50`
-                    : "border-transparent text-gray-500 hover:text-gray-900 hover:bg-gray-50/50"
+                    ? tabStyles[tab.key as keyof typeof tabStyles]
+                    : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
                   }
                 `}
               >
-                <tab.icon className={`h-4 w-4 transition-transform group-hover:scale-110 ${mainTab === tab.key ? `text-${tab.color}-600` : ""
+                <tab.icon className={`h-4 w-4 transition-transform group-hover:scale-110 ${mainTab === tab.key ? tabIconStyles[tab.key as keyof typeof tabIconStyles] : ""
                   }`} />
                 {tab.label}
               </button>
@@ -1464,7 +945,7 @@ export function KnowledgeDatasetDetailPage() {
               <div className="flex items-center gap-3">
                 {/* 筛选下拉 */}
                 <Select defaultValue="name">
-                  <SelectTrigger className="w-28 bg-white h-9">
+                  <SelectTrigger className="w-28 bg-card h-9">
                     <SelectValue placeholder="数据名" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1477,15 +958,15 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="relative">
                   <Input
                     placeholder="搜索文件名称"
-                    className="w-64 h-9 bg-white pr-8"
+                    className="w-64 h-9 bg-card pr-8"
                   />
-                  <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
                 <Select defaultValue="all">
-                  <SelectTrigger className="w-28 bg-white h-9">
+                  <SelectTrigger className="w-28 bg-card h-9">
                     <SelectValue placeholder="全部状态" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1496,7 +977,7 @@ export function KnowledgeDatasetDetailPage() {
                   </SelectContent>
                 </Select>
                 <Select defaultValue="all">
-                  <SelectTrigger className="w-32 bg-white h-9">
+                  <SelectTrigger className="w-32 bg-card h-9">
                     <SelectValue placeholder="全部数据格式" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1510,15 +991,15 @@ export function KnowledgeDatasetDetailPage() {
                 <Button
                   variant="outline"
                   size="icon"
-                  className="h-9 w-9 bg-white"
+                  className="h-9 w-9 bg-card"
                   onClick={() => qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] })}
                 >
                   <RefreshCcw className={`h-4 w-4 ${docsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
-                <Button variant="outline" className="h-9 bg-white">
+                <Button variant="outline" className="h-9 bg-card">
                   Meta信息
                 </Button>
-                <Button variant="outline" className="h-9 bg-white">
+                <Button variant="outline" className="h-9 bg-card">
                   批量操作
                 </Button>
 
@@ -1534,7 +1015,7 @@ export function KnowledgeDatasetDetailPage() {
                 <Button
                   onClick={() => fileRef.current?.click()}
                   disabled={uploading}
-                  className="h-9 bg-indigo-600 hover:bg-indigo-700 text-white"
+                  className="h-9 bg-primary hover:bg-primary/90 text-white"
                 >
                   <Plus className="h-4 w-4 mr-1.5" />
                   上传数据
@@ -1543,9 +1024,9 @@ export function KnowledgeDatasetDetailPage() {
             </div>
 
             {/* 文档列表 - 表格形式 */}
-            <Card className="p-0 overflow-hidden border-gray-200">
+            <Card className="p-0 overflow-hidden border-border">
               {/* 表头 */}
-              <div className="flex items-center px-5 py-3 bg-gray-50 border-b border-gray-200 text-sm font-medium text-gray-600">
+              <div className="flex items-center px-5 py-3 bg-muted/40 border-b border-border text-sm font-medium text-muted-foreground">
                 <div className="flex-1">数据名称</div>
                 <div className="w-24 text-center">数据大小</div>
                 <div className="w-28 text-center">状态</div>
@@ -1568,9 +1049,9 @@ export function KnowledgeDatasetDetailPage() {
                 ))}
                 {docs.length === 0 && !docsQuery.isLoading && (
                   <div className="text-center py-16">
-                    <FileText className="h-12 w-12 mx-auto text-gray-300 mb-3" />
-                    <p className="text-gray-500">暂无文档</p>
-                    <p className="text-sm text-gray-400 mt-1">上传文件或输入文本开始</p>
+                    <FileText className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
+                    <p className="text-muted-foreground">暂无文档</p>
+                    <p className="text-sm text-muted-foreground/70 mt-1">上传文件或输入文本开始</p>
                   </div>
                 )}
               </div>
@@ -1578,51 +1059,51 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 切片列表 */}
             {selectedDoc && (
-              <Card className="p-0 overflow-hidden shadow-lg border-blue-200/50 mt-6">
+              <Card className="p-0 overflow-hidden shadow-sm border-primary/20 mt-6">
                 {/* 标题栏 - 带明显的返回按钮 */}
-                <div className="px-5 py-4 border-b border-gray-200 bg-gradient-to-r from-blue-50/50 via-white to-indigo-50/30 flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-border bg-gradient-to-r from-muted/70 via-card to-primary/10 flex items-center justify-between">
                   <div className="flex items-center gap-4">
                     <button
                       onClick={() => setSelectedDocId(undefined)}
-                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 hover:text-blue-600 bg-white hover:bg-blue-50 border border-gray-200 hover:border-blue-200 rounded-lg transition-all shadow-sm"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-all shadow-sm"
                     >
                       <ArrowLeft className="h-4 w-4" />
                       <span>返回列表</span>
                     </button>
-                    <div className="w-px h-6 bg-gray-200" />
+                    <div className="w-px h-6 bg-border" />
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
-                        <Hash className="h-4 w-4 text-white" />
+                      <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
+                        <Hash className="h-4 w-4 text-primary" />
                       </div>
                       <div>
-                        <h3 className="font-semibold text-gray-900">切片列表</h3>
-                        <p className="text-xs text-gray-500">{selectedDoc.title}</p>
+                        <h3 className="font-semibold text-foreground">切片列表</h3>
+                        <p className="text-xs text-muted-foreground">{selectedDoc.title}</p>
                       </div>
                     </div>
-                    <Badge className="bg-indigo-100 text-indigo-700 border-indigo-200">{segments.length} 个切片</Badge>
+                    <Badge className="bg-primary/10 text-primary/90 border-primary/20">{segments.length} 个切片</Badge>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
                       <Input
                         placeholder="搜索切片内容..."
                         value={segmentSearch}
                         onChange={(e) => setSegmentSearch(e.target.value)}
-                        className="pl-9 w-56 h-9 text-sm bg-white border-gray-200"
+                        className="pl-9 w-56 h-9 text-sm bg-card border-border"
                       />
                     </div>
                   </div>
                 </div>
 
                 {/* 切片网格 */}
-                <div className="max-h-[500px] overflow-auto p-4 bg-gray-50/50">
+                <div className="max-h-[500px] overflow-auto p-4 bg-muted/30">
                   {segments.length === 0 ? (
                     <div className="text-center py-16">
-                      <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-gray-100 to-gray-200 flex items-center justify-center mb-4">
-                        <Hash className="h-8 w-8 text-gray-400" />
+                      <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-muted/40 to-muted flex items-center justify-center mb-4">
+                        <Hash className="h-8 w-8 text-muted-foreground/70" />
                       </div>
-                      <p className="text-gray-600 font-medium">暂无切片</p>
-                      <p className="text-sm text-gray-400 mt-1">文档处理完成后将显示切片</p>
+                      <p className="text-muted-foreground font-medium">暂无切片</p>
+                      <p className="text-sm text-muted-foreground/70 mt-1">文档处理完成后将显示切片</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1648,18 +1129,18 @@ export function KnowledgeDatasetDetailPage() {
           <div className="grid grid-cols-12 gap-6">
             {/* 左侧：知识库配置调试 */}
             <div className="col-span-4">
-              <Card className="p-5 bg-white">
-                <h3 className="font-semibold text-gray-900 mb-6">知识库配置调试</h3>
+              <Card className="p-5 bg-card">
+                <h3 className="font-semibold text-foreground mb-6">知识库配置调试</h3>
 
                 <div className="space-y-6">
                   {/* 选择排序模型 */}
                   <div>
-                    <Label className="text-sm text-gray-600 flex items-center gap-1">
+                    <Label className="text-sm text-muted-foreground flex items-center gap-1">
                       选择排序模型
-                      <HelpCircle className="h-3.5 w-3.5 text-gray-400" />
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <Select defaultValue="official">
-                      <SelectTrigger className="mt-2 bg-white">
+                      <SelectTrigger className="mt-2 bg-card">
                         <SelectValue placeholder="官方排序" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1672,9 +1153,9 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 相似度阈值 - 阿里云风格 */}
                   <div>
-                    <Label className="text-sm text-gray-600 flex items-center gap-1">
+                    <Label className="text-sm text-muted-foreground flex items-center gap-1">
                       相似度阈值
-                      <HelpCircle className="h-3.5 w-3.5 text-gray-400" />
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <div className="mt-2 flex items-center gap-3">
                       <input
@@ -1684,7 +1165,7 @@ export function KnowledgeDatasetDetailPage() {
                         step={0.01}
                         value={scoreThreshold || 0.2}
                         onChange={(e) => setScoreThreshold(parseFloat(e.target.value))}
-                        className="flex-1 h-1.5 bg-indigo-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        className="flex-1 h-1.5 bg-primary/10 rounded-lg appearance-none cursor-pointer accent-primary"
                       />
                       <Input
                         type="number"
@@ -1696,7 +1177,7 @@ export function KnowledgeDatasetDetailPage() {
                         max={1}
                       />
                     </div>
-                    <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
                       <span>0.01</span>
                       <span>1</span>
                     </div>
@@ -1704,9 +1185,9 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 最大召回数量 - 阿里云风格 */}
                   <div>
-                    <Label className="text-sm text-gray-600 flex items-center gap-1">
+                    <Label className="text-sm text-muted-foreground flex items-center gap-1">
                       最大召回数量
-                      <HelpCircle className="h-3.5 w-3.5 text-gray-400" />
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <div className="mt-2 flex items-center gap-3">
                       <input
@@ -1716,7 +1197,7 @@ export function KnowledgeDatasetDetailPage() {
                         step={1}
                         value={topK}
                         onChange={(e) => setTopK(parseInt(e.target.value))}
-                        className="flex-1 h-1.5 bg-indigo-100 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        className="flex-1 h-1.5 bg-primary/10 rounded-lg appearance-none cursor-pointer accent-primary"
                       />
                       <Input
                         type="number"
@@ -1727,7 +1208,7 @@ export function KnowledgeDatasetDetailPage() {
                         max={20}
                       />
                     </div>
-                    <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
                       <span>1</span>
                       <span>20</span>
                     </div>
@@ -1735,7 +1216,7 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 输入 */}
                   <div>
-                    <Label className="text-sm text-gray-600">输入</Label>
+                    <Label className="text-sm text-muted-foreground">输入</Label>
                     <Textarea
                       placeholder="请输入文本"
                       value={query}
@@ -1744,22 +1225,22 @@ export function KnowledgeDatasetDetailPage() {
                       className="mt-2 resize-none"
                     />
                     <div className="flex justify-end mt-1">
-                      <button className="text-gray-400 hover:text-gray-600">
+                      <button className="text-muted-foreground/70 hover:text-muted-foreground">
                         <ImageIcon className="h-4 w-4" />
                       </button>
                     </div>
                   </div>
 
                   {/* 高级选项 */}
-                  <div className="pt-4 border-t border-gray-100">
+                  <div className="pt-4 border-t border-border/60">
                     <div className="flex items-center gap-6">
                       <label className="flex items-center gap-2 cursor-pointer">
                         <Switch checked={rerank} onCheckedChange={setRerank} />
-                        <span className="text-sm text-gray-700">Rerank</span>
+                        <span className="text-sm text-foreground/80">Rerank</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
                         <Switch checked={mmr} onCheckedChange={setMmr} />
-                        <span className="text-sm text-gray-700">MMR</span>
+                        <span className="text-sm text-foreground/80">MMR</span>
                       </label>
                     </div>
                   </div>
@@ -1768,7 +1249,7 @@ export function KnowledgeDatasetDetailPage() {
                   <Button
                     onClick={runHitTest}
                     disabled={hitLoading || !query.trim()}
-                    className="w-full h-10 bg-indigo-100 hover:bg-indigo-200 text-indigo-600 font-medium border-0"
+                    className="w-full h-10 bg-primary/10 hover:bg-primary/20 text-primary font-medium border-0"
                   >
                     {hitLoading ? (
                       <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 测试中...</>
@@ -1778,46 +1259,46 @@ export function KnowledgeDatasetDetailPage() {
                   </Button>
 
                   {Object.keys(hitMeta).length > 0 && (
-                    <div className="p-4 bg-gradient-to-r from-gray-50 to-blue-50/30 rounded-lg border border-gray-200">
-                      <h4 className="text-xs font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                    <div className="p-4 bg-gradient-to-r from-muted/70 to-primary/5 rounded-lg border border-border">
+                      <h4 className="text-xs font-semibold text-foreground/80 mb-3 flex items-center gap-2">
                         <BarChart3 className="h-3.5 w-3.5" />
                         检索统计
                       </h4>
                       <div className="grid grid-cols-2 gap-3 text-xs">
-                        <div className="flex items-center justify-between p-2 bg-white rounded border">
-                          <span className="text-gray-500">模式</span>
+                        <div className="flex items-center justify-between p-2 bg-card rounded border">
+                          <span className="text-muted-foreground">模式</span>
                           <Badge variant="outline" className="font-mono">
                             {String(hitMeta.mode)}
                           </Badge>
                         </div>
-                        <div className="flex items-center justify-between p-2 bg-white rounded border">
-                          <span className="text-gray-500">Rerank</span>
-                          <Badge className={hitMeta.rerank ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-500"}>
+                        <div className="flex items-center justify-between p-2 bg-card rounded border">
+                          <span className="text-muted-foreground">Rerank</span>
+                          <Badge className={hitMeta.rerank ? "bg-emerald-100 text-emerald-700" : "bg-secondary/60 text-muted-foreground"}>
                             {hitMeta.rerank ? "启用" : "禁用"}
                           </Badge>
                         </div>
-                        <div className="flex items-center justify-between p-2 bg-white rounded border">
-                          <span className="text-gray-500">MMR</span>
-                          <Badge className={hitMeta.mmr ? "bg-purple-100 text-purple-700" : "bg-gray-100 text-gray-500"}>
+                        <div className="flex items-center justify-between p-2 bg-card rounded border">
+                          <span className="text-muted-foreground">MMR</span>
+                          <Badge className={hitMeta.mmr ? "bg-accent/10 text-accent/90" : "bg-secondary/60 text-muted-foreground"}>
                             {hitMeta.mmr ? "启用" : "禁用"}
                           </Badge>
                         </div>
                         {hitMeta.score_threshold !== undefined && hitMeta.score_threshold !== null && (
-                          <div className="flex items-center justify-between p-2 bg-white rounded border">
-                            <span className="text-gray-500">阈值</span>
-                            <span className="font-mono text-gray-700">{String(hitMeta.score_threshold)}</span>
+                          <div className="flex items-center justify-between p-2 bg-card rounded border">
+                            <span className="text-muted-foreground">阈值</span>
+                            <span className="font-mono text-foreground/80">{String(hitMeta.score_threshold)}</span>
                           </div>
                         )}
                       </div>
 
                       {/* Hit counts */}
-                      <div className="mt-3 pt-3 border-t border-gray-200 grid grid-cols-2 gap-3">
+                      <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 gap-3">
                         {typeof hitMeta.vector_hits_count === 'number' && (
-                          <div className="p-2 bg-blue-50 rounded text-center">
-                            <div className="text-lg font-bold text-blue-700">{hitMeta.vector_hits_count}</div>
-                            <div className="text-xs text-blue-600">向量命中</div>
+                          <div className="p-2 bg-primary/5 rounded text-center">
+                            <div className="text-lg font-bold text-primary/90">{hitMeta.vector_hits_count}</div>
+                            <div className="text-xs text-primary">向量命中</div>
                             {typeof hitMeta.vector_hits_raw_count === 'number' && hitMeta.vector_hits_raw_count !== hitMeta.vector_hits_count && (
-                              <div className="text-xs text-blue-400">原始: {hitMeta.vector_hits_raw_count}</div>
+                              <div className="text-xs text-primary/70">原始: {hitMeta.vector_hits_raw_count}</div>
                             )}
                           </div>
                         )}
@@ -1833,7 +1314,7 @@ export function KnowledgeDatasetDetailPage() {
                       </div>
 
                       {typeof hitMeta.collection_name === 'string' && hitMeta.collection_name && (
-                        <div className="mt-2 text-xs text-gray-400 truncate font-mono">
+                        <div className="mt-2 text-xs text-muted-foreground/70 truncate font-mono">
                           集合: {hitMeta.collection_name}
                         </div>
                       )}
@@ -1850,10 +1331,10 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 右侧：结果 */}
             <div className="col-span-8">
-              <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-lg">
-                <div className="px-5 py-4 border-b border-gray-100 bg-white flex items-center justify-between sticky top-0">
+              <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-sm">
+                <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center justify-between sticky top-0">
                   <div className="flex items-center gap-3">
-                    <h3 className="font-bold text-gray-900">召回结果</h3>
+                    <h3 className="font-bold text-foreground">召回结果</h3>
                     {hitResults.length > 0 && (
                       <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200">
                         {hitResults.length} 条
@@ -1861,7 +1342,7 @@ export function KnowledgeDatasetDetailPage() {
                     )}
                   </div>
                   {hitResults.length > 0 && (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <span>最高分: {Math.max(...hitResults.map(h => h.score)).toFixed(4)}</span>
                       <span>·</span>
                       <span>最低分: {Math.min(...hitResults.map(h => h.score)).toFixed(4)}</span>
@@ -1869,7 +1350,7 @@ export function KnowledgeDatasetDetailPage() {
                   )}
                 </div>
 
-                <div className="p-5 space-y-4 overflow-auto h-[calc(100%-70px)] bg-gray-50/50">
+                <div className="p-5 space-y-4 overflow-auto h-[calc(100%-70px)] bg-muted/30">
                   {hitResults.map((hit, i) => (
                     <RetrievalResultCard
                       key={`${hit.segment_id}-${i}`}
@@ -1883,8 +1364,8 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="w-20 h-20 mx-auto rounded-2xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center mb-4">
                         <Search className="h-10 w-10 text-emerald-400" />
                       </div>
-                      <p className="text-lg font-medium text-gray-600">暂无结果</p>
-                      <p className="text-sm text-gray-400 mt-2 max-w-sm mx-auto">
+                      <p className="text-lg font-medium text-muted-foreground">暂无结果</p>
+                      <p className="text-sm text-muted-foreground/70 mt-2 max-w-sm mx-auto">
                         {Object.keys(hitMeta).length > 0
                           ? `向量命中: ${hitMeta.vector_hits_count ?? 0}, 关键词命中: ${hitMeta.keyword_hits_count ?? 0}`
                           : "输入查询内容并运行测试，查看检索效果"
@@ -1908,25 +1389,25 @@ export function KnowledgeDatasetDetailPage() {
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* 左侧：配置 */}
             <div className="space-y-6 lg:col-span-4">
-              <Card className="p-0 overflow-hidden shadow-lg border-slate-200">
-                <div className="px-5 py-4 bg-gradient-to-r from-slate-50 via-white to-indigo-50 border-b border-slate-100">
-                  <h3 className="font-bold text-gray-900 flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-slate-800 flex items-center justify-center">
-                      <Sliders className="h-4 w-4 text-white" />
+              <Card className="p-0 overflow-hidden shadow-sm border-border">
+                <div className="px-5 py-4 bg-gradient-to-r from-muted/70 via-card to-primary/10 border-b border-border/60">
+                  <h3 className="font-bold text-foreground flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
+                      <Sliders className="h-4 w-4 text-primary" />
                     </div>
                     QA 配置
                   </h3>
-                  <p className="text-xs text-gray-500 mt-1">配置检索参数与模型，右侧进行流式对话测试</p>
+                  <p className="text-xs text-muted-foreground mt-1">配置检索参数与模型，右侧进行流式对话测试</p>
                 </div>
 
                 <div className="p-5 space-y-6">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium text-gray-700">模型</Label>
+                      <Label className="text-sm font-medium text-foreground/80">模型</Label>
                       <Badge variant="outline" className="text-xs">DeepSeek</Badge>
                     </div>
                     <Select value={qaModel} onValueChange={setQaModel}>
-                      <SelectTrigger className="border-gray-200">
+                      <SelectTrigger className="border-border">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1939,7 +1420,7 @@ export function KnowledgeDatasetDetailPage() {
                     </Select>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <Label className="text-xs text-gray-600">温度</Label>
+                        <Label className="text-xs text-muted-foreground">温度</Label>
                         <Input
                           type="number"
                           step={0.1}
@@ -1950,11 +1431,11 @@ export function KnowledgeDatasetDetailPage() {
                             const value = e.target.valueAsNumber;
                             setQaTemperature((prev) => (Number.isNaN(value) ? prev : value));
                           }}
-                          className="mt-1.5 border-gray-200"
+                          className="mt-1.5 border-border"
                         />
                       </div>
                       <div>
-                        <Label className="text-xs text-gray-600">Max Tokens</Label>
+                        <Label className="text-xs text-muted-foreground">Max Tokens</Label>
                         <Input
                           type="number"
                           min={256}
@@ -1965,7 +1446,7 @@ export function KnowledgeDatasetDetailPage() {
                             const value = e.target.valueAsNumber;
                             setQaMaxTokens((prev) => (Number.isNaN(value) ? prev : value));
                           }}
-                          className="mt-1.5 border-gray-200"
+                          className="mt-1.5 border-border"
                         />
                       </div>
                     </div>
@@ -1973,25 +1454,25 @@ export function KnowledgeDatasetDetailPage() {
 
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium text-gray-700">检索设置</Label>
+                      <Label className="text-sm font-medium text-foreground/80">检索设置</Label>
                       <Badge variant="outline" className="text-xs font-mono">{mode}</Badge>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <Label className="text-xs font-medium text-gray-600">Top K</Label>
+                        <Label className="text-xs font-medium text-muted-foreground">Top K</Label>
                         <Input
                           type="number"
                           value={topK}
                           onChange={(e) => setTopK(Number(e.target.value || 5))}
-                          className="mt-1.5 border-gray-200"
+                          className="mt-1.5 border-border"
                           min={1}
                           max={20}
                         />
                       </div>
                       <div>
-                        <Label className="text-xs font-medium text-gray-600">检索模式</Label>
+                        <Label className="text-xs font-medium text-muted-foreground">检索模式</Label>
                         <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
-                          <SelectTrigger className="mt-1.5 border-gray-200">
+                          <SelectTrigger className="mt-1.5 border-border">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -2004,8 +1485,8 @@ export function KnowledgeDatasetDetailPage() {
                     </div>
 
                     {mode === "hybrid" && (
-                      <div className="space-y-4 p-3 bg-blue-50/60 rounded-lg border border-blue-100">
-                        <div className="flex items-center justify-between text-xs text-gray-600">
+                      <div className="space-y-4 p-3 bg-primary/5 rounded-lg border border-primary/20">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
                           <span className="font-medium">权重配置</span>
                           <Select value={fusionMethod} onValueChange={(v) => setFusionMethod(v as typeof fusionMethod)}>
                             <SelectTrigger className="h-7 w-28 text-xs">
@@ -2020,8 +1501,8 @@ export function KnowledgeDatasetDetailPage() {
 
                         <div>
                           <div className="flex items-center justify-between mb-1">
-                            <Label className="text-xs text-blue-700">Dense (向量)</Label>
-                            <span className="text-xs font-mono text-blue-600">{(denseWeight * 100).toFixed(0)}%</span>
+                            <Label className="text-xs text-primary/90">Dense (向量)</Label>
+                            <span className="text-xs font-mono text-primary">{(denseWeight * 100).toFixed(0)}%</span>
                           </div>
                           <input
                             type="range"
@@ -2033,7 +1514,7 @@ export function KnowledgeDatasetDetailPage() {
                               setDenseWeight(newDense);
                               setBm25Weight(1 - newDense);
                             }}
-                            className="w-full h-2 bg-blue-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                            className="w-full h-2 bg-primary/20 rounded-lg appearance-none cursor-pointer accent-primary"
                           />
                         </div>
 
@@ -2060,57 +1541,57 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   <div className="space-y-3">
-                    <Label className="text-sm font-medium text-gray-700">策略</Label>
+                    <Label className="text-sm font-medium text-foreground/80">策略</Label>
                     <div className="grid grid-cols-2 gap-3">
-                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={rerank} onCheckedChange={setRerank} />
-                        <span className="text-sm font-medium text-gray-700">Rerank</span>
+                        <span className="text-sm font-medium text-foreground/80">Rerank</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={mmr} onCheckedChange={setMmr} />
-                        <span className="text-sm font-medium text-gray-700">MMR</span>
+                        <span className="text-sm font-medium text-foreground/80">MMR</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaShowSources} onCheckedChange={setQaShowSources} />
-                        <span className="text-sm font-medium text-gray-700">显示引用</span>
+                        <span className="text-sm font-medium text-foreground/80">显示引用</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaAutoScroll} onCheckedChange={setQaAutoScroll} />
-                        <span className="text-sm font-medium text-gray-700">自动滚动</span>
+                        <span className="text-sm font-medium text-foreground/80">自动滚动</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-gray-200 px-3 py-2 bg-white">
+                      <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaStrictMode} onCheckedChange={setQaStrictMode} />
-                        <span className="text-sm font-medium text-gray-700">严格模式</span>
+                        <span className="text-sm font-medium text-foreground/80">严格模式</span>
                       </label>
                     </div>
-                    <p className="text-xs text-slate-500">
+                    <p className="text-xs text-muted-foreground">
                       严格模式仅基于知识库回答；关闭时允许通用知识补充。
                     </p>
                   </div>
 
-                  <div className="space-y-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
-                    <div className="flex items-center justify-between text-xs text-slate-500">
+                  <div className="space-y-3 rounded-xl border border-border/60 bg-muted/40 p-4">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <span>会话统计</span>
                       {lastQaResponse?.timing?.total_ms && (
                         <span className="font-mono">最近 {lastQaResponse.timing.total_ms}ms</span>
                       )}
                     </div>
                     <div className="grid grid-cols-2 gap-3">
-                      <div className="rounded-lg border border-slate-200 bg-white p-3">
-                        <p className="text-xs text-slate-500">消息数</p>
-                        <p className="text-lg font-semibold text-slate-800">{qaMessages.length}</p>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <p className="text-xs text-muted-foreground">消息数</p>
+                        <p className="text-lg font-semibold text-foreground">{qaMessages.length}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-3">
-                        <p className="text-xs text-slate-500">对话轮次</p>
-                        <p className="text-lg font-semibold text-slate-800">{qaTurns}</p>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <p className="text-xs text-muted-foreground">对话轮次</p>
+                        <p className="text-lg font-semibold text-foreground">{qaTurns}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-3">
-                        <p className="text-xs text-slate-500">最近 Tokens</p>
-                        <p className="text-lg font-semibold text-slate-800">{lastQaResponse?.tokens_used ?? "-"}</p>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <p className="text-xs text-muted-foreground">最近 Tokens</p>
+                        <p className="text-lg font-semibold text-foreground">{lastQaResponse?.tokens_used ?? "-"}</p>
                       </div>
-                      <div className="rounded-lg border border-slate-200 bg-white p-3">
-                        <p className="text-xs text-slate-500">检索片段</p>
-                        <p className="text-lg font-semibold text-slate-800">{lastQaResponse?.context_segments?.length ?? 0}</p>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <p className="text-xs text-muted-foreground">检索片段</p>
+                        <p className="text-lg font-semibold text-foreground">{lastQaResponse?.context_segments?.length ?? 0}</p>
                       </div>
                     </div>
                     <Button
@@ -2126,27 +1607,27 @@ export function KnowledgeDatasetDetailPage() {
               </Card>
 
               {qaHistory.length > 0 && (
-                <Card className="p-0 overflow-hidden border-slate-200">
-                  <div className="px-5 py-4 border-b border-slate-100 bg-white flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-slate-400" />
-                    <h4 className="text-sm font-semibold text-gray-700">最近问题</h4>
+                <Card className="p-0 overflow-hidden border-border">
+                  <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-muted-foreground/70" />
+                    <h4 className="text-sm font-semibold text-foreground/80">最近问题</h4>
                   </div>
                   <div className="p-4 space-y-2 max-h-64 overflow-auto">
                     {qaHistory.slice().reverse().map((h, i) => (
                       <button
                         key={`${h.query}-${i}`}
-                        className="w-full text-left p-3 rounded-lg bg-slate-50 hover:bg-indigo-50 border border-transparent hover:border-indigo-200 transition-all"
+                        className="w-full text-left p-3 rounded-lg bg-muted/40 hover:bg-primary/5 border border-transparent hover:border-primary/20 transition-all"
                         onClick={() => setQaQueryInput(h.query)}
                       >
-                        <p className="text-sm text-gray-700 truncate font-medium">{h.query}</p>
+                        <p className="text-sm text-foreground/80 truncate font-medium">{h.query}</p>
                         <div className="flex items-center gap-2 mt-1 flex-wrap">
                           <Badge variant="outline" className="text-xs font-mono">
                             {h.response.timing.total_ms}ms
                           </Badge>
-                          <span className="text-xs text-gray-400">
+                          <span className="text-xs text-muted-foreground/70">
                             {h.response.context_segments.length} 片段
                           </span>
-                          <span className="text-xs text-gray-400 font-mono">
+                          <span className="text-xs text-muted-foreground/70 font-mono">
                             {h.response.model}
                           </span>
                         </div>
@@ -2159,33 +1640,33 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 右侧：对话 */}
             <div className="lg:col-span-8">
-              <Card className="p-0 h-[calc(100vh-200px)] flex flex-col overflow-hidden border-slate-200">
-                <div className="px-5 py-4 border-b border-slate-100 bg-white/90 backdrop-blur flex items-center justify-between">
+              <Card className="p-0 h-[calc(100vh-200px)] flex flex-col overflow-hidden border-border">
+                <div className="px-5 py-4 border-b border-border/60 bg-card/90 backdrop-blur flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-500 to-slate-800 flex items-center justify-center">
-                      <MessageSquare className="h-4 w-4 text-white" />
+                    <div className="w-9 h-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center">
+                      <MessageSquare className="h-4 w-4 text-primary" />
                     </div>
                     <div>
-                      <h3 className="font-semibold text-gray-900">QA 对话</h3>
-                      <p className="text-xs text-gray-500">流式回答 + 引用上下文</p>
+                      <h3 className="font-semibold text-foreground">QA 对话</h3>
+                      <p className="text-xs text-muted-foreground">流式回答 + 引用上下文</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <Badge variant="outline" className="font-mono">{qaModel}</Badge>
                     {qaLoading && (
-                      <Badge className="bg-indigo-50 text-indigo-600 border-indigo-200">生成中</Badge>
+                      <Badge className="bg-primary/5 text-primary border-primary/20">生成中</Badge>
                     )}
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-auto bg-gradient-to-b from-white via-white to-slate-50 px-4 py-6">
+                <div className="flex-1 overflow-auto bg-gradient-to-b from-card via-card to-muted/40 px-4 py-6">
                   {qaMessages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center text-center h-full">
-                      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-indigo-100 to-slate-100 flex items-center justify-center mb-4">
-                        <Sparkles className="h-10 w-10 text-indigo-400" />
+                      <div className="w-20 h-20 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4">
+                        <Sparkles className="h-10 w-10 text-primary/70" />
                       </div>
-                      <p className="text-lg font-medium text-gray-700">开始一段 QA 测试</p>
-                      <p className="text-sm text-gray-400 mt-1 max-w-md">
+                      <p className="text-lg font-medium text-foreground/80">开始一段 QA 测试</p>
+                      <p className="text-sm text-muted-foreground/70 mt-1 max-w-md">
                         输入问题后将触发检索与模型回答，支持流式展示与引用片段
                       </p>
                       <div className="mt-5 flex flex-wrap gap-2 justify-center">
@@ -2196,7 +1677,7 @@ export function KnowledgeDatasetDetailPage() {
                         ].map((suggestion) => (
                           <button
                             key={suggestion}
-                            className="px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                            className="px-3 py-1.5 rounded-full border border-border bg-card text-xs text-muted-foreground hover:border-primary/30 hover:text-primary transition-colors"
                             onClick={() => setQaQueryInput(suggestion)}
                           >
                             {suggestion}
@@ -2209,16 +1690,16 @@ export function KnowledgeDatasetDetailPage() {
                       {qaMessages.map((msg) => {
                         const isUser = msg.role === "user";
                         const bubbleStyles = isUser
-                          ? "bg-indigo-600 text-white rounded-tr-sm"
+                          ? "bg-primary text-white rounded-tr-sm"
                           : msg.status === "error"
                             ? "bg-red-50 text-red-700 border border-red-200"
-                            : "bg-white text-slate-700 border border-slate-200";
+                            : "bg-card text-foreground/80 border border-border";
 
                         return (
                           <div key={msg.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
                             <div className={`max-w-[85%] flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-                              <div className={`h-9 w-9 rounded-full flex items-center justify-center ${isUser ? "bg-indigo-600 text-white" : "bg-white border border-slate-200"}`}>
-                                {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4 text-indigo-500" />}
+                              <div className={`h-9 w-9 rounded-full flex items-center justify-center ${isUser ? "bg-primary text-white" : "bg-card border border-border"}`}>
+                                {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4 text-primary" />}
                               </div>
                               <div className="flex flex-col gap-2">
                                 <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${bubbleStyles}`}>
@@ -2226,7 +1707,7 @@ export function KnowledgeDatasetDetailPage() {
                                     msg.content ? (
                                       <StreamOutput text={msg.content} />
                                     ) : (
-                                      <div className="flex items-center gap-2 text-sm text-slate-500">
+                                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
                                         <Loader2 className="h-4 w-4 animate-spin" />
                                         正在生成回答...
                                       </div>
@@ -2238,7 +1719,7 @@ export function KnowledgeDatasetDetailPage() {
 
                                 {msg.role === "assistant" && msg.response && (
                                   <div className="space-y-2">
-                                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                                       <Badge variant="outline" className="font-mono text-xs">
                                         {msg.response.model}
                                       </Badge>
@@ -2255,19 +1736,19 @@ export function KnowledgeDatasetDetailPage() {
                                     </div>
 
                                     {qaShowSources && msg.response.context_segments.length > 0 && (
-                                      <details className="rounded-lg border border-slate-200 bg-slate-50">
-                                        <summary className="cursor-pointer px-3 py-2 text-xs text-slate-600 flex items-center gap-2">
+                                      <details className="rounded-lg border border-border bg-muted/40">
+                                        <summary className="cursor-pointer px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
                                           <Database className="h-3.5 w-3.5" />
                                           引用片段 ({msg.response.context_segments.length})
                                         </summary>
                                         <div className="px-3 pb-3 space-y-2">
                                           {msg.response.context_segments.map((seg, segIndex) => (
-                                            <div key={seg.segment_id} className="rounded-md border border-slate-200 bg-white p-2 text-xs text-slate-600">
+                                            <div key={seg.segment_id} className="rounded-md border border-border bg-card p-2 text-xs text-muted-foreground">
                                               <div className="flex items-center justify-between mb-1">
-                                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-indigo-100 text-indigo-600 text-[10px] font-semibold">
+                                                <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-primary/10 text-primary text-[10px] font-semibold">
                                                   {segIndex + 1}
                                                 </span>
-                                                <Badge className="bg-indigo-50 text-indigo-600 font-mono text-[10px]">
+                                                <Badge className="bg-primary/5 text-primary font-mono text-[10px]">
                                                   {seg.score.toFixed(4)}
                                                 </Badge>
                                               </div>
@@ -2289,7 +1770,7 @@ export function KnowledgeDatasetDetailPage() {
                   )}
                 </div>
 
-                <div className="border-t border-slate-100 bg-white p-4">
+                <div className="border-t border-border/60 bg-card p-4">
                   <div className="flex flex-col gap-3 sm:flex-row">
                     <Textarea
                       placeholder="输入你的问题，Shift+Enter 换行..."
@@ -2297,12 +1778,12 @@ export function KnowledgeDatasetDetailPage() {
                       onChange={(e) => setQaQueryInput(e.target.value)}
                       onKeyDown={handleQaKeyDown}
                       rows={2}
-                      className="flex-1 resize-none border-slate-200 focus:border-indigo-400 focus:ring-indigo-400"
+                      className="flex-1 resize-none border-border focus:border-primary focus:ring-primary"
                     />
                     <Button
                       onClick={runQA}
                       disabled={qaLoading || !qaQueryInput.trim()}
-                      className="h-11 bg-indigo-600 hover:bg-indigo-700 text-white"
+                      className="h-11 bg-primary hover:bg-primary/90 text-white"
                     >
                       {qaLoading ? (
                         <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 生成中</>
@@ -2311,7 +1792,7 @@ export function KnowledgeDatasetDetailPage() {
                       )}
                     </Button>
                   </div>
-                  <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
+                  <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground/70">
                     <span>Enter 发送，Shift+Enter 换行</span>
                     <span className="font-mono">TopK {topK} · {mode}</span>
                   </div>
@@ -2327,7 +1808,7 @@ export function KnowledgeDatasetDetailPage() {
             {/* 分块配置 */}
             <Card className="p-5">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <Sliders className="h-5 w-5 text-amber-600" />
                   分块配置
                 </h3>
@@ -2345,7 +1826,7 @@ export function KnowledgeDatasetDetailPage() {
 
               {configLoading ? (
                 <div className="py-12 text-center">
-                  <Loader2 className="h-8 w-8 animate-spin mx-auto text-gray-400" />
+                  <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground/70" />
                 </div>
               ) : configEditing ? (
                 <div className="space-y-4">
@@ -2359,49 +1840,49 @@ export function KnowledgeDatasetDetailPage() {
                         <SelectItem value="automatic">
                           <div className="flex flex-col">
                             <span>智能切分</span>
-                            <span className="text-xs text-gray-500">自动检测最优策略</span>
+                            <span className="text-xs text-muted-foreground">自动检测最优策略</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="fixed_size">
                           <div className="flex flex-col">
                             <span>按长度切分</span>
-                            <span className="text-xs text-gray-500">固定字符数分块</span>
+                            <span className="text-xs text-muted-foreground">固定字符数分块</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="paragraph">
                           <div className="flex flex-col">
                             <span>按段落切分</span>
-                            <span className="text-xs text-gray-500">尊重段落边界</span>
+                            <span className="text-xs text-muted-foreground">尊重段落边界</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="heading">
                           <div className="flex flex-col">
                             <span>按标题切分</span>
-                            <span className="text-xs text-gray-500">按章节/标题划分</span>
+                            <span className="text-xs text-muted-foreground">按章节/标题划分</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="hierarchical">
                           <div className="flex flex-col">
                             <span>父子分块</span>
-                            <span className="text-xs text-gray-500">大块包含小块，保留上下文</span>
+                            <span className="text-xs text-muted-foreground">大块包含小块，保留上下文</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="recursive">
                           <div className="flex flex-col">
                             <span>递归切分</span>
-                            <span className="text-xs text-gray-500">多层级递归分割</span>
+                            <span className="text-xs text-muted-foreground">多层级递归分割</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="separator">
                           <div className="flex flex-col">
                             <span>按符号切分</span>
-                            <span className="text-xs text-gray-500">自定义分隔符</span>
+                            <span className="text-xs text-muted-foreground">自定义分隔符</span>
                           </div>
                         </SelectItem>
                       </SelectContent>
                     </Select>
                     {/* 模式说明 */}
-                    <p className="text-xs text-gray-500 mt-1">
+                    <p className="text-xs text-muted-foreground mt-1">
                       {editChunkingMode === "automatic" && "根据文档结构自动选择最优切分策略"}
                       {editChunkingMode === "fixed_size" && "按固定字符数切分，适合规整内容"}
                       {editChunkingMode === "paragraph" && "保持段落完整性，适合文章报告"}
@@ -2420,7 +1901,7 @@ export function KnowledgeDatasetDetailPage() {
                           <Label className="text-sm">
                             {editChunkingMode === "hierarchical" ? "子块大小" : "块大小"}
                           </Label>
-                          <span className="text-sm text-gray-500">{editChunkSize} 字符</span>
+                          <span className="text-sm text-muted-foreground">{editChunkSize} 字符</span>
                         </div>
                         <input
                           type="range"
@@ -2435,7 +1916,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center">
                           <Label className="text-sm">重叠大小</Label>
-                          <span className="text-sm text-gray-500">{editChunkOverlap} 字符</span>
+                          <span className="text-sm text-muted-foreground">{editChunkOverlap} 字符</span>
                         </div>
                         <input
                           type="range"
@@ -2452,14 +1933,14 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* hierarchical模式特有参数 */}
                   {editChunkingMode === "hierarchical" && (
-                    <div className="p-3 bg-purple-50 rounded-lg space-y-3">
-                      <Label className="text-sm font-medium text-purple-800">父子分块配置</Label>
+                    <div className="p-3 bg-accent/10 rounded-lg space-y-3">
+                      <Label className="text-sm font-medium text-accent">父子分块配置</Label>
                       <div>
                         <div className="flex justify-between items-center">
-                          <Label className="text-xs text-gray-600">父块大小</Label>
-                          <span className="text-xs text-gray-500">2000 字符</span>
+                          <Label className="text-xs text-muted-foreground">父块大小</Label>
+                          <span className="text-xs text-muted-foreground">2000 字符</span>
                         </div>
-                        <p className="text-xs text-gray-400 mt-1">父块包含多个子块，提供更完整的上下文</p>
+                        <p className="text-xs text-muted-foreground/70 mt-1">父块包含多个子块，提供更完整的上下文</p>
                       </div>
                     </div>
                   )}
@@ -2467,7 +1948,7 @@ export function KnowledgeDatasetDetailPage() {
                     <Button
                       onClick={handleSaveConfig}
                       disabled={configSaving}
-                      className="bg-blue-600 hover:bg-blue-700"
+                      className="bg-primary hover:bg-primary/90"
                     >
                       {configSaving ? "保存中..." : "保存配置"}
                     </Button>
@@ -2492,35 +1973,35 @@ export function KnowledgeDatasetDetailPage() {
               ) : datasetConfig ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">分块模式</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">分块模式</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.chunking?.mode || "automatic"}
                       </p>
                     </div>
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">块大小</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">块大小</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.chunking?.chunk_size || 500}
                       </p>
                     </div>
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">重叠大小</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">重叠大小</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.chunking?.chunk_overlap || 50}
                       </p>
                     </div>
                   </div>
                 </div>
               ) : (
-                <p className="text-gray-500">无法加载配置</p>
+                <p className="text-muted-foreground">无法加载配置</p>
               )}
             </Card>
 
             {/* 检索配置 */}
             <Card className="p-5">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <Search className="h-5 w-5 text-emerald-600" />
                   检索配置
                 </h3>
@@ -2538,7 +2019,7 @@ export function KnowledgeDatasetDetailPage() {
 
               {configLoading ? (
                 <div className="py-12 text-center">
-                  <Loader2 className="h-8 w-8 animate-spin mx-auto text-gray-400" />
+                  <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground/70" />
                 </div>
               ) : retrievalEditing ? (
                 <div className="space-y-4">
@@ -2561,7 +2042,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div>
                     <div className="flex justify-between items-center">
                       <Label className="text-sm">返回数量 (Top K)</Label>
-                      <span className="text-sm text-gray-500">{editTopK}</span>
+                      <span className="text-sm text-muted-foreground">{editTopK}</span>
                     </div>
                     <input
                       type="range"
@@ -2575,10 +2056,10 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 融合配置 - 仅hybrid模式 */}
                   {editRetrievalMode === "hybrid" && (
-                    <div className="p-3 bg-blue-50 rounded-lg space-y-3">
-                      <Label className="text-sm font-medium text-blue-800">融合策略</Label>
+                    <div className="p-3 bg-primary/5 rounded-lg space-y-3">
+                      <Label className="text-sm font-medium text-primary">融合策略</Label>
                       <Select value={editFusionStrategy} onValueChange={(v) => setEditFusionStrategy(v as typeof editFusionStrategy)}>
-                        <SelectTrigger className="bg-white">
+                        <SelectTrigger className="bg-card">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -2589,7 +2070,7 @@ export function KnowledgeDatasetDetailPage() {
 
                       {/* 权重滑块 */}
                       <div className="space-y-2">
-                        <div className="flex justify-between text-xs text-gray-600">
+                        <div className="flex justify-between text-xs text-muted-foreground">
                           <span>向量权重: {(editDenseWeight * 100).toFixed(0)}%</span>
                           <span>BM25权重: {(editBm25Weight * 100).toFixed(0)}%</span>
                         </div>
@@ -2606,7 +2087,7 @@ export function KnowledgeDatasetDetailPage() {
                           className="w-full"
                         />
                         <div className="flex justify-between text-xs">
-                          <span className="text-blue-600">向量 (语义)</span>
+                          <span className="text-primary">向量 (语义)</span>
                           <span className="text-amber-600">BM25 (关键词)</span>
                         </div>
                       </div>
@@ -2614,10 +2095,10 @@ export function KnowledgeDatasetDetailPage() {
                   )}
 
                   {/* Rerank */}
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                  <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                     <div>
-                      <p className="font-medium text-gray-900">Rerank 重排序</p>
-                      <p className="text-xs text-gray-500">使用交叉编码器优化排序</p>
+                      <p className="font-medium text-foreground">Rerank 重排序</p>
+                      <p className="text-xs text-muted-foreground">使用交叉编码器优化排序</p>
                     </div>
                     <Switch
                       checked={editRerankEnabled}
@@ -2626,7 +2107,7 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
                   {editRerankEnabled && (
                     <div className="ml-3">
-                      <Label className="text-xs text-gray-500">Rerank 模型</Label>
+                      <Label className="text-xs text-muted-foreground">Rerank 模型</Label>
                       <Select value={editRerankModel} onValueChange={setEditRerankModel}>
                         <SelectTrigger className="mt-1 h-8 text-sm">
                           <SelectValue />
@@ -2640,10 +2121,10 @@ export function KnowledgeDatasetDetailPage() {
                   )}
 
                   {/* MMR */}
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                  <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                     <div>
-                      <p className="font-medium text-gray-900">MMR 多样性</p>
-                      <p className="text-xs text-gray-500">最大边际相关性去重</p>
+                      <p className="font-medium text-foreground">MMR 多样性</p>
+                      <p className="text-xs text-muted-foreground">最大边际相关性去重</p>
                     </div>
                     <Switch
                       checked={editMmrEnabled}
@@ -2653,8 +2134,8 @@ export function KnowledgeDatasetDetailPage() {
                   {editMmrEnabled && (
                     <div className="ml-3">
                       <div className="flex justify-between items-center">
-                        <Label className="text-xs text-gray-500">Lambda (相关性 vs 多样性)</Label>
-                        <span className="text-xs text-gray-500">{editMmrLambda.toFixed(2)}</span>
+                        <Label className="text-xs text-muted-foreground">Lambda (相关性 vs 多样性)</Label>
+                        <span className="text-xs text-muted-foreground">{editMmrLambda.toFixed(2)}</span>
                       </div>
                       <input
                         type="range"
@@ -2665,7 +2146,7 @@ export function KnowledgeDatasetDetailPage() {
                         className="w-full mt-1"
                       />
                       <div className="flex justify-between text-xs mt-1">
-                        <span className="text-purple-600">多样性优先</span>
+                        <span className="text-accent">多样性优先</span>
                         <span className="text-green-600">相关性优先</span>
                       </div>
                     </div>
@@ -2701,15 +2182,15 @@ export function KnowledgeDatasetDetailPage() {
               ) : datasetConfig ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">检索模式</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">检索模式</p>
+                      <p className="font-medium text-foreground mt-1">
                         {{vector: "向量检索", dense: "向量检索", keyword: "关键词检索", bm25: "关键词检索", hybrid: "混合检索"}[datasetConfig.retrieval?.mode || "hybrid"]}
                       </p>
                     </div>
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">默认 Top K</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">默认 Top K</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.retrieval?.top_k || 5}
                       </p>
                     </div>
@@ -2717,16 +2198,16 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 融合权重显示 */}
                   {(datasetConfig.retrieval?.mode === "hybrid") && (
-                    <div className="p-3 bg-blue-50 rounded-lg">
-                      <p className="text-xs text-blue-600 mb-2">融合权重</p>
+                    <div className="p-3 bg-primary/5 rounded-lg">
+                      <p className="text-xs text-primary mb-2">融合权重</p>
                       <div className="flex items-center gap-2">
-                        <div className="flex-1 bg-blue-200 rounded-full h-2">
+                        <div className="flex-1 bg-primary/20 rounded-full h-2">
                           <div
-                            className="bg-blue-600 h-2 rounded-full"
+                            className="bg-primary h-2 rounded-full"
                             style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
                           />
                         </div>
-                        <span className="text-xs text-gray-600">
+                        <span className="text-xs text-muted-foreground">
                           向量 {((datasetConfig.retrieval.fusion?.alpha || 0.7) * 100).toFixed(0)}%
                         </span>
                       </div>
@@ -2734,19 +2215,19 @@ export function KnowledgeDatasetDetailPage() {
                   )}
 
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                       <div>
-                        <p className="font-medium text-gray-900">Rerank</p>
-                        <p className="text-xs text-gray-500">重排序优化结果</p>
+                        <p className="font-medium text-foreground">Rerank</p>
+                        <p className="text-xs text-muted-foreground">重排序优化结果</p>
                       </div>
                       <Badge variant={datasetConfig.retrieval?.rerank?.enabled ? "default" : "outline"}>
                         {datasetConfig.retrieval?.rerank?.enabled ? "启用" : "禁用"}
                       </Badge>
                     </div>
-                    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                       <div>
-                        <p className="font-medium text-gray-900">MMR</p>
-                        <p className="text-xs text-gray-500">最大边际相关性</p>
+                        <p className="font-medium text-foreground">MMR</p>
+                        <p className="text-xs text-muted-foreground">最大边际相关性</p>
                       </div>
                       <Badge variant={datasetConfig.retrieval?.mmr?.enabled ? "default" : "outline"}>
                         {datasetConfig.retrieval?.mmr?.enabled ? "启用" : "禁用"}
@@ -2755,43 +2236,43 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
                 </div>
               ) : (
-                <p className="text-gray-500">无法加载配置</p>
+                <p className="text-muted-foreground">无法加载配置</p>
               )}
             </Card>
 
             {/* Embedding 配置 */}
             <Card className="p-5">
-              <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-blue-600" />
+              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-primary" />
                 Embedding 配置
               </h3>
 
               {datasetConfig && (
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">Provider</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">Provider</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.embedding?.provider}
                       </p>
                     </div>
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">Model</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">Model</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.embedding?.model}
                       </p>
                     </div>
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">Dimension</p>
-                      <p className="font-medium text-gray-900 mt-1">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">Dimension</p>
+                      <p className="font-medium text-foreground mt-1">
                         {datasetConfig.embedding?.dimension || "未设置"}
                       </p>
                     </div>
                   </div>
                   {datasetConfig.embedding?.collection_name && (
-                    <div className="p-3 bg-gray-50 rounded-lg">
-                      <p className="text-xs text-gray-500">Collection</p>
-                      <p className="font-mono text-sm text-gray-900 mt-1 truncate">
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">Collection</p>
+                      <p className="font-mono text-sm text-foreground mt-1 truncate">
                         {datasetConfig.embedding.collection_name}
                       </p>
                     </div>
@@ -2802,18 +2283,18 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 统计信息 */}
             <Card className="p-5">
-              <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <BarChart3 className="h-5 w-5 text-purple-600" />
+              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <BarChart3 className="h-5 w-5 text-accent" />
                 统计信息
               </h3>
 
               {datasetConfig?.statistics ? (
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-blue-50 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-blue-700">
+                  <div className="p-4 bg-primary/5 rounded-lg text-center">
+                    <p className="text-2xl font-bold text-primary/90">
                       {datasetConfig.statistics.document_count ?? 0}
                     </p>
-                    <p className="text-xs text-blue-600 mt-1">文档总数</p>
+                    <p className="text-xs text-primary mt-1">文档总数</p>
                   </div>
                   <div className="p-4 bg-emerald-50 rounded-lg text-center">
                     <p className="text-2xl font-bold text-emerald-700">
@@ -2827,15 +2308,15 @@ export function KnowledgeDatasetDetailPage() {
                     </p>
                     <p className="text-xs text-amber-600 mt-1">可用片段</p>
                   </div>
-                  <div className="p-4 bg-purple-50 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-purple-700">
+                  <div className="p-4 bg-accent/10 rounded-lg text-center">
+                    <p className="text-2xl font-bold text-accent/90">
                       {datasetConfig.statistics.hit_count ?? 0}
                     </p>
-                    <p className="text-xs text-purple-600 mt-1">命中次数</p>
+                    <p className="text-xs text-accent mt-1">命中次数</p>
                   </div>
                 </div>
               ) : (
-                <p className="text-gray-500 text-center py-4">加载统计信息...</p>
+                <p className="text-muted-foreground text-center py-4">加载统计信息...</p>
               )}
 
               {datasetConfig?.statistics?.segment_count === 0 && (
@@ -2847,8 +2328,8 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 分块预览 */}
             <Card className="p-5 col-span-2">
-              <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                <Eye className="h-5 w-5 text-cyan-600" />
+              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <Eye className="h-5 w-5 text-accent" />
                 分块预览
               </h3>
 
@@ -2865,7 +2346,7 @@ export function KnowledgeDatasetDetailPage() {
                     <Button
                       onClick={handlePreviewChunks}
                       disabled={previewLoading || !previewText.trim()}
-                      className="bg-cyan-600 hover:bg-cyan-700"
+                      className="bg-accent hover:bg-accent/90"
                     >
                       {previewLoading ? (
                         <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 处理中...</>
@@ -2873,32 +2354,32 @@ export function KnowledgeDatasetDetailPage() {
                         <><Play className="h-4 w-4 mr-2" /> 预览分块</>
                       )}
                     </Button>
-                    <span className="text-xs text-gray-500">
+                    <span className="text-xs text-muted-foreground">
                       使用当前配置: {editChunkingMode}, 块大小 {editChunkSize}, 重叠 {editChunkOverlap}
                     </span>
                   </div>
                 </div>
-                <div className="border rounded-lg p-3 bg-gray-50 max-h-[300px] overflow-auto">
+                <div className="border rounded-lg p-3 bg-muted/40 max-h-[300px] overflow-auto">
                   {previewChunksResult.length > 0 ? (
                     <div className="space-y-2">
-                      <div className="text-xs text-gray-500 mb-2">
+                      <div className="text-xs text-muted-foreground mb-2">
                         共 {previewChunksResult.length} 个分块
                       </div>
                       {previewChunksResult.map((chunk, i) => (
-                        <div key={i} className="p-2 bg-white rounded border text-xs">
+                        <div key={i} className="p-2 bg-card rounded border text-xs">
                           <div className="flex items-center gap-2 mb-1">
                             <Badge variant="secondary">#{i + 1}</Badge>
-                            <span className="text-gray-400">{chunk.char_count} 字符</span>
-                            <span className="text-gray-400">~{chunk.token_count} tokens</span>
+                            <span className="text-muted-foreground/70">{chunk.char_count} 字符</span>
+                            <span className="text-muted-foreground/70">~{chunk.token_count} tokens</span>
                           </div>
-                          <div className="text-gray-700 whitespace-pre-wrap line-clamp-3">
+                          <div className="text-foreground/80 whitespace-pre-wrap line-clamp-3">
                             {chunk.content}
                           </div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <div className="text-center text-gray-400 py-8">
+                    <div className="text-center text-muted-foreground/70 py-8">
                       输入文本并点击"预览分块"查看效果
                     </div>
                   )}
@@ -2909,21 +2390,21 @@ export function KnowledgeDatasetDetailPage() {
             {/* 调试信息 */}
             {debugInfo && (
               <Card className="p-5 col-span-2">
-                <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <HelpCircle className="h-5 w-5 text-gray-500" />
+                <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                  <HelpCircle className="h-5 w-5 text-muted-foreground" />
                   调试信息
                 </h3>
 
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div className={`p-3 rounded-lg ${debugInfo.has_segments ? "bg-emerald-50" : "bg-red-50"}`}>
-                      <p className="text-xs text-gray-500">数据库片段</p>
+                      <p className="text-xs text-muted-foreground">数据库片段</p>
                       <p className={`font-medium ${debugInfo.has_segments ? "text-emerald-700" : "text-red-700"}`}>
                         {debugInfo.has_segments ? "✓ 存在" : "✗ 无片段"}
                       </p>
                     </div>
                     <div className={`p-3 rounded-lg ${debugInfo.has_collection ? "bg-emerald-50" : "bg-red-50"}`}>
-                      <p className="text-xs text-gray-500">向量集合</p>
+                      <p className="text-xs text-muted-foreground">向量集合</p>
                       <p className={`font-medium ${debugInfo.has_collection ? "text-emerald-700" : "text-red-700"}`}>
                         {debugInfo.has_collection ? "✓ 已创建" : "✗ 未创建"}
                       </p>
@@ -2932,12 +2413,12 @@ export function KnowledgeDatasetDetailPage() {
 
                   {Array.isArray(debugInfo.sample_segments) && debugInfo.sample_segments.length > 0 && (
                     <div>
-                      <p className="text-xs text-gray-500 mb-2">示例片段</p>
+                      <p className="text-xs text-muted-foreground mb-2">示例片段</p>
                       <div className="space-y-2">
                         {(debugInfo.sample_segments as Array<Record<string, unknown>>).slice(0, 2).map((seg, i) => (
-                          <div key={i} className="p-2 bg-gray-50 rounded text-xs font-mono">
-                            <div className="text-gray-500">ID: {String(seg.segment_id).slice(0, 16)}...</div>
-                            <div className="text-gray-700 mt-1">{String(seg.text_preview)}</div>
+                          <div key={i} className="p-2 bg-muted/40 rounded text-xs font-mono">
+                            <div className="text-muted-foreground">ID: {String(seg.segment_id).slice(0, 16)}...</div>
+                            <div className="text-foreground/80 mt-1">{String(seg.text_preview)}</div>
                           </div>
                         ))}
                       </div>
@@ -2972,16 +2453,16 @@ export function KnowledgeDatasetDetailPage() {
           setUploadDialogOpen(open);
         }
       }}>
-        <DialogContent className="max-w-4xl bg-white max-h-[90vh] overflow-hidden flex flex-col">
+        <DialogContent className="max-w-4xl bg-card max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader className="flex-shrink-0">
             <DialogTitle className="text-xl font-semibold">上传文档</DialogTitle>
           </DialogHeader>
 
           {uploading ? (
             <div className="py-12 text-center flex flex-col items-center justify-center">
-              <Loader2 className="h-12 w-12 text-blue-600 animate-spin mb-4" />
+              <Loader2 className="h-12 w-12 text-primary animate-spin mb-4" />
               <p className="text-lg font-medium">正在上传并处理文档...</p>
-              <p className="text-sm text-gray-500 mt-2">这可能需要几分钟，请勿关闭窗口</p>
+              <p className="text-sm text-muted-foreground mt-2">这可能需要几分钟，请勿关闭窗口</p>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto space-y-4 pr-1">
@@ -2989,7 +2470,7 @@ export function KnowledgeDatasetDetailPage() {
               <div className="flex gap-4">
                 {/* Upload zone - compact */}
                 <div
-                  className="flex-shrink-0 w-48 border-2 border-dashed border-gray-300 rounded-lg p-4 text-center hover:border-blue-400 transition-colors cursor-pointer bg-gray-50"
+                  className="flex-shrink-0 w-48 border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-primary/40 transition-colors cursor-pointer bg-muted/40"
                   onClick={() => fileRef.current?.click()}
                   onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
                   onDrop={(e) => {
@@ -2998,14 +2479,14 @@ export function KnowledgeDatasetDetailPage() {
                     handleFilesSelected(e.dataTransfer.files);
                   }}
                 >
-                  <Upload className="h-8 w-8 mx-auto text-gray-400 mb-2" />
-                  <p className="text-sm text-gray-600">点击或拖拽上传</p>
-                  <p className="text-xs text-gray-400 mt-1">PDF、Word、TXT、MD</p>
+                  <Upload className="h-8 w-8 mx-auto text-muted-foreground/70 mb-2" />
+                  <p className="text-sm text-muted-foreground">点击或拖拽上传</p>
+                  <p className="text-xs text-muted-foreground/70 mt-1">PDF、Word、TXT、MD</p>
                 </div>
 
                 {/* File list - horizontal compact */}
                 <div className="flex-1 min-w-0">
-                  <Label className="text-sm font-medium text-gray-700">已选文件 ({pendingFiles.length})</Label>
+                  <Label className="text-sm font-medium text-foreground/80">已选文件 ({pendingFiles.length})</Label>
                   <div className="mt-2 flex flex-wrap gap-2 max-h-24 overflow-auto">
                     {pendingFiles.map((file, i) => (
                       <Badge key={i} variant="secondary" className="flex items-center gap-1 py-1 px-2 max-w-[200px]">
@@ -3023,7 +2504,7 @@ export function KnowledgeDatasetDetailPage() {
                       </Badge>
                     ))}
                     {pendingFiles.length === 0 && (
-                      <p className="text-sm text-gray-400">请选择要上传的文件</p>
+                      <p className="text-sm text-muted-foreground/70">请选择要上传的文件</p>
                     )}
                   </div>
                 </div>
@@ -3031,7 +2512,7 @@ export function KnowledgeDatasetDetailPage() {
 
               {/* Chunking Mode Selection - Card Grid */}
               <div className="border rounded-lg p-4">
-                <Label className="text-sm font-medium text-gray-900 mb-3 block">切片方式</Label>
+                <Label className="text-sm font-medium text-foreground mb-3 block">切片方式</Label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
                   {[
                     { id: "automatic", name: "智能切分", desc: "自动检测最优策略" },
@@ -3048,22 +2529,22 @@ export function KnowledgeDatasetDetailPage() {
                       key={mode.id}
                       className={`p-3 rounded-lg border cursor-pointer transition-all ${
                         uploadChunkMode === mode.id
-                          ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
-                          : "border-gray-200 hover:border-gray-300"
+                          ? "border-primary bg-primary/5 ring-1 ring-primary/50"
+                          : "border-border hover:border-border"
                       }`}
                       onClick={() => setUploadChunkMode(mode.id)}
                     >
-                      <p className="text-sm font-medium text-gray-900">{mode.name}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{mode.desc}</p>
+                      <p className="text-sm font-medium text-foreground">{mode.name}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{mode.desc}</p>
                     </div>
                   ))}
                 </div>
 
                 {/* Mode-specific Configuration */}
-                <div className="bg-gray-50 rounded-lg p-4">
+                <div className="bg-muted/40 rounded-lg p-4">
                   {/* Automatic mode */}
                   {uploadChunkMode === "automatic" && (
-                    <p className="text-sm text-gray-600">
+                    <p className="text-sm text-muted-foreground">
                       自动模式会根据文档类型智能选择最佳切分策略，无需额外配置
                     </p>
                   )}
@@ -3074,7 +2555,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">块大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3083,13 +2564,13 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">重叠大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkOverlap}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkOverlap}</span>
                         </div>
                         <input
                           type="range"
@@ -3098,7 +2579,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={10}
                           value={uploadChunkOverlap}
                           onChange={(e) => setUploadChunkOverlap(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3110,7 +2591,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">最大块大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3119,13 +2600,13 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">最小段落长度</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadMinParagraphLength}</span>
+                          <span className="text-sm font-medium text-primary">{uploadMinParagraphLength}</span>
                         </div>
                         <input
                           type="range"
@@ -3134,7 +2615,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={10}
                           value={uploadMinParagraphLength}
                           onChange={(e) => setUploadMinParagraphLength(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div className="flex items-center gap-2">
@@ -3143,7 +2624,7 @@ export function KnowledgeDatasetDetailPage() {
                           id="merge-short"
                           checked={uploadMergeShortParagraphs}
                           onChange={(e) => setUploadMergeShortParagraphs(e.target.checked)}
-                          className="w-4 h-4 rounded text-blue-600"
+                          className="w-4 h-4 rounded text-primary"
                         />
                         <Label htmlFor="merge-short" className="text-sm cursor-pointer">合并短段落</Label>
                       </div>
@@ -3169,7 +2650,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">最大块大小</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3178,7 +2659,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={100}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3187,15 +2668,15 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Hierarchical mode */}
                   {uploadChunkMode === "hierarchical" && (
                     <div className="space-y-4">
-                      <div className="p-3 bg-blue-50 rounded-lg mb-2">
-                        <p className="text-sm text-blue-700">
+                      <div className="p-3 bg-primary/5 rounded-lg mb-2">
+                        <p className="text-sm text-primary/90">
                           层级切分会生成父块和子块，父块用于提供上下文，子块用于精确检索
                         </p>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">父块大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadParentChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadParentChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3204,13 +2685,13 @@ export function KnowledgeDatasetDetailPage() {
                           step={100}
                           value={uploadParentChunkSize}
                           onChange={(e) => setUploadParentChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">子块大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChildChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChildChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3219,13 +2700,13 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChildChunkSize}
                           onChange={(e) => setUploadChildChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">子块重叠 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChildOverlap}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChildOverlap}</span>
                         </div>
                         <input
                           type="range"
@@ -3234,7 +2715,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={10}
                           value={uploadChildOverlap}
                           onChange={(e) => setUploadChildOverlap(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3250,7 +2731,7 @@ export function KnowledgeDatasetDetailPage() {
                           onChange={(e) => setUploadSeparator(e.target.value)}
                           placeholder="例如: \n\n 或 ---"
                         />
-                        <p className="text-xs text-gray-500 mt-1">支持转义字符：\n(换行) \t(制表符)</p>
+                        <p className="text-xs text-muted-foreground mt-1">支持转义字符：\n(换行) \t(制表符)</p>
                       </div>
                       <div className="flex items-center gap-2">
                         <input
@@ -3258,14 +2739,14 @@ export function KnowledgeDatasetDetailPage() {
                           id="keep-sep"
                           checked={uploadKeepSeparator}
                           onChange={(e) => setUploadKeepSeparator(e.target.checked)}
-                          className="w-4 h-4 rounded text-blue-600"
+                          className="w-4 h-4 rounded text-primary"
                         />
                         <Label htmlFor="keep-sep" className="text-sm cursor-pointer">保留分隔符</Label>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">最大块大小</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3274,7 +2755,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3290,7 +2771,7 @@ export function KnowledgeDatasetDetailPage() {
                           onChange={(e) => setUploadRegexPattern(e.target.value)}
                           placeholder="例如: (?=第[一二三四五六七八九十]+章)"
                         />
-                        <p className="text-xs text-gray-500 mt-1">
+                        <p className="text-xs text-muted-foreground mt-1">
                           使用正向前瞻 (?=...) 保留匹配内容，使用普通模式则删除匹配内容
                         </p>
                       </div>
@@ -3311,7 +2792,7 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">最大块大小</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3320,7 +2801,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3329,13 +2810,13 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Recursive mode */}
                   {uploadChunkMode === "recursive" && (
                     <div className="space-y-4">
-                      <p className="text-sm text-gray-600 mb-2">
+                      <p className="text-sm text-muted-foreground mb-2">
                         递归切分会按段落、句子逐级细分，确保每个块不超过限制
                       </p>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">块大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkSize}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
                           type="range"
@@ -3344,13 +2825,13 @@ export function KnowledgeDatasetDetailPage() {
                           step={50}
                           value={uploadChunkSize}
                           onChange={(e) => setUploadChunkSize(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
                           <Label className="text-sm">重叠大小 (字符数)</Label>
-                          <span className="text-sm font-medium text-blue-600">{uploadChunkOverlap}</span>
+                          <span className="text-sm font-medium text-primary">{uploadChunkOverlap}</span>
                         </div>
                         <input
                           type="range"
@@ -3359,7 +2840,7 @@ export function KnowledgeDatasetDetailPage() {
                           step={10}
                           value={uploadChunkOverlap}
                           onChange={(e) => setUploadChunkOverlap(Number(e.target.value))}
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          className="w-full h-2 bg-border rounded-lg appearance-none cursor-pointer accent-primary"
                         />
                       </div>
                     </div>
@@ -3403,16 +2884,16 @@ export function KnowledgeDatasetDetailPage() {
                     if (el) el.classList.toggle('hidden');
                   }}
                 >
-                  <span className="text-sm font-medium text-gray-900">高级设置</span>
-                  <ChevronDown className="h-4 w-4 text-gray-500" />
+                  <span className="text-sm font-medium text-foreground">高级设置</span>
+                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
                 </button>
                 <div id="advanced-settings" className="hidden px-4 pb-4 space-y-4">
                   {/* Metadata Enhancement */}
-                  <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <Label className="text-sm font-medium">元数据增强</Label>
-                        <p className="text-xs text-gray-500">自动提取和丰富文档元数据</p>
+                        <p className="text-xs text-muted-foreground">自动提取和丰富文档元数据</p>
                       </div>
                       <Switch
                         checked={uploadMetadataEnabled}
@@ -3420,13 +2901,13 @@ export function KnowledgeDatasetDetailPage() {
                       />
                     </div>
                     {uploadMetadataEnabled && (
-                      <div className="pl-4 border-l-2 border-indigo-200 space-y-2 mt-3">
+                      <div className="pl-4 border-l-2 border-primary/20 space-y-2 mt-3">
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
                             type="checkbox"
                             checked={uploadExtractTitle}
                             onChange={(e) => setUploadExtractTitle(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">自动提取文档标题</span>
                         </label>
@@ -3435,7 +2916,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadExtractSummary}
                             onChange={(e) => setUploadExtractSummary(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">自动生成摘要</span>
                         </label>
@@ -3444,7 +2925,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadExtractKeywords}
                             onChange={(e) => setUploadExtractKeywords(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">自动提取关键词</span>
                         </label>
@@ -3453,7 +2934,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadExtractEntities}
                             onChange={(e) => setUploadExtractEntities(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">自动识别命名实体</span>
                         </label>
@@ -3462,7 +2943,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadDetectLanguage}
                             onChange={(e) => setUploadDetectLanguage(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">自动检测语言</span>
                         </label>
@@ -3471,11 +2952,11 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   {/* Table Processing */}
-                  <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <Label className="text-sm font-medium">表格处理增强</Label>
-                        <p className="text-xs text-gray-500">优化表格内容的解析和检索</p>
+                        <p className="text-xs text-muted-foreground">优化表格内容的解析和检索</p>
                       </div>
                       <Switch
                         checked={uploadTableEnabled}
@@ -3483,7 +2964,7 @@ export function KnowledgeDatasetDetailPage() {
                       />
                     </div>
                     {uploadTableEnabled && (
-                      <div className="pl-4 border-l-2 border-indigo-200 space-y-3 mt-3">
+                      <div className="pl-4 border-l-2 border-primary/20 space-y-3 mt-3">
                         <div>
                           <Label className="text-sm mb-2 block">表格处理模式</Label>
                           <Select value={uploadTableMode} onValueChange={(v) => setUploadTableMode(v as typeof uploadTableMode)}>
@@ -3502,7 +2983,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadTableIncludeHeaders}
                             onChange={(e) => setUploadTableIncludeHeaders(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">每行包含表头信息</span>
                         </label>
@@ -3511,7 +2992,7 @@ export function KnowledgeDatasetDetailPage() {
                             type="checkbox"
                             checked={uploadTableGenerateSummary}
                             onChange={(e) => setUploadTableGenerateSummary(e.target.checked)}
-                            className="w-4 h-4 rounded text-blue-600"
+                            className="w-4 h-4 rounded text-primary"
                           />
                           <span className="text-sm">生成表格摘要</span>
                         </label>
@@ -3520,11 +3001,11 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   {/* Rerank Model */}
-                  <div className="p-4 bg-gray-50 rounded-lg">
+                  <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <Label className="text-sm font-medium">排序模型</Label>
-                        <p className="text-xs text-gray-500">使用交叉编码器优化检索排序</p>
+                        <p className="text-xs text-muted-foreground">使用交叉编码器优化检索排序</p>
                       </div>
                       <Switch
                         checked={rerankEnabled}
@@ -3547,13 +3028,13 @@ export function KnowledgeDatasetDetailPage() {
               </div>
 
               {/* Current embedding model info */}
-              <div className="p-3 bg-blue-50 rounded-lg border border-blue-200 flex items-center gap-3">
-                <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-500 rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+              <div className="p-3 bg-primary/5 rounded-lg border border-primary/20 flex items-center gap-3">
+                <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
                   {dataset?.embedding_provider === "openai" ? "O" : "阿"}
                 </div>
                 <div className="text-sm">
                   <span className="font-medium">{dataset?.embedding_model || "text-embedding-v4"}</span>
-                  <span className="text-gray-500 ml-2">{dataset?.embedding_dimension || 1024}维</span>
+                  <span className="text-muted-foreground ml-2">{dataset?.embedding_dimension || 1024}维</span>
                 </div>
               </div>
             </div>
@@ -3569,7 +3050,7 @@ export function KnowledgeDatasetDetailPage() {
             <Button
               onClick={handleConfirmUpload}
               disabled={uploading || pendingFiles.length === 0}
-              className="bg-blue-600 hover:bg-blue-700 text-white"
+              className="bg-primary hover:bg-primary/90 text-white"
             >
               {uploading ? "上传中..." : `上传 ${pendingFiles.length} 个文件`}
             </Button>
@@ -3610,7 +3091,7 @@ export function KnowledgeDatasetDetailPage() {
             <Button
               onClick={handleCreateText}
               disabled={textSaving || !textTitle.trim() || !textContent.trim()}
-              className="bg-blue-600 hover:bg-blue-700"
+              className="bg-primary hover:bg-primary/90"
             >
               {textSaving ? "创建中..." : "创建"}
             </Button>
@@ -3650,7 +3131,7 @@ export function KnowledgeDatasetDetailPage() {
             <Button
               onClick={handleCreateFromUrl}
               disabled={urlSaving || !urlInput.trim()}
-              className="bg-blue-600 hover:bg-blue-700"
+              className="bg-primary hover:bg-primary/90"
             >
               {urlSaving ? "获取中..." : "添加"}
             </Button>
@@ -3668,7 +3149,7 @@ export function KnowledgeDatasetDetailPage() {
             <Button variant="outline" onClick={() => setEditOpen(false)}>
               取消
             </Button>
-            <Button onClick={saveEdit} disabled={editSaving} className="bg-blue-600 hover:bg-blue-700">
+            <Button onClick={saveEdit} disabled={editSaving} className="bg-primary hover:bg-primary/90">
               {editSaving ? "保存中..." : "保存"}
             </Button>
           </DialogFooter>
@@ -3703,7 +3184,7 @@ export function KnowledgeDatasetDetailPage() {
             <Button variant="outline" onClick={() => setSettingsOpen(false)}>
               取消
             </Button>
-            <Button onClick={handleSaveSettings} disabled={settingsSaving} className="bg-blue-600 hover:bg-blue-700">
+            <Button onClick={handleSaveSettings} disabled={settingsSaving} className="bg-primary hover:bg-primary/90">
               {settingsSaving ? "保存中..." : "保存"}
             </Button>
           </DialogFooter>
@@ -3715,7 +3196,7 @@ export function KnowledgeDatasetDetailPage() {
           <DialogHeader>
             <DialogTitle className="text-red-600">确认删除</DialogTitle>
           </DialogHeader>
-          <p className="text-sm text-gray-600">
+          <p className="text-sm text-muted-foreground">
             确定要删除知识库 <strong>{dataset?.name}</strong> 吗？此操作不可撤销。
           </p>
           <DialogFooter>

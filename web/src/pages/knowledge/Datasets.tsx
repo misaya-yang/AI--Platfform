@@ -65,17 +65,17 @@ function DatasetCard({
 
   return (
     <div
-      className="relative bg-white rounded-xl border border-gray-200 p-5 hover:border-indigo-300 hover:shadow-lg transition-all duration-200 group"
+      className="relative bg-card rounded-xl border border-border p-5 hover:border-primary/30 hover:shadow-lg transition-all duration-200 group"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
       {/* Header */}
       <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md">
-          <Database className="h-5 w-5 text-white" />
+        <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shadow-md">
+          <Database className="h-5 w-5 text-primary" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-bold text-gray-900 truncate text-lg">
+          <h3 className="font-bold text-foreground truncate text-lg">
             {dataset.name}
           </h3>
         </div>
@@ -84,41 +84,41 @@ function DatasetCard({
       {/* Info */}
       <div className="mt-4 space-y-2">
         <div className="flex items-center text-sm">
-          <span className="text-gray-400 w-12">描述</span>
-          <span className="text-gray-600 truncate flex-1">
+          <span className="text-muted-foreground/70 w-12">描述</span>
+          <span className="text-muted-foreground truncate flex-1">
             {dataset.description || "-"}
           </span>
         </div>
         <div className="flex items-center text-sm">
-          <span className="text-gray-400 w-12">ID</span>
-          <span className="text-gray-500 font-mono text-xs truncate flex-1">
+          <span className="text-muted-foreground/70 w-12">ID</span>
+          <span className="text-muted-foreground font-mono text-xs truncate flex-1">
             {dataset.dataset_id.slice(0, 12)}
           </span>
           <button
             onClick={copyId}
-            className="ml-1 p-1 hover:bg-gray-100 rounded transition-colors"
+            className="ml-1 p-1 hover:bg-muted/60 rounded transition-colors"
             title="复制ID"
           >
             {copied ? (
               <Check className="h-3.5 w-3.5 text-green-500" />
             ) : (
-              <Copy className="h-3.5 w-3.5 text-gray-400" />
+              <Copy className="h-3.5 w-3.5 text-muted-foreground/70" />
             )}
           </button>
         </div>
       </div>
 
       {/* Tags */}
-      <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
+      <div className="mt-4 pt-3 border-t border-border/60 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs bg-indigo-50 text-indigo-600 border-indigo-200">
+          <Badge variant="outline" className="text-xs bg-primary/10 text-primary border-primary/20">
             标准版
           </Badge>
-          <Badge variant="outline" className="text-xs bg-purple-50 text-purple-600 border-purple-200">
+          <Badge variant="outline" className="text-xs bg-secondary text-secondary-foreground border-border">
             基础问答
           </Badge>
         </div>
-        <div className="flex items-center gap-1.5 text-gray-400">
+        <div className="flex items-center gap-1.5 text-muted-foreground/70">
           <FileText className="h-4 w-4" />
           <span className="text-sm font-medium">
             {dataset.statistics?.document_count ?? 0}
@@ -128,17 +128,17 @@ function DatasetCard({
 
       {/* Hover Actions - 阿里云风格 */}
       {(hovered || dropdownOpen) && (
-        <div className="absolute inset-x-0 bottom-0 bg-white border-t border-gray-200 rounded-b-xl p-3 flex items-center gap-2 shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
+        <div className="absolute inset-x-0 bottom-0 bg-card border-t border-border rounded-b-xl p-3 flex items-center gap-2 shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-200">
           <Button
             onClick={onViewDetail}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white h-9"
+            className="flex-1 bg-primary hover:bg-primary/90 text-white h-9"
           >
             查看详情
           </Button>
           <Button
             onClick={(e) => { e.stopPropagation(); onHitTest(); }}
             variant="outline"
-            className="flex-1 h-9 border-gray-300"
+            className="flex-1 h-9 border-border"
           >
             命中测试
           </Button>
@@ -148,7 +148,7 @@ function DatasetCard({
               <Button
                 variant="outline"
                 size="icon"
-                className="h-9 w-9 border-gray-300"
+                className="h-9 w-9 border-border"
                 onClick={(e) => e.stopPropagation()}
               >
                 <MoreHorizontal className="h-4 w-4" />
@@ -156,7 +156,7 @@ function DatasetCard({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-[120px]">
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setDropdownOpen(false); onEdit(); }}>
-                <Edit3 className="mr-2 h-3.5 w-3.5 text-gray-500" />
+                <Edit3 className="mr-2 h-3.5 w-3.5 text-muted-foreground" />
                 编辑
               </DropdownMenuItem>
               <DropdownMenuSeparator />
@@ -203,22 +203,22 @@ export function KnowledgeDatasetsPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-background">
       {/* 顶部导航栏 - 阿里云风格 */}
-      <div className="bg-white border-b border-gray-200 sticky top-0 z-20">
+      <div className="bg-card border-b border-border sticky top-0 z-20">
         <div className="max-w-[1400px] mx-auto px-6">
           <div className="flex items-center justify-between h-14">
             {/* 左侧：标题和Tab */}
             <div className="flex items-center gap-6">
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-bold text-gray-900">知识库</h1>
+                <h1 className="text-lg font-bold text-foreground">知识库</h1>
                 <Badge variant="outline" className="text-xs font-mono">
                   {datasets.length}
                 </Badge>
               </div>
 
               {/* 类型Tab */}
-              <div className="flex items-center bg-gray-100 rounded-lg p-1">
+              <div className="flex items-center bg-secondary/60 rounded-lg p-1">
                 {typeTabs.map((tab) => (
                   <button
                     key={tab.key}
@@ -226,8 +226,8 @@ export function KnowledgeDatasetsPage() {
                     className={`
                       flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-all
                       ${typeFilter === tab.key
-                        ? "bg-white text-indigo-600 shadow-sm"
-                        : "text-gray-600 hover:text-gray-900"
+                        ? "bg-card text-primary shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
                       }
                     `}
                   >
@@ -244,14 +244,14 @@ export function KnowledgeDatasetsPage() {
                 variant="outline"
                 size="icon"
                 onClick={() => qc.invalidateQueries({ queryKey: ["kb-datasets"] })}
-                className="h-9 w-9 bg-white"
+                className="h-9 w-9 bg-card"
                 title="刷新列表"
               >
                 <RefreshCcw className={`h-4 w-4 ${datasetsQuery.isFetching ? "animate-spin" : ""}`} />
               </Button>
               <Button
                 onClick={() => nav("/knowledge/create")}
-                className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                className="bg-primary hover:bg-primary/90 text-white"
               >
                 <Plus className="h-4 w-4 mr-2" />
                 创建知识库
@@ -266,18 +266,18 @@ export function KnowledgeDatasetsPage() {
         {/* 搜索和筛选栏 */}
         <div className="flex items-center justify-between mb-6">
           <div className="relative w-80">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
             <Input
               placeholder="搜索知识库名称"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10 bg-white border-gray-300 h-10"
+              className="pl-10 bg-card border-border h-10"
             />
           </div>
 
           <div className="flex items-center gap-3">
             <Select value={visibilityFilter} onValueChange={setVisibilityFilter}>
-              <SelectTrigger className="w-36 bg-white h-10">
+              <SelectTrigger className="w-36 bg-card h-10">
                 <SelectValue placeholder="可见性" />
               </SelectTrigger>
               <SelectContent>
@@ -315,16 +315,16 @@ export function KnowledgeDatasetsPage() {
 
         {filteredDatasets.length === 0 && (
           <div className="text-center py-24">
-            <div className="w-20 h-20 mx-auto rounded-2xl bg-gradient-to-br from-indigo-100 to-purple-100 flex items-center justify-center mb-6">
-              <Database className="h-10 w-10 text-indigo-400" />
+            <div className="w-20 h-20 mx-auto rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-6">
+              <Database className="h-10 w-10 text-primary/70" />
             </div>
-            <h3 className="text-xl font-semibold text-gray-900">暂无知识库</h3>
-            <p className="text-gray-500 mt-2 max-w-sm mx-auto">
+            <h3 className="text-xl font-semibold text-foreground">暂无知识库</h3>
+            <p className="text-muted-foreground mt-2 max-w-sm mx-auto">
               创建您的第一个知识库，上传文档或添加URL构建AI知识体系
             </p>
             <Button
               onClick={() => nav("/knowledge/create")}
-              className="mt-6 bg-indigo-600 hover:bg-indigo-700"
+              className="mt-6 bg-primary hover:bg-primary/90"
             >
               <Plus className="h-4 w-4 mr-2" />
               创建知识库

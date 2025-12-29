@@ -45,7 +45,7 @@ const ChatMessageItem = memo(
           "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm",
           isUser ? "bg-primary text-primary-foreground" : "bg-white dark:bg-zinc-800"
         )}>
-          {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5 text-indigo-500" />}
+          {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5 text-primary" />}
         </div>
 
         {/* Content Bubble */}
@@ -69,7 +69,7 @@ const ChatMessageItem = memo(
             {!isUser && hasToolCalls && (
               <div className="mb-3 rounded-xl border border-border/50 bg-muted/40 p-2">
                 <div className="mb-2 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary/60" />
                   Tool Calls
                 </div>
                 <div className="space-y-2">
@@ -100,16 +100,16 @@ const ChatMessageItem = memo(
                   <>
                     <span className="text-sm text-muted-foreground">Thinking...</span>
                     <div className="flex items-center gap-1">
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500" />
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
                     </div>
                   </>
                 ) : (
                   <div className="flex items-center gap-1.5">
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.3s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500 [animation-delay:-0.15s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-indigo-500" />
+                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
                   </div>
                 )}
               </div>

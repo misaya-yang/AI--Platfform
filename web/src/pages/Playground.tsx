@@ -874,7 +874,7 @@ export function PlaygroundPage() {
         <div className="mx-auto w-full max-w-4xl px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3 flex-1">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-500/20">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent text-white shadow-lg shadow-primary/20">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
               </div>
               <div className="flex flex-col">
@@ -901,7 +901,7 @@ export function PlaygroundPage() {
                   id="session-toggle"
                   checked={sessionEnabled}
                   onChange={(e) => setSessionEnabled(e.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-muted-foreground/30 accent-indigo-500"
+                  className="h-3.5 w-3.5 rounded border-muted-foreground/30 accent-primary"
                 />
                 <label htmlFor="session-toggle" className="text-xs font-medium cursor-pointer select-none">
                   Memory
@@ -933,8 +933,8 @@ export function PlaygroundPage() {
       <div ref={scrollRef} className="flex-1 overflow-y-auto pb-32">
         {!serviceId ? (
           <div className="flex h-full flex-col items-center justify-center p-8 text-center opacity-0 animate-in fade-in duration-500 delay-100 fill-mode-forwards" style={{ opacity: 1 }}>
-            <div className="mb-6 rounded-2xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 p-6 shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5">
-              <div className="h-16 w-16 mx-auto rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
+            <div className="mb-6 rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-6 shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5">
+              <div className="h-16 w-16 mx-auto rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg">
                 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
               </div>
             </div>

@@ -18,7 +18,7 @@ const statusLabels: Record<string, string> = {
 
 const statusColors: Record<string, string> = {
   pending: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-  running: "bg-blue-500/10 text-blue-600 border-blue-500/20",
+  running: "bg-primary/10 text-primary border-primary/20",
   completed: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
   error: "bg-red-500/10 text-red-600 border-red-500/20",
 };
@@ -111,7 +111,7 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
 
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex items-center gap-2">
-            <div className="flex h-6 w-6 items-center justify-center rounded bg-violet-500/10 text-violet-600">
+            <div className="flex h-6 w-6 items-center justify-center rounded bg-accent/15 text-accent">
               <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path
                   strokeLinecap="round"

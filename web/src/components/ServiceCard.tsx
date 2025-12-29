@@ -41,7 +41,7 @@ export function ServiceCard({
           onClick={onSelect}
         >
           {/* Decorative gradient orb */}
-          <div className="absolute -right-4 -top-4 w-24 h-24 bg-gradient-to-br from-primary/20 to-purple-500/20 rounded-full blur-2xl pointer-events-none" />
+          <div className="absolute -right-4 -top-4 w-24 h-24 bg-gradient-to-br from-primary/15 to-primary/5 rounded-full blur-2xl pointer-events-none" />
 
           <CardHeader className="pb-3 relative z-10">
             <div className="flex items-center justify-between">
@@ -100,4 +100,3 @@ export function ServiceCard({
     </>
   );
 }
-

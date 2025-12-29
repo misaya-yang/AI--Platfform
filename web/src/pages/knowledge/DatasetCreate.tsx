@@ -155,10 +155,10 @@ Try pasting your own content here to test.`);
   };
 
   return (
-    <div className="border rounded-lg p-4 bg-white">
+    <div className="border rounded-lg p-4 bg-card">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <Eye className="h-4 w-4 text-indigo-500" />
+          <Eye className="h-4 w-4 text-primary" />
           <Label className="text-sm font-medium">分段预览</Label>
         </div>
         <Dialog open={showPreview} onOpenChange={setShowPreview}>
@@ -189,24 +189,24 @@ Try pasting your own content here to test.`);
                     {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "执行分段"}
                   </Button>
                 </div>
-                <div className="flex-1 border rounded-md bg-gray-50 p-4 overflow-y-auto">
+                <div className="flex-1 border rounded-md bg-muted/40 p-4 overflow-y-auto">
                   <div className="space-y-4">
                     {chunks.map((c, i) => (
-                      <div key={i} className="bg-white p-3 rounded border shadow-sm text-sm">
-                        <div className="mb-2 text-xs text-gray-400 flex justify-between">
+                      <div key={i} className="bg-card p-3 rounded border shadow-sm text-sm">
+                        <div className="mb-2 text-xs text-muted-foreground/70 flex justify-between">
                           <span># {i + 1}</span>
                           <span>{c.char_count} chars</span>
                         </div>
                         <div className="whitespace-pre-wrap">{c.content}</div>
                         {c.metadata && Object.keys(c.metadata).length > 0 && (
-                          <div className="mt-2 pt-2 border-t text-xs text-gray-500">
+                          <div className="mt-2 pt-2 border-t text-xs text-muted-foreground">
                             {JSON.stringify(c.metadata)}
                           </div>
                         )}
                       </div>
                     ))}
                     {chunks.length === 0 && !loading && (
-                      <div className="text-center text-gray-400 py-10">
+                      <div className="text-center text-muted-foreground/70 py-10">
                         点击执行分段查看结果
                       </div>
                     )}
@@ -217,7 +217,7 @@ Try pasting your own content here to test.`);
           </DialogContent>
         </Dialog>
       </div>
-      <div className="text-xs text-gray-500">
+      <div className="text-xs text-muted-foreground">
         可以在此处测试不同分段设置下的实际效果
       </div>
     </div>
@@ -393,23 +393,23 @@ export default function DatasetCreatePage() {
   // ============================================================
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-background">
       {/* Header */}
-      <div className="bg-white border-b px-6 py-4">
+      <div className="bg-card border-b px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center gap-4">
           <button
             onClick={() => navigate("/knowledge")}
-            className="text-gray-500 hover:text-gray-700 transition"
+            className="text-muted-foreground hover:text-foreground/80 transition"
           >
             <ArrowLeft className="h-5 w-5" />
           </button>
-          <div className="text-gray-400">/</div>
-          <h1 className="text-lg font-semibold text-gray-900">创建知识库</h1>
+          <div className="text-muted-foreground/70">/</div>
+          <h1 className="text-lg font-semibold text-foreground">创建知识库</h1>
         </div>
       </div>
 
       {/* Step Indicator */}
-      <div className="bg-white border-b">
+      <div className="bg-card border-b">
         <div className="max-w-4xl mx-auto px-6 py-6">
           <div className="flex items-center justify-center gap-4">
             {[
@@ -421,16 +421,16 @@ export default function DatasetCreatePage() {
                 <div className="flex items-center gap-2">
                   <div
                     className={`w-7 h-7 rounded-full flex items-center justify-center text-sm font-medium transition-all ${step > s.num
-                      ? "bg-indigo-600 text-white"
+                      ? "bg-primary text-white"
                       : step === s.num
-                        ? "bg-indigo-600 text-white ring-4 ring-indigo-100"
-                        : "bg-gray-200 text-gray-500"
+                        ? "bg-primary text-white ring-4 ring-primary/10"
+                        : "bg-border text-muted-foreground"
                       }`}
                   >
                     {step > s.num ? <Check className="h-4 w-4" /> : s.num}
                   </div>
                   <span
-                    className={`text-sm font-medium ${step >= s.num ? "text-gray-900" : "text-gray-400"
+                    className={`text-sm font-medium ${step >= s.num ? "text-foreground" : "text-muted-foreground/70"
                       }`}
                   >
                     {s.label}
@@ -438,7 +438,7 @@ export default function DatasetCreatePage() {
                 </div>
                 {i < 2 && (
                   <div
-                    className={`w-24 h-0.5 mx-4 transition-all ${step > s.num ? "bg-indigo-600" : "bg-gray-200"
+                    className={`w-24 h-0.5 mx-4 transition-all ${step > s.num ? "bg-primary" : "bg-border"
                       }`}
                   />
                 )}
@@ -496,9 +496,9 @@ export default function DatasetCreatePage() {
                   {EMBEDDING_MODELS.map((m) => (
                     <SelectItem key={`${m.provider}:${m.model}`} value={`${m.provider}:${m.model}`}>
                       <div className="flex items-center gap-2">
-                        <Sparkles className="h-4 w-4 text-indigo-500" />
+                        <Sparkles className="h-4 w-4 text-primary" />
                         <span>{m.name}</span>
-                        <span className="text-gray-400 text-xs">({m.dimension}维)</span>
+                        <span className="text-muted-foreground/70 text-xs">({m.dimension}维)</span>
                       </div>
                     </SelectItem>
                   ))}
@@ -513,7 +513,7 @@ export default function DatasetCreatePage() {
           <div className="space-y-6">
             {/* File Upload */}
             <div
-              className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-indigo-400 transition cursor-pointer"
+              className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/40 transition cursor-pointer"
               onClick={() => fileInputRef.current?.click()}
               onDragOver={(e) => {
                 e.preventDefault();
@@ -525,12 +525,12 @@ export default function DatasetCreatePage() {
                 handleFilesSelect(e.dataTransfer.files);
               }}
             >
-              <Upload className="h-10 w-10 mx-auto text-gray-400" />
-              <p className="mt-3 text-sm font-medium text-gray-700">点击或拖拽上传文件</p>
-              <p className="text-xs text-gray-500 mt-1">
+              <Upload className="h-10 w-10 mx-auto text-muted-foreground/70" />
+              <p className="mt-3 text-sm font-medium text-foreground/80">点击或拖拽上传文件</p>
+              <p className="text-xs text-muted-foreground mt-1">
                 支持 .pdf, .doc, .docx, .txt, .md, .pptx, .ppt, .png, .jpg, .jpeg, .bmp, .gif, .xls, .xlsx 等格式
               </p>
-              <p className="text-xs text-gray-400 mt-1">单文档最大限制 100MB 或 1000 页，单图片最大限制 20MB</p>
+              <p className="text-xs text-muted-foreground/70 mt-1">单文档最大限制 100MB 或 1000 页，单图片最大限制 20MB</p>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -547,22 +547,22 @@ export default function DatasetCreatePage() {
                 {pendingFiles.map((pf) => (
                   <div
                     key={pf.id}
-                    className="flex items-center justify-between p-3 bg-white rounded-lg border"
+                    className="flex items-center justify-between p-3 bg-card rounded-lg border"
                   >
                     <div className="flex items-center gap-3">
                       <div className="p-2 bg-red-50 rounded">
                         <FileText className="h-5 w-5 text-red-500" />
                       </div>
                       <div>
-                        <p className="text-sm font-medium text-gray-900">{pf.name}</p>
-                        <p className="text-xs text-gray-500">
+                        <p className="text-sm font-medium text-foreground">{pf.name}</p>
+                        <p className="text-xs text-muted-foreground">
                           {(pf.size / 1024).toFixed(1)} KB
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {pf.status === "uploading" && (
-                        <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
                       )}
                       {pf.status === "done" && (
                         <Check className="h-4 w-4 text-green-500" />
@@ -573,9 +573,9 @@ export default function DatasetCreatePage() {
                       {pf.status === "pending" && (
                         <button
                           onClick={() => handleRemoveFile(pf.id)}
-                          className="p-1 hover:bg-gray-100 rounded"
+                          className="p-1 hover:bg-secondary/60 rounded"
                         >
-                          <Trash2 className="h-4 w-4 text-gray-400" />
+                          <Trash2 className="h-4 w-4 text-muted-foreground/70" />
                         </button>
                       )}
                     </div>
@@ -618,20 +618,20 @@ export default function DatasetCreatePage() {
                 {pendingUrls.map((pu) => (
                   <div
                     key={pu.id}
-                    className="flex items-center justify-between p-3 bg-white rounded-lg border"
+                    className="flex items-center justify-between p-3 bg-card rounded-lg border"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-blue-50 rounded">
-                        <Link className="h-5 w-5 text-blue-500" />
+                      <div className="p-2 bg-primary/5 rounded">
+                        <Link className="h-5 w-5 text-primary" />
                       </div>
                       <div>
-                        <p className="text-sm font-medium text-gray-900">{pu.title}</p>
-                        <p className="text-xs text-gray-500 truncate max-w-[300px]">{pu.url}</p>
+                        <p className="text-sm font-medium text-foreground">{pu.title}</p>
+                        <p className="text-xs text-muted-foreground truncate max-w-[300px]">{pu.url}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {pu.status === "uploading" && (
-                        <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
                       )}
                       {pu.status === "done" && (
                         <Check className="h-4 w-4 text-green-500" />
@@ -642,9 +642,9 @@ export default function DatasetCreatePage() {
                       {pu.status === "pending" && (
                         <button
                           onClick={() => handleRemoveUrl(pu.id)}
-                          className="p-1 hover:bg-gray-100 rounded"
+                          className="p-1 hover:bg-secondary/60 rounded"
                         >
-                          <Trash2 className="h-4 w-4 text-gray-400" />
+                          <Trash2 className="h-4 w-4 text-muted-foreground/70" />
                         </button>
                       )}
                     </div>
@@ -668,32 +668,32 @@ export default function DatasetCreatePage() {
                   <Card
                     key={mode.id}
                     className={`p-4 cursor-pointer transition-all ${chunkingMode === mode.id
-                      ? "border-2 border-indigo-500 bg-indigo-50/50"
-                      : "border hover:border-gray-300"
+                      ? "border-2 border-primary bg-primary/5"
+                      : "border hover:border-border"
                       }`}
                     onClick={() => setChunkingMode(mode.id)}
                   >
                     <div className="flex items-start justify-between">
-                      <h4 className="text-sm font-medium text-gray-900">{mode.name}</h4>
+                      <h4 className="text-sm font-medium text-foreground">{mode.name}</h4>
                       <div
                         className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${chunkingMode === mode.id
-                          ? "border-indigo-500 bg-indigo-500"
-                          : "border-gray-300"
+                          ? "border-primary bg-primary/50"
+                          : "border-border"
                           }`}
                       >
                         {chunkingMode === mode.id && (
-                          <div className="w-2 h-2 rounded-full bg-white" />
+                          <div className="w-2 h-2 rounded-full bg-card" />
                         )}
                       </div>
                     </div>
-                    <p className="text-xs text-gray-500 mt-2 leading-relaxed">{mode.desc}</p>
+                    <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{mode.desc}</p>
                   </Card>
                 ))}
               </div>
             </div>
 
             {/* Max Chunk Size */}
-            <div className="p-4 bg-gray-50 rounded-lg">
+            <div className="p-4 bg-muted/40 rounded-lg">
               <div className="flex items-center justify-between mb-3">
                 <Label className="text-sm font-medium">
                   最大分段长度 <span className="text-red-500">*</span>
@@ -716,7 +716,7 @@ export default function DatasetCreatePage() {
                   className="w-24"
                 />
               </div>
-              <div className="flex justify-between text-xs text-gray-400 mt-1">
+              <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
                 <span>10</span>
                 <span>6000</span>
               </div>
@@ -736,13 +736,13 @@ export default function DatasetCreatePage() {
 
             {/* Processing Options */}
             <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 rounded-lg bg-white border">
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-700">Metadata 抽取</span>
+                  <span className="text-sm text-foreground/80">Metadata 抽取</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-gray-400" />
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
                         <p className="max-w-xs">自动提取文档标题、作者、日期等元数据</p>
@@ -753,13 +753,13 @@ export default function DatasetCreatePage() {
                 <Switch checked={metadataExtract} onCheckedChange={setMetadataExtract} />
               </div>
 
-              <div className="flex items-center justify-between p-3 rounded-lg bg-white border">
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-700">Excel 表头拼装</span>
+                  <span className="text-sm text-foreground/80">Excel 表头拼装</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-gray-400" />
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
                         <p className="max-w-xs">将Excel表格的列标题拼接到每个单元格内容中，提高检索准确度</p>
@@ -770,13 +770,13 @@ export default function DatasetCreatePage() {
                 <Switch checked={excelHeaderConcat} onCheckedChange={setExcelHeaderConcat} />
               </div>
 
-              <div className="flex items-center justify-between p-3 rounded-lg bg-white border">
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-700">多轮对话改写</span>
+                  <span className="text-sm text-foreground/80">多轮对话改写</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-gray-400" />
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
                         <p className="max-w-xs">在多轮对话中自动改写用户问题，提升检索效果</p>
@@ -796,7 +796,7 @@ export default function DatasetCreatePage() {
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-gray-400" />
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
                         <p className="max-w-xs">使用重排序模型优化检索结果的相关性排序</p>
@@ -812,7 +812,7 @@ export default function DatasetCreatePage() {
                     {RERANK_MODELS.map((m) => (
                       <SelectItem key={m.id} value={m.id}>
                         <div className="flex items-center gap-2">
-                          <Sparkles className="h-4 w-4 text-indigo-500" />
+                          <Sparkles className="h-4 w-4 text-primary" />
                           <span>{m.name}</span>
                         </div>
                       </SelectItem>
@@ -828,7 +828,7 @@ export default function DatasetCreatePage() {
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger>
-                          <HelpCircle className="h-4 w-4 text-gray-400" />
+                          <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                         </TooltipTrigger>
                         <TooltipContent>
                           <p className="max-w-xs">低于此阈值的检索结果将被过滤</p>
@@ -855,7 +855,7 @@ export default function DatasetCreatePage() {
                     step={0.01}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
                   <span>0.01</span>
                   <span>1</span>
                 </div>
@@ -882,7 +882,7 @@ export default function DatasetCreatePage() {
                     className="w-24"
                   />
                 </div>
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
                   <span>1</span>
                   <span>20</span>
                 </div>
@@ -908,7 +908,7 @@ export default function DatasetCreatePage() {
               <Button
                 onClick={() => setStep((s) => s + 1)}
                 disabled={step === 1 ? !canProceedStep1 : step === 2 ? !canProceedStep2 : false}
-                className="bg-indigo-600 hover:bg-indigo-700"
+                className="bg-primary hover:bg-primary/90"
               >
                 下一步
                 <ArrowRight className="ml-2 h-4 w-4" />
@@ -917,7 +917,7 @@ export default function DatasetCreatePage() {
               <Button
                 onClick={handleSubmit}
                 disabled={isSubmitting}
-                className="bg-indigo-600 hover:bg-indigo-700"
+                className="bg-primary hover:bg-primary/90"
               >
                 {isSubmitting ? (
                   <>
