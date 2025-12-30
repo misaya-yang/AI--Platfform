@@ -17,7 +17,7 @@ export function ServicesPage() {
   // 如果当前选中的服务已经不在列表中，重置选择
   if (selectedServiceId && services.length > 0 && !services.some(s => s.service_id === selectedServiceId)) {
     // 延迟执行以避免在渲染期间更新状态
-    setTimeout(() => setSelectedServiceId(null), 0);
+    setTimeout(() => setSelectedServiceId(undefined), 0);
   }
 
   return (

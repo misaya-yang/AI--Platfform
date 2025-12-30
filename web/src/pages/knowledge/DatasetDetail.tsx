@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -20,7 +20,6 @@ import {
   Database,
   Send,
   Eye,
-  EyeOff,
   Clock,
   Hash,
   Globe,
@@ -712,7 +711,7 @@ export function KnowledgeDatasetDetailPage() {
       rerank,
       mmr,
       llm_config: {
-        provider: "deepseek",
+        provider: "deepseek" as const,
         model: qaModel,
         temperature: qaTemperature,
         max_tokens: qaMaxTokens,
@@ -743,18 +742,19 @@ export function KnowledgeDatasetDetailPage() {
       try {
         for await (const chunk of qaQueryStream(datasetId, requestPayload)) {
           const event = (chunk as QAStreamEvent).event;
+          const data = (chunk as QAStreamEvent).data as Record<string, unknown> | undefined;
           if (event === "delta") {
-            const delta = chunk.data?.content;
+            const delta = data?.content;
             if (typeof delta === "string" && delta) {
               streamed = true;
               acc += delta;
               updateAssistant({ content: acc });
             }
           } else if (event === "done") {
-            finalResponse = chunk.data?.result ?? null;
+            finalResponse = (data?.result as QAResponse) ?? null;
             break;
           } else if (event === "error") {
-            throw new Error(chunk.data?.message || "QA stream error");
+            throw new Error((data?.message as string) || "QA stream error");
           }
         }
       } catch (err) {
@@ -775,7 +775,7 @@ export function KnowledgeDatasetDetailPage() {
 
       if (finalResponse) {
         updateAssistant({ content: finalResponse.answer || acc, response: finalResponse, status: "done" });
-        setQaHistory((prev) => [...prev, { query: queryText, response: finalResponse }]);
+        setQaHistory((prev) => [...prev, { query: queryText, response: finalResponse as QAResponse }]);
         return;
       }
 

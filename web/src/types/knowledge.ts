@@ -583,6 +583,8 @@ export function getRetrievalModeLabel(mode: RetrieveMode): string {
     keyword: "关键词检索",
     hybrid: "混合检索",
     vector: "向量检索",
+    dense: "稠密检索",
+    bm25: "BM25检索",
   };
   return labels[mode] || mode;
 }

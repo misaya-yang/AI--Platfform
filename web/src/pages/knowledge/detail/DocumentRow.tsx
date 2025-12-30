@@ -1,4 +1,4 @@
-﻿import React, { useState } from "react";
+import { useState } from "react";
 
 import type { Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";

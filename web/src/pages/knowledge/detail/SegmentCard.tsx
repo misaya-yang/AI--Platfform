@@ -1,4 +1,4 @@
-﻿import React, { useState } from "react";
+import { useState } from "react";
 import { Edit3, Eye, EyeOff, Trash2 } from "lucide-react";
 
 import type { Segment } from "@/types/knowledge";
