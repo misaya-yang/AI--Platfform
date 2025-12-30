@@ -7,6 +7,7 @@ class ServiceType(str, Enum):
     PROCESSING = "processing"
     EMBEDDING = "embedding"
     CLASSIFICATION = "classification"
+    LANGGRAPH = "langgraph"
     CUSTOM = "custom"
 
 
