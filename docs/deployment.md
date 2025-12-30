@@ -20,8 +20,15 @@ cd ai-gateway
 conda create -n ai_gateway python=3.12
 conda activate ai_gateway
 
-# Install dependencies
+# Install dependencies (full installation)
 pip install -e ".[all,dev]"
+
+# Or install specific feature sets:
+# pip install -e "."                    # Core only
+# pip install -e ".[database]"          # + PostgreSQL, Redis
+# pip install -e ".[knowledge]"         # + Qdrant, DashScope
+# pip install -e ".[documents]"         # + PDF, DOCX parsing (pypdf, pdfplumber, python-docx)
+# pip install -e ".[all]"               # All features
 ```
 
 ### 2. Configuration
@@ -277,6 +284,30 @@ docker logs postgres_container
 # Reset and retry (CAUTION: data loss)
 python database/cli.py reset
 ```
+
+### Knowledge Base Document Upload Failed
+
+If PDF/DOCX uploads fail with parsing errors:
+
+```bash
+# Check if document parsing libraries are installed
+python -c "import pypdf; import pdfplumber; print('PDF: OK')"
+python -c "from docx import Document; print('DOCX: OK')"
+
+# Install missing dependencies
+pip install pypdf pdfplumber python-docx beautifulsoup4 lxml
+
+# Or install the documents group
+pip install "ai-gateway[documents]"
+```
+
+**Required libraries by file type:**
+| File Type | Required Package |
+|-----------|------------------|
+| PDF | `pypdf`, `pdfplumber` |
+| DOCX | `python-docx` |
+| HTML | `beautifulsoup4`, `lxml` |
+| DOC (legacy) | `textract` + system dependencies |
 
 ---
 
