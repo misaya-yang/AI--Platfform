@@ -1,20 +1,79 @@
-# Claude Code 本地配置（个人权限，不共享）
-.claude/settings.local.json
+# =============================================================================
+# AI Gateway .gitignore
+# =============================================================================
 
-# Python
-.venv/
+# ======================== Environment & Secrets ========================
+# Local environment configuration (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# ======================== Python ========================
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# ======================== Testing & Coverage ========================
 .pytest_cache/
-*.pyc
-*.pyo
-*.pyd
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ======================== Type Checking & Linting ========================
 .mypy_cache/
 .ruff_cache/
-dist/
-build/
-.env
-config/.env
+.dmypy.json
+dmypy.json
+
+# ======================== IDE & Editor ========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ======================== Claude Code ========================
+.claude/settings.local.json
+
+# ======================== Logs & Temp Files ========================
 *.log
 .err
 .out
 logs/
+tmp/
+temp/
+
+# ======================== OS Generated ========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

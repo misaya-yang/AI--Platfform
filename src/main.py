@@ -1,34 +1,20 @@
 """
-AI Service Gateway 应用入口
+AI Service Gateway - Application Entry Point
 
-使用依赖注入容器和中间件架构重构后的应用入口。
+Unified AI service gateway with multi-protocol adapters, rate limiting,
+circuit breaker, and session management.
 """
 
 from __future__ import annotations
 
-# Load environment variables from .env file FIRST
-import os
+# Load environment variables from .env file BEFORE importing other modules
+# This ensures env vars are available for module-level configurations
 from pathlib import Path
+from dotenv import load_dotenv
 
-# Try to load .env file if it exists
-env_file = Path(__file__).parent.parent / ".env"
-if env_file.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
-    except ImportError:
-        # Manual loading if python-dotenv not installed
-        with open(env_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip()
-                    # Remove quotes if present
-                    if value and value[0] in ('"', "'") and value[-1] == value[0]:
-                        value = value[1:-1]
-                    os.environ.setdefault(key, value)
+# Load .env from project root (one level up from src/)
+_env_file = Path(__file__).parent.parent / ".env"
+load_dotenv(_env_file, override=False)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

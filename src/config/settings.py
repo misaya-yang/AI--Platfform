@@ -169,16 +169,20 @@ class ProxySettings(BaseModel):
 
 
 class Settings(BaseSettings):
+    """
+    Application settings loaded from environment variables.
+
+    Configuration sources (in order of precedence):
+    1. Environment variables (highest priority)
+    2. .env file in project root
+
+    All settings use GATEWAY_ prefix with double underscore for nested values.
+    Example: GATEWAY_DATABASE__ENABLED=true
+    """
     model_config = SettingsConfigDict(
         env_prefix="GATEWAY_",
         env_nested_delimiter="__",
-        # Prefer repo-local env files (used by this project layout), but keep
-        # compatibility with conventional root `.env` files as well.
-        # Precedence (later overrides earlier):
-        # - config/env.local: committed template/defaults
-        # - config/.env: local actual config (e.g., port changes)
-        # - .env / .env.local: conventional root env files (optional)
-        env_file=("config/env.local", "config/.env", ".env", ".env.local"),
+        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
