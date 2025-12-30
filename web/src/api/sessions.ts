@@ -10,10 +10,29 @@ export interface SessionSummary {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface SessionMessageToolCall {
+  tool_call_id: string;
+  name: string;
+  arguments: string;
+  result?: string | null;
+}
+
+export interface SessionMessageMetadata {
+  tool_calls?: SessionMessageToolCall[];
+  stats?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    duration_ms?: number;
+    first_token_ms?: number;
+  };
+}
+
 export interface SessionMessage {
   role: "user" | "assistant" | string;
   content: unknown;
   timestamp: string;
+  metadata?: SessionMessageMetadata | null;
 }
 
 export async function listSessions(params?: {

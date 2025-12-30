@@ -130,6 +130,11 @@ async def get_history(
         raise HTTPException(status_code=404, detail="session not found")
     history = await session_manager.history(session_id, limit=limit)
     return [
-        {"role": m.role, "content": m.content, "timestamp": m.timestamp}
+        {
+            "role": m.role,
+            "content": m.content,
+            "timestamp": m.timestamp,
+            "metadata": m.metadata if hasattr(m, "metadata") and m.metadata else None,
+        }
         for m in history
     ]

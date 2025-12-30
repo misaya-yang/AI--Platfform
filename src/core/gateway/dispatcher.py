@@ -205,20 +205,16 @@ class GatewayDispatcher:
         if service.circuit_breaker_enabled:
             await circuit.allow()
 
-        # User message persistence (fire and forget)
+        # User message persistence - wait for completion to ensure message is saved
         acc_text: str = ""
         if session_id and service.session_enabled:
             user_text = self._inputs_to_text(request)
             if user_text:
-                async def _add_user_message():
-                    try:
-                        await self.session_manager.add_message(session_id, "user", user_text)
-                    except Exception as e:
-                        logger.error(f"Failed to persist user message to session {session_id}: {e}")
-
-                # Fire and forget with error handling
-                task = asyncio.create_task(_add_user_message())
-                task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
+                try:
+                    await self.session_manager.add_message(session_id, "user", user_text)
+                    logger.debug(f"User message saved to session {session_id}")
+                except Exception as e:
+                    logger.error(f"Failed to persist user message to session {session_id}: {e}")
 
         t_ready = time.perf_counter()
         logger.debug(
@@ -230,6 +226,12 @@ class GatewayDispatcher:
 
         adapter = self.registry.get_adapter(service)
         first_chunk = True
+        t_first_chunk: Optional[float] = None
+
+        # Collect tool calls and stats for session metadata
+        tool_calls_map: Dict[str, Dict] = {}  # tool_call_id -> {name, arguments, result}
+        usage_stats: Optional[Dict] = None
+
         try:
             async for chunk in adapter.stream(request):
                 if first_chunk:
@@ -237,16 +239,103 @@ class GatewayDispatcher:
                     logger.info(f"[TIMING] dispatcher first chunk: {((t_first_chunk - t0)*1000):.1f}ms from stream start")
                     first_chunk = False
                 try:
-                    if getattr(chunk, "event_type", None) == StreamEventType.TEXT_DELTA:
+                    event_type = getattr(chunk, "event_type", None)
+
+                    if event_type == StreamEventType.TEXT_DELTA:
                         delta = getattr(getattr(chunk, "content", None), "data", None)
                         if isinstance(delta, str) and delta:
                             acc_text += delta
+
+                    # Collect tool call information
+                    elif event_type in (StreamEventType.TOOL_CALL_START, StreamEventType.TOOL_CALL_DELTA, StreamEventType.TOOL_CALL_END):
+                        tc = getattr(chunk, "tool_call", None)
+                        if tc:
+                            tc_id = getattr(tc, "tool_call_id", None)
+                            if tc_id:
+                                if tc_id not in tool_calls_map:
+                                    tool_calls_map[tc_id] = {
+                                        "tool_call_id": tc_id,
+                                        "name": getattr(tc, "name", ""),
+                                        "arguments": "",
+                                        "result": None,
+                                    }
+                                # Update name if provided
+                                if getattr(tc, "name", None):
+                                    tool_calls_map[tc_id]["name"] = tc.name
+                                # Update arguments - keep the longest/most complete version
+                                tc_args = getattr(tc, "arguments", "")
+                                if tc_args and len(tc_args) > len(tool_calls_map[tc_id].get("arguments", "")):
+                                    tool_calls_map[tc_id]["arguments"] = tc_args
+
+                    # Collect tool result
+                    elif event_type == StreamEventType.TOOL_RESULT:
+                        tc = getattr(chunk, "tool_call", None)
+                        if tc:
+                            tc_id = getattr(tc, "tool_call_id", None)
+                            if tc_id and tc_id in tool_calls_map:
+                                # Result might be in content or tool_call
+                                result_data = getattr(getattr(chunk, "content", None), "data", None)
+                                if result_data:
+                                    tool_calls_map[tc_id]["result"] = str(result_data)
+
+                    # Collect usage stats from any chunk that has it
+                    chunk_meta = getattr(chunk, "metadata", None)
+                    if chunk_meta and isinstance(chunk_meta, dict):
+                        chunk_usage = chunk_meta.get("usage")
+                        if chunk_usage and isinstance(chunk_usage, dict):
+                            # Merge usage stats (later values override earlier ones)
+                            if usage_stats is None:
+                                usage_stats = {}
+                            usage_stats.update(chunk_usage)
+
                 except Exception:
                     pass
                 yield chunk
         finally:
+            t_end = time.perf_counter()
             if session_id and service.session_enabled and acc_text.strip():
-                await self.session_manager.add_message(session_id, "assistant", acc_text)
+                # Build metadata with tool calls and stats
+                metadata: Dict = {}
+
+                if tool_calls_map:
+                    metadata["tool_calls"] = list(tool_calls_map.values())
+                    logger.debug(f"Collected {len(tool_calls_map)} tool calls for session {session_id}")
+
+                # Build stats with usage and timing - always include timing stats
+                stats: Dict = {}
+                if usage_stats:
+                    stats.update(usage_stats)
+                    logger.debug(f"Usage stats: {usage_stats}")
+
+                # Estimate tokens if not provided by upstream
+                if "input_tokens" not in stats or "output_tokens" not in stats:
+                    user_text = self._inputs_to_text(request)
+                    # Simple estimation: ~4 chars per token for English, ~2 for CJK
+                    def estimate_tokens(text: str) -> int:
+                        if not text:
+                            return 0
+                        # Count CJK characters
+                        cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+                        non_cjk_count = max(len(text) - cjk_count, 0)
+                        return max(1, cjk_count // 2 + non_cjk_count // 4)
+
+                    if "input_tokens" not in stats:
+                        stats["input_tokens"] = estimate_tokens(user_text)
+                    if "output_tokens" not in stats:
+                        stats["output_tokens"] = estimate_tokens(acc_text)
+                    if "total_tokens" not in stats:
+                        stats["total_tokens"] = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
+                    logger.debug(f"Estimated tokens: input={stats.get('input_tokens')}, output={stats.get('output_tokens')}")
+
+                # Add timing stats
+                stats["duration_ms"] = int((t_end - t0) * 1000)
+                if t_first_chunk is not None:
+                    stats["first_token_ms"] = int((t_first_chunk - t0) * 1000)
+
+                metadata["stats"] = stats
+                logger.info(f"Saving assistant message to session {session_id} with metadata: tool_calls={len(tool_calls_map)}, stats={stats}")
+
+                await self.session_manager.add_message(session_id, "assistant", acc_text, metadata=metadata)
 
     async def submit(
         self,

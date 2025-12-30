@@ -10,6 +10,7 @@ import {
   updateSession,
   type SessionSummary,
   type SessionMessage,
+  type SessionMessageToolCall,
 } from "@/api/sessions";
 import { sseFetch } from "@/lib/sse";
 import { cn } from "@/lib/utils";
@@ -212,6 +213,21 @@ function dedupeHistory(history: SessionMessage[]): SessionMessage[] {
   return next;
 }
 
+function convertToolCallsFromMetadata(toolCalls?: SessionMessageToolCall[]): ToolCallWithResult[] | undefined {
+  if (!toolCalls || toolCalls.length === 0) return undefined;
+  return toolCalls.map((tc) => ({
+    toolCall: {
+      tool_call_id: tc.tool_call_id,
+      name: tc.name,
+      arguments: tc.arguments,
+      status: "completed" as const,
+    },
+    result: tc.result ?? undefined,
+    argsText: tc.arguments,
+    argsValid: true,
+  }));
+}
+
 export function PlaygroundPage() {
   const servicesQuery = useServices();
   const services = servicesQuery.data || [];
@@ -291,6 +307,7 @@ export function PlaygroundPage() {
 
     try {
       const history = await getSessionHistory(id, { limit: 200 });
+      console.log("[History] Raw history:", history);
 
       // 检查是否仍然是当前选中的会话（防止竞态条件）
       if (loadingHistorySessionRef.current !== id) {
@@ -299,11 +316,35 @@ export function PlaygroundPage() {
       }
 
       const normalizedHistory = dedupeHistory(history);
-      const nextMessages: ChatMessage[] = normalizedHistory.map((m) => ({
-        role: m.role === "user" ? "user" : "assistant",
-        content:
-          typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
-      }));
+      console.log("[History] After dedupe:", normalizedHistory);
+
+      const nextMessages: ChatMessage[] = normalizedHistory.map((m) => {
+        const role = m.role === "user" ? "user" : "assistant";
+        const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+
+        // Extract tool calls and stats from metadata for assistant messages
+        if (role === "assistant" && m.metadata) {
+          console.log("[History] Assistant metadata:", m.metadata);
+          const toolCalls = convertToolCallsFromMetadata(m.metadata.tool_calls);
+          const stats = m.metadata.stats ? {
+            durationMs: m.metadata.stats.duration_ms,
+            firstTokenMs: m.metadata.stats.first_token_ms,
+            inputTokens: m.metadata.stats.input_tokens,
+            outputTokens: m.metadata.stats.output_tokens,
+            totalTokens: m.metadata.stats.total_tokens,
+          } : undefined;
+          console.log("[History] Extracted stats:", stats);
+
+          return {
+            role,
+            content,
+            toolCalls,
+            stats,
+          };
+        }
+
+        return { role, content };
+      });
       setMessages(nextMessages);
     } catch (err) {
       // 只有当仍是当前会话时才显示错误
