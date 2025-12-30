@@ -158,56 +158,74 @@ class GatewayDispatcher:
         client_ip: Optional[str] = None,
     ) -> AsyncIterator[StreamChunk]:
         import time
-        
+
         t0 = time.perf_counter()
-        
+
+        # Step 1: Get service (required for subsequent steps)
         service = await self._get_service(request.service_id)
         t_service = time.perf_counter()
-        
-        await self.validator.validate(request, service, roles)
-        t_validate = time.perf_counter()
-        
-        await self.rate_limiter.enforce(request, service, client_ip)
-        t_rate_limit = time.perf_counter()
 
+        # Step 2: Run validate, rate_limit, and session in parallel
+        # These operations are independent once we have the service
+        async def do_validate():
+            await self.validator.validate(request, service, roles)
+
+        async def do_rate_limit():
+            await self.rate_limiter.enforce(request, service, client_ip)
+
+        async def do_session():
+            if service.session_enabled:
+                session = await self.session_manager.get_or_create(
+                    request.session_id,
+                    user_id=request.user_id or "local",
+                    tenant_id=request.tenant_id or "local",
+                    service_id=service.service_id,
+                )
+                return session
+            return None
+
+        # Execute in parallel
+        results = await asyncio.gather(
+            do_validate(),
+            do_rate_limit(),
+            do_session(),
+            return_exceptions=False,  # Raise first exception
+        )
+        t_parallel = time.perf_counter()
+
+        # Extract session result
+        session = results[2]
+        session_id: Optional[str] = None
+        if session:
+            session_id = session.session_id
+            request.session_id = session_id
+
+        # Circuit breaker check (fast, no need to parallelize)
         circuit = self._get_circuit_breaker(service)
         if service.circuit_breaker_enabled:
             await circuit.allow()
 
-        session_id: Optional[str] = None
+        # User message persistence (fire and forget)
         acc_text: str = ""
-        if service.session_enabled:
-            # Always validate/create session via get_or_create to ensure it exists
-            # Even if session_id is pre-set, we need to verify the session is valid
-            session = await self.session_manager.get_or_create(
-                request.session_id,
-                user_id=request.user_id or "local",
-                tenant_id=request.tenant_id or "local",
-                service_id=service.service_id,
-            )
-            session_id = session.session_id
-            request.session_id = session_id
-            
-            # 添加用户消息到历史（异步不阻塞，但捕获错误）
+        if session_id and service.session_enabled:
             user_text = self._inputs_to_text(request)
-            if user_text and session_id:
+            if user_text:
                 async def _add_user_message():
                     try:
                         await self.session_manager.add_message(session_id, "user", user_text)
                     except Exception as e:
                         logger.error(f"Failed to persist user message to session {session_id}: {e}")
-                
+
                 # Fire and forget with error handling
                 task = asyncio.create_task(_add_user_message())
                 task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
-        
-        t_session = time.perf_counter()
+
+        t_ready = time.perf_counter()
         logger.debug(
             f"[TIMING] dispatcher.stream preflight: "
             f"service={((t_service - t0)*1000):.1f}ms, "
-            f"validate={((t_validate - t_service)*1000):.1f}ms, "
-            f"rate_limit={((t_rate_limit - t_validate)*1000):.1f}ms, "
-            f"session={((t_session - t_rate_limit)*1000):.1f}ms"
+            f"parallel(validate+rate_limit+session)={((t_parallel - t_service)*1000):.1f}ms, "
+            f"total={((t_ready - t0)*1000):.1f}ms"
         )
 
         adapter = self.registry.get_adapter(service)

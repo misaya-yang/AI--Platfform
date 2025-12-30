@@ -36,6 +36,7 @@ from ...proxy import (
     ContextInjector,
     RequestContext,
 )
+from ...proxy.transparent_proxy import LANGGRAPH_OPERATION_TYPES
 
 logger = get_logger(__name__)
 
@@ -129,19 +130,22 @@ async def transparent_proxy_handler(
     3. 构建代理请求
     4. 执行代理并返回响应
     """
-    # 1. 限流检查
-    await check_proxy_rate_limit(user, rate_limiter, service_name)
-    
-    # 2. 提取请求上下文
+    # 1. 检测操作类型（用于限流）
+    operation = TransparentProxy.detect_operation_type(request.method, path)
+
+    # 2. 限流检查
+    await check_proxy_rate_limit(user, rate_limiter, service_name, operation)
+
+    # 3. 提取请求上下文
     context = _build_request_context(request, user)
-    
-    # 3. 读取请求体
+
+    # 4. 读取请求体
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
-    
-    # 4. 检查是否期望流式响应
+
+    # 5. 检查是否期望流式响应
     wants_stream = _wants_streaming(request, path)
-    
-    # 5. 构建代理请求
+
+    # 6. 构建代理请求
     proxy_request = ProxyRequest(
         service_name=service_name,
         path=path,
@@ -152,23 +156,23 @@ async def transparent_proxy_handler(
         stream=wants_stream,
     )
     
-    # 6. 执行代理
+    # 7. 执行代理
     logger.info(
         f"[ProxyRoute] {request.method} /proxy/{service_name}/{path} "
-        f"user={user.user_id} stream={wants_stream}"
+        f"user={user.user_id} op={operation} stream={wants_stream}"
     )
-    
+
     response = await proxy.proxy(proxy_request)
-    
-    # 7. 处理网关内部错误（如服务不存在、配置错误）
+
+    # 8. 处理网关内部错误（如服务不存在、配置错误）
     # 注意：上游 4xx/5xx 错误不在此处理，直接透传
     if response.error:
         raise HTTPException(
             status_code=response.status_code,
             detail=response.error,
         )
-    
-    # 8. 返回响应（包括上游的 4xx/5xx 错误，原样透传）
+
+    # 9. 返回响应（包括上游的 4xx/5xx 错误，原样透传）
     if response.is_streaming and response.stream:
         return StreamingResponse(
             response.stream,

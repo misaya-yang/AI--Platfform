@@ -416,6 +416,7 @@ class TestHeaderInjection:
         from src.core.auth.user_resolver import UserContext
 
         proxy = LangGraphProxy.__new__(LangGraphProxy)
+        proxy.auth_token = None  # Required for _build_langgraph_headers
 
         user = UserContext(
             user_id="user_123",
@@ -438,6 +439,7 @@ class TestHeaderInjection:
         from src.core.auth.user_resolver import UserContext
 
         proxy = LangGraphProxy.__new__(LangGraphProxy)
+        proxy.auth_token = None  # Required for _build_langgraph_headers
 
         guest = UserContext(
             user_id="guest_abc123",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, Optional
 
 import httpx
 
@@ -11,48 +12,95 @@ from ..models.service import ServiceDefinition
 class HTTPConnector(BaseConnector):
     """
     HTTP Connector with optimized connection pooling.
-    
+
     Key optimizations for latency:
     - Connection pooling (reuse TCP connections)
-    - Keep-alive connections
-    - Optimized timeout settings
+    - Keep-alive connections with extended expiry
+    - Optimized timeout settings for streaming
     - Explicit pool limits for better resource management
+    - Connection pre-warming for critical paths
     """
-    
+
+    # Default connection pool settings (optimized for high concurrency)
+    DEFAULT_MAX_CONNECTIONS = 200
+    DEFAULT_KEEPALIVE_CONNECTIONS = 50
+    DEFAULT_KEEPALIVE_EXPIRY = 120.0  # 2 minutes
+
+    # Default timeout settings
+    DEFAULT_CONNECT_TIMEOUT = 3.0  # Fast connection establishment
+    DEFAULT_READ_TIMEOUT = 300.0   # Long for streaming
+    DEFAULT_WRITE_TIMEOUT = 60.0
+    DEFAULT_POOL_TIMEOUT = 10.0    # Fail fast if pool exhausted
+
     def __init__(self, service: ServiceDefinition):
         super().__init__(service)
         config = service.connector_config or {}
         self.base_url = str(config.get("base_url", "")).rstrip("/")
-        
+
         # Timeout configuration - optimized for streaming
-        connect_timeout = config.get("connect_timeout", 5.0)  # Reduced for faster failure detection
+        connect_timeout = config.get("connect_timeout", self.DEFAULT_CONNECT_TIMEOUT)
         default_timeout = config.get("timeout", service.timeout) or 60.0
-        stream_timeout = config.get("stream_timeout", 300.0)
-        
+        stream_timeout = config.get("stream_timeout", self.DEFAULT_READ_TIMEOUT)
+        pool_timeout = config.get("pool_timeout", self.DEFAULT_POOL_TIMEOUT)
+
         timeout = httpx.Timeout(
             connect=connect_timeout,
             read=stream_timeout,
             write=default_timeout,
-            pool=10.0,  # Short pool timeout - fail fast if pool exhausted
+            pool=pool_timeout,
         )
-        
-        # Connection pool limits
+
+        # Connection pool limits - optimized for high concurrency
+        max_connections = config.get("max_connections", self.DEFAULT_MAX_CONNECTIONS)
+        keepalive_connections = config.get("keepalive_connections", self.DEFAULT_KEEPALIVE_CONNECTIONS)
+        keepalive_expiry = config.get("keepalive_expiry", self.DEFAULT_KEEPALIVE_EXPIRY)
+
         limits = httpx.Limits(
-            max_connections=100,
-            max_keepalive_connections=20,
-            keepalive_expiry=30.0,  # Keep connections alive for 30s
+            max_connections=max_connections,
+            max_keepalive_connections=keepalive_connections,
+            keepalive_expiry=keepalive_expiry,
         )
-        
+
         headers = config.get("headers") or {}
-        
-        # HTTP/2 disabled by default - can cause negotiation delays in some environments
+
+        # HTTP/2 support - configurable, disabled by default for compatibility
+        http2_enabled = config.get("http2", False)
+
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
             limits=limits,
             headers=headers,
-            http2=False,
+            http2=http2_enabled,
         )
+
+        # Track if connections have been warmed up
+        self._warmed_up = False
+
+    async def warm_up_connections(self, count: int = 5) -> None:
+        """
+        Pre-warm connection pool by establishing connections.
+
+        This can significantly reduce first-request latency for critical services
+        by establishing TCP connections and TLS handshakes in advance.
+
+        Args:
+            count: Number of connections to pre-establish (default: 5)
+        """
+        if self._warmed_up:
+            return
+
+        async def warm_one():
+            try:
+                # HEAD request is lightweight
+                await self._client.head("/", timeout=2.0)
+            except Exception:
+                pass  # Ignore failures during warm-up
+
+        # Warm up connections in parallel
+        tasks = [warm_one() for _ in range(min(count, 10))]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._warmed_up = True
 
     async def request(self, method: str, url: str, **kwargs: Any) -> Any:
         # 支持动态传递额外的 headers（与 client 默认 headers 合并）

@@ -79,8 +79,25 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
     setSaving(true);
     setError(null);
     try {
-      // 自动生成 service_id 和 name
-      const serviceId = formData.graphId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      // 自动生成 service_id - 包含 URL 信息以保证唯一性
+      // 从 URL 中提取主机名和端口作为前缀
+      let urlPrefix = "";
+      try {
+        const url = new URL(formData.deploymentUrl);
+        // 使用主机名（去掉 localhost）和端口
+        const host = url.hostname === "localhost" ? "" : url.hostname.split(".")[0];
+        const port = url.port && url.port !== "80" && url.port !== "443" ? `-${url.port}` : "";
+        urlPrefix = host ? `${host}${port}-` : (port ? `local${port}-` : "");
+      } catch {
+        // URL 解析失败，使用简单哈希
+        const hash = formData.deploymentUrl.split("").reduce((a, b) => {
+          a = ((a << 5) - a) + b.charCodeAt(0);
+          return a & a;
+        }, 0);
+        urlPrefix = `svc${Math.abs(hash).toString(36).slice(0, 4)}-`;
+      }
+      const graphIdClean = formData.graphId.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      const serviceId = `${urlPrefix}${graphIdClean}`.replace(/^-+|-+$/g, "").replace(/-+/g, "-");
       
       await api.post("/api/v1/config/services/langgraph", {
         service_id: serviceId,

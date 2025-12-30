@@ -180,8 +180,10 @@ class LangGraphProxy:
         "admin": float('inf'),
     }
     
-    # Thread 缓存 TTL（秒）
+    # 缓存 TTL（秒）
     THREAD_CACHE_TTL = 60
+    ASSISTANT_CACHE_TTL = 300
+    ASSISTANTS_LIST_CACHE_TTL = 60
 
     def __init__(
         self,
@@ -192,11 +194,15 @@ class LangGraphProxy:
     ):
         self.lb = load_balancer
         self.rate_limiter = rate_limiter
-        self.redis = redis_client
+        self.redis = redis_client  # RedisStorage instance
         self.auth_token = auth_token
         self._clients: Dict[str, httpx.AsyncClient] = {}
-        # Thread 元数据缓存: {thread_id: (thread_data, timestamp)}
+        # L1 缓存: Thread 元数据 {cache_key: (thread_data, timestamp)}
         self._thread_cache: Dict[str, tuple] = {}
+        # L1 缓存: Assistant 信息 {assistant_id: (assistant_data, timestamp)}
+        self._assistant_cache: Dict[str, tuple] = {}
+        # L1 缓存: Assistants 列表 {user_id: (assistants_list, timestamp)}
+        self._assistants_list_cache: Dict[str, tuple] = {}
     
     async def _get_client(self, instance: LangGraphInstance) -> httpx.AsyncClient:
         """获取或创建实例的 HTTP 客户端"""
@@ -292,7 +298,30 @@ class LangGraphProxy:
         offset: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """列出 Assistants"""
+        """列出 Assistants（带二级缓存）"""
+        # 只缓存无特殊参数的列表请求
+        use_cache = limit == 10 and offset == 0 and not metadata
+        cache_key = user.user_id
+
+        if use_cache:
+            # L1: 检查本地缓存
+            cached = self._assistants_list_cache.get(cache_key)
+            if cached:
+                data, cached_at = cached
+                if time.time() - cached_at < self.ASSISTANTS_LIST_CACHE_TTL:
+                    return data
+
+            # L2: 检查 Redis 缓存
+            if self.redis and self.redis.enabled:
+                try:
+                    cached_data = await self.redis.get_cached_assistants_list(user.user_id)
+                    if cached_data:
+                        # 回填 L1 缓存
+                        self._assistants_list_cache[cache_key] = (cached_data, time.time())
+                        return cached_data
+                except Exception:
+                    pass
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
@@ -303,17 +332,62 @@ class LangGraphProxy:
 
         response = await client.post("/assistants/search", json=params, headers=headers)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+
+        # 更新缓存
+        if use_cache:
+            # L1 缓存
+            self._assistants_list_cache[cache_key] = (result, time.time())
+            # L2 Redis 缓存
+            if self.redis and self.redis.enabled:
+                try:
+                    await self.redis.cache_assistants_list(
+                        user.user_id, result, self.ASSISTANTS_LIST_CACHE_TTL
+                    )
+                except Exception:
+                    pass
+
+        return result
 
     async def get_assistant(self, user: UserContext, assistant_id: str) -> Dict[str, Any]:
-        """获取 Assistant 详情"""
+        """获取 Assistant 详情（带二级缓存）"""
+        # L1: 检查本地缓存
+        cached = self._assistant_cache.get(assistant_id)
+        if cached:
+            data, cached_at = cached
+            if time.time() - cached_at < self.ASSISTANT_CACHE_TTL:
+                return data
+
+        # L2: 检查 Redis 缓存
+        if self.redis and self.redis.enabled:
+            try:
+                cached_data = await self.redis.get_cached_assistant(assistant_id)
+                if cached_data:
+                    # 回填 L1 缓存
+                    self._assistant_cache[assistant_id] = (cached_data, time.time())
+                    return cached_data
+            except Exception:
+                pass
+
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
 
         response = await client.get(f"/assistants/{assistant_id}", headers=headers)
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+
+        # 更新缓存
+        # L1 缓存
+        self._assistant_cache[assistant_id] = (result, time.time())
+        # L2 Redis 缓存
+        if self.redis and self.redis.enabled:
+            try:
+                await self.redis.cache_assistant(assistant_id, result, self.ASSISTANT_CACHE_TTL)
+            except Exception:
+                pass
+
+        return result
     
     async def create_assistant(
         self,
@@ -382,11 +456,18 @@ class LangGraphProxy:
         response.raise_for_status()
         thread = response.json()
 
-        # 预填充缓存
+        # 预填充二级缓存
         thread_id = thread.get("thread_id")
         if thread_id:
+            # L1 缓存
             cache_key = f"{thread_id}:{user.user_id}"
             self._thread_cache[cache_key] = (thread, time.time())
+            # L2 Redis 缓存
+            if self.redis and self.redis.enabled:
+                try:
+                    await self.redis.cache_thread(thread_id, thread, self.THREAD_CACHE_TTL)
+                except Exception:
+                    pass
 
         # 记录用户的 Thread 计数
         await self._increment_thread_count(user)
@@ -396,19 +477,33 @@ class LangGraphProxy:
     async def get_thread(
         self, user: UserContext, thread_id: str, use_cache: bool = True
     ) -> Dict[str, Any]:
-        """获取 Thread，验证所有权
+        """获取 Thread，验证所有权（带二级缓存）
 
         Args:
             use_cache: 是否使用缓存（默认 True，可显著减少延迟）
         """
-        # 检查缓存
+        cache_key = f"{thread_id}:{user.user_id}"
+
         if use_cache:
-            cache_key = f"{thread_id}:{user.user_id}"
+            # L1: 检查本地缓存
             cached = self._thread_cache.get(cache_key)
             if cached:
                 thread_data, cached_at = cached
                 if time.time() - cached_at < self.THREAD_CACHE_TTL:
                     return thread_data
+
+            # L2: 检查 Redis 缓存
+            if self.redis and self.redis.enabled:
+                try:
+                    cached_data = await self.redis.get_cached_thread(thread_id)
+                    if cached_data:
+                        # 验证所有权
+                        self._verify_ownership(cached_data, user)
+                        # 回填 L1 缓存
+                        self._thread_cache[cache_key] = (cached_data, time.time())
+                        return cached_data
+                except Exception:
+                    pass
 
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
@@ -424,10 +519,16 @@ class LangGraphProxy:
         # 验证所有权
         self._verify_ownership(thread, user)
 
-        # 更新缓存
+        # 更新二级缓存
         if use_cache:
-            cache_key = f"{thread_id}:{user.user_id}"
+            # L1 缓存
             self._thread_cache[cache_key] = (thread, time.time())
+            # L2 Redis 缓存
+            if self.redis and self.redis.enabled:
+                try:
+                    await self.redis.cache_thread(thread_id, thread, self.THREAD_CACHE_TTL)
+                except Exception:
+                    pass
 
         return thread
 
@@ -452,9 +553,16 @@ class LangGraphProxy:
         response = await client.patch(f"/threads/{thread_id}", json=payload, headers=headers)
         response.raise_for_status()
 
-        # 失效缓存
+        # 失效二级缓存
+        # L1 缓存
         cache_key = f"{thread_id}:{user.user_id}"
         self._thread_cache.pop(cache_key, None)
+        # L2 Redis 缓存
+        if self.redis and self.redis.enabled:
+            try:
+                await self.redis.invalidate_thread(thread_id)
+            except Exception:
+                pass
 
         return response.json()
 
@@ -470,9 +578,16 @@ class LangGraphProxy:
         response = await client.delete(f"/threads/{thread_id}", headers=headers)
         response.raise_for_status()
 
-        # 失效缓存
+        # 失效二级缓存
+        # L1 缓存
         cache_key = f"{thread_id}:{user.user_id}"
         self._thread_cache.pop(cache_key, None)
+        # L2 Redis 缓存
+        if self.redis and self.redis.enabled:
+            try:
+                await self.redis.invalidate_thread(thread_id)
+            except Exception:
+                pass
 
         # 减少 Thread 计数
         await self._decrement_thread_count(user)
@@ -939,20 +1054,28 @@ class LangGraphProxy:
     
     async def _count_user_threads(self, user_id: str) -> int:
         """统计用户的 Thread 数量"""
-        if self.redis:
-            count = await self.redis.get(f"thread_count:{user_id}")
-            return int(count) if count else 0
+        if self.redis and self.redis.enabled:
+            try:
+                return await self.redis.get_user_thread_count(user_id)
+            except Exception:
+                return 0
         return 0
-    
+
     async def _increment_thread_count(self, user: UserContext) -> None:
         """增加 Thread 计数"""
-        if self.redis:
-            await self.redis.incr(f"thread_count:{user.user_id}")
-    
+        if self.redis and self.redis.enabled:
+            try:
+                await self.redis.incr_user_thread_count(user.user_id)
+            except Exception:
+                pass
+
     async def _decrement_thread_count(self, user: UserContext) -> None:
         """减少 Thread 计数"""
-        if self.redis:
-            await self.redis.decr(f"thread_count:{user.user_id}")
+        if self.redis and self.redis.enabled:
+            try:
+                await self.redis.decr_user_thread_count(user.user_id)
+            except Exception:
+                pass
     
     def _validate_namespace_access(
         self,

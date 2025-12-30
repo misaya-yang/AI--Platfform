@@ -37,6 +37,53 @@ LANGGRAPH_ASSISTANT_PATHS = [
     "/threads/",       # POST /threads/{thread_id}/runs etc.
 ]
 
+# LangGraph API 操作类型映射（用于限流）
+LANGGRAPH_OPERATION_TYPES = {
+    # Assistants API
+    "GET /assistants": "assistant_list",
+    "POST /assistants": "assistant_create",
+    "POST /assistants/search": "assistant_list",
+    "GET /assistants/": "assistant_read",
+    "PATCH /assistants/": "assistant_update",
+    "DELETE /assistants/": "assistant_delete",
+    # Threads API
+    "POST /threads": "thread_create",
+    "POST /threads/search": "thread_search",
+    "GET /threads/": "thread_read",
+    "PATCH /threads/": "thread_update",
+    "DELETE /threads/": "thread_delete",
+    # Thread State API
+    "GET /threads/*/state": "state_read",
+    "POST /threads/*/state": "state_update",
+    "GET /threads/*/history": "history_read",
+    # Runs API
+    "POST /threads/*/runs": "run_create",
+    "POST /threads/*/runs/stream": "run_stream",
+    "POST /threads/*/runs/wait": "run_wait",
+    "GET /threads/*/runs": "run_list",
+    "GET /threads/*/runs/": "run_read",
+    "POST /threads/*/runs/*/cancel": "run_cancel",
+    "POST /threads/*/runs/*/join": "run_join",
+    # Stateless Runs API
+    "POST /runs": "run_create",
+    "POST /runs/stream": "run_stream",
+    "POST /runs/wait": "run_wait",
+    "GET /runs/": "run_read",
+    # Store API
+    "GET /store/items": "store_read",
+    "POST /store/items": "store_write",
+    "DELETE /store/items": "store_delete",
+    "GET /store/namespaces": "store_list",
+    "POST /store/namespaces": "store_list",
+    # Crons API
+    "GET /crons": "cron_list",
+    "POST /crons": "cron_create",
+    "GET /crons/": "cron_read",
+    "PATCH /crons/": "cron_update",
+    "DELETE /crons/": "cron_delete",
+    "POST /crons/*/trigger": "cron_trigger",
+}
+
 
 @dataclass
 class ProxyRequest:
@@ -528,7 +575,7 @@ class TransparentProxy:
     def _is_streaming_path(self, path: str) -> bool:
         """
         检查是否是流式路径
-        
+
         LangGraph 的流式端点：
         - /runs/stream
         - /threads/{thread_id}/runs/stream
@@ -538,19 +585,65 @@ class TransparentProxy:
             "/runs/stream",
             "/sse",
         ]
-        
+
         path_lower = path.lower()
-        
+
         # 精确匹配流式后缀
         for suffix in streaming_suffixes:
             if path_lower.endswith(suffix):
                 return True
-        
+
         # 检查路径中是否包含 "stream"（但要排除 "upstream" 等）
         if "/stream" in path_lower:
             return True
-        
+
         return False
+
+    @staticmethod
+    def detect_operation_type(method: str, path: str) -> str:
+        """
+        检测 LangGraph API 操作类型
+
+        用于更精细的限流控制。
+
+        Args:
+            method: HTTP 方法
+            path: 请求路径
+
+        Returns:
+            操作类型字符串，如 "run_stream", "thread_create" 等
+        """
+        import re
+
+        path_lower = path.lower().rstrip("/")
+        method_upper = method.upper()
+
+        # 首先尝试精确匹配
+        key = f"{method_upper} {path_lower}"
+        if key in LANGGRAPH_OPERATION_TYPES:
+            return LANGGRAPH_OPERATION_TYPES[key]
+
+        # 尝试前缀匹配（带 /）
+        for pattern, op_type in LANGGRAPH_OPERATION_TYPES.items():
+            p_method, p_path = pattern.split(" ", 1)
+            if p_method != method_upper:
+                continue
+
+            # 通配符模式匹配
+            if "*" in p_path:
+                # 将通配符转换为正则
+                regex_pattern = p_path.replace("*", "[^/]+")
+                if p_path.endswith("/"):
+                    regex_pattern = regex_pattern + ".*"
+                if re.match(f"^{regex_pattern}$", path_lower):
+                    return op_type
+            elif p_path.endswith("/"):
+                # 前缀匹配
+                if path_lower.startswith(p_path[:-1]):
+                    return op_type
+
+        # 默认为 proxy
+        return "proxy"
     
     def _filter_response_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
         """过滤响应头（移除 hop-by-hop 头）"""

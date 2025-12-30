@@ -201,3 +201,132 @@ class RedisStorage:
         """使配置缓存失效"""
         key = f"config:{config_type}"
         await self.delete(key)
+
+    # ===== LangGraph 专用缓存 =====
+
+    async def get_thread_mapping(self, session_id: str) -> Optional[str]:
+        """
+        获取 session_id -> thread_id 映射
+
+        用于 LangGraph 的会话管理，将网关的 session_id 映射到 LangGraph 的 thread_id
+        """
+        key = f"lg:thread_map:{session_id}"
+        result = await self.get(key)
+        return str(result) if result else None
+
+    async def set_thread_mapping(
+        self, session_id: str, thread_id: str, ttl: int = 604800
+    ) -> None:
+        """
+        设置 session_id -> thread_id 映射
+
+        Args:
+            session_id: 网关会话 ID
+            thread_id: LangGraph 线程 ID (UUID 格式)
+            ttl: 过期时间，默认 7 天 (604800 秒)
+        """
+        key = f"lg:thread_map:{session_id}"
+        await self.save(key, thread_id, ttl)
+
+    async def cache_thread(
+        self, thread_id: str, data: Dict[str, Any], ttl: int = 60
+    ) -> None:
+        """
+        缓存 Thread 元数据
+
+        Args:
+            thread_id: LangGraph 线程 ID
+            data: Thread 元数据（包含 metadata、created_at 等）
+            ttl: 过期时间，默认 60 秒
+        """
+        key = f"lg:thread:{thread_id}"
+        await self.save(key, data, ttl)
+
+    async def get_cached_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
+        """获取缓存的 Thread 元数据"""
+        key = f"lg:thread:{thread_id}"
+        return await self.get(key)
+
+    async def invalidate_thread(self, thread_id: str) -> None:
+        """使 Thread 缓存失效"""
+        key = f"lg:thread:{thread_id}"
+        await self.delete(key)
+
+    async def cache_assistant(
+        self, assistant_id: str, data: Dict[str, Any], ttl: int = 300
+    ) -> None:
+        """
+        缓存 Assistant 信息
+
+        Args:
+            assistant_id: LangGraph 助手 ID
+            data: Assistant 配置信息
+            ttl: 过期时间，默认 300 秒 (5 分钟)
+        """
+        key = f"lg:assistant:{assistant_id}"
+        await self.save(key, data, ttl)
+
+    async def get_cached_assistant(self, assistant_id: str) -> Optional[Dict[str, Any]]:
+        """获取缓存的 Assistant 信息"""
+        key = f"lg:assistant:{assistant_id}"
+        return await self.get(key)
+
+    async def cache_assistants_list(
+        self, user_id: str, data: List[Dict[str, Any]], ttl: int = 60
+    ) -> None:
+        """
+        缓存用户的 Assistants 列表
+
+        Args:
+            user_id: 用户 ID
+            data: Assistants 列表
+            ttl: 过期时间，默认 60 秒
+        """
+        key = f"lg:assistants_list:{user_id}"
+        await self.save(key, data, ttl)
+
+    async def get_cached_assistants_list(self, user_id: str) -> Optional[List[Dict[str, Any]]]:
+        """获取缓存的 Assistants 列表"""
+        key = f"lg:assistants_list:{user_id}"
+        result = await self.get(key)
+        if isinstance(result, list):
+            return result
+        return None
+
+    async def incr_user_thread_count(self, user_id: str) -> int:
+        """
+        增加用户 Thread 计数
+
+        用于配额管理，跟踪用户创建的 Thread 数量
+        """
+        key = f"lg:quota:{user_id}:threads"
+        return await self.incr(key)
+
+    async def decr_user_thread_count(self, user_id: str) -> int:
+        """减少用户 Thread 计数（删除 Thread 时调用）"""
+        key = f"lg:quota:{user_id}:threads"
+        return await self.decr(key)
+
+    async def get_user_thread_count(self, user_id: str) -> int:
+        """获取用户 Thread 计数"""
+        key = f"lg:quota:{user_id}:threads"
+        count = await self.get(key)
+        return int(count) if count else 0
+
+    async def incr_user_run_count(self, user_id: str, window: int = 3600) -> int:
+        """
+        增加用户 Run 计数（带滑动窗口）
+
+        用于限流，跟踪用户在时间窗口内的 Run 调用次数
+
+        Args:
+            user_id: 用户 ID
+            window: 时间窗口（秒），默认 1 小时
+        """
+        key = f"lg:quota:{user_id}:runs:{window}"
+        return await self.incr_rate_limit(key, window)
+
+    async def get_user_run_count(self, user_id: str, window: int = 3600) -> int:
+        """获取用户 Run 计数"""
+        key = f"lg:quota:{user_id}:runs:{window}"
+        return await self.get_rate_limit_count(key)

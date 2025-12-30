@@ -72,15 +72,52 @@ function estimateTokens(text: string): number {
 function mergeToolArguments(current: string, incoming: string): string {
   if (!current) return incoming;
   if (!incoming) return current;
+
+  // If incoming is a complete superset, use it directly
   if (incoming.startsWith(current)) return incoming;
   if (current.startsWith(incoming)) return current;
 
-  const maxOverlap = Math.min(current.length, incoming.length);
+  const currentTrimmed = current.trim();
+  const incomingTrimmed = incoming.trim();
+
+  // Detect if values look like JSON objects
+  const currentLooksLikeJson = currentTrimmed.startsWith("{") && currentTrimmed.endsWith("}");
+  const incomingLooksLikeJson = incomingTrimmed.startsWith("{") && incomingTrimmed.endsWith("}");
+
+  // Both look like complete JSON objects - these are accumulated values
+  // Use the longer one (which should have more complete data)
+  if (currentLooksLikeJson && incomingLooksLikeJson) {
+    return incoming.length >= current.length ? incoming : current;
+  }
+
+  // If incoming starts with '{' - it's likely a new accumulated value
+  // Don't try to merge JSON structure with existing content
+  if (incomingTrimmed.startsWith("{")) {
+    return incoming;
+  }
+
+  // If current is complete JSON and incoming is not, incoming is likely a delta
+  // that should extend the JSON content - simply concatenate
+  if (currentLooksLikeJson && !incomingLooksLikeJson) {
+    return current + incoming;
+  }
+
+  // For true deltas, use conservative overlap detection
+  // Limit overlap search to avoid false positives
+  const maxOverlap = Math.min(current.length, incoming.length, 10);
   for (let size = maxOverlap; size > 0; size -= 1) {
-    if (current.endsWith(incoming.slice(0, size))) {
+    const suffix = current.slice(-size);
+    const prefix = incoming.slice(0, size);
+    if (suffix === prefix) {
+      // Avoid false positives with JSON structural characters
+      if (size <= 2 && /^[{}\[\]:,"]+$/.test(suffix)) {
+        continue;
+      }
       return current + incoming.slice(size);
     }
   }
+
+  // Default: simple concatenation
   return current + incoming;
 }
 
@@ -94,18 +131,49 @@ function tryParseJson(text: string): unknown | null {
 
 function resolveToolArguments(current: string, incoming: string, currentValid: boolean): { text: string; isValid: boolean } {
   if (!incoming) return { text: current, isValid: currentValid };
-  if (!current) {
-    const parsed = tryParseJson(incoming);
-    return { text: incoming, isValid: parsed !== null };
-  }
 
-  const merged = mergeToolArguments(current, incoming);
+  // If incoming is valid JSON, use it directly (accumulated value from backend)
   const incomingParsed = tryParseJson(incoming);
   if (incomingParsed !== null) {
+    // Check if incoming is an empty placeholder like {"query": ""}
+    const isEmptyPlaceholder = typeof incomingParsed === 'object' && incomingParsed !== null &&
+      Object.values(incomingParsed).every(v => v === "" || v === null || (Array.isArray(v) && v.length === 0));
+
+    // If current is valid and has content, and incoming is empty placeholder, keep current
+    if (isEmptyPlaceholder && currentValid) {
+      const currentParsed = tryParseJson(current);
+      if (currentParsed !== null && typeof currentParsed === 'object') {
+        const currentHasContent = Object.values(currentParsed).some(v => v !== "" && v !== null && !(Array.isArray(v) && v.length === 0));
+        if (currentHasContent) {
+          return { text: current, isValid: true };
+        }
+      }
+    }
+
     return { text: incoming, isValid: true };
   }
+
+  // Incoming is NOT valid JSON - it's a fragment like "hicle"}"
+  // Only try to merge if we have no valid current value
+  if (!current) {
+    // No current value, just store the fragment (marked as invalid)
+    return { text: incoming, isValid: false };
+  }
+
+  // If current is valid JSON, DON'T corrupt it with invalid fragments
+  if (currentValid) {
+    return { text: current, isValid: true };
+  }
+
+  // Both are invalid, try merging (for true delta streaming scenarios)
+  const merged = mergeToolArguments(current, incoming);
   const mergedParsed = tryParseJson(merged);
-  return { text: merged, isValid: mergedParsed !== null };
+  if (mergedParsed !== null) {
+    return { text: merged, isValid: true };
+  }
+
+  // Fallback: return merged text but mark as invalid
+  return { text: merged, isValid: false };
 }
 
 function normalizeHistoryContent(value: unknown): string {
@@ -163,9 +231,10 @@ export function PlaygroundPage() {
   const stickToBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
   const [showToolCalls, setShowToolCalls] = useState(() => {
-    if (typeof window === "undefined") return false;
+    if (typeof window === "undefined") return true;
     const stored = window.localStorage.getItem("showToolCalls");
-    return stored ? stored === "true" : false;
+    // Default to true if not set
+    return stored === null ? true : stored === "true";
   });
 
   // 会话管理状态（用于左侧历史列表 & 多轮上下文）
@@ -468,12 +537,13 @@ export function PlaygroundPage() {
         const toolCalls = Array.from(toolCallsMap.values()).map((tc) => ({
           toolCall: {
             ...tc.toolCall,
-            arguments: tc.argsValid ? tc.argsText : "",
+            arguments: tc.argsText,
           },
           result: tc.result,
           argsText: tc.argsText,
           argsValid: tc.argsValid,
         }));
+
         startTransition(() => {
           setMessages((m) => {
             const next = [...m];

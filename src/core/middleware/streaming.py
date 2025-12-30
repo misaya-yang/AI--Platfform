@@ -33,18 +33,26 @@ STREAMING_PATH_PREFIXES: List[str] = [
     "/api/v1/conversations/",  # /api/v1/conversations/{id}/stream
     "/api/v1/langgraph/",  # LangGraph SSE endpoints
     "/api/v1/proxy/",  # 透明代理 SSE endpoints
+    "/proxy/",  # 透明代理（无版本前缀）
 ]
 
-# Streaming suffixes to detect
+# Streaming suffixes to detect (LangGraph 兼容)
 STREAMING_SUFFIXES: List[str] = [
-    "/stream",
-    "/runs/stream",
+    "/stream",           # 通用流式后缀
+    "/runs/stream",      # LangGraph runs stream
+    "/sse",              # SSE endpoint
+]
+
+# 额外的流式路径关键词检测
+STREAMING_KEYWORDS: List[str] = [
+    "/stream",           # 包含 stream 的路径
+    "/events",           # SSE events
 ]
 
 
 def is_streaming_path(path: str) -> bool:
     """检查是否是流式路径
-    
+
     Critical for latency: paths detected as streaming will bypass
     response buffering in middleware, enabling true streaming.
     """
@@ -57,10 +65,22 @@ def is_streaming_path(path: str) -> bool:
         if path.endswith(suffix):
             return True
 
-    # Check prefixes with /stream suffix
+    # Check prefixes (streaming API areas)
     for prefix in STREAMING_PATH_PREFIXES:
         if path.startswith(prefix):
-            return True
+            # Check if this specific path is streaming-related
+            for keyword in STREAMING_KEYWORDS:
+                if keyword in path:
+                    return True
+            # Also check suffixes within prefixed paths
+            for suffix in STREAMING_SUFFIXES:
+                if path.endswith(suffix):
+                    return True
+
+    # Check keywords anywhere in path (but exclude false positives like "upstream")
+    path_lower = path.lower()
+    if "/stream" in path_lower and "upstream" not in path_lower:
+        return True
 
     return False
 

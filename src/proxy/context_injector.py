@@ -59,7 +59,7 @@ class ContextInjector:
     # 网关注入的头部前缀
     GW_HEADER_PREFIX = "X-GW-"
     
-    # 标准头部映射
+    # 标准头部映射（网关内部格式）
     HEADER_MAPPINGS = {
         "user_id": "X-GW-User-ID",
         "tenant_id": "X-GW-Tenant-ID",
@@ -68,6 +68,17 @@ class ContextInjector:
         "span_id": "X-Span-ID",
         "user_tier": "X-GW-User-Tier",
         "client_ip": "X-Forwarded-For",
+    }
+
+    # LangGraph 兼容头部映射
+    # LangGraph auth 期望的头部格式（不带 X-GW- 前缀）
+    LANGGRAPH_HEADER_MAPPINGS = {
+        "user_id": "X-User-Id",
+        "tenant_id": "X-Tenant-Id",
+        "user_type": "X-User-Type",
+        "user_tier": "X-User-Tier",
+        "user_name": "X-User-Name",
+        "user_permissions": "X-User-Permissions",
     }
     
     # 需要转发的原始头部（白名单）
@@ -154,19 +165,44 @@ class ContextInjector:
         
         # 2. 注入用户信息
         if self.inject_user_info:
+            # 2a. 网关标准头部（X-GW- 前缀）
             if context.user_id:
                 headers[self.HEADER_MAPPINGS["user_id"]] = context.user_id
             if context.tenant_id:
                 headers[self.HEADER_MAPPINGS["tenant_id"]] = context.tenant_id
             if context.user_tier:
                 headers[self.HEADER_MAPPINGS["user_tier"]] = context.user_tier
-            
+
             # 用户角色（逗号分隔）
             if context.roles:
                 headers["X-GW-User-Roles"] = ",".join(context.roles)
-            
+
             # 认证状态
             headers["X-GW-Authenticated"] = "true" if context.is_authenticated else "false"
+
+            # 2b. LangGraph 兼容头部（无前缀，LangGraph auth 期望的格式）
+            if context.user_id:
+                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_id"]] = context.user_id
+            if context.tenant_id:
+                headers[self.LANGGRAPH_HEADER_MAPPINGS["tenant_id"]] = context.tenant_id
+            if context.user_tier:
+                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_tier"]] = context.user_tier
+
+            # X-User-Type: user/guest/anonymous
+            user_type = "user" if context.is_authenticated else ("guest" if context.user_id else "anonymous")
+            headers[self.LANGGRAPH_HEADER_MAPPINGS["user_type"]] = user_type
+
+            # X-User-Name: 可选的用户名
+            if context.user_id:
+                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_name"]] = f"User-{context.user_id}"
+
+            # X-User-Permissions: 基于角色推断的权限
+            permissions = ["read"]
+            if context.is_authenticated:
+                permissions.append("write")
+            if "admin" in context.roles or context.user_tier == "admin":
+                permissions.extend(["admin", "delete"])
+            headers[self.LANGGRAPH_HEADER_MAPPINGS["user_permissions"]] = ",".join(permissions)
         
         # 3. 注入请求追踪信息
         if self.inject_request_info:
