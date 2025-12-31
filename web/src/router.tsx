@@ -8,6 +8,7 @@ import { TasksPage } from "@/pages/Tasks";
 import { SettingsPage } from "@/pages/Settings";
 import { KnowledgeDatasetsPage, KnowledgeDatasetDetailPage } from "@/pages/knowledge";
 import DatasetCreatePage from "@/pages/knowledge/DatasetCreate";
+import ConfluencePage from "@/pages/confluence/ConfluencePage";
 
 export function AppRouter() {
   return (
@@ -19,6 +20,7 @@ export function AppRouter() {
         <Route path="/knowledge" element={<KnowledgeDatasetsPage />} />
         <Route path="/knowledge/create" element={<DatasetCreatePage />} />
         <Route path="/knowledge/:datasetId" element={<KnowledgeDatasetDetailPage />} />
+        <Route path="/confluence" element={<ConfluencePage />} />
         <Route path="/playground" element={<PlaygroundPage />} />
         <Route path="/tasks" element={<TasksPage />} />
         <Route path="/settings" element={<SettingsPage />} />

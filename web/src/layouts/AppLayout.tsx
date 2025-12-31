@@ -7,6 +7,7 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
   CloudServerOutlined,
+  CloudSyncOutlined,
   UnorderedListOutlined,
   DatabaseOutlined,
   MenuFoldOutlined,
@@ -44,6 +45,12 @@ const navItems = [
     label: "知识库",
     icon: <DatabaseOutlined />,
     description: "管理知识库和文档"
+  },
+  {
+    key: "/confluence",
+    label: "Confluence",
+    icon: <CloudSyncOutlined />,
+    description: "Confluence 文档同步"
   },
   {
     key: "/playground",

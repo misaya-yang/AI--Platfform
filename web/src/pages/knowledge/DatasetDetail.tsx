@@ -1003,7 +1003,7 @@ export function KnowledgeDatasetDetailPage() {
                   批量操作
                 </Button>
 
-                {/* 上传按钮 */}
+                {/* 添加数据下拉菜单 */}
                 <input
                   ref={fileRef}
                   type="file"
@@ -1012,14 +1012,32 @@ export function KnowledgeDatasetDetailPage() {
                   multiple
                   onChange={(e) => handleFilesSelected(e.target.files)}
                 />
-                <Button
-                  onClick={() => fileRef.current?.click()}
-                  disabled={uploading}
-                  className="h-9 bg-primary hover:bg-primary/90 text-white"
-                >
-                  <Plus className="h-4 w-4 mr-1.5" />
-                  上传数据
-                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      disabled={uploading}
+                      className="h-9 bg-primary hover:bg-primary/90 text-white"
+                    >
+                      <Plus className="h-4 w-4 mr-1.5" />
+                      添加数据
+                      <ChevronDown className="h-4 w-4 ml-1" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => fileRef.current?.click()}>
+                      <Upload className="h-4 w-4 mr-2" />
+                      上传文件
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setUrlDialogOpen(true)}>
+                      <Globe className="h-4 w-4 mr-2" />
+                      添加 URL
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setTextDialogOpen(true)}>
+                      <FileText className="h-4 w-4 mr-2" />
+                      添加文本
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             </div>
 
