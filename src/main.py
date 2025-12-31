@@ -278,10 +278,10 @@ def create_app() -> FastAPI:
             from .services.knowledge.confluence.scheduler import ConfluenceScheduler
 
             app.state.confluence_sync_service = ConfluenceSyncService(
-                db=container.database,
+                settings=settings,
+                database=container.database,
                 knowledge_service=app.state.knowledge_service,
                 knowledge_worker=app.state.knowledge_worker,
-                settings=settings,
             )
 
             # 如果启用轮询，启动调度器
