@@ -4,7 +4,7 @@
  * Provides UI for managing Confluence connections and space bindings.
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import {
   Plus,
@@ -31,7 +31,6 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -40,6 +39,16 @@ import {
   DialogFooter,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -66,16 +75,17 @@ import {
   createBinding,
   deleteBinding,
   triggerSync,
-  getSyncStatus,
 } from "@/api/confluence";
 import { listDatasets } from "@/api/knowledge";
 import type {
   ConfluenceConnection,
   ConfluenceConnectionCreateRequest,
+  ConfluenceConnectionUpdateRequest,
   ConfluenceBinding,
   ConfluenceSpace,
   ConfluenceBindingCreateRequest,
 } from "@/types/confluence";
+import type { Dataset } from "@/types/knowledge";
 
 // ============================================================
 // Connection Card Component
@@ -186,10 +196,12 @@ function ConnectionCard({
 
 function BindingCard({
   binding,
+  datasetName,
   onSync,
   onDelete,
 }: {
   binding: ConfluenceBinding;
+  datasetName: string;
   onSync: () => void;
   onDelete: () => void;
 }) {
@@ -221,7 +233,7 @@ function BindingCard({
               </span>
               <ChevronRight className="h-4 w-4 text-muted-foreground" />
               <span className="text-sm text-muted-foreground">
-                知识库 {binding.dataset_id.slice(0, 8)}...
+                {datasetName}
               </span>
             </div>
             <div className="flex items-center gap-2 mt-1">
@@ -274,12 +286,15 @@ export default function ConfluencePage() {
 
   // State
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [bindDialogOpen, setBindDialogOpen] = useState(false);
+  const [deleteConnectionDialogOpen, setDeleteConnectionDialogOpen] = useState(false);
+  const [deleteBindingDialogOpen, setDeleteBindingDialogOpen] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState<ConfluenceConnection | null>(null);
-  const [testingId, setTestingId] = useState<string | null>(null);
+  const [selectedBindingId, setSelectedBindingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ status: string; message: string } | null>(null);
 
-  // Form state for creating connection
+  // Form state for creating/editing connection
   const [formName, setFormName] = useState("");
   const [formDomain, setFormDomain] = useState("");
   const [formEmail, setFormEmail] = useState("");
@@ -294,13 +309,21 @@ export default function ConfluencePage() {
   const [discoveredSpaces, setDiscoveredSpaces] = useState<ConfluenceSpace[]>([]);
   const [discoveringSpaces, setDiscoveringSpaces] = useState(false);
 
+  // Auto-dismiss test result toast
+  useEffect(() => {
+    if (testResult) {
+      const timer = setTimeout(() => setTestResult(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [testResult]);
+
   // Queries
-  const { data: connections = [], isLoading: loadingConnections, refetch: refetchConnections } = useQuery({
+  const { data: connections = [], isLoading: loadingConnections } = useQuery({
     queryKey: ["confluence-connections"],
     queryFn: () => listConnections(),
   });
 
-  const { data: bindings = [], isLoading: loadingBindings, refetch: refetchBindings } = useQuery({
+  const { data: bindings = [], isLoading: loadingBindings } = useQuery({
     queryKey: ["confluence-bindings"],
     queryFn: () => listBindings(),
   });
@@ -310,26 +333,48 @@ export default function ConfluencePage() {
     queryFn: () => listDatasets(),
   });
 
+  // Create a map for quick dataset lookup
+  const datasetMap = useMemo(() => {
+    const map = new Map<string, Dataset>();
+    datasets.forEach((ds) => map.set(ds.dataset_id, ds));
+    return map;
+  }, [datasets]);
+
   // Mutations
   const createMutation = useMutation({
     mutationFn: (payload: ConfluenceConnectionCreateRequest) => createConnection(payload),
     onSuccess: () => {
-      refetchConnections();
+      queryClient.invalidateQueries({ queryKey: ["confluence-connections"] });
       setCreateDialogOpen(false);
+      resetForm();
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (payload: { id: string; data: ConfluenceConnectionUpdateRequest }) =>
+      updateConnection(payload.id, payload.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["confluence-connections"] });
+      setEditDialogOpen(false);
+      setSelectedConnection(null);
       resetForm();
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteConnection(id),
-    onSuccess: () => refetchConnections(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["confluence-connections"] });
+      setDeleteConnectionDialogOpen(false);
+      setSelectedConnection(null);
+    },
   });
 
   const bindMutation = useMutation({
     mutationFn: (payload: { connectionId: string; data: ConfluenceBindingCreateRequest }) =>
       createBinding(payload.connectionId, payload.data),
     onSuccess: () => {
-      refetchBindings();
+      queryClient.invalidateQueries({ queryKey: ["confluence-bindings"] });
       setBindDialogOpen(false);
       resetBindForm();
     },
@@ -337,12 +382,18 @@ export default function ConfluencePage() {
 
   const syncMutation = useMutation({
     mutationFn: (bindingId: string) => triggerSync(bindingId),
-    onSuccess: () => refetchBindings(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["confluence-bindings"] });
+    },
   });
 
   const deleteBindingMutation = useMutation({
     mutationFn: (bindingId: string) => deleteBinding(bindingId),
-    onSuccess: () => refetchBindings(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["confluence-bindings"] });
+      setDeleteBindingDialogOpen(false);
+      setSelectedBindingId(null);
+    },
   });
 
   // Reset form
@@ -364,15 +415,12 @@ export default function ConfluencePage() {
 
   // Handle test connection
   const handleTestConnection = async (connectionId: string) => {
-    setTestingId(connectionId);
     setTestResult(null);
     try {
       const result = await testConnection(connectionId);
       setTestResult(result);
     } catch (error) {
       setTestResult({ status: "error", message: error instanceof Error ? error.message : "测试失败" });
-    } finally {
-      setTestingId(null);
     }
   };
 
@@ -387,6 +435,30 @@ export default function ConfluencePage() {
     } finally {
       setDiscoveringSpaces(false);
     }
+  };
+
+  // Open edit dialog
+  const openEditDialog = (connection: ConfluenceConnection) => {
+    setSelectedConnection(connection);
+    setFormName(connection.name);
+    setFormDomain(connection.domain);
+    setFormEmail(connection.email);
+    setFormApiToken(""); // Don't prefill token for security
+    setFormSyncMode(connection.sync_mode);
+    setFormPollingInterval(connection.polling_interval_minutes);
+    setEditDialogOpen(true);
+  };
+
+  // Open delete connection dialog
+  const openDeleteConnectionDialog = (connection: ConfluenceConnection) => {
+    setSelectedConnection(connection);
+    setDeleteConnectionDialogOpen(true);
+  };
+
+  // Open delete binding dialog
+  const openDeleteBindingDialog = (bindingId: string) => {
+    setSelectedBindingId(bindingId);
+    setDeleteBindingDialogOpen(true);
   };
 
   // Open bind dialog
@@ -409,6 +481,25 @@ export default function ConfluencePage() {
     });
   };
 
+  // Update connection
+  const handleUpdate = () => {
+    if (!selectedConnection) return;
+    const updateData: ConfluenceConnectionUpdateRequest = {
+      name: formName,
+      email: formEmail,
+      sync_mode: formSyncMode,
+      polling_interval_minutes: formPollingInterval,
+    };
+    // Only include api_token if user entered a new one
+    if (formApiToken) {
+      updateData.api_token = formApiToken;
+    }
+    updateMutation.mutate({
+      id: selectedConnection.connection_id,
+      data: updateData,
+    });
+  };
+
   // Create binding
   const handleBind = () => {
     if (!bindConnectionId || !bindDatasetId || !bindSpaceKey) return;
@@ -419,6 +510,12 @@ export default function ConfluencePage() {
         space_key: bindSpaceKey,
       },
     });
+  };
+
+  // Refresh data
+  const handleRefresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["confluence-connections"] });
+    queryClient.invalidateQueries({ queryKey: ["confluence-bindings"] });
   };
 
   return (
@@ -441,10 +538,7 @@ export default function ConfluencePage() {
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => {
-                  refetchConnections();
-                  refetchBindings();
-                }}
+                onClick={handleRefresh}
                 className="h-9 w-9"
               >
                 <RefreshCcw className={`h-4 w-4 ${loadingConnections ? "animate-spin" : ""}`} />
@@ -483,12 +577,8 @@ export default function ConfluencePage() {
                 <ConnectionCard
                   key={conn.connection_id}
                   connection={conn}
-                  onEdit={() => {}}
-                  onDelete={() => {
-                    if (confirm("确定要删除此连接吗？")) {
-                      deleteMutation.mutate(conn.connection_id);
-                    }
-                  }}
+                  onEdit={() => openEditDialog(conn)}
+                  onDelete={() => openDeleteConnectionDialog(conn)}
                   onTest={() => handleTestConnection(conn.connection_id)}
                   onCreateBinding={() => openBindDialog(conn)}
                 />
@@ -516,12 +606,9 @@ export default function ConfluencePage() {
                 <BindingCard
                   key={binding.binding_id}
                   binding={binding}
+                  datasetName={datasetMap.get(binding.dataset_id)?.name || `知识库 ${binding.dataset_id.slice(0, 8)}...`}
                   onSync={() => syncMutation.mutate(binding.binding_id)}
-                  onDelete={() => {
-                    if (confirm("确定要解除此绑定吗？")) {
-                      deleteBindingMutation.mutate(binding.binding_id);
-                    }
-                  }}
+                  onDelete={() => openDeleteBindingDialog(binding.binding_id)}
                 />
               ))}
             </div>
@@ -627,6 +714,143 @@ export default function ConfluencePage() {
         </DialogContent>
       </Dialog>
 
+      {/* Edit Connection Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={(open) => {
+        setEditDialogOpen(open);
+        if (!open) {
+          setSelectedConnection(null);
+          resetForm();
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>编辑 Confluence 连接</DialogTitle>
+            <DialogDescription>修改连接配置（API Token 留空则不修改）</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <Label>连接名称</Label>
+              <Input
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                placeholder="例如: 公司文档库"
+                className="mt-1.5"
+              />
+            </div>
+            <div>
+              <Label>Confluence 域名</Label>
+              <Input
+                value={formDomain}
+                disabled
+                className="mt-1.5 bg-muted"
+              />
+              <p className="text-xs text-muted-foreground mt-1">域名不可修改</p>
+            </div>
+            <div>
+              <Label>邮箱</Label>
+              <Input
+                type="email"
+                value={formEmail}
+                onChange={(e) => setFormEmail(e.target.value)}
+                placeholder="用于认证的邮箱地址"
+                className="mt-1.5"
+              />
+            </div>
+            <div>
+              <Label>API Token</Label>
+              <Input
+                type="password"
+                value={formApiToken}
+                onChange={(e) => setFormApiToken(e.target.value)}
+                placeholder="留空则不修改"
+                className="mt-1.5"
+              />
+            </div>
+            <div>
+              <Label>同步模式</Label>
+              <Select value={formSyncMode} onValueChange={(v) => setFormSyncMode(v as "manual" | "polling")}>
+                <SelectTrigger className="mt-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">手动同步</SelectItem>
+                  <SelectItem value="polling">定时轮询</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {formSyncMode === "polling" && (
+              <div>
+                <Label>轮询间隔（分钟）</Label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={1440}
+                  value={formPollingInterval}
+                  onChange={(e) => setFormPollingInterval(parseInt(e.target.value) || 60)}
+                  className="mt-1.5"
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={handleUpdate}
+              disabled={updateMutation.isPending || !formName || !formEmail}
+            >
+              {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Connection Confirmation Dialog */}
+      <AlertDialog open={deleteConnectionDialogOpen} onOpenChange={setDeleteConnectionDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除连接</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除连接 "{selectedConnection?.name}" 吗？此操作不可撤销，相关的空间绑定也将被删除。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={() => selectedConnection && deleteMutation.mutate(selectedConnection.connection_id)}
+            >
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Binding Confirmation Dialog */}
+      <AlertDialog open={deleteBindingDialogOpen} onOpenChange={setDeleteBindingDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认解除绑定</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要解除此空间绑定吗？已同步的文档不会被删除，但后续不再自动同步更新。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={() => selectedBindingId && deleteBindingMutation.mutate(selectedBindingId)}
+            >
+              {deleteBindingMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+              解除绑定
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Bind Space Dialog */}
       <Dialog open={bindDialogOpen} onOpenChange={setBindDialogOpen}>
         <DialogContent className="max-w-md">
@@ -690,7 +914,7 @@ export default function ConfluencePage() {
 
       {/* Test Result Toast */}
       {testResult && (
-        <div className="fixed bottom-4 right-4 z-50">
+        <div className="fixed bottom-4 right-4 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
           <Card
             className={`p-4 shadow-lg ${
               testResult.status === "success" ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"
