@@ -141,6 +141,29 @@ class KnowledgeSettings(BaseModel):
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
 
 
+class ConfluenceSettings(BaseModel):
+    """Confluence 集成配置"""
+    enabled: bool = False
+
+    # 同步配置
+    sync_batch_size: int = 25  # 每批处理的页面数
+    sync_max_concurrent: int = 3  # 最大并发同步任务数
+    sync_retry_max: int = 3  # 最大重试次数
+    sync_retry_delay: float = 5.0  # 重试延迟（秒）
+
+    # 定时轮询配置
+    polling_enabled: bool = False  # 是否启用定时轮询
+    polling_default_interval_minutes: int = 60  # 默认轮询间隔（分钟）
+
+    # API 客户端配置
+    request_timeout: float = 30.0  # 请求超时（秒）
+    max_retries: int = 3  # 最大重试次数
+
+    # Webhook 配置 (二期)
+    webhook_enabled: bool = False
+    webhook_callback_base_url: str = ""  # Webhook 回调基础 URL
+
+
 class ProxySettings(BaseModel):
     """透明代理配置"""
     enabled: bool = True
@@ -212,6 +235,9 @@ class Settings(BaseSettings):
 
     # Knowledge Base (KBMS)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+
+    # Confluence 集成
+    confluence: ConfluenceSettings = Field(default_factory=ConfluenceSettings)
 
     # 透明代理配置
     proxy: ProxySettings = Field(default_factory=ProxySettings)

@@ -1946,6 +1946,984 @@ class DatabaseStorage:
             """, config_type, json.dumps(config), enabled)
 
     # =========================================================================
+    # Confluence 集成表
+    # =========================================================================
+
+    async def save_confluence_connection(self, connection: Dict[str, Any]) -> None:
+        """保存或更新 Confluence 连接配置"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_connections (
+                    connection_id, tenant_id, name, domain, email, api_token,
+                    sync_mode, polling_interval_minutes, status,
+                    last_sync_at, last_error, created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ON CONFLICT (connection_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    domain = EXCLUDED.domain,
+                    email = EXCLUDED.email,
+                    api_token = EXCLUDED.api_token,
+                    sync_mode = EXCLUDED.sync_mode,
+                    polling_interval_minutes = EXCLUDED.polling_interval_minutes,
+                    status = EXCLUDED.status,
+                    last_sync_at = EXCLUDED.last_sync_at,
+                    last_error = EXCLUDED.last_error,
+                    updated_at = NOW()
+            """,
+                connection.get("connection_id"),
+                connection.get("tenant_id", ""),
+                connection.get("name"),
+                connection.get("domain"),
+                connection.get("email"),
+                connection.get("api_token"),
+                connection.get("sync_mode", "manual"),
+                connection.get("polling_interval_minutes", 60),
+                connection.get("status", "active"),
+                connection.get("last_sync_at"),
+                connection.get("last_error"),
+                connection.get("created_by"),
+            )
+
+    async def get_confluence_connection(self, connection_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Confluence 连接配置"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confluence_connections WHERE connection_id = $1",
+                connection_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def list_confluence_connections(
+        self,
+        tenant_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 Confluence 连接"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM confluence_connections WHERE 1=1"
+        params: List[Any] = []
+        param_idx = 1
+
+        if tenant_id:
+            query += f" AND tenant_id = ${param_idx}"
+            params.append(tenant_id)
+            param_idx += 1
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        query += f" ORDER BY created_at DESC LIMIT ${param_idx}"
+        params.append(limit)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_confluence_connections_with_polling(self) -> List[Dict[str, Any]]:
+        """获取启用轮询的 Confluence 连接"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_connections
+                WHERE sync_mode = 'polling' AND status = 'active'
+                ORDER BY created_at
+            """)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def update_confluence_connection_status(
+        self,
+        connection_id: str,
+        status: str,
+        last_sync_at: Optional[datetime] = None,
+        last_error: Optional[str] = None,
+    ) -> None:
+        """更新 Confluence 连接状态"""
+        if not self._pool:
+            return
+
+        updates = ["status = $1", "updated_at = NOW()"]
+        params: List[Any] = [status]
+        param_idx = 2
+
+        if last_sync_at:
+            updates.append(f"last_sync_at = ${param_idx}")
+            params.append(last_sync_at)
+            param_idx += 1
+
+        if last_error is not None:
+            updates.append(f"last_error = ${param_idx}")
+            params.append(last_error if last_error else None)
+            param_idx += 1
+
+        params.append(connection_id)
+        query = f"UPDATE confluence_connections SET {', '.join(updates)} WHERE connection_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_confluence_connection(self, connection_id: str) -> bool:
+        """删除 Confluence 连接（级联删除绑定）"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM confluence_connections WHERE connection_id = $1",
+                connection_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def update_confluence_connection(
+        self,
+        connection_id: str,
+        updates: Dict[str, Any],
+    ) -> None:
+        """更新 Confluence 连接配置"""
+        if not self._pool or not updates:
+            return
+
+        set_clauses = []
+        params: List[Any] = []
+        param_idx = 1
+
+        allowed_fields = {
+            "name", "domain", "email", "api_token", "sync_mode",
+            "polling_interval_minutes", "status", "last_sync_at", "last_error"
+        }
+
+        for key, value in updates.items():
+            if key in allowed_fields:
+                set_clauses.append(f"{key} = ${param_idx}")
+                params.append(value)
+                param_idx += 1
+
+        if not set_clauses:
+            return
+
+        set_clauses.append("updated_at = NOW()")
+        params.append(connection_id)
+
+        query = f"UPDATE confluence_connections SET {', '.join(set_clauses)} WHERE connection_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def find_confluence_connection_by_domain(
+        self,
+        domain: str,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """根据域名查找连接"""
+        if not self._pool:
+            return None
+
+        query = "SELECT * FROM confluence_connections WHERE domain = $1"
+        params: List[Any] = [domain]
+
+        if tenant_id:
+            query += " AND tenant_id = $2"
+            params.append(tenant_id)
+
+        query += " AND status = 'active' ORDER BY created_at DESC LIMIT 1"
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+            return self._row_to_dict(row) if row else None
+
+    # =========================================================================
+    # Confluence Space Binding 表
+    # =========================================================================
+
+    async def save_confluence_binding(self, binding: Dict[str, Any]) -> None:
+        """保存或更新 Confluence 空间绑定"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_space_bindings (
+                    binding_id, connection_id, dataset_id, space_key, space_id,
+                    space_name, include_patterns, exclude_patterns, max_depth,
+                    include_attachments, include_comments, status,
+                    last_sync_at, synced_page_count, total_page_count,
+                    last_error, created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                ON CONFLICT (binding_id) DO UPDATE SET
+                    space_id = EXCLUDED.space_id,
+                    space_name = EXCLUDED.space_name,
+                    include_patterns = EXCLUDED.include_patterns,
+                    exclude_patterns = EXCLUDED.exclude_patterns,
+                    max_depth = EXCLUDED.max_depth,
+                    include_attachments = EXCLUDED.include_attachments,
+                    include_comments = EXCLUDED.include_comments,
+                    status = EXCLUDED.status,
+                    last_sync_at = EXCLUDED.last_sync_at,
+                    synced_page_count = EXCLUDED.synced_page_count,
+                    total_page_count = EXCLUDED.total_page_count,
+                    last_error = EXCLUDED.last_error,
+                    updated_at = NOW()
+            """,
+                binding.get("binding_id"),
+                binding.get("connection_id"),
+                binding.get("dataset_id"),
+                binding.get("space_key"),
+                binding.get("space_id"),
+                binding.get("space_name"),
+                binding.get("include_patterns", []),
+                binding.get("exclude_patterns", []),
+                binding.get("max_depth", 10),
+                binding.get("include_attachments", False),
+                binding.get("include_comments", False),
+                binding.get("status", "pending"),
+                binding.get("last_sync_at"),
+                binding.get("synced_page_count", 0),
+                binding.get("total_page_count", 0),
+                binding.get("last_error"),
+                binding.get("created_by"),
+            )
+
+    async def get_confluence_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Confluence 空间绑定"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confluence_space_bindings WHERE binding_id = $1",
+                binding_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def get_confluence_bindings_by_connection(
+        self, connection_id: str
+    ) -> List[Dict[str, Any]]:
+        """获取连接下的所有空间绑定"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_space_bindings
+                WHERE connection_id = $1
+                ORDER BY created_at
+            """, connection_id)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_confluence_bindings_by_dataset(
+        self, dataset_id: str
+    ) -> List[Dict[str, Any]]:
+        """获取数据集关联的所有空间绑定"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_space_bindings
+                WHERE dataset_id = $1
+                ORDER BY created_at
+            """, dataset_id)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def update_confluence_binding_status(
+        self,
+        binding_id: str,
+        status: str,
+        synced_page_count: Optional[int] = None,
+        total_page_count: Optional[int] = None,
+        last_sync_at: Optional[datetime] = None,
+        last_error: Optional[str] = None,
+    ) -> None:
+        """更新 Confluence 空间绑定状态"""
+        if not self._pool:
+            return
+
+        updates = ["status = $1", "updated_at = NOW()"]
+        params: List[Any] = [status]
+        param_idx = 2
+
+        if synced_page_count is not None:
+            updates.append(f"synced_page_count = ${param_idx}")
+            params.append(synced_page_count)
+            param_idx += 1
+
+        if total_page_count is not None:
+            updates.append(f"total_page_count = ${param_idx}")
+            params.append(total_page_count)
+            param_idx += 1
+
+        if last_sync_at:
+            updates.append(f"last_sync_at = ${param_idx}")
+            params.append(last_sync_at)
+            param_idx += 1
+
+        if last_error is not None:
+            updates.append(f"last_error = ${param_idx}")
+            params.append(last_error if last_error else None)
+            param_idx += 1
+
+        params.append(binding_id)
+        query = f"UPDATE confluence_space_bindings SET {', '.join(updates)} WHERE binding_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_confluence_binding(self, binding_id: str) -> bool:
+        """删除 Confluence 空间绑定（级联删除页面记录）"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM confluence_space_bindings WHERE binding_id = $1",
+                binding_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def update_confluence_binding(
+        self,
+        binding_id: str,
+        updates: Dict[str, Any],
+    ) -> None:
+        """更新 Confluence 空间绑定"""
+        if not self._pool or not updates:
+            return
+
+        set_clauses = []
+        params: List[Any] = []
+        param_idx = 1
+
+        allowed_fields = {
+            "space_id", "space_name", "include_patterns", "exclude_patterns",
+            "max_depth", "include_attachments", "include_comments", "status",
+            "last_sync_at", "synced_page_count", "total_page_count", "last_error"
+        }
+
+        for key, value in updates.items():
+            if key in allowed_fields:
+                set_clauses.append(f"{key} = ${param_idx}")
+                params.append(value)
+                param_idx += 1
+
+        if not set_clauses:
+            return
+
+        set_clauses.append("updated_at = NOW()")
+        params.append(binding_id)
+
+        query = f"UPDATE confluence_space_bindings SET {', '.join(set_clauses)} WHERE binding_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def list_confluence_bindings(
+        self,
+        connection_id: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 Confluence 空间绑定"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM confluence_space_bindings WHERE 1=1"
+        params: List[Any] = []
+        param_idx = 1
+
+        if connection_id:
+            query += f" AND connection_id = ${param_idx}"
+            params.append(connection_id)
+            param_idx += 1
+
+        if dataset_id:
+            query += f" AND dataset_id = ${param_idx}"
+            params.append(dataset_id)
+            param_idx += 1
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        query += f" ORDER BY created_at DESC LIMIT ${param_idx}"
+        params.append(limit)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # Confluence Page 表
+    # =========================================================================
+
+    async def save_confluence_page(self, page: Dict[str, Any]) -> None:
+        """保存或更新 Confluence 页面记录"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_pages (
+                    id, binding_id, document_id, page_id, space_key, title,
+                    version, content_hash, parent_page_id, depth, status,
+                    last_synced_at, confluence_updated_at, error, labels, web_url, author
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                ON CONFLICT (id) DO UPDATE SET
+                    document_id = EXCLUDED.document_id,
+                    title = EXCLUDED.title,
+                    version = EXCLUDED.version,
+                    content_hash = EXCLUDED.content_hash,
+                    status = EXCLUDED.status,
+                    last_synced_at = EXCLUDED.last_synced_at,
+                    confluence_updated_at = EXCLUDED.confluence_updated_at,
+                    error = EXCLUDED.error,
+                    labels = EXCLUDED.labels,
+                    web_url = EXCLUDED.web_url,
+                    updated_at = NOW()
+            """,
+                page.get("id"),
+                page.get("binding_id"),
+                page.get("document_id"),
+                page.get("page_id"),
+                page.get("space_key"),
+                page.get("title"),
+                page.get("version", 1),
+                page.get("content_hash"),
+                page.get("parent_page_id"),
+                page.get("depth", 0),
+                page.get("status", "pending"),
+                page.get("last_synced_at"),
+                page.get("confluence_updated_at"),
+                page.get("error"),
+                page.get("labels", []),
+                page.get("web_url"),
+                page.get("author"),
+            )
+
+    async def get_confluence_page(
+        self, page_record_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """通过记录 ID 获取 Confluence 页面记录"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confluence_pages WHERE id = $1",
+                page_record_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def get_confluence_page_by_binding_and_page(
+        self, binding_id: str, page_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """通过绑定 ID 和页面 ID 获取 Confluence 页面记录"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT * FROM confluence_pages
+                WHERE binding_id = $1 AND page_id = $2
+            """, binding_id, page_id)
+            return self._row_to_dict(row) if row else None
+
+    async def get_confluence_page_by_document(
+        self, document_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """根据文档 ID 获取 Confluence 页面记录"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confluence_pages WHERE document_id = $1",
+                document_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def list_confluence_pages(
+        self,
+        binding_id: str,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """列出 Confluence 页面记录"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM confluence_pages WHERE binding_id = $1"
+        params: List[Any] = [binding_id]
+        param_idx = 2
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        query += f" ORDER BY title ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def update_confluence_page_status(
+        self,
+        id: str,
+        status: str,
+        document_id: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        version: Optional[int] = None,
+        last_synced_at: Optional[datetime] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """更新 Confluence 页面状态"""
+        if not self._pool:
+            return
+
+        updates = ["status = $1", "updated_at = NOW()"]
+        params: List[Any] = [status]
+        param_idx = 2
+
+        if document_id is not None:
+            updates.append(f"document_id = ${param_idx}")
+            params.append(document_id)
+            param_idx += 1
+
+        if content_hash is not None:
+            updates.append(f"content_hash = ${param_idx}")
+            params.append(content_hash)
+            param_idx += 1
+
+        if version is not None:
+            updates.append(f"version = ${param_idx}")
+            params.append(version)
+            param_idx += 1
+
+        if last_synced_at:
+            updates.append(f"last_synced_at = ${param_idx}")
+            params.append(last_synced_at)
+            param_idx += 1
+
+        if error is not None:
+            updates.append(f"error = ${param_idx}")
+            params.append(error if error else None)
+            param_idx += 1
+
+        params.append(id)
+        query = f"UPDATE confluence_pages SET {', '.join(updates)} WHERE id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_confluence_page(self, id: str) -> bool:
+        """删除 Confluence 页面记录"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM confluence_pages WHERE id = $1", id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    async def delete_confluence_pages_by_binding(self, binding_id: str) -> int:
+        """删除绑定下的所有页面记录"""
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM confluence_pages WHERE binding_id = $1",
+                binding_id
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1])
+            return 0
+
+    async def get_confluence_page_by_page_id(
+        self,
+        binding_id: str,
+        page_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """根据 Confluence page_id 获取页面记录"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT * FROM confluence_pages
+                WHERE binding_id = $1 AND page_id = $2
+            """, binding_id, page_id)
+            return self._row_to_dict(row) if row else None
+
+    async def upsert_confluence_page(
+        self,
+        binding_id: str,
+        page_id: str,
+        document_id: Optional[str] = None,
+        space_key: str = "",
+        title: str = "",
+        version: int = 1,
+        content_hash: Optional[str] = None,
+        parent_page_id: Optional[str] = None,
+        depth: int = 0,
+        status: str = "synced",
+        labels: Optional[List[str]] = None,
+        web_url: Optional[str] = None,
+        author: Optional[str] = None,
+        confluence_updated_at: Optional[str] = None,
+    ) -> None:
+        """插入或更新 Confluence 页面记录"""
+        if not self._pool:
+            return
+
+        record_id = f"{binding_id}:{page_id}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_pages (
+                    id, binding_id, document_id, page_id, space_key, title,
+                    version, content_hash, parent_page_id, depth, status,
+                    last_synced_at, confluence_updated_at, labels, web_url, author
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15)
+                ON CONFLICT (id) DO UPDATE SET
+                    document_id = EXCLUDED.document_id,
+                    title = EXCLUDED.title,
+                    version = EXCLUDED.version,
+                    content_hash = EXCLUDED.content_hash,
+                    status = EXCLUDED.status,
+                    last_synced_at = NOW(),
+                    confluence_updated_at = EXCLUDED.confluence_updated_at,
+                    labels = EXCLUDED.labels,
+                    web_url = EXCLUDED.web_url,
+                    updated_at = NOW()
+            """,
+                record_id,
+                binding_id,
+                document_id,
+                page_id,
+                space_key,
+                title,
+                version,
+                content_hash,
+                parent_page_id,
+                depth,
+                status,
+                confluence_updated_at,
+                labels or [],
+                web_url,
+                author,
+            )
+
+    async def delete_confluence_page_by_page_id(
+        self,
+        binding_id: str,
+        page_id: str,
+    ) -> bool:
+        """根据 page_id 删除页面记录"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute("""
+                DELETE FROM confluence_pages
+                WHERE binding_id = $1 AND page_id = $2
+            """, binding_id, page_id)
+            if result.startswith("DELETE "):
+                return int(result.split()[-1]) > 0
+            return False
+
+    # =========================================================================
+    # Confluence Sync Task 表
+    # =========================================================================
+
+    async def save_confluence_sync_task(self, task: Dict[str, Any]) -> None:
+        """保存或更新 Confluence 同步任务"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_sync_tasks (
+                    task_id, binding_id, page_id, task_type, priority,
+                    status, retry_count, max_retries, progress,
+                    total_items, processed_items, error, result,
+                    started_at, completed_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                ON CONFLICT (task_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    retry_count = EXCLUDED.retry_count,
+                    progress = EXCLUDED.progress,
+                    total_items = EXCLUDED.total_items,
+                    processed_items = EXCLUDED.processed_items,
+                    error = EXCLUDED.error,
+                    result = EXCLUDED.result,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = NOW()
+            """,
+                task.get("task_id"),
+                task.get("binding_id"),
+                task.get("page_id"),
+                task.get("task_type"),
+                task.get("priority", 0),
+                task.get("status", "pending"),
+                task.get("retry_count", 0),
+                task.get("max_retries", 3),
+                task.get("progress", 0.0),
+                task.get("total_items", 0),
+                task.get("processed_items", 0),
+                task.get("error"),
+                json.dumps(task.get("result")) if task.get("result") else None,
+                task.get("started_at"),
+                task.get("completed_at"),
+            )
+
+    async def get_confluence_sync_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """获取 Confluence 同步任务"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confluence_sync_tasks WHERE task_id = $1",
+                task_id
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def list_confluence_sync_tasks(
+        self,
+        binding_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """列出 Confluence 同步任务"""
+        if not self._pool:
+            return []
+
+        query = "SELECT * FROM confluence_sync_tasks WHERE 1=1"
+        params: List[Any] = []
+        param_idx = 1
+
+        if binding_id:
+            query += f" AND binding_id = ${param_idx}"
+            params.append(binding_id)
+            param_idx += 1
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        query += f" ORDER BY priority DESC, created_at ASC LIMIT ${param_idx}"
+        params.append(limit)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def update_confluence_sync_task_status(
+        self,
+        task_id: str,
+        status: str,
+        progress: Optional[float] = None,
+        processed_items: Optional[int] = None,
+        error: Optional[str] = None,
+        result: Optional[Dict] = None,
+    ) -> None:
+        """更新 Confluence 同步任务状态"""
+        if not self._pool:
+            return
+
+        updates = ["status = $1", "updated_at = NOW()"]
+        params: List[Any] = [status]
+        param_idx = 2
+
+        if progress is not None:
+            updates.append(f"progress = ${param_idx}")
+            params.append(progress)
+            param_idx += 1
+
+        if processed_items is not None:
+            updates.append(f"processed_items = ${param_idx}")
+            params.append(processed_items)
+            param_idx += 1
+
+        if error is not None:
+            updates.append(f"error = ${param_idx}")
+            params.append(error if error else None)
+            param_idx += 1
+
+        if result is not None:
+            updates.append(f"result = ${param_idx}")
+            params.append(json.dumps(result))
+            param_idx += 1
+
+        if status == "processing":
+            updates.append(f"started_at = COALESCE(started_at, ${param_idx})")
+            params.append(datetime.utcnow())
+            param_idx += 1
+        elif status in ("completed", "failed"):
+            updates.append(f"completed_at = ${param_idx}")
+            params.append(datetime.utcnow())
+            param_idx += 1
+
+        params.append(task_id)
+        query = f"UPDATE confluence_sync_tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def get_pending_confluence_sync_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """获取待处理的 Confluence 同步任务"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_sync_tasks
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT $1
+            """, limit)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def create_confluence_sync_task(
+        self,
+        task_id: str,
+        binding_id: Optional[str] = None,
+        page_id: Optional[str] = None,
+        task_type: str = "full_sync",
+        priority: int = 0,
+    ) -> None:
+        """创建 Confluence 同步任务"""
+        if not self._pool:
+            return
+
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO confluence_sync_tasks (
+                    task_id, binding_id, page_id, task_type, priority,
+                    status, retry_count, max_retries, progress,
+                    total_items, processed_items
+                ) VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, 0, 0)
+            """,
+                task_id,
+                binding_id,
+                page_id,
+                task_type,
+                priority,
+            )
+
+    async def update_confluence_sync_task(
+        self,
+        task_id: str,
+        updates: Dict[str, Any],
+    ) -> None:
+        """更新 Confluence 同步任务"""
+        if not self._pool or not updates:
+            return
+
+        set_clauses = []
+        params: List[Any] = []
+        param_idx = 1
+
+        allowed_fields = {
+            "status", "retry_count", "progress", "total_items",
+            "processed_items", "error", "result", "started_at", "completed_at"
+        }
+
+        for key, value in updates.items():
+            if key in allowed_fields:
+                if key == "result" and isinstance(value, dict):
+                    set_clauses.append(f"{key} = ${param_idx}")
+                    params.append(json.dumps(value))
+                else:
+                    set_clauses.append(f"{key} = ${param_idx}")
+                    params.append(value)
+                param_idx += 1
+
+        if not set_clauses:
+            return
+
+        set_clauses.append("updated_at = NOW()")
+        params.append(task_id)
+
+        query = f"UPDATE confluence_sync_tasks SET {', '.join(set_clauses)} WHERE task_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    # =========================================================================
+    # Document Confluence 扩展字段
+    # =========================================================================
+
+    async def update_document_confluence_fields(
+        self,
+        document_id: str,
+        confluence_page_id: Optional[str] = None,
+        confluence_binding_id: Optional[str] = None,
+        confluence_version: Optional[int] = None,
+        confluence_web_url: Optional[str] = None,
+    ) -> None:
+        """更新文档的 Confluence 关联字段"""
+        if not self._pool:
+            return
+
+        updates = ["updated_at = NOW()"]
+        params: List[Any] = []
+        param_idx = 1
+
+        if confluence_page_id is not None:
+            updates.append(f"confluence_page_id = ${param_idx}")
+            params.append(confluence_page_id)
+            param_idx += 1
+
+        if confluence_binding_id is not None:
+            updates.append(f"confluence_binding_id = ${param_idx}")
+            params.append(confluence_binding_id)
+            param_idx += 1
+
+        if confluence_version is not None:
+            updates.append(f"confluence_version = ${param_idx}")
+            params.append(confluence_version)
+            param_idx += 1
+
+        if confluence_web_url is not None:
+            updates.append(f"confluence_web_url = ${param_idx}")
+            params.append(confluence_web_url)
+            param_idx += 1
+
+        if len(updates) == 1:  # 只有 updated_at
+            return
+
+        params.append(document_id)
+        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def get_documents_by_confluence_binding(
+        self,
+        binding_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """获取 Confluence 绑定关联的文档"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM documents
+                WHERE confluence_binding_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+            """, binding_id, limit, offset)
+            return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
     # 辅助方法
     # =========================================================================
 

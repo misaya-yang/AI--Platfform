@@ -271,7 +271,32 @@ def create_app() -> FastAPI:
             )
             app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
-        
+
+        # 启动 Confluence 集成服务（如果启用）
+        if getattr(settings, "confluence", None) and settings.confluence.enabled:
+            from .services.knowledge.confluence.sync_service import ConfluenceSyncService
+            from .services.knowledge.confluence.scheduler import ConfluenceScheduler
+
+            app.state.confluence_sync_service = ConfluenceSyncService(
+                db=container.database,
+                knowledge_service=app.state.knowledge_service,
+                knowledge_worker=app.state.knowledge_worker,
+                settings=settings,
+            )
+
+            # 如果启用轮询，启动调度器
+            if settings.confluence.polling_enabled:
+                app.state.confluence_scheduler = ConfluenceScheduler(
+                    sync_service=app.state.confluence_sync_service,
+                    max_concurrent=settings.confluence.sync_max_concurrent,
+                )
+                await app.state.confluence_scheduler.start()
+                logger.info("Confluence 调度器已启动")
+            else:
+                app.state.confluence_scheduler = None
+
+            logger.info("Confluence 集成服务已启动")
+
         # 打印启动信息
         _print_startup_info(settings)
     
@@ -279,13 +304,20 @@ def create_app() -> FastAPI:
     async def shutdown():
         """应用关闭"""
         logger.info("正在关闭 AI Gateway...")
-        # Stop KBMS worker/service first (if enabled)
+
+        # Stop Confluence scheduler/service first (if enabled)
+        confluence_scheduler = getattr(app.state, "confluence_scheduler", None)
+        if confluence_scheduler is not None:
+            await confluence_scheduler.stop()
+
+        # Stop KBMS worker/service (if enabled)
         kb_worker = getattr(app.state, "knowledge_worker", None)
         if kb_worker is not None:
             await kb_worker.stop()
         kb_service = getattr(app.state, "knowledge_service", None)
         if kb_service is not None:
             await kb_service.close()
+
         await container.shutdown()
         logger.info("AI Gateway 已关闭")
     
@@ -348,6 +380,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     # Knowledge Base (KBMS)
     app.state.knowledge_service = None
     app.state.knowledge_worker = None
+
+    # Confluence 集成
+    app.state.confluence_sync_service = None
+    app.state.confluence_scheduler = None
 
     # 游客会话管理器
     from .services.session.guest_session_manager import GuestSessionManager, GuestSessionConfig

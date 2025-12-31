@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from .v1.config import router as config_router
+from .v1.confluence import router as confluence_router
 from .v1.conversations import router as conversations_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
@@ -26,3 +27,4 @@ api_router.include_router(conversations_router)  # 简化的对话 API
 api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理（向后兼容）
 api_router.include_router(proxy_router)  # 透明代理路由
 api_router.include_router(knowledge_router)  # KBMS Knowledge Base
+api_router.include_router(confluence_router)  # Confluence 集成
