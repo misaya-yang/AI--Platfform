@@ -1506,7 +1506,179 @@ class ConfluenceSyncService:
 
 ---
 
-## 十一、参考资料
+## 十一、API 版本差异与选择
+
+> 参考来源：[Confluence API v1 versus v2](https://community.atlassian.com/forums/Confluence-questions/Confluence-API-v1-versus-v2/qaq-p/2978171) | [REST API v2 Intro](https://developer.atlassian.com/cloud/confluence/rest/v2/intro/)
+
+### 11.1 v1 与 v2 对比
+
+| 特性 | REST API v1 | REST API v2 |
+|------|-------------|-------------|
+| **Base URL** | `/wiki/rest/api/` | `/wiki/api/v2/` |
+| **分页方式** | offset-based（偏移量） | cursor-based（游标） |
+| **性能** | 较慢（尤其高偏移量时） | 更快、更优化 |
+| **功能完整性** | 完整，但已标记弃用 | 部分功能仍在迁移中 |
+| **OAuth 2.0** | 部分支持 | 完全支持 granular scopes |
+| **状态** | 维护中，暂无完全弃用日期 | 推荐用于新开发 |
+
+### 11.2 端点格式对比
+
+```bash
+# ===== REST API v1 =====
+# 获取页面（推荐，功能完整）
+GET /wiki/rest/api/content/{page_id}?expand=body.storage
+
+# 搜索页面
+GET /wiki/rest/api/content/search?cql=space=HFDSH AND type=page
+
+# 获取空间
+GET /wiki/rest/api/space/{space_key}
+
+# ===== REST API v2 =====
+# 获取页面
+GET /wiki/api/v2/pages/{page_id}?body-format=storage
+
+# 获取空间下页面
+GET /wiki/api/v2/spaces/{space_id}/pages
+
+# 获取所有空间
+GET /wiki/api/v2/spaces
+```
+
+### 11.3 选择建议
+
+| 场景 | 推荐版本 | 原因 |
+|------|----------|------|
+| **获取页面内容** | v1 | v2 有时返回空 body 或 404 |
+| **批量获取页面列表** | v2 | 游标分页性能更好 |
+| **搜索（CQL）** | v1 | v2 暂无搜索 API |
+| **新项目开发** | v2 优先，v1 兜底 | 优先 v2，功能缺失时用 v1 |
+
+---
+
+## 十二、权限与认证问题排查
+
+### 12.1 常见错误码
+
+| 错误码 | 消息 | 原因 | 解决方案 |
+|--------|------|------|----------|
+| **401** | Unauthorized | 认证失败 | 检查邮箱和 API Token 是否正确 |
+| **403** | Current user not permitted to use Confluence | 用户无 API 访问权限 | 联系管理员授予 Confluence 访问权限 |
+| **404** | Not Found | 页面不存在或无权访问 | 检查 page_id 是否正确，或尝试 v1 API |
+
+### 12.2 403 错误详细排查
+
+> 参考来源：[Current user not permitted to use Confluence](https://community.atlassian.com/forums/Confluence-questions/Current-user-not-permitted-to-use-Confluence/qaq-p/2668582)
+
+**"Current user not permitted to use Confluence"** 错误的常见原因：
+
+#### 原因 1：用户缺少 Confluence 产品访问权限
+
+```
+即使用户能在浏览器中访问 Confluence，API 访问可能被单独限制。
+
+解决方案：
+1. 管理员登录 admin.atlassian.com
+2. 进入 User management > Users
+3. 找到用户，确认 Confluence 产品访问权限已启用
+4. 确认用户有 "Can use" 全局权限
+```
+
+#### 原因 2：API Token 创建时账号混淆
+
+```
+如果登录了多个 Atlassian 账号，API Token 可能创建在了错误的账号下。
+
+解决方案：
+1. 退出所有 Atlassian 账号
+2. 仅登录正确的账号
+3. 重新创建 API Token
+4. 检查 Token 管理页面确认账号正确
+```
+
+#### 原因 3：API Token Scopes 不足（新版 Token）
+
+```
+2024年底后创建的 API Token 可能需要配置 scopes。
+
+所需 Scopes：
+- read:page:confluence       - 读取页面
+- read:space:confluence      - 读取空间
+- read:content:confluence    - 读取内容
+- read:content-details:confluence - 读取内容详情
+```
+
+#### 原因 4：使用了错误的认证方式
+
+```
+# ❌ 错误：使用 Bearer Token（OAuth 专用）
+Authorization: Bearer ATATT3xFfGF0...
+
+# ✅ 正确：使用 Basic Auth
+Authorization: Basic base64(email:api_token)
+```
+
+### 12.3 Postman 配置完整示例
+
+#### Basic Auth 方式（推荐用于 API Token）
+
+```yaml
+Method: GET
+URL: https://{domain}.atlassian.net/wiki/rest/api/content/{page_id}?expand=body.storage
+
+Authorization:
+  Type: Basic Auth
+  Username: your-email@example.com
+  Password: your-api-token
+
+Headers:
+  Accept: application/json
+```
+
+#### 手动构建 Authorization Header
+
+```bash
+# 1. 构建凭据字符串
+credentials="email@example.com:ATATT3xFfGF0..."
+
+# 2. Base64 编码
+# Linux/Mac:
+echo -n "$credentials" | base64
+
+# Windows PowerShell:
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($credentials))
+
+# 3. 添加到 Header
+Authorization: Basic <base64_encoded_string>
+```
+
+### 12.4 测试连接的步骤
+
+```bash
+# Step 1: 测试认证是否成功（获取当前用户）
+GET /wiki/rest/api/user/current
+
+# Step 2: 测试是否有空间访问权限
+GET /wiki/rest/api/space/{space_key}
+
+# Step 3: 测试是否能访问页面
+GET /wiki/rest/api/content/{page_id}?expand=body.storage
+```
+
+### 12.5 权限申请清单
+
+向管理员申请权限时，请求以下内容：
+
+| 权限项 | 说明 |
+|--------|------|
+| **Confluence 产品访问** | 在 admin.atlassian.com 中启用 |
+| **"Can use" 全局权限** | 允许通过 API 访问 Confluence |
+| **空间访问权限** | 对目标空间有 View 权限 |
+| **API Token Scopes**（如适用）| `read:page:confluence`, `read:content:confluence` |
+
+---
+
+## 十三、参考资料
 
 - [Confluence Cloud REST API v2 Introduction](https://developer.atlassian.com/cloud/confluence/rest/v2/intro/)
 - [Confluence Cloud REST API v2 - Page Endpoints](https://developer.atlassian.com/cloud/confluence/rest/v2/api-group-page/)
