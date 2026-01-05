@@ -6,6 +6,8 @@ PostgreSQL 数据库存储层
 from __future__ import annotations
 
 import json
+import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,6 +19,8 @@ except ImportError:
     HAS_ASYNCPG = False
     asyncpg = None
 
+logger = logging.getLogger(__name__)
+
 
 class DatabaseStorage:
     """PostgreSQL 数据库存储"""
@@ -27,6 +31,7 @@ class DatabaseStorage:
         enabled: bool = False,
         auto_init: bool = True,
         schema_path: Optional[str] = None,
+        permission_cache_ttl_seconds: int = 60,
     ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
@@ -35,6 +40,34 @@ class DatabaseStorage:
             Path(__file__).resolve().parent.parent.parent / "database" / "schema.sql"
         )
         self._pool: Optional[Any] = None
+        self._permission_cache: Dict[str, tuple[List[str], float]] = {}
+        self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
+
+    def _get_cached_permissions(self, user_id: str) -> Optional[List[str]]:
+        if self._permission_cache_ttl_seconds <= 0:
+            return None
+        entry = self._permission_cache.get(user_id)
+        if not entry:
+            return None
+        permissions, expires_at = entry
+        if time.time() >= expires_at:
+            self._permission_cache.pop(user_id, None)
+            return None
+        return list(permissions)
+
+    def _set_cached_permissions(self, user_id: str, permissions: List[str]) -> None:
+        if self._permission_cache_ttl_seconds <= 0:
+            return
+        self._permission_cache[user_id] = (
+            list(permissions),
+            time.time() + self._permission_cache_ttl_seconds,
+        )
+
+    def _invalidate_permission_cache(self, user_id: Optional[str] = None) -> None:
+        if user_id:
+            self._permission_cache.pop(user_id, None)
+        else:
+            self._permission_cache.clear()
 
     async def connect(self) -> None:
         """建立数据库连接池"""
@@ -45,6 +78,8 @@ class DatabaseStorage:
         self._pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=10)
         if self.auto_init:
             await self._auto_initialize_schema()
+            await self._auto_apply_account_permission_migration()
+            await self._auto_apply_user_extra_permissions_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -87,6 +122,88 @@ class DatabaseStorage:
             raise RuntimeError(f"Database schema not found: {schema_path}")
 
         await self.execute_schema(schema_path)
+
+    async def _account_permission_schema_missing(self) -> bool:
+        """Check if account/permission schema pieces are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            password_col = await conn.fetchval(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_name = 'users' AND column_name = 'password_hash'
+                """
+            )
+            permissions_table = await conn.fetchval(
+                "SELECT to_regclass('public.permissions')"
+            )
+            return password_col is None or permissions_table is None
+
+    async def _auto_apply_account_permission_migration(self) -> None:
+        """Apply account/permission migration when required."""
+        if not self._pool:
+            return
+        try:
+            missing = await self._account_permission_schema_missing()
+        except Exception:
+            # If we cannot determine schema state, skip auto-migration.
+            return
+        if not missing:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "005_account_permission_system.sql"
+        )
+        if not migration_path.exists():
+            raise RuntimeError(f"Migration not found: {migration_path}")
+
+        await self.execute_schema(str(migration_path))
+
+    async def _user_permissions_schema_missing(self) -> bool:
+        """Check if user_permissions table is missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            table_exists = await conn.fetchval(
+                "SELECT to_regclass('public.user_permissions')"
+            )
+            return table_exists is None
+
+    async def _auto_apply_user_extra_permissions_migration(self) -> None:
+        """Apply user extra permissions migration (006) when required."""
+        if not self._pool:
+            return
+        try:
+            missing = await self._user_permissions_schema_missing()
+        except Exception as e:
+            logger.warning(f"Could not check user_permissions schema: {e}")
+            return
+        if not missing:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "006_user_extra_permissions.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 006 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 006_user_extra_permissions.sql")
+        except Exception as e:
+            # If table already exists or other non-critical error, log and continue
+            if "already exists" in str(e).lower():
+                logger.info("Migration 006 already applied (user_permissions table exists)")
+            else:
+                logger.error(f"Failed to apply migration 006: {e}")
 
     # =========================================================================
     # 服务定义表 (services)
@@ -2922,6 +3039,622 @@ class DatabaseStorage:
                 LIMIT $2 OFFSET $3
             """, binding_id, limit, offset)
             return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # 用户认证增强方法 (Account Management)
+    # =========================================================================
+
+    async def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """通过邮箱获取用户"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM users WHERE LOWER(email) = LOWER($1)", email
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def save_user_with_password(self, user: Dict[str, Any]) -> None:
+        """保存或更新用户（包含密码字段）"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO users (
+                    user_id, username, email, display_name, department, tenant_id,
+                    tier, roles, permissions, quota_config, status,
+                    password_hash, force_password_change, email_verified,
+                    created_by, metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    email = EXCLUDED.email,
+                    display_name = EXCLUDED.display_name,
+                    department = EXCLUDED.department,
+                    tier = EXCLUDED.tier,
+                    roles = EXCLUDED.roles,
+                    permissions = EXCLUDED.permissions,
+                    quota_config = EXCLUDED.quota_config,
+                    status = EXCLUDED.status,
+                    updated_at = NOW()
+            """,
+                user.get("user_id"),
+                user.get("username") or user.get("email", "").split("@")[0],
+                user.get("email"),
+                user.get("display_name"),
+                user.get("department"),
+                user.get("tenant_id", "default"),
+                user.get("tier", "normal"),
+                user.get("roles", ["user"]),
+                user.get("permissions", []),
+                json.dumps(user.get("quota_config", {})),
+                user.get("status", "active"),
+                user.get("password_hash"),
+                user.get("force_password_change", True),
+                user.get("email_verified", False),
+                user.get("created_by"),
+                json.dumps(user.get("metadata", {})),
+            )
+
+    async def update_user_password(self, user_id: str, password_hash: str) -> None:
+        """更新用户密码并清除强制修改标记"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET
+                    password_hash = $1,
+                    force_password_change = FALSE,
+                    password_changed_at = NOW(),
+                    updated_at = NOW()
+                WHERE user_id = $2
+            """, password_hash, user_id)
+
+    async def reset_user_password(self, user_id: str, password_hash: str) -> None:
+        """重置用户密码为默认值，需强制修改"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET
+                    password_hash = $1,
+                    force_password_change = TRUE,
+                    password_changed_at = NULL,
+                    login_attempts = 0,
+                    locked_until = NULL,
+                    updated_at = NOW()
+                WHERE user_id = $2
+            """, password_hash, user_id)
+
+    async def increment_login_attempts(self, user_id: str) -> None:
+        """增加登录失败计数"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET login_attempts = COALESCE(login_attempts, 0) + 1 WHERE user_id = $1",
+                user_id
+            )
+
+    async def reset_login_attempts(self, user_id: str) -> None:
+        """重置登录失败计数"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET login_attempts = 0, locked_until = NULL WHERE user_id = $1",
+                user_id
+            )
+
+    async def lock_user_account(self, user_id: str, minutes: int = 30) -> None:
+        """锁定用户账户"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET
+                    locked_until = NOW() + INTERVAL '%s minutes',
+                    updated_at = NOW()
+                WHERE user_id = $1
+            """ % minutes, user_id)
+
+    async def update_last_login(self, user_id: str, ip_address: str) -> None:
+        """更新最后登录信息"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET
+                    last_login_at = NOW(),
+                    last_login_ip = $1,
+                    last_active_at = NOW()
+                WHERE user_id = $2
+            """, ip_address, user_id)
+
+    async def log_login_audit(
+        self,
+        user_id: Optional[str],
+        email: Optional[str],
+        action: str,
+        ip_address: str,
+        user_agent: str,
+        details: Dict[str, Any]
+    ) -> None:
+        """记录登录审计日志"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO login_audit (user_id, email, action, ip_address, user_agent, details)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, user_id, email, action, ip_address, user_agent, json.dumps(details))
+
+    async def get_user_permissions(self, user_id: str) -> List[str]:
+        """获取用户的所有权限（角色权限 + 额外权限）"""
+        if not self._pool:
+            return []
+        cached = self._get_cached_permissions(user_id)
+        if cached is not None:
+            return cached
+        async with self._pool.acquire() as conn:
+            permissions_set: set = set()
+
+            # 1. 从 role_permissions 表获取角色权限
+            try:
+                rows = await conn.fetch("""
+                    SELECT DISTINCT rp.permission_code
+                    FROM user_roles ur
+                    JOIN role_permissions rp ON ur.role_name = rp.role_name
+                    WHERE ur.user_id = $1
+                      AND (ur.expires_at IS NULL OR ur.expires_at > NOW())
+                """, user_id)
+                for row in rows:
+                    permissions_set.add(row['permission_code'])
+            except Exception:
+                pass
+
+            # 2. 如果 role_permissions 为空，回退到 rbac_roles 的 permissions 数组
+            if not permissions_set:
+                try:
+                    rows = await conn.fetch("""
+                        SELECT DISTINCT unnest(rr.permissions) as permission_code
+                        FROM user_roles ur
+                        JOIN rbac_roles rr ON ur.role_name = rr.role_name
+                        WHERE ur.user_id = $1
+                          AND (ur.expires_at IS NULL OR ur.expires_at > NOW())
+                    """, user_id)
+                    for row in rows:
+                        permissions_set.add(row['permission_code'])
+                except Exception:
+                    pass
+
+            # 3. 回退到用户自身的 permissions 字段/roles 映射
+            if not permissions_set:
+                user_row = await conn.fetchrow(
+                    "SELECT roles, permissions FROM users WHERE user_id = $1", user_id
+                )
+                if user_row:
+                    permissions_set.update(user_row["permissions"] or [])
+                    roles = user_row["roles"] or []
+                    if roles:
+                        try:
+                            role_rows = await conn.fetch(
+                                "SELECT permissions FROM rbac_roles WHERE role_name = ANY($1)",
+                                roles,
+                            )
+                            for role_row in role_rows:
+                                role_perms = role_row["permissions"] or []
+                                permissions_set.update(role_perms)
+                        except Exception:
+                            pass
+
+            # 4. 获取用户额外权限（直接分配）
+            try:
+                extra_rows = await conn.fetch("""
+                    SELECT permission_code
+                    FROM user_permissions
+                    WHERE user_id = $1
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                """, user_id)
+                for row in extra_rows:
+                    permissions_set.add(row['permission_code'])
+            except Exception:
+                # user_permissions 表可能不存在
+                pass
+
+            permissions = list(permissions_set)
+            self._set_cached_permissions(user_id, permissions)
+            return permissions
+
+    async def list_users_paginated(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0
+    ) -> tuple:
+        """分页获取用户列表"""
+        if not self._pool:
+            return [], 0
+
+        query = "SELECT * FROM users WHERE 1=1"
+        count_query = "SELECT COUNT(*) FROM users WHERE 1=1"
+        params = []
+        param_idx = 1
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            count_query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        if tenant_id:
+            query += f" AND tenant_id = ${param_idx}"
+            count_query += f" AND tenant_id = ${param_idx}"
+            params.append(tenant_id)
+            param_idx += 1
+
+        if search:
+            query += f" AND (email ILIKE ${param_idx} OR display_name ILIKE ${param_idx} OR username ILIKE ${param_idx})"
+            count_query += f" AND (email ILIKE ${param_idx} OR display_name ILIKE ${param_idx} OR username ILIKE ${param_idx})"
+            params.append(f"%{search}%")
+            param_idx += 1
+
+        async with self._pool.acquire() as conn:
+            total = await conn.fetchval(count_query, *params)
+
+            query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+            params.extend([limit, offset])
+
+            rows = await conn.fetch(query, *params)
+            users = [self._row_to_dict(row) for row in rows]
+
+            return users, total or 0
+
+    async def update_user(self, user_id: str, updates: Dict[str, Any]) -> None:
+        """更新用户字段"""
+        if not self._pool or not updates:
+            return
+
+        allowed_fields = {
+            "display_name", "username", "department", "tier", "roles", "permissions",
+            "quota_config", "status", "metadata", "email_verified"
+        }
+        filtered = {k: v for k, v in updates.items() if k in allowed_fields}
+        if not filtered:
+            return
+
+        set_clauses = ["updated_at = NOW()"]
+        params = []
+        param_idx = 1
+
+        for key, value in filtered.items():
+            if key in ("quota_config", "metadata") and isinstance(value, dict):
+                set_clauses.append(f"{key} = ${param_idx}")
+                params.append(json.dumps(value))
+            else:
+                set_clauses.append(f"{key} = ${param_idx}")
+                params.append(value)
+            param_idx += 1
+
+        params.append(user_id)
+        query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${param_idx}"
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *params)
+
+    async def delete_user(self, user_id: str) -> bool:
+        """删除用户"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            # 先删除 user_roles
+            await conn.execute("DELETE FROM user_roles WHERE user_id = $1", user_id)
+            # 再删除用户
+            result = await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
+            return result == "DELETE 1"
+
+    async def assign_user_role(
+        self, user_id: str, role_name: str, granted_by: str
+    ) -> None:
+        """为用户分配角色"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO user_roles (user_id, role_name, granted_by)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, role_name) DO UPDATE SET
+                    granted_at = NOW(),
+                    granted_by = EXCLUDED.granted_by
+            """, user_id, role_name, granted_by)
+        self._invalidate_permission_cache(user_id)
+
+    async def remove_user_role(self, user_id: str, role_name: str) -> bool:
+        """移除用户角色"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM user_roles WHERE user_id = $1 AND role_name = $2",
+                user_id, role_name
+            )
+        self._invalidate_permission_cache(user_id)
+        return result == "DELETE 1"
+
+    async def update_user_roles(
+        self, user_id: str, roles: List[str], granted_by: str
+    ) -> None:
+        """更新用户的所有角色"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            # 先删除现有角色
+            await conn.execute("DELETE FROM user_roles WHERE user_id = $1", user_id)
+            # 插入新角色
+            for role in roles:
+                await conn.execute("""
+                    INSERT INTO user_roles (user_id, role_name, granted_by)
+                    VALUES ($1, $2, $3)
+                """, user_id, role, granted_by)
+            # 同时更新 users 表的 roles 字段
+            await conn.execute(
+                "UPDATE users SET roles = $1, updated_at = NOW() WHERE user_id = $2",
+                roles, user_id
+            )
+        self._invalidate_permission_cache(user_id)
+
+    async def get_user_roles(self, user_id: str) -> List[str]:
+        """获取用户的所有角色"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT role_name FROM user_roles
+                WHERE user_id = $1
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                ORDER BY granted_at
+            """, user_id)
+            return [row['role_name'] for row in rows]
+
+    # =========================================================================
+    # 角色和权限管理方法
+    # =========================================================================
+
+    async def list_roles(self) -> List[Dict[str, Any]]:
+        """获取所有角色"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name"
+            )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_role(self, role_name: str) -> Optional[Dict[str, Any]]:
+        """获取角色详情"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM rbac_roles WHERE role_name = $1", role_name
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def create_role(
+        self, role_name: str, description: Optional[str], permissions: List[str]
+    ) -> None:
+        """创建新角色"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO rbac_roles (role_name, description, permissions, is_system)
+                VALUES ($1, $2, $3, FALSE)
+            """, role_name, description, permissions)
+
+            # 同时插入 role_permissions
+            for perm in permissions:
+                await conn.execute("""
+                    INSERT INTO role_permissions (role_name, permission_code)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                """, role_name, perm)
+        self._invalidate_permission_cache()
+
+    async def update_role(
+        self, role_name: str, description: Optional[str], permissions: Optional[List[str]]
+    ) -> None:
+        """更新角色"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            if description is not None and permissions is not None:
+                await conn.execute("""
+                    UPDATE rbac_roles SET
+                        description = $1,
+                        permissions = $2,
+                        updated_at = NOW()
+                    WHERE role_name = $3
+                """, description, permissions, role_name)
+            elif description is not None:
+                await conn.execute("""
+                    UPDATE rbac_roles SET
+                        description = $1,
+                        updated_at = NOW()
+                    WHERE role_name = $2
+                """, description, role_name)
+            elif permissions is not None:
+                await conn.execute("""
+                    UPDATE rbac_roles SET
+                        permissions = $1,
+                        updated_at = NOW()
+                    WHERE role_name = $2
+                """, permissions, role_name)
+
+            # 如果更新了权限，同步 role_permissions 表
+            if permissions is not None:
+                await conn.execute(
+                    "DELETE FROM role_permissions WHERE role_name = $1", role_name
+                )
+                for perm in permissions:
+                    await conn.execute("""
+                        INSERT INTO role_permissions (role_name, permission_code)
+                        VALUES ($1, $2)
+                        ON CONFLICT DO NOTHING
+                    """, role_name, perm)
+        self._invalidate_permission_cache()
+
+    async def delete_role(self, role_name: str) -> bool:
+        """删除角色"""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            # 先删除 role_permissions
+            await conn.execute(
+                "DELETE FROM role_permissions WHERE role_name = $1", role_name
+            )
+            # 删除 user_roles 中的引用
+            await conn.execute(
+                "DELETE FROM user_roles WHERE role_name = $1", role_name
+            )
+            # 删除角色
+            result = await conn.execute(
+                "DELETE FROM rbac_roles WHERE role_name = $1 AND is_system = FALSE",
+                role_name
+            )
+            self._invalidate_permission_cache()
+            return result == "DELETE 1"
+
+    async def list_permissions(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取所有权限定义"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            if category:
+                rows = await conn.fetch(
+                    "SELECT * FROM permissions WHERE category = $1 ORDER BY permission_code",
+                    category
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM permissions ORDER BY category, permission_code"
+                )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_role_user_count(self, role_name: str) -> int:
+        """获取角色的用户数量"""
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM user_roles WHERE role_name = $1",
+                role_name
+            )
+            return count or 0
+
+    async def get_users_by_role(self, role_name: str) -> List[Dict[str, Any]]:
+        """获取拥有指定角色的所有用户"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT u.user_id, u.email, u.display_name, u.status, ur.granted_at
+                FROM users u
+                JOIN user_roles ur ON u.user_id = ur.user_id
+                WHERE ur.role_name = $1
+                ORDER BY ur.granted_at DESC
+            """, role_name)
+            return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # 用户额外权限管理 (User Extra Permissions)
+    # =========================================================================
+
+    async def get_user_extra_permissions(self, user_id: str) -> List[Dict[str, Any]]:
+        """获取用户的额外权限（直接分配，非角色）"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            try:
+                rows = await conn.fetch("""
+                    SELECT permission_code, granted_by, granted_at, expires_at, note
+                    FROM user_permissions
+                    WHERE user_id = $1
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                    ORDER BY granted_at DESC
+                """, user_id)
+                return [self._row_to_dict(row) for row in rows]
+            except Exception:
+                # Table might not exist yet
+                return []
+
+    async def add_user_extra_permission(
+        self,
+        user_id: str,
+        permission_code: str,
+        granted_by: str,
+        note: Optional[str] = None,
+        expires_at: Optional[datetime] = None
+    ) -> bool:
+        """给用户添加额外权限"""
+        if not self._pool:
+            return False
+        self._invalidate_permission_cache(user_id)
+        async with self._pool.acquire() as conn:
+            try:
+                await conn.execute("""
+                    INSERT INTO user_permissions (user_id, permission_code, granted_by, note, expires_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, permission_code) DO UPDATE SET
+                        granted_by = EXCLUDED.granted_by,
+                        granted_at = NOW(),
+                        note = EXCLUDED.note,
+                        expires_at = EXCLUDED.expires_at
+                """, user_id, permission_code, granted_by, note, expires_at)
+                return True
+            except Exception:
+                return False
+
+    async def remove_user_extra_permission(self, user_id: str, permission_code: str) -> bool:
+        """移除用户的额外权限"""
+        if not self._pool:
+            return False
+        self._invalidate_permission_cache(user_id)
+        async with self._pool.acquire() as conn:
+            try:
+                result = await conn.execute("""
+                    DELETE FROM user_permissions
+                    WHERE user_id = $1 AND permission_code = $2
+                """, user_id, permission_code)
+                return "DELETE" in result
+            except Exception:
+                return False
+
+    async def update_user_extra_permissions(
+        self,
+        user_id: str,
+        permissions: List[str],
+        granted_by: str
+    ) -> None:
+        """更新用户的额外权限（替换所有）"""
+        if not self._pool:
+            return
+        self._invalidate_permission_cache(user_id)
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                # 删除现有的额外权限
+                await conn.execute(
+                    "DELETE FROM user_permissions WHERE user_id = $1",
+                    user_id
+                )
+                # 添加新的额外权限
+                for perm in permissions:
+                    await conn.execute("""
+                        INSERT INTO user_permissions (user_id, permission_code, granted_by)
+                        VALUES ($1, $2, $3)
+                    """, user_id, perm, granted_by)
 
     # =========================================================================
     # 辅助方法

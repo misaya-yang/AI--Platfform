@@ -99,7 +99,7 @@ class UserResolver:
         token = self._extract_bearer_token(request)
         if not token:
             return None
-        
+
         try:
             payload = jwt.decode(
                 token,
@@ -108,19 +108,29 @@ class UserResolver:
                 audience=self.config.jwt_audience,
                 issuer=self.config.jwt_issuer,
             )
-            
+
             # 提取用户信息
             user_id = payload.get("sub") or payload.get("user_id") or ""
             if not user_id:
                 return None
-            
+
+            # 验证 token 是否在 Redis 中有效（如果 Redis 可用）
+            token_id = payload.get("jti")
+            if token_id:
+                redis = getattr(request.app.state, "redis", None)
+                if redis and getattr(redis, "enabled", False):
+                    is_valid = await redis.validate_token(token_id)
+                    if not is_valid:
+                        # Token 已被撤销
+                        return None
+
             tenant_id = payload.get(self.config.tenant_claim, "")
             tier = payload.get(self.config.tier_claim, "normal")
             roles = payload.get("roles", [])
-            
+
             if isinstance(roles, str):
                 roles = [roles]
-            
+
             return UserContext(
                 user_id=user_id,
                 tenant_id=tenant_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
@@ -11,6 +12,9 @@ try:
 except ImportError:
     HAS_REDIS = False
     aioredis = None
+
+logger = logging.getLogger(__name__)
+_warned_degraded = False
 
 
 class RedisStorage:
@@ -98,11 +102,33 @@ class RedisStorage:
         result = await self._client.delete(key)
         return result > 0
 
-    async def exists(self, key: str) -> bool:
-        """检查键是否存在"""
+    async def exists(self, key: str, degraded_default: bool = False) -> bool:
+        """
+        检查键是否存在
+
+        Args:
+            key: Redis 键名
+            degraded_default: 当 Redis 未连接时返回的默认值
+                             对于 token 验证场景应设为 True（降级模式允许通过）
+
+        Returns:
+            键是否存在，或 Redis 未连接时返回 degraded_default
+        """
         if not self._client:
-            return False
-        return await self._client.exists(key) > 0
+            if degraded_default:
+                global _warned_degraded
+                if not _warned_degraded:
+                    logger.warning(
+                        "Redis not connected, degraded mode: assuming token exists "
+                        "(first warning only)"
+                    )
+                    _warned_degraded = True
+            return degraded_default
+        try:
+            return await self._client.exists(key) > 0
+        except Exception as e:
+            logger.error(f"Redis exists check failed for key '{key}': {e}")
+            return degraded_default
 
     async def incr(self, key: str) -> int:
         """增加计数器"""
@@ -330,3 +356,128 @@ class RedisStorage:
         """获取用户 Run 计数"""
         key = f"lg:quota:{user_id}:runs:{window}"
         return await self.get_rate_limit_count(key)
+
+    # ===== Token 存储 =====
+
+    async def save_token(
+        self,
+        token_id: str,
+        user_id: str,
+        data: Dict[str, Any],
+        ttl: int = 10800,  # 默认 3 小时
+    ) -> None:
+        """
+        保存 JWT Token 到 Redis
+
+        Args:
+            token_id: Token 的唯一标识（可以是 jti 或 token 的 hash）
+            user_id: 用户 ID
+            data: Token 关联的数据（用户信息、权限等）
+            ttl: 过期时间（秒），默认 3 小时
+        """
+        # 保存 token 数据
+        token_key = f"auth:token:{token_id}"
+        await self.save(token_key, data, ttl)
+
+        # 维护用户的 token 列表（用于登出所有设备）
+        user_tokens_key = f"auth:user_tokens:{user_id}"
+        if self._client:
+            await self._client.sadd(user_tokens_key, token_id)
+            await self._client.expire(user_tokens_key, ttl)
+
+    async def get_token(self, token_id: str) -> Optional[Dict[str, Any]]:
+        """
+        获取 Token 数据
+
+        Args:
+            token_id: Token 的唯一标识
+
+        Returns:
+            Token 数据，如果不存在或已过期返回 None
+        """
+        key = f"auth:token:{token_id}"
+        return await self.get(key)
+
+    def is_connected(self) -> bool:
+        """检查 Redis 客户端是否已连接"""
+        return self._client is not None
+
+    async def validate_token(self, token_id: str) -> bool:
+        """
+        验证 Token 是否有效（存在于 Redis 中）
+
+        当 Redis 未连接时，采用降级模式，假设 token 有效。
+        这确保了系统在 Redis 故障时仍能正常工作（无状态 JWT 验证）。
+
+        Args:
+            token_id: Token 的唯一标识
+
+        Returns:
+            True 如果 Token 有效或 Redis 未连接（降级模式），否则 False
+        """
+        key = f"auth:token:{token_id}"
+        # 使用降级模式：Redis 未连接时假设 token 有效
+        return await self.exists(key, degraded_default=True)
+
+    async def revoke_token(self, token_id: str, user_id: str) -> bool:
+        """
+        撤销单个 Token（登出）
+
+        Args:
+            token_id: Token 的唯一标识
+            user_id: 用户 ID
+
+        Returns:
+            True 如果成功撤销
+        """
+        token_key = f"auth:token:{token_id}"
+        user_tokens_key = f"auth:user_tokens:{user_id}"
+
+        result = await self.delete(token_key)
+
+        if self._client:
+            await self._client.srem(user_tokens_key, token_id)
+
+        return result
+
+    async def revoke_all_user_tokens(self, user_id: str) -> int:
+        """
+        撤销用户所有 Token（登出所有设备）
+
+        Args:
+            user_id: 用户 ID
+
+        Returns:
+            撤销的 Token 数量
+        """
+        if not self._client:
+            return 0
+
+        user_tokens_key = f"auth:user_tokens:{user_id}"
+        token_ids = await self._client.smembers(user_tokens_key)
+
+        count = 0
+        for token_id in token_ids:
+            token_key = f"auth:token:{token_id}"
+            if await self.delete(token_key):
+                count += 1
+
+        await self.delete(user_tokens_key)
+        return count
+
+    async def refresh_token_ttl(self, token_id: str, ttl: int = 10800) -> bool:
+        """
+        刷新 Token 的过期时间
+
+        Args:
+            token_id: Token 的唯一标识
+            ttl: 新的过期时间（秒）
+
+        Returns:
+            True 如果成功刷新
+        """
+        if not self._client:
+            return False
+
+        key = f"auth:token:{token_id}"
+        return await self._client.expire(key, ttl)

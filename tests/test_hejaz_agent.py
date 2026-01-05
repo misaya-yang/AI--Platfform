@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import os
 import uuid
 from typing import Optional
 
@@ -17,8 +18,23 @@ import pytest
 
 
 # 网关基础 URL
-GATEWAY_BASE_URL = "http://localhost:8080"
-SERVICE_ID = "Hejaz Agent"
+GATEWAY_BASE_URL = os.getenv("GATEWAY_BASE_URL", "http://localhost:8080")
+SERVICE_ID = os.getenv("HEJAZ_AGENT_SERVICE_ID", "Hejaz Agent")
+
+# Only force these tests when explicitly requested.
+RUN_HEJAZ_AGENT_TESTS = os.getenv("RUN_HEJAZ_AGENT_TESTS", "").lower() in {"1", "true", "yes"}
+
+
+async def _skip_if_hejaz_unavailable(tester: "HejazAgentTester") -> None:
+    """
+    Skip Hejaz Agent integration tests unless explicitly enabled or service is available.
+    """
+    if RUN_HEJAZ_AGENT_TESTS:
+        return
+    if not await tester.test_health():
+        pytest.skip("Hejaz Agent tests skipped: gateway not available")
+    if not await tester.test_service_exists():
+        pytest.skip("Hejaz Agent tests skipped: service not registered")
 
 
 class HejazAgentTester:
@@ -246,6 +262,8 @@ async def test_hejaz_agent_health():
     """测试网关和服务健康状态"""
     tester = HejazAgentTester()
     try:
+        if not RUN_HEJAZ_AGENT_TESTS:
+            await _skip_if_hejaz_unavailable(tester)
         assert await tester.test_health()
         assert await tester.test_service_exists()
     finally:
@@ -257,6 +275,8 @@ async def test_hejaz_agent_invoke():
     """测试同步调用"""
     tester = HejazAgentTester()
     try:
+        if not RUN_HEJAZ_AGENT_TESTS:
+            await _skip_if_hejaz_unavailable(tester)
         result = await tester.test_invoke("你好，介绍一下 Halal Money")
         assert result is not None
         assert result.get("status") == "success"
@@ -270,6 +290,8 @@ async def test_hejaz_agent_stream():
     """测试流式调用"""
     tester = HejazAgentTester()
     try:
+        if not RUN_HEJAZ_AGENT_TESTS:
+            await _skip_if_hejaz_unavailable(tester)
         result = await tester.test_stream("请详细说明 Halal Money 的投资方式")
         assert result is not None
         assert len(result) > 0
@@ -282,6 +304,8 @@ async def test_hejaz_agent_conversation():
     """测试多轮对话"""
     tester = HejazAgentTester()
     try:
+        if not RUN_HEJAZ_AGENT_TESTS:
+            await _skip_if_hejaz_unavailable(tester)
         await tester.test_conversation()
     finally:
         await tester.close()
@@ -292,6 +316,8 @@ async def test_hejaz_agent_stream_with_session():
     """测试带会话的流式调用"""
     tester = HejazAgentTester()
     try:
+        if not RUN_HEJAZ_AGENT_TESTS:
+            await _skip_if_hejaz_unavailable(tester)
         # 第一轮
         result1 = await tester.test_stream("什么是 Halal Money？", use_session=True)
         assert result1 is not None

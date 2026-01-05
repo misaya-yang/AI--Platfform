@@ -192,10 +192,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
         <Space align="start">
           <RocketOutlined style={{ fontSize: 32, color: colors.primary[500], marginTop: 4 }} />
           <div>
-            <Title level={4} style={{ margin: 0 }}>AI Gateway</Title>
-            <Text type="secondary">统一的 AI 服务网关平台</Text>
+            <Title level={4} style={{ margin: 0 }}>AI Platform</Title>
+            <Text type="secondary">统一的 AI 服务管理平台</Text>
             <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
-              AI Gateway 是一个企业级的 AI 服务管理平台，提供统一的服务注册、
+              AI Platform 是一个企业级的 AI 服务管理平台，提供统一的服务注册、
               智能路由、知识库管理和对话测试能力。帮助您快速构建和部署 AI 应用。
             </Paragraph>
           </div>

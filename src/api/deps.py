@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -9,16 +10,20 @@ from pydantic import BaseModel
 from ..config.settings import Settings
 from ..core.auth.api_key import verify_api_key
 from ..core.auth.jwt import decode_jwt_token
+from ..core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
 from ..core.auth.user_resolver import UserContext
 from ..core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
 from ..adapters.langgraph_proxy import LangGraphProxy
+
+logger = logging.getLogger(__name__)
 
 
 class AuthContext(BaseModel):
     user_id: str = ""
     tenant_id: str = ""
     roles: List[str] = ["guest"]
+    permissions: List[str] = []
 
 
 def get_settings(request: Request) -> Settings:
@@ -126,31 +131,47 @@ async def get_user_context(
     client_ip = _get_client_ip(request)
     auth_cfg = settings.authentication
 
-    # Local/dev convenience: if auth is disabled, behave like an admin user.
+    # If auth is disabled, treat as guest (secure default).
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
         return UserContext(
-            user_id="local",
-            tenant_id="local",
-            tier="admin",
-            is_authenticated=True,
+            user_id="guest",
+            tenant_id="public",
+            tier="anonymous",
+            is_authenticated=False,
             ip=client_ip,
-            roles=["admin"],
+            roles=["guest"],
         )
 
     # 1) JWT (Bearer)
     auth_header = request.headers.get("Authorization") or ""
     if auth_cfg.jwt.enabled and auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ", 1)[1].strip()
+
+        # Use unified JWT config for consistent secret/algorithms
+        jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
+        jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
+
         payload = decode_jwt_token(
             token,
-            secret=auth_cfg.jwt.secret,
-            algorithms=auth_cfg.jwt.algorithms,
+            secret=jwt_secret,
+            algorithms=jwt_algorithms,
             audience=auth_cfg.jwt.audience,
             issuer=auth_cfg.jwt.issuer,
         )
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
         if not user_id:
             raise AuthError("Missing user_id in JWT token")
+
+        # Check token revocation in Redis (if available)
+        token_id = payload.get("jti")
+        if token_id:
+            redis = getattr(request.app.state, "redis", None)
+            if redis and getattr(redis, "enabled", False):
+                is_valid = await redis.validate_token(token_id)
+                if not is_valid:
+                    logger.warning(f"Token revoked for user {user_id}")
+                    raise AuthError("Token has been revoked")
+
         tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "")
         roles = _normalize_roles(payload.get("roles") or payload.get("role"))
         tier = str(payload.get("tier") or "normal")
@@ -219,34 +240,72 @@ async def get_auth_context(
 ) -> AuthContext:
     auth_cfg = settings.authentication
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
-        ctx = AuthContext(user_id="local", tenant_id="local", roles=["admin"])
+        ctx = AuthContext(user_id="guest", tenant_id="public", roles=["guest"], permissions=[])
         request.state.auth = ctx
         return ctx
 
     # Unauthenticated requests default to a guest role.
     roles: List[str] = ["guest"]
+    permissions: List[str] = []
     user_id = ""
     tenant_id = ""
 
     auth_header = request.headers.get("Authorization")
     if auth_cfg.jwt.enabled and auth_header and auth_header.lower().startswith("bearer "):
         token = auth_header.split(" ", 1)[1]
+
+        # Use unified JWT config for consistent secret/algorithms
+        jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
+        jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
+
         payload = decode_jwt_token(
             token,
-            secret=auth_cfg.jwt.secret,
-            algorithms=auth_cfg.jwt.algorithms,
+            secret=jwt_secret,
+            algorithms=jwt_algorithms,
             audience=auth_cfg.jwt.audience,
             issuer=auth_cfg.jwt.issuer,
         )
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
+
+        # Check token revocation in Redis (if available)
+        token_id = payload.get("jti")
+        if token_id:
+            redis = getattr(request.app.state, "redis", None)
+            if redis and getattr(redis, "enabled", False):
+                is_valid = await redis.validate_token(token_id)
+                if not is_valid:
+                    logger.warning(f"Token revoked for user {user_id}")
+                    raise AuthError("Token has been revoked")
+
         tenant_id = str(payload.get("tenant_id") or "")
         raw_roles = payload.get("roles") or payload.get("role") or ["user"]
         if isinstance(raw_roles, str):
             roles = [raw_roles]
         elif isinstance(raw_roles, list):
             roles = [str(r) for r in raw_roles]
+        raw_permissions = payload.get("permissions") or []
+        if isinstance(raw_permissions, str):
+            permissions = [raw_permissions]
+        elif isinstance(raw_permissions, list):
+            permissions = [str(p) for p in raw_permissions]
 
-        ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles)
+        # Merge permissions from DB if available (keeps JWT small when missing)
+        db = getattr(request.app.state, "database", None)
+        if db and getattr(db, "enabled", False) and user_id:
+            try:
+                db_permissions = await db.get_user_permissions(user_id)
+                for perm in db_permissions:
+                    if perm not in permissions:
+                        permissions.append(perm)
+            except Exception:
+                pass
+
+        # Merge permissions into roles so RBAC can honor them directly.
+        for perm in permissions:
+            if perm not in roles:
+                roles.append(perm)
+
+        ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=permissions)
         request.state.auth = ctx
         return ctx
 
@@ -263,12 +322,12 @@ async def get_auth_context(
                 roles = _normalize_roles(key_info.get("roles"))
                 tenant_id = str(key_info.get("tenant_id") or "")
                 user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(key)
-                ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles)
+                ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=[])
                 request.state.auth = ctx
                 return ctx
 
         verify_api_key(key, auth_cfg.api_key.keys)
-        ctx = AuthContext(user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"])
+        ctx = AuthContext(user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[])
         request.state.auth = ctx
         return ctx
 

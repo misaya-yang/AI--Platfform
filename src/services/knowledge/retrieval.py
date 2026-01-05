@@ -16,7 +16,7 @@ def tokenize(text: str, keep_original: bool = False) -> List[str]:
     """Tokenize text for lightweight lexical search.
 
     - Latin: lowercased alnum words (including hyphenated like Q-Flow)
-    - CJK: single characters (for better exact matching)
+    - CJK: whole run, bigrams, and single characters (for better matching)
     - Quoted phrases are kept intact
     
     Args:
@@ -46,11 +46,14 @@ def tokenize(text: str, keep_original: bool = False) -> List[str]:
     latin_words = _RE_LATIN_WORD.findall(t_clean)
     tokens.extend(latin_words)
     
-    # For CJK, use single characters for better exact matching
+    # For CJK, include whole run + bigrams + single characters
     for run in _RE_CJK_RUN.findall(t_clean):
         # Add whole CJK phrase for exact matching
         if len(run) >= 2:
             tokens.append(run)
+            # Add bigrams (e.g., 智能, 知识) for better matching
+            for i in range(len(run) - 1):
+                tokens.append(run[i:i + 2])
         # Also add individual characters
         tokens.extend(list(run))
 

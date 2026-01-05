@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { Layout, Menu, Tooltip, Typography, Space, Badge, Dropdown } from "antd";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Layout, Menu, Tooltip, Typography, Space, Dropdown } from "antd";
 import type { MenuProps } from "antd";
 import {
   DashboardOutlined,
@@ -14,14 +14,19 @@ import {
   MenuUnfoldOutlined,
   SunOutlined,
   MoonOutlined,
-  BellOutlined,
   UserOutlined,
   QuestionCircleOutlined,
+  TeamOutlined,
+  LogoutOutlined,
 } from "@ant-design/icons";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAppStore } from "@/store/useAppStore";
+import { useAuthStore } from "@/store/useAuthStore";
+import { logout } from "@/api/auth";
 import { colors } from "@/theme/themeConfig";
 import { HelpModal } from "@/components/HelpModal";
+import { PasswordChangeModal } from "@/components/PasswordChangeModal";
+import { ProfileModal } from "@/components/ProfileModal";
 
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
@@ -32,43 +37,57 @@ const navItems = [
     key: "/dashboard",
     label: "仪表盘",
     icon: <DashboardOutlined />,
-    description: "系统概览与数据统计"
+    description: "系统概览与数据统计",
+    permission: "console:dashboard:view",
   },
   {
     key: "/services",
     label: "服务管理",
     icon: <CloudServerOutlined />,
-    description: "管理已注册的服务"
+    description: "管理已注册的服务",
+    permission: "console:services:view",
   },
   {
     key: "/knowledge",
     label: "知识库",
     icon: <DatabaseOutlined />,
-    description: "管理知识库和文档"
+    description: "管理知识库和文档",
+    permission: "knowledge:dataset:view",
   },
   {
     key: "/confluence",
     label: "Confluence",
     icon: <CloudSyncOutlined />,
-    description: "Confluence 文档同步"
+    description: "Confluence 文档同步",
+    permission: "knowledge:confluence:manage",
   },
   {
     key: "/playground",
     label: "智能对话",
     icon: <ThunderboltOutlined />,
-    description: "AI 对话测试"
+    description: "AI 对话测试",
+    permission: "conversation:playground:access",
   },
   {
     key: "/tasks",
     label: "任务管理",
     icon: <UnorderedListOutlined />,
-    description: "异步任务追踪"
+    description: "异步任务追踪",
+    permission: null, // 所有用户可见
+  },
+  {
+    key: "/users",
+    label: "用户管理",
+    icon: <TeamOutlined />,
+    description: "管理系统用户",
+    permission: "user:list",
   },
   {
     key: "/settings",
     label: "系统设置",
     icon: <SettingOutlined />,
-    description: "系统配置选项"
+    description: "系统配置选项",
+    permission: "console:settings:view",
   },
 ];
 
@@ -130,7 +149,7 @@ function Logo({ collapsed }: { collapsed: boolean }) {
               WebkitTextFillColor: 'transparent',
               letterSpacing: '-0.5px'
             }}>
-              AI Gateway
+              AI Platform
             </Text>
             <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: -4 }}>
               Unified AI Services
@@ -185,20 +204,53 @@ function ThemeToggle({ darkMode, onToggle }: { darkMode: boolean; onToggle: () =
   );
 }
 
-// 用户下拉菜单
-const userMenuItems: MenuProps['items'] = [
-  { key: 'profile', label: '个人设置', icon: <UserOutlined /> },
-  { key: 'help', label: '帮助文档', icon: <QuestionCircleOutlined /> },
-  { type: 'divider' },
-  { key: 'logout', label: '退出登录', danger: true },
-];
-
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
+  const [showPasswordChange, setShowPasswordChange] = useState(false);
   const { darkMode, toggleDarkMode } = useAppStore();
+  const { user, clearAuth, hasPermission, forcePasswordChange, setForcePasswordChange } = useAuthStore();
   const location = useLocation();
+  const navigate = useNavigate();
+
+  // Profile modal state
+  const [showProfileModal, setShowProfileModal] = useState(false);
+
+  // 用户下拉菜单
+  const userMenuItems: MenuProps['items'] = [
+    { key: 'profile', label: '个人设置', icon: <UserOutlined /> },
+    { key: 'change-password', label: '修改密码', icon: <SettingOutlined /> },
+    { key: 'help', label: '帮助文档', icon: <QuestionCircleOutlined /> },
+    { type: 'divider' },
+    { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
+  ];
+
+  // Handle user menu click
+  const handleUserMenuClick = async ({ key }: { key: string }) => {
+    if (key === 'logout') {
+      try {
+        await logout();
+      } catch {
+        // Ignore logout errors
+      }
+      clearAuth();
+      navigate('/login');
+    } else if (key === 'profile') {
+      setShowProfileModal(true);
+    } else if (key === 'change-password') {
+      setShowPasswordChange(true);
+    } else if (key === 'help') {
+      setHelpModalOpen(true);
+    }
+  };
+
+  // Show password change modal if forced
+  useEffect(() => {
+    if (forcePasswordChange) {
+      setShowPasswordChange(true);
+    }
+  }, [forcePasswordChange]);
 
   // 同步 dark mode 到 HTML
   useEffect(() => {
@@ -206,8 +258,12 @@ export function AppLayout() {
     document.body.style.colorScheme = darkMode ? 'dark' : 'light';
   }, [darkMode]);
 
-  // 生成菜单项
-  const menuItems: MenuProps['items'] = navItems.map(item => ({
+  // 生成菜单项 - 根据权限过滤
+  const filteredNavItems = navItems.filter(item =>
+    item.permission === null || hasPermission(item.permission)
+  );
+
+  const menuItems: MenuProps['items'] = filteredNavItems.map(item => ({
     key: item.key,
     icon: (
       <motion.span
@@ -362,57 +418,14 @@ export function AppLayout() {
           {/* 左侧 - 面包屑/标题 */}
           <div>
             <Text strong style={{ fontSize: 16 }}>
-              {navItems.find(item => location.pathname.startsWith(item.key))?.label || ''}
+              {filteredNavItems.find(item => location.pathname.startsWith(item.key))?.label || ''}
             </Text>
           </div>
 
           {/* 右侧 - 工具栏 */}
           <Space size={16}>
-            {/* 通知 */}
-            <Tooltip title="通知">
-              <Badge count={3} size="small" offset={[-2, 2]}>
-                <motion.div
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.95 }}
-                  style={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: 8,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    cursor: 'pointer',
-                    background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                  }}
-                >
-                  <BellOutlined style={{ fontSize: 18 }} />
-                </motion.div>
-              </Badge>
-            </Tooltip>
-
-            {/* 帮助 */}
-            <Tooltip title="帮助文档">
-              <motion.div
-                whileHover={{ scale: 1.1 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setHelpModalOpen(true)}
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 8,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: 'pointer',
-                  background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                }}
-              >
-                <QuestionCircleOutlined style={{ fontSize: 18 }} />
-              </motion.div>
-            </Tooltip>
-
             {/* 用户菜单 */}
-            <Dropdown menu={{ items: userMenuItems }} trigger={['click']}>
+            <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
               <motion.div
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
@@ -437,7 +450,7 @@ export function AppLayout() {
                 }}>
                   <UserOutlined style={{ color: '#fff', fontSize: 14 }} />
                 </div>
-                <Text style={{ fontSize: 13 }}>管理员</Text>
+                <Text style={{ fontSize: 13 }}>{user?.display_name || user?.user_id || '用户'}</Text>
               </motion.div>
             </Dropdown>
           </Space>
@@ -461,6 +474,23 @@ export function AppLayout() {
 
       {/* 帮助文档模态框 */}
       <HelpModal open={helpModalOpen} onClose={() => setHelpModalOpen(false)} />
+
+      {/* 密码修改模态框 */}
+      <PasswordChangeModal
+        open={showPasswordChange}
+        allowClose={!forcePasswordChange}
+        onClose={() => setShowPasswordChange(false)}
+        onComplete={() => {
+          setShowPasswordChange(false);
+          setForcePasswordChange(false);
+        }}
+      />
+
+      {/* 个人设置模态框 */}
+      <ProfileModal
+        open={showProfileModal}
+        onClose={() => setShowProfileModal(false)}
+      />
 
       {/* 全局样式 */}
       <style>{`

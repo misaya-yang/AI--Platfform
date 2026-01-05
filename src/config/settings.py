@@ -12,6 +12,8 @@ class DatabaseSettings(BaseModel):
     dsn: str = "postgresql://postgres:postgres@localhost:5432/gateway"
     # Development-friendly: automatically run `database/schema.sql` when core tables are missing.
     auto_init: bool = True
+    # Permission cache TTL in seconds (0 to disable).
+    permission_cache_ttl_seconds: int = 60
 
 
 class RedisSettings(BaseModel):

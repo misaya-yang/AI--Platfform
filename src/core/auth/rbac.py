@@ -9,6 +9,18 @@ class RBAC:
     def __init__(self, role_permissions: Dict[str, List[str]]):
         self.role_permissions = role_permissions
 
+    def _matches_permission(self, permissions: Set[str], permission: str) -> bool:
+        if "admin:*" in permissions:
+            return True
+        if permission in permissions:
+            return True
+        parts = permission.split(":")
+        for i in range(len(parts) - 1, 0, -1):
+            wildcard = ":".join(parts[:i]) + ":*"
+            if wildcard in permissions:
+                return True
+        return False
+
     def permissions_for_roles(self, roles: List[str]) -> Set[str]:
         permissions: Set[str] = set()
         for role in roles:
@@ -16,13 +28,12 @@ class RBAC:
         return permissions
 
     def has_permission(self, roles: List[str], permission: str) -> bool:
+        # If permissions are already provided in the roles list, honor them directly.
+        if self._matches_permission(set(roles), permission):
+            return True
+        # Fall back to role -> permission mapping.
         permissions = self.permissions_for_roles(roles)
-        if "admin:*" in permissions:
-            return True
-        if permission in permissions:
-            return True
-        prefix = permission.split(":")[0] + ":*"
-        return prefix in permissions
+        return self._matches_permission(permissions, permission)
 
     def require(self, roles: List[str], permission: str) -> None:
         if not self.has_permission(roles, permission):
