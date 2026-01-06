@@ -9,6 +9,7 @@
 
 import { useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { message } from "antd";
 import {
   ArrowLeft,
   ArrowRight,
@@ -91,6 +92,13 @@ const RERANK_MODELS = [
   { id: "gte-rerank", name: "GTE-ReRank" },
   { id: "gte-rerank-v2", name: "GTE-ReRank v2" },
 ];
+
+// 验证常量
+const MAX_NAME_LENGTH = 100;
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB
+const URL_PATTERN = /^https?:\/\/([\w-]+\.)+[\w-]+(\/[\w\-./?%&=#]*)?$/i;
+const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 
 // ============================================================
 // Sub-Components
@@ -236,6 +244,9 @@ export default function DatasetCreatePage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 表单验证错误
+  const [nameError, setNameError] = useState<string | null>(null);
+
   // Step 1: Basic Info
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -263,32 +274,73 @@ export default function DatasetCreatePage() {
 
   const handleFilesSelect = useCallback((files: FileList | null) => {
     if (!files) return;
-    const newFiles: PendingFile[] = Array.from(files).map((file) => ({
-      id: `file_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      file,
-      name: file.name,
-      size: file.size,
-      status: "pending",
-    }));
-    setPendingFiles((prev) => [...prev, ...newFiles]);
-  }, []);
+    const newFiles: PendingFile[] = [];
+    const errors: string[] = [];
+
+    Array.from(files).forEach((file) => {
+      const isImage = IMAGE_EXTENSIONS.test(file.name);
+      const maxSize = isImage ? MAX_IMAGE_SIZE : MAX_FILE_SIZE;
+      const maxSizeLabel = isImage ? "20MB" : "100MB";
+
+      if (file.size > maxSize) {
+        errors.push(`文件 "${file.name}" 超过大小限制 (${maxSizeLabel})`);
+        return;
+      }
+
+      // 检查重复文件
+      if (pendingFiles.some(pf => pf.name === file.name && pf.size === file.size)) {
+        errors.push(`文件 "${file.name}" 已添加`);
+        return;
+      }
+
+      newFiles.push({
+        id: `file_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        file,
+        name: file.name,
+        size: file.size,
+        status: "pending",
+      });
+    });
+
+    if (errors.length > 0) {
+      errors.forEach(err => message.warning(err));
+    }
+
+    if (newFiles.length > 0) {
+      setPendingFiles((prev) => [...prev, ...newFiles]);
+    }
+  }, [pendingFiles]);
 
   const handleRemoveFile = useCallback((id: string) => {
     setPendingFiles((prev) => prev.filter((f) => f.id !== id));
   }, []);
 
   const handleAddUrl = useCallback(() => {
-    if (!urlInput.trim()) return;
+    const trimmedUrl = urlInput.trim();
+    if (!trimmedUrl) return;
+
+    // URL格式验证
+    if (!URL_PATTERN.test(trimmedUrl)) {
+      message.error("请输入有效的URL地址，需以 http:// 或 https:// 开头");
+      return;
+    }
+
+    // 重复检查
+    if (pendingUrls.some(pu => pu.url === trimmedUrl)) {
+      message.warning("该URL已添加");
+      return;
+    }
+
     const newUrl: PendingUrl = {
       id: `url_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      url: urlInput.trim(),
-      title: urlTitle.trim() || urlInput.trim(),
+      url: trimmedUrl,
+      title: urlTitle.trim() || trimmedUrl,
       status: "pending",
     };
     setPendingUrls((prev) => [...prev, newUrl]);
     setUrlInput("");
     setUrlTitle("");
-  }, [urlInput, urlTitle]);
+  }, [urlInput, urlTitle, pendingUrls]);
 
   const handleRemoveUrl = useCallback((id: string) => {
     setPendingUrls((prev) => prev.filter((u) => u.id !== id));
@@ -385,8 +437,32 @@ export default function DatasetCreatePage() {
     }
   };
 
-  const canProceedStep1 = name.trim().length > 0;
-  const canProceedStep2 = pendingFiles.length > 0 || pendingUrls.length > 0;
+  // 处理下一步点击，带验证
+  const handleNextStep = () => {
+    if (step === 1) {
+      // Step 1 验证
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        setNameError("请输入知识库名称");
+        message.error("请输入知识库名称");
+        return;
+      }
+      if (trimmedName.length > MAX_NAME_LENGTH) {
+        setNameError(`名称长度不能超过 ${MAX_NAME_LENGTH} 个字符`);
+        message.error(`名称长度不能超过 ${MAX_NAME_LENGTH} 个字符`);
+        return;
+      }
+      setNameError(null);
+      setStep(2);
+    } else if (step === 2) {
+      // Step 2 验证
+      if (pendingFiles.length === 0 && pendingUrls.length === 0) {
+        message.error("请至少上传一个文件或添加一个URL");
+        return;
+      }
+      setStep(3);
+    }
+  };
 
   // ============================================================
   // Render
@@ -468,11 +544,25 @@ export default function DatasetCreatePage() {
                 知识库名称 <span className="text-red-500">*</span>
               </Label>
               <Input
-                className="mt-2"
+                className={`mt-2 ${nameError ? "border-red-500" : ""}`}
                 placeholder="请输入知识库名称"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                maxLength={MAX_NAME_LENGTH}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  if (nameError) setNameError(null);
+                }}
               />
+              <div className="flex justify-between mt-1">
+                {nameError ? (
+                  <span className="text-xs text-red-500">{nameError}</span>
+                ) : (
+                  <span className="text-xs text-muted-foreground/70">1-100个字符</span>
+                )}
+                <span className={`text-xs ${name.length > MAX_NAME_LENGTH ? "text-red-500" : "text-muted-foreground/70"}`}>
+                  {name.length}/{MAX_NAME_LENGTH}
+                </span>
+              </div>
             </div>
 
             <div>
@@ -906,8 +996,7 @@ export default function DatasetCreatePage() {
             </Button>
             {step < 3 ? (
               <Button
-                onClick={() => setStep((s) => s + 1)}
-                disabled={step === 1 ? !canProceedStep1 : step === 2 ? !canProceedStep2 : false}
+                onClick={handleNextStep}
                 className="bg-primary hover:bg-primary/90"
               >
                 下一步

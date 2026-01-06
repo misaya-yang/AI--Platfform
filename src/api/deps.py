@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -127,24 +128,40 @@ async def get_user_context(
     request: Request,
     settings: Settings = Depends(get_settings),
 ) -> UserContext:
-    """User context for request scoping (JWT / API key / anonymous cookie)."""
+    """User context for request scoping (JWT / API key / anonymous cookie).
+
+    Results are cached at request level to avoid redundant auth operations.
+    """
+    # Request-level cache: return cached result if available
+    cached = getattr(request.state, "_cached_user_context", None)
+    if cached is not None:
+        return cached
+
+    t_start = time.perf_counter()
     client_ip = _get_client_ip(request)
     auth_cfg = settings.authentication
 
+    def _cache_and_return(ctx: UserContext) -> UserContext:
+        """Cache the context in request.state and return it."""
+        request.state._cached_user_context = ctx
+        return ctx
+
     # If auth is disabled, treat as guest (secure default).
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
-        return UserContext(
+        logger.debug(f"[AUTH][TIMING] auth_disabled total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+        return _cache_and_return(UserContext(
             user_id="guest",
             tenant_id="public",
             tier="anonymous",
             is_authenticated=False,
             ip=client_ip,
             roles=["guest"],
-        )
+        ))
 
     # 1) JWT (Bearer)
     auth_header = request.headers.get("Authorization") or ""
     if auth_cfg.jwt.enabled and auth_header.lower().startswith("bearer "):
+        t_jwt_start = time.perf_counter()
         token = auth_header.split(" ", 1)[1].strip()
 
         # Use unified JWT config for consistent secret/algorithms
@@ -158,11 +175,13 @@ async def get_user_context(
             audience=auth_cfg.jwt.audience,
             issuer=auth_cfg.jwt.issuer,
         )
+        t_jwt_decode = time.perf_counter()
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
         if not user_id:
             raise AuthError("Missing user_id in JWT token")
 
         # Check token revocation in Redis (if available)
+        t_redis_start = time.perf_counter()
         token_id = payload.get("jti")
         if token_id:
             redis = getattr(request.app.state, "redis", None)
@@ -171,6 +190,7 @@ async def get_user_context(
                 if not is_valid:
                     logger.warning(f"Token revoked for user {user_id}")
                     raise AuthError("Token has been revoked")
+        t_redis_done = time.perf_counter()
 
         tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "")
         roles = _normalize_roles(payload.get("roles") or payload.get("role"))
@@ -181,14 +201,21 @@ async def get_user_context(
             tier = "enterprise"
         elif "premium" in roles or "vip" in roles:
             tier = "premium"
-        return UserContext(
+
+        logger.info(
+            f"[AUTH][TIMING] JWT user={user_id} "
+            f"decode={((t_jwt_decode - t_jwt_start) * 1000):.1f}ms "
+            f"redis={((t_redis_done - t_redis_start) * 1000):.1f}ms "
+            f"total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+        )
+        return _cache_and_return(UserContext(
             user_id=user_id,
             tenant_id=tenant_id,
             tier=tier,
             is_authenticated=True,
             ip=client_ip,
             roles=roles,
-        )
+        ))
 
     # 2) API key
     if auth_cfg.api_key.enabled:
@@ -203,41 +230,53 @@ async def get_user_context(
                     tenant_id = str(key_info.get("tenant_id") or "")
                     user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(api_key)
                     tier = str(key_info.get("tier") or "normal")
-                    return UserContext(
+                    logger.info(f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+                    return _cache_and_return(UserContext(
                         user_id=user_id,
                         tenant_id=tenant_id,
                         tier=tier,
                         is_authenticated=True,
                         ip=client_ip,
                         roles=roles,
-                    )
+                    ))
 
             # Fallback to static allowlist (env-configured keys)
             verify_api_key(api_key, auth_cfg.api_key.keys)
-            return UserContext(
+            logger.info(f"[AUTH][TIMING] API_KEY_STATIC total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+            return _cache_and_return(UserContext(
                 user_id=_derive_api_key_user_id(api_key),
                 tenant_id="",
                 tier="normal",
                 is_authenticated=True,
                 ip=client_ip,
                 roles=["user"],
-            )
+            ))
 
     # 3) Anonymous (stable ID minted by middleware)
     anon_id = getattr(getattr(request, "state", None), "anonymous_id", None) or client_ip
-    return UserContext(
+    logger.debug(f"[AUTH][TIMING] anonymous total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+    return _cache_and_return(UserContext(
         user_id=f"anon:{anon_id}",
         tenant_id="public",
         tier="anonymous",
         is_authenticated=False,
         ip=client_ip,
         roles=["guest"],
-    )
+    ))
 
 
 async def get_auth_context(
     request: Request, settings: Settings = Depends(get_settings)
 ) -> AuthContext:
+    """Get authentication context for RBAC.
+
+    Results are cached in request.state.auth to avoid redundant auth operations.
+    """
+    # Request-level cache: return cached result if available
+    cached = getattr(request.state, "auth", None)
+    if cached is not None and isinstance(cached, AuthContext):
+        return cached
+
     auth_cfg = settings.authentication
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
         ctx = AuthContext(user_id="guest", tenant_id="public", roles=["guest"], permissions=[])

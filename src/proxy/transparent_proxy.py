@@ -274,17 +274,19 @@ class TransparentProxy:
     async def proxy(self, request: ProxyRequest) -> ProxyResponse:
         """
         执行代理请求
-        
+
         Args:
             request: 代理请求
-            
+
         Returns:
             代理响应
         """
-        start_time = time.time()
-        
+        start_time = time.perf_counter()
+        t_config_start = start_time
+
         # 1. 获取服务配置
         config = await self.config_loader.get_config(request.service_name)
+        t_config_done = time.perf_counter()
         if not config:
             return ProxyResponse(
                 status_code=404,
@@ -318,15 +320,31 @@ class TransparentProxy:
             context=context,
             service_auth_token=config.auth_token if not config.forward_auth else None,
         )
-        
+        t_headers_done = time.perf_counter()
+
         # 5. 获取 HTTP 客户端
         client = await self._get_client(config)
-        
-        # 6. LangGraph assistant_id 自动注入
+        t_client_done = time.perf_counter()
+
+        # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
-        if config.assistant_id and request.method in ("POST", "PUT", "PATCH"):
-            body = self._inject_assistant_id(body, request.path, config.assistant_id)
-        
+        if request.method in ("POST", "PUT", "PATCH"):
+            if config.assistant_id:
+                body = self._inject_assistant_id(body, request.path, config.assistant_id)
+            # 为流式请求设置默认参数
+            body = self._ensure_stream_defaults(body, request.path)
+        t_body_done = time.perf_counter()
+
+        # Performance logging
+        logger.info(
+            f"[Proxy][TIMING] {request.method} {request.service_name}/{request.path} prep: "
+            f"config={((t_config_done - t_config_start) * 1000):.1f}ms "
+            f"headers={((t_headers_done - t_config_done) * 1000):.1f}ms "
+            f"client={((t_client_done - t_headers_done) * 1000):.1f}ms "
+            f"body={((t_body_done - t_client_done) * 1000):.1f}ms "
+            f"total_prep={((t_body_done - start_time) * 1000):.1f}ms"
+        )
+
         # 7. 执行请求
         logger.info(
             f"[Proxy] {request.method} {request.service_name}/{request.path} -> {upstream_url}"
@@ -415,7 +433,65 @@ class TransparentProxy:
         except (json.JSONDecodeError, UnicodeDecodeError):
             # 非 JSON 请求体，原样返回
             return body
-    
+
+    @staticmethod
+    def _stream_mode_wants_messages(stream_mode: Any) -> bool:
+        """检查 stream_mode 是否包含 messages 模式"""
+        if stream_mode is None:
+            return False
+        if isinstance(stream_mode, str):
+            modes = [m.strip() for m in stream_mode.split(",") if m.strip()]
+        elif isinstance(stream_mode, list):
+            modes = [str(m).strip() for m in stream_mode if str(m).strip()]
+        else:
+            return False
+        return any(m in ("messages", "messages-tuple") for m in modes)
+
+    def _ensure_stream_defaults(self, body: Optional[bytes], path: str) -> Optional[bytes]:
+        """
+        为 LangGraph 流式请求设置默认参数
+
+        确保 /runs/stream 请求包含合理的默认值：
+        - stream_mode: ["messages", "updates"] - 启用消息流
+        - stream_subgraphs: true - 启用子图流式输出
+        """
+        if not body:
+            return body
+        if not self._is_streaming_path(path):
+            return body
+        if "/runs/stream" not in path.lower():
+            return body
+
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return body
+
+        if not isinstance(data, dict):
+            return body
+
+        changed = False
+
+        # 设置默认 stream_mode
+        if not data.get("stream_mode"):
+            data["stream_mode"] = ["messages", "updates"]
+            changed = True
+            logger.debug("[Proxy] Set default stream_mode=['messages', 'updates']")
+
+        # 如果 stream_mode 包含 messages，自动启用 stream_subgraphs
+        if (
+            "stream_subgraphs" not in data
+            and self._stream_mode_wants_messages(data.get("stream_mode"))
+        ):
+            data["stream_subgraphs"] = True
+            changed = True
+            logger.debug("[Proxy] Set stream_subgraphs=true for messages mode")
+
+        if not changed:
+            return body
+
+        return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
     async def _proxy_normal(
         self,
         client: httpx.AsyncClient,
@@ -479,6 +555,7 @@ class TransparentProxy:
             )
         
         # 先获取响应头，判断是否真的是流式响应
+        t_send_start = time.perf_counter()
         try:
             response = await client.send(
                 client.build_request(
@@ -489,6 +566,11 @@ class TransparentProxy:
                     params=params,
                 ),
                 stream=True,
+            )
+            t_response_headers = time.perf_counter()
+            logger.info(
+                f"[Proxy][TIMING] streaming response_headers={((t_response_headers - t_send_start) * 1000):.1f}ms "
+                f"status={response.status_code}"
             )
         except httpx.TimeoutException as e:
             logger.error(f"[Proxy] Streaming timeout: {e}")

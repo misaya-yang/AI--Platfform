@@ -8,7 +8,7 @@ import { useAuthStore } from "@/store/useAuthStore";
 import { login } from "@/api/auth";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { Eye, EyeOff } from "lucide-react";
-import { Modal, message } from "antd";
+import { Modal } from "antd";
 
 export function LoginPage() {
   const navigate = useNavigate();

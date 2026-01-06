@@ -188,6 +188,7 @@ class ProxySettings(BaseModel):
     inject_user_info: bool = True
     inject_request_info: bool = True
     forward_auth: bool = True
+    forward_all_headers: bool = True
     
     # 自定义头部（所有请求都会注入）
     custom_headers: Dict[str, str] = Field(default_factory=dict)

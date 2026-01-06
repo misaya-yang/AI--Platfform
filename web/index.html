@@ -8,6 +8,18 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Emergency reset script: runs BEFORE any modules load -->
+    <script>
+      (function() {
+        var params = new URLSearchParams(window.location.search);
+        if (params.get("reset") === "true") {
+          console.log("[Emergency Reset] Clearing localStorage before React loads");
+          localStorage.removeItem("agent-gateway-storage");
+          var newUrl = window.location.pathname;
+          window.history.replaceState({}, "", newUrl);
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -209,7 +209,7 @@ export function UserEditPage() {
   if (error || !user) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
-        <ExclamationCircleOutlined style={{ fontSize: 48, color: colors.red[500] }} />
+        <ExclamationCircleOutlined style={{ fontSize: 48, color: '#ff4d4f' }} />
         <p className="text-lg text-muted-foreground">{error || "用户不存在"}</p>
         <Button variant="outline" onClick={() => navigate("/users")}>
           返回用户列表

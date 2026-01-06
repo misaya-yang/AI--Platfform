@@ -119,6 +119,8 @@ export function StreamOutput({
     return (
       <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
         {text}
+        {/* Streaming cursor - blinking indicator */}
+        <span className="inline-block w-2 h-4 ml-0.5 bg-primary/70 animate-pulse rounded-sm align-middle" />
       </div>
     );
   }

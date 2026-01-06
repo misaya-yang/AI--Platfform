@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -107,12 +108,21 @@ class ContextInjector:
         "trailers",
         "upgrade",
     }
+
+    # 敏感身份头部（客户端不允许传递，必须由网关强制覆盖）
+    # 防止身份伪造攻击：攻击者可能发送 X-User-Id: admin 冒充管理员
+    SENSITIVE_HEADERS = {
+        "x-user-id", "x-gw-user-id", "x-user-type", "x-user-tier",
+        "x-gw-user-roles", "x-gw-authenticated", "x-tenant-id", "x-gw-tenant-id",
+        "x-user-permissions", "x-user-name",
+    }
     
     def __init__(
         self,
         inject_user_info: bool = True,
         inject_request_info: bool = True,
         forward_auth: bool = True,
+        forward_all_headers: bool = False,
         custom_headers: Optional[Dict[str, str]] = None,
     ):
         """
@@ -127,12 +137,14 @@ class ContextInjector:
         self.inject_user_info = inject_user_info
         self.inject_request_info = inject_request_info
         self.forward_auth = forward_auth
+        self.forward_all_headers = forward_all_headers
         self.custom_headers = custom_headers or {}
     
     def build_headers(
         self,
         context: RequestContext,
         service_auth_token: Optional[str] = None,
+        forward_all_headers: Optional[bool] = None,
     ) -> Dict[str, str]:
         """
         构建转发请求的头部
@@ -145,72 +157,132 @@ class ContextInjector:
             构建好的请求头部字典
         """
         headers: Dict[str, str] = {}
-        
-        # 1. 转发原始头部（白名单过滤）
+        if forward_all_headers is None:
+            forward_all_headers = self.forward_all_headers
+
+        def _header_exists(name: str) -> bool:
+            name_lower = name.lower()
+            return any(k.lower() == name_lower for k in headers.keys())
+
+        def _set_if_missing(name: str, value: Optional[str]) -> None:
+            if value is None:
+                return
+            if not _header_exists(name):
+                headers[name] = value
+
+        def _force_set(name: str, value: Optional[str]) -> None:
+            """强制设置头部值（覆盖已有值），用于防止身份伪造"""
+            if value is not None:
+                headers[name] = value
+
+        # 1. Forward original headers (transparent mode can pass all)
+        # 记录原始请求头中的认证相关头部（脱敏处理）
+        original_auth_headers = {
+            k: "[PRESENT]" if k.lower() in ("authorization", "x-api-key") else (v[:30] + "..." if len(v) > 30 else v)
+            for k, v in context.original_headers.items()
+            if k.lower() in ("x-user-id", "x-user-type", "authorization", "x-api-key")
+        }
+        if original_auth_headers:
+            logger.info(f"[ContextInjector] Original auth headers from request: {original_auth_headers}")
+
         for name, value in context.original_headers.items():
             name_lower = name.lower()
-            
-            # 检查黑名单
+
+            # Skip hop-by-hop headers
             if name_lower in self.BLOCKED_HEADERS:
                 continue
-            
-            # 检查白名单
-            if name_lower in self.FORWARD_HEADERS:
-                # Authorization 特殊处理
+
+            # 安全：剔除敏感身份头部（防止客户端伪造）
+            if name_lower in self.SENSITIVE_HEADERS:
+                logger.debug(f"[ContextInjector] Blocking sensitive header from client: {name}")
+                continue
+
+            # Transparent mode: forward everything except blocked
+            if forward_all_headers:
                 if name_lower == "authorization":
                     if self.forward_auth and not service_auth_token:
                         headers[name] = value
                 else:
                     headers[name] = value
-        
-        # 2. 注入用户信息
+                continue
+
+            # Non-transparent mode: forward only whitelist
+            if name_lower in self.FORWARD_HEADERS:
+                if name_lower == "authorization":
+                    if self.forward_auth and not service_auth_token:
+                        headers[name] = value
+                else:
+                    headers[name] = value
+
+        # 2. 注入用户信息（使用 _force_set 强制覆盖，防止客户端伪造身份）
+        logger.info(f"[ContextInjector] inject_user_info={self.inject_user_info}, user_id={context.user_id}")
         if self.inject_user_info:
-            # 2a. 网关标准头部（X-GW- 前缀）
+            # 2a. 网关标准头部（X-GW- 前缀）- 强制覆盖
             if context.user_id:
-                headers[self.HEADER_MAPPINGS["user_id"]] = context.user_id
+                _force_set(self.HEADER_MAPPINGS["user_id"], context.user_id)
             if context.tenant_id:
-                headers[self.HEADER_MAPPINGS["tenant_id"]] = context.tenant_id
+                _force_set(self.HEADER_MAPPINGS["tenant_id"], context.tenant_id)
             if context.user_tier:
-                headers[self.HEADER_MAPPINGS["user_tier"]] = context.user_tier
+                _force_set(self.HEADER_MAPPINGS["user_tier"], context.user_tier)
 
-            # 用户角色（逗号分隔）
+            # 用户角色（逗号分隔）- 强制覆盖
             if context.roles:
-                headers["X-GW-User-Roles"] = ",".join(context.roles)
+                _force_set("X-GW-User-Roles", ",".join(context.roles))
 
-            # 认证状态
-            headers["X-GW-Authenticated"] = "true" if context.is_authenticated else "false"
+            # 认证状态 - 强制覆盖
+            _force_set("X-GW-Authenticated", "true" if context.is_authenticated else "false")
 
             # 2b. LangGraph 兼容头部（无前缀，LangGraph auth 期望的格式）
-            if context.user_id:
-                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_id"]] = context.user_id
+            # LangGraph 需要 X-User-Id，即使是匿名用户也要发送一个有效的 ID
+            original_user_id = context.user_id
+            langgraph_user_id = original_user_id
+            if not langgraph_user_id:
+                # 没有 user_id，生成一个匿名 ID
+                langgraph_user_id = f"anonymous-{uuid.uuid4().hex[:8]}"
+                logger.info(f"[ContextInjector] Generated anonymous user_id: {langgraph_user_id}")
+            elif langgraph_user_id.startswith("anon:"):
+                # 移除 "anon:" 前缀，LangGraph 可能不接受这种格式
+                # 转换为更标准的格式：anonymous-{hash}
+                anon_suffix = langgraph_user_id[5:]  # 去掉 "anon:"
+                if anon_suffix:
+                    # 使用 hash 来保持一致性（同一 IP 生成相同的 ID）
+                    hash_suffix = hashlib.md5(anon_suffix.encode()).hexdigest()[:8]
+                    langgraph_user_id = f"anonymous-{hash_suffix}"
+                else:
+                    langgraph_user_id = f"anonymous-{uuid.uuid4().hex[:8]}"
+                logger.info(f"[ContextInjector] Transformed user_id: {original_user_id} -> {langgraph_user_id}")
+
+            # 2b. LangGraph 兼容头部 - 强制覆盖（防止身份伪造）
+            _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_id"], langgraph_user_id)
+
             if context.tenant_id:
-                headers[self.LANGGRAPH_HEADER_MAPPINGS["tenant_id"]] = context.tenant_id
+                _force_set(self.LANGGRAPH_HEADER_MAPPINGS["tenant_id"], context.tenant_id)
             if context.user_tier:
-                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_tier"]] = context.user_tier
+                _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_tier"], context.user_tier)
 
-            # X-User-Type: user/guest/anonymous
+            # X-User-Type: user/guest/anonymous - 强制覆盖
             user_type = "user" if context.is_authenticated else ("guest" if context.user_id else "anonymous")
-            headers[self.LANGGRAPH_HEADER_MAPPINGS["user_type"]] = user_type
+            _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_type"], user_type)
 
-            # X-User-Name: 可选的用户名
+            # X-User-Name: 可选的用户名 - 强制覆盖
             if context.user_id:
-                headers[self.LANGGRAPH_HEADER_MAPPINGS["user_name"]] = f"User-{context.user_id}"
+                _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_name"], f"User-{context.user_id}")
 
-            # X-User-Permissions: 基于角色推断的权限
+            # X-User-Permissions: 基于角色推断的权限 - 强制覆盖
             permissions = ["read"]
             if context.is_authenticated:
                 permissions.append("write")
             if "admin" in context.roles or context.user_tier == "admin":
                 permissions.extend(["admin", "delete"])
-            headers[self.LANGGRAPH_HEADER_MAPPINGS["user_permissions"]] = ",".join(permissions)
+            _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_permissions"], ",".join(permissions))
         
         # 3. 注入请求追踪信息
         if self.inject_request_info:
-            headers[self.HEADER_MAPPINGS["request_id"]] = context.request_id
+            _set_if_missing(self.HEADER_MAPPINGS["request_id"], context.request_id)
             if context.trace_id:
-                headers[self.HEADER_MAPPINGS["trace_id"]] = context.trace_id
+                _set_if_missing(self.HEADER_MAPPINGS["trace_id"], context.trace_id)
             if context.span_id:
-                headers[self.HEADER_MAPPINGS["span_id"]] = context.span_id
+                _set_if_missing(self.HEADER_MAPPINGS["span_id"], context.span_id)
         
         # 4. 客户端 IP（X-Forwarded-For）
         if context.client_ip:
@@ -237,11 +309,20 @@ class ContextInjector:
         
         # 6. 自定义静态头部
         headers.update(self.custom_headers)
-        
+
         # 7. 确保 Content-Type
         if "content-type" not in {k.lower() for k in headers}:
             headers["Content-Type"] = "application/json"
-        
+
+        # 记录关键的认证头部（INFO 级别用于调试，敏感值脱敏）
+        auth_headers = {
+            k: "[PRESENT]" if k.lower() in ("authorization", "x-api-key") else (v[:30] + "..." if len(v) > 30 else v)
+            for k, v in headers.items()
+            if k.lower() in ("x-user-id", "x-user-type", "x-user-name", "authorization", "x-api-key", "x-gw-user-id")
+        }
+        if auth_headers:
+            logger.info(f"[ContextInjector] Forwarding auth headers: {auth_headers}")
+
         return headers
     
     @staticmethod
@@ -335,4 +416,3 @@ class ContextInjector:
             user_agent=request.headers.get("user-agent", ""),
             original_headers=original_headers,
         )
-

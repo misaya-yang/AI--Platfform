@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { ArrowUpDown, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -53,6 +55,7 @@ import {
 import type { RoleResponse, UserResponse, PermissionResponse } from "@/api/users";
 
 export function UserManagementPage() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { hasPermission, user: currentUser } = useAuthStore();
 
@@ -68,10 +71,19 @@ export function UserManagementPage() {
   const [permissions, setPermissions] = useState<PermissionResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(20);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(false);
+
+  // Sorting state
+  type SortField = "email" | "display_name" | "status" | "last_login_at";
+  type SortDirection = "asc" | "desc";
+  const [sortField, setSortField] = useState<SortField | null>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  // Page size options
+  const pageSizeOptions = [10, 20, 50];
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -146,7 +158,63 @@ export function UserManagementPage() {
 
   useEffect(() => {
     loadUsers();
-  }, [page, statusFilter]);
+  }, [page, pageSize, statusFilter]);
+
+  // Reset to page 1 when page size changes
+  useEffect(() => {
+    setPage(1);
+  }, [pageSize]);
+
+  // Handle sorting
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  // Sort users client-side
+  const sortedUsers = useMemo(() => {
+    if (!sortField) return users;
+
+    return [...users].sort((a, b) => {
+      let aVal: string | number | null = a[sortField];
+      let bVal: string | number | null = b[sortField];
+
+      // Handle null/undefined values
+      if (aVal == null) aVal = "";
+      if (bVal == null) bVal = "";
+
+      // String comparison
+      if (typeof aVal === "string" && typeof bVal === "string") {
+        const result = aVal.localeCompare(bVal);
+        return sortDirection === "asc" ? result : -result;
+      }
+
+      return 0;
+    });
+  }, [users, sortField, sortDirection]);
+
+  // Sortable header component
+  const SortableHeader = ({ field, children }: { field: SortField; children: React.ReactNode }) => (
+    <button
+      className="flex items-center gap-1 hover:text-foreground transition-colors"
+      onClick={() => handleSort(field)}
+    >
+      {children}
+      {sortField === field ? (
+        sortDirection === "asc" ? (
+          <ArrowUp className="h-4 w-4" />
+        ) : (
+          <ArrowDown className="h-4 w-4" />
+        )
+      ) : (
+        <ArrowUpDown className="h-4 w-4 opacity-50" />
+      )}
+    </button>
+  );
 
   useEffect(() => {
     loadRoles();
@@ -254,44 +322,33 @@ export function UserManagementPage() {
     setFormError("");
   };
 
-  // Open edit modal
-  const openEditModal = (user: UserResponse) => {
-    setSelectedUser(user);
-    setFormDisplayName(user.display_name || "");
-    setFormDepartment(user.department || "");
-    setFormRoles(user.roles);
-    setFormExtraPermissions(user.extra_permissions || []);
-    setFormStatus(user.status);
-    setShowEditModal(true);
-  };
-
   const totalPages = Math.ceil(total / pageSize);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="text-xl font-semibold">User Management</div>
+        <div className="text-xl font-semibold">{t('users.title')}</div>
         {canCreate && (
-          <Button onClick={() => setShowCreateModal(true)}>Add User</Button>
+          <Button onClick={() => setShowCreateModal(true)}>{t('users.addUser')}</Button>
         )}
       </div>
 
       {/* Filters */}
       <div className="flex gap-4">
         <Input
-          placeholder="Search by email or name..."
+          placeholder={t('users.searchPlaceholder')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="max-w-sm"
         />
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-[150px]">
-            <SelectValue placeholder="All Status" />
+            <SelectValue placeholder={t('users.allStatus')} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All Status</SelectItem>
-            <SelectItem value="active">Active</SelectItem>
-            <SelectItem value="disabled">Disabled</SelectItem>
+            <SelectItem value="all">{t('users.allStatus')}</SelectItem>
+            <SelectItem value="active">{t('common.active')}</SelectItem>
+            <SelectItem value="disabled">{t('common.disabled')}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -301,30 +358,38 @@ export function UserManagementPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Email</TableHead>
-              <TableHead>Display Name</TableHead>
-              <TableHead>Department</TableHead>
-              <TableHead>Roles</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Last Login</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
+              <TableHead>
+                <SortableHeader field="email">{t('users.fields.email')}</SortableHeader>
+              </TableHead>
+              <TableHead>
+                <SortableHeader field="display_name">{t('users.fields.displayName')}</SortableHeader>
+              </TableHead>
+              <TableHead>{t('users.fields.department')}</TableHead>
+              <TableHead>{t('users.fields.roles')}</TableHead>
+              <TableHead>
+                <SortableHeader field="status">{t('users.fields.status')}</SortableHeader>
+              </TableHead>
+              <TableHead>
+                <SortableHeader field="last_login_at">{t('users.fields.lastLogin')}</SortableHeader>
+              </TableHead>
+              <TableHead className="text-right">{t('common.actions')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {isLoading ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center py-8">
-                  Loading...
+                  {t('users.loading')}
                 </TableCell>
               </TableRow>
-            ) : users.length === 0 ? (
+            ) : sortedUsers.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center py-8">
-                  No users found
+                  {t('users.noUsers')}
                 </TableCell>
               </TableRow>
             ) : (
-              users.map((user) => (
+              sortedUsers.map((user) => (
                 <TableRow key={user.user_id}>
                   <TableCell>{user.email}</TableCell>
                   <TableCell>{user.display_name}</TableCell>
@@ -334,7 +399,7 @@ export function UserManagementPage() {
                         {departmentOptions.find(d => d.value === user.department)?.label || user.department}
                       </Badge>
                     ) : (
-                      <span className="text-muted-foreground text-sm">-</span>
+                      <span className="text-muted-foreground text-sm">{t('common.notSet')}</span>
                     )}
                   </TableCell>
                   <TableCell>
@@ -356,7 +421,7 @@ export function UserManagementPage() {
                   <TableCell>
                     {user.last_login_at
                       ? new Date(user.last_login_at).toLocaleString()
-                      : "Never"}
+                      : t('common.never')}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex gap-2 justify-end">
@@ -367,7 +432,7 @@ export function UserManagementPage() {
                             size="sm"
                             onClick={() => navigate(`/users/${user.user_id}/edit`)}
                           >
-                            Edit
+                            {t('users.actions.edit')}
                           </Button>
                           <Button
                             variant="outline"
@@ -377,7 +442,7 @@ export function UserManagementPage() {
                               setShowResetPasswordDialog(true);
                             }}
                           >
-                            Reset PW
+                            {t('users.actions.resetPassword')}
                           </Button>
                           {user.user_id !== currentUser?.user_id && user.user_id !== "admin" && (
                             <Button
@@ -385,7 +450,7 @@ export function UserManagementPage() {
                               size="sm"
                               onClick={() => handleToggleStatus(user)}
                             >
-                              {user.status === "active" ? "Disable" : "Enable"}
+                              {user.status === "active" ? t('users.actions.disable') : t('users.actions.enable')}
                             </Button>
                           )}
                         </>
@@ -399,7 +464,7 @@ export function UserManagementPage() {
                             setShowDeleteDialog(true);
                           }}
                         >
-                          Delete
+                          {t('users.actions.delete')}
                         </Button>
                       )}
                     </div>
@@ -412,20 +477,54 @@ export function UserManagementPage() {
       </div>
 
       {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div className="flex items-center gap-4">
           <div className="text-sm text-muted-foreground">
-            Showing {(page - 1) * pageSize + 1} to{" "}
-            {Math.min(page * pageSize, total)} of {total} users
+            {t('users.pagination.showing', {
+              start: total > 0 ? (page - 1) * pageSize + 1 : 0,
+              end: Math.min(page * pageSize, total),
+              total: total
+            })}
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">{t('users.pagination.page', { current: page, total: Math.max(totalPages, 1) })}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          {/* Page size selector */}
+          <div className="flex items-center gap-2">
+            <Select value={pageSize.toString()} onValueChange={(v) => setPageSize(Number(v))}>
+              <SelectTrigger className="w-[100px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {pageSizeOptions.map((size) => (
+                  <SelectItem key={size} value={size.toString()}>
+                    {t('users.pagination.perPage', { count: size })}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {/* Pagination buttons */}
+          <div className="flex gap-1">
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(1)}
+              disabled={page <= 1}
+              title={t('users.pagination.first')}
+            >
+              <ChevronsLeft className="h-4 w-4" />
+            </Button>
             <Button
               variant="outline"
               size="sm"
               onClick={() => setPage(page - 1)}
               disabled={page <= 1}
             >
-              Previous
+              {t('users.pagination.prev')}
             </Button>
             <Button
               variant="outline"
@@ -433,11 +532,21 @@ export function UserManagementPage() {
               onClick={() => setPage(page + 1)}
               disabled={page >= totalPages}
             >
-              Next
+              {t('users.pagination.next')}
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage(totalPages)}
+              disabled={page >= totalPages}
+              title={t('users.pagination.last')}
+            >
+              <ChevronsRight className="h-4 w-4" />
             </Button>
           </div>
         </div>
-      )}
+      </div>
 
       {/* Create User Modal */}
       <Dialog open={showCreateModal} onOpenChange={setShowCreateModal}>

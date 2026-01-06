@@ -223,7 +223,7 @@ export const useAuthStore = create<AuthState>()(
         return {
           ...currentState,
           ...persisted,
-          user: normalizedUser,
+          user: normalizedUser ?? null,
         };
       },
     }

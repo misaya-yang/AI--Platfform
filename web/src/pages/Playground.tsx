@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, startTransition } from "react";
+﻿import { useEffect, useRef, useState, useCallback, startTransition } from "react";
 
 import { useServices } from "@/hooks/useServices";
 import { invokeService } from "@/api/gateway";
@@ -8,11 +8,12 @@ import {
   getSessionHistory,
   listSessions,
   updateSession,
+  addSessionMessage,
   type SessionSummary,
   type SessionMessage,
   type SessionMessageToolCall,
 } from "@/api/sessions";
-import { sseFetch } from "@/lib/sse";
+import { sseFetch, sseFetchEvents } from "@/lib/sse";
 import { cn } from "@/lib/utils";
 import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
 import { MultimodalInput } from "@/components/MultimodalInput";
@@ -28,6 +29,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { MessageSquarePlus, Trash2 } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
+import { useAuthStore } from "@/store/useAuthStore";
 
 type UsageStats = {
   inputTokens?: number;
@@ -38,6 +40,14 @@ type UsageStats = {
 type ToolCallState = ToolCallWithResult & {
   argsText: string;
   argsValid: boolean;
+};
+
+type LangGraphStreamEvent = { event: string; data: unknown };
+
+type ToolCallUpdate = {
+  id: string;
+  name: string;
+  args: string;
 };
 
 function toNumber(value: unknown): number | undefined {
@@ -60,6 +70,14 @@ function normalizeUsage(usage?: Record<string, unknown>): UsageStats | null {
     inputTokens: input,
     outputTokens: output,
     totalTokens: resolvedTotal,
+  };
+}
+
+function extractTimingStats(usage?: Record<string, unknown>): { durationMs?: number; firstTokenMs?: number } {
+  if (!usage) return {};
+  return {
+    durationMs: toNumber(usage.duration_ms),
+    firstTokenMs: toNumber(usage.first_token_ms),
   };
 }
 
@@ -177,6 +195,129 @@ function resolveToolArguments(current: string, incoming: string, currentValid: b
   return { text: merged, isValid: false };
 }
 
+function normalizeLangGraphEvent(raw: LangGraphStreamEvent): LangGraphStreamEvent {
+  const data = raw?.data as Record<string, unknown> | null;
+  if (data && typeof data === "object" && typeof data.event === "string" && "data" in data) {
+    return {
+      event: data.event as string,
+      data: (data as Record<string, unknown>).data,
+    };
+  }
+  return { event: raw?.event || "", data: raw?.data };
+}
+
+function extractMessagePayload(data: unknown): { message: Record<string, unknown>; metadata?: unknown } | null {
+  if (Array.isArray(data) && data.length > 0 && data[0] && typeof data[0] === "object") {
+    return { message: data[0] as Record<string, unknown>, metadata: data[1] };
+  }
+  if (data && typeof data === "object") {
+    return { message: data as Record<string, unknown> };
+  }
+  return null;
+}
+
+function normalizeContentDelta(message: Record<string, unknown>): string | null {
+  const content = message.content as unknown;
+  const directText = message.text as unknown;
+
+  // Direct text field (some LangGraph versions use this)
+  if (typeof directText === "string" && directText) return directText;
+
+  // String content (most common case)
+  if (typeof content === "string") return content;
+
+  // Array content (LangGraph multimodal format)
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (typeof item === "string") {
+        parts.push(item);
+      } else if (item && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        // Handle various content block formats
+        const text = record.text ?? record.data ?? record.content;
+        if (typeof text === "string") parts.push(text);
+        // Handle type-prefixed content blocks (e.g., {"type": "text", "text": "..."})
+        if (record.type === "text" && typeof record.text === "string") {
+          if (!parts.includes(record.text as string)) parts.push(record.text as string);
+        }
+      }
+    }
+    const joined = parts.join("");
+    return joined || null;
+  }
+
+  // Object content (nested structure)
+  if (content && typeof content === "object" && !Array.isArray(content)) {
+    const record = content as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.data === "string") return record.data;
+  }
+
+  return null;
+}
+
+function normalizeToolArgs(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractToolCallUpdates(message: Record<string, unknown>): ToolCallUpdate[] {
+  const updates: ToolCallUpdate[] = [];
+  const toolCallChunks = message.tool_call_chunks as unknown;
+  const toolCalls = message.tool_calls as unknown;
+
+  if (Array.isArray(toolCallChunks) && toolCallChunks.length > 0) {
+    for (const chunk of toolCallChunks) {
+      if (!chunk || typeof chunk !== "object") continue;
+      const record = chunk as Record<string, unknown>;
+      updates.push({
+        id: (record.id as string) || (record.tool_call_id as string) || "",
+        name: (record.name as string) || "",
+        args: normalizeToolArgs(record.args ?? record.arguments),
+      });
+    }
+    return updates.filter((u) => u.id || u.name || u.args);
+  }
+
+  if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+    for (const call of toolCalls) {
+      if (!call || typeof call !== "object") continue;
+      const record = call as Record<string, unknown>;
+      updates.push({
+        id: (record.id as string) || (record.tool_call_id as string) || "",
+        name: (record.name as string) || "",
+        args: normalizeToolArgs(record.args ?? record.arguments),
+      });
+    }
+  }
+
+  return updates.filter((u) => u.id || u.name || u.args);
+}
+
+function extractToolResult(message: Record<string, unknown>): { id: string; name: string; content: string } | null {
+  const msgType = (message.type as string) || "";
+  const role = (message.role as string) || "";
+  const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
+  if (!isToolMessage) return null;
+
+  const toolCallId =
+    (message.tool_call_id as string) ||
+    ((message.tool_call_ids as string[] | undefined)?.[0] as string | undefined) ||
+    "";
+  const name = (message.name as string) || "";
+  let content = message.content as unknown;
+  if (typeof content !== "string") {
+    content = normalizeToolArgs(content);
+  }
+  return { id: toolCallId, name, content: String(content) };
+}
+
 function normalizeHistoryContent(value: unknown): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
@@ -185,6 +326,43 @@ function normalizeHistoryContent(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function extractRunWaitContent(result: unknown): string {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+
+  const record = result as Record<string, unknown>;
+
+  const outputs = record.outputs as unknown;
+  if (Array.isArray(outputs) && outputs.length > 0) {
+    const first = outputs[0] as Record<string, unknown>;
+    const data = first?.data;
+    return normalizeHistoryContent(data);
+  }
+
+  const messages = record.messages as unknown;
+  if (Array.isArray(messages) && messages.length > 0) {
+    const reversed = [...messages].reverse();
+    const assistantMsg = reversed.find((m) => {
+      if (!m || typeof m !== "object") return false;
+      const recordMsg = m as Record<string, unknown>;
+      const role = (recordMsg.role as string) || "";
+      const type = (recordMsg.type as string) || "";
+      return role === "assistant" || type.toLowerCase().includes("ai");
+    });
+    const fallbackMsg = reversed.find((m) => m && typeof m === "object");
+    const target = (assistantMsg || fallbackMsg) as Record<string, unknown> | undefined;
+    if (target) {
+      return normalizeHistoryContent(target.content);
+    }
+  }
+
+  if ("output" in record) {
+    return normalizeHistoryContent(record.output);
+  }
+
+  return normalizeHistoryContent(record);
 }
 
 function dedupeHistory(history: SessionMessage[]): SessionMessage[] {
@@ -253,7 +431,7 @@ export function PlaygroundPage() {
     return stored === null ? true : stored === "true";
   });
 
-  // 会话管理状态（用于左侧历史列表 & 多轮上下文）
+  // 浼氳瘽绠＄悊鐘舵€侊紙鐢ㄤ簬宸︿晶鍘嗗彶鍒楄〃 & 澶氳疆涓婁笅鏂囷級
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -261,12 +439,14 @@ export function PlaygroundPage() {
 
   const isInitialMount = useRef(true);
 
-  // 用于取消正在进行的请求，解决竞态条件
+  // 鐢ㄤ簬鍙栨秷姝ｅ湪杩涜鐨勮姹傦紝瑙ｅ喅绔炴€佹潯浠?
   const abortControllerRef = useRef<AbortController | null>(null);
-  // 用于追踪当前请求的会话ID，防止串台
+  // 鐢ㄤ簬杩借釜褰撳墠璇锋眰鐨勪細璇滻D锛岄槻姝覆鍙?
   const currentRequestSessionRef = useRef<string | null>(null);
-  // 用于追踪当前正在加载的历史会话ID
+  // 鐢ㄤ簬杩借釬褰撳墠姝ｅ湪鍔犺浇鐨勫巻鍙蹭會璇滻D
   const loadingHistorySessionRef = useRef<string | null>(null);
+  const sessionThreadIdRef = useRef<Record<string, string>>({});
+
 
   const refreshSessions = useCallback(async () => {
     if (!serviceId) {
@@ -277,7 +457,15 @@ export function PlaygroundPage() {
     try {
       const data = await listSessions({ service_id: serviceId, limit: 100 });
       setSessions(data);
-      // 从服务器返回的 metadata.title 初始化 localTitles（页面刷新后恢复标题）
+      const nextThreads = { ...sessionThreadIdRef.current };
+      for (const s of data) {
+        const threadId = s.metadata?.langgraph_thread_id as string | undefined;
+        if (threadId) {
+          nextThreads[s.session_id] = threadId;
+        }
+      }
+      sessionThreadIdRef.current = nextThreads;
+      // 浠庢湇鍔″櫒杩斿洖鐨?metadata.title 鍒濆鍖?localTitles锛堥〉闈㈠埛鏂板悗鎭㈠鏍囬锛?
       setLocalTitles(prev => {
         const updated = { ...prev };
         for (const s of data) {
@@ -294,22 +482,28 @@ export function PlaygroundPage() {
   }, [serviceId]);
 
   const handleSelectSession = useCallback(async (id: string) => {
-    // 取消正在进行的流式请求
+    // 鍙栨秷姝ｅ湪杩涜鐨勬祦寮忚姹?
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
 
-    // 记录当前正在加载的会话ID，用于防止竞态条件
+    // 璁板綍褰撳墠姝ｅ湪鍔犺浇鐨勪細璇滻D锛岀敤浜庨槻姝㈢珵鎬佹潯浠?
     loadingHistorySessionRef.current = id;
     setActiveSessionId(id);
     setHistoryLoading(true);
 
     try {
-      const history = await getSessionHistory(id, { limit: 200 });
+      // Add timeout to prevent infinite waits on problematic sessions
+      const timeoutMs = 10000; // 10 second timeout
+      const historyPromise = getSessionHistory(id, { limit: 200 });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("History load timeout")), timeoutMs)
+      );
+      const history = await Promise.race([historyPromise, timeoutPromise]);
       console.log("[History] Raw history:", history);
 
-      // 检查是否仍然是当前选中的会话（防止竞态条件）
+      // 妫€鏌ユ槸鍚︿粛鐒舵槸褰撳墠閫変腑鐨勪細璇濓紙闃叉绔炴€佹潯浠讹級
       if (loadingHistorySessionRef.current !== id) {
         console.log("Session changed during history load, discarding result for:", id);
         return;
@@ -347,12 +541,19 @@ export function PlaygroundPage() {
       });
       setMessages(nextMessages);
     } catch (err) {
-      // 只有当仍是当前会话时才显示错误
+      // 鍙湁褰撲粛鏄綋鍓嶄細璇濇椂鎵嶆樉绀洪敊璇?
       if (loadingHistorySessionRef.current === id) {
         console.error("Failed to load session history:", err);
+        // On timeout or error, clear the problematic session to recover
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        if (errorMessage.includes("timeout") || errorMessage.includes("Timeout")) {
+          console.warn("[Playground] Session load timed out, clearing session to recover");
+          setActiveSessionId(undefined);
+          setMessages([]);
+        }
       }
     } finally {
-      // 只有当仍是当前会话时才清除加载状态
+      // 鍙湁褰撲粛鏄綋鍓嶄細璇濇椂鎵嶆竻闄ゅ姞杞界姸鎬?
       if (loadingHistorySessionRef.current === id) {
         setHistoryLoading(false);
       }
@@ -362,7 +563,7 @@ export function PlaygroundPage() {
   const handleNewSession = useCallback(async () => {
     if (!serviceId) return;
 
-    // 取消正在进行的流式请求
+    // 鍙栨秷姝ｅ湪杩涜鐨勬祦寮忚姹?
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -413,7 +614,7 @@ export function PlaygroundPage() {
     scheduleScrollToBottom(isStreaming ? "auto" : "smooth");
   }, [messages, scheduleScrollToBottom]);
 
-  // 组件卸载时取消正在进行的请求
+  // 缁勪欢鍗歌浇鏃跺彇娑堟鍦ㄨ繘琛岀殑璇锋眰
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
@@ -439,7 +640,7 @@ export function PlaygroundPage() {
         setActiveSessionId(undefined);
         setMessages([]);
       }
-      // 从本地标题缓存中移除
+      // 浠庢湰鍦版爣棰樼紦瀛樹腑绉婚櫎
       setLocalTitles(prev => {
         const next = { ...prev };
         delete next[id];
@@ -450,9 +651,25 @@ export function PlaygroundPage() {
     [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles]
   );
 
-  // 1. 初始化挂载：如果已有持久化状态，恢复数据
+  // 1. 鍒濆鍖栨寕杞斤細濡傛灉宸叉湁鎸佷箙鍖栫姸鎬侊紝鎭㈠鏁版嵁
   useEffect(() => {
     const init = async () => {
+      // Safety: Check URL params for reset flag to recover from stuck sessions
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get("reset") === "true") {
+        console.log("[Playground] Reset flag detected, clearing session state");
+        setActiveSessionId(undefined);
+        setMessages([]);
+        // Remove the reset param from URL without reload
+        const newUrl = window.location.pathname;
+        window.history.replaceState({}, "", newUrl);
+        isInitialMount.current = false;
+        if (serviceId) {
+          await refreshSessions();
+        }
+        return;
+      }
+
       if (serviceId) {
         await refreshSessions();
         if (activeSessionId) {
@@ -465,18 +682,18 @@ export function PlaygroundPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. 切换服务时：清空当前会话并取消进行中的请求
+  // 2. 鍒囨崲鏈嶅姟鏃讹細娓呯┖褰撳墠浼氳瘽骞跺彇娑堣繘琛屼腑鐨勮姹?
   const prevServiceId = useRef(serviceId);
   useEffect(() => {
     if (isInitialMount.current) return;
 
     if (serviceId !== prevServiceId.current) {
-      // 取消正在进行的流式请求
+      // 鍙栨秷姝ｅ湪杩涜鐨勬祦寮忚姹?
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
-      // 清除会话追踪
+      // 娓呴櫎浼氳瘽杩借釜
       currentRequestSessionRef.current = null;
       loadingHistorySessionRef.current = null;
 
@@ -489,28 +706,37 @@ export function PlaygroundPage() {
 
   async function handleSend(inputs: ContentItem[]) {
     if (!serviceId) return;
+    // 获取认证 token（动态获取避免 stale closure）
+    const token = useAuthStore.getState().token;
+    const activeService = services.find((s) => s.service_id === serviceId);
+    const isLangGraphService =
+      activeService?.service_type === "langgraph" ||
+      activeService?.metadata?.adapter_type === "langgraph";
+    const useTransparentProxy = Boolean(isLangGraphService);
     const text = inputs.find((i) => i.type === "text")?.data || "";
     if (!text) return;
     const inputText = String(text);
     const estimatedInputTokens = estimateTokens(inputText);
     stickToBottomRef.current = true;
 
-    // 取消之前进行中的流式请求
+    // 鍙栨秷涔嬪墠杩涜涓殑娴佸紡璇锋眰
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
 
-    // 创建新的 AbortController
+    // 鍒涘缓鏂扮殑 AbortController
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
     setLoading(true);
 
-    // 统计追踪
+    // 缁熻杩借釜
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
+    // 用于生成唯一的 tool_call_id（当上游未提供时）
+    let toolCallIdCounter = 0;
 
-    // **立即显示用户消息和"AI思考中"状态，不等待任何网络请求**
+    // **绔嬪嵆鏄剧ず鐢ㄦ埛娑堟伅鍜?AI鎬濊€冧腑"鐘舵€侊紝涓嶇瓑寰呬换浣曠綉缁滆姹?*
     let assistantIndex = 0;
     setMessages((prev) => {
       const next = [
@@ -525,19 +751,19 @@ export function PlaygroundPage() {
     try {
       let effectiveSessionId: string | undefined = undefined;
 
-      // 并行处理：会话创建与准备请求同时进行
+      // 骞惰澶勭悊锛氫細璇濆垱寤轰笌鍑嗗璇锋眰鍚屾椂杩涜
       if (sessionEnabled) {
         if (!activeSessionId) {
-          // 会话创建不阻塞UI更新，但需要等待完成才能发送请求
+          // 浼氳瘽鍒涘缓涓嶉樆濉濽I鏇存柊锛屼絾闇€瑕佺瓑寰呭畬鎴愭墠鑳藉彂閫佽姹?
           const created = await createSession({ service_id: serviceId });
 
-          // 检查是否已被取消
+          // 妫€鏌ユ槸鍚﹀凡琚彇娑?
           if (abortController.signal.aborted) return;
 
           effectiveSessionId = created.session_id;
           currentRequestSessionRef.current = created.session_id;
           setActiveSessionId(created.session_id);
-          // 后台刷新会话列表，不阻塞
+          // 鍚庡彴鍒锋柊浼氳瘽鍒楄〃锛屼笉闃诲
           refreshSessions().catch(console.error);
         } else {
           effectiveSessionId = activeSessionId;
@@ -545,16 +771,64 @@ export function PlaygroundPage() {
         }
       }
 
-      // 为会话设置标题：使用第一条消息的前40个字符
+      // 涓轰細璇濊缃爣棰橈細浣跨敤绗竴鏉℃秷鎭殑鍓?0涓瓧绗?
       if (effectiveSessionId && !localTitles[effectiveSessionId]) {
         const titleText = inputText.trim().split('\n')[0].slice(0, 40);
         if (titleText) {
           setLocalTitles(prev => ({ ...prev, [effectiveSessionId!]: titleText }));
-          // 异步更新后端会话标题（不阻塞发送）
+          // 寮傛鏇存柊鍚庣浼氳瘽鏍囬锛堜笉闃诲鍙戦€侊級
           updateSession(effectiveSessionId, { metadata: { title: titleText } })
             .catch((err) => console.error('Failed to update session title:', err));
         }
       }
+
+      const shouldPersistManually = useTransparentProxy && Boolean(effectiveSessionId);
+      if (shouldPersistManually) {
+        // Await user message save to ensure it's persisted before continuing
+        // This prevents race conditions where assistant response is saved but user message is lost
+        try {
+          await addSessionMessage(effectiveSessionId!, { role: "user", content: inputText });
+        } catch (err) {
+          console.error("Failed to persist user message:", err);
+          // Continue even if user message save fails - don't block the conversation
+        }
+      }
+
+      let threadId: string | undefined;
+      if (useTransparentProxy && sessionEnabled && effectiveSessionId) {
+        threadId =
+          sessionThreadIdRef.current[effectiveSessionId] ||
+          (sessions.find((s) => s.session_id === effectiveSessionId)?.metadata
+            ?.langgraph_thread_id as string | undefined);
+
+        if (!threadId) {
+          try {
+            const resp = await fetch(`/api/v1/proxy/${serviceId}/threads`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: JSON.stringify({ metadata: { gateway_session_id: effectiveSessionId } }),
+              signal: abortController.signal,
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              threadId = data.thread_id || data.id || data.threadId;
+              if (threadId) {
+                sessionThreadIdRef.current[effectiveSessionId] = threadId;
+                updateSession(effectiveSessionId, { metadata: { langgraph_thread_id: threadId } })
+                  .catch((err) => console.error("Failed to update thread id:", err));
+              }
+            } else {
+              console.warn("Thread create failed:", resp.status);
+            }
+          } catch (err) {
+            console.warn("Thread create error:", err);
+          }
+        }
+      }
+
 
       const req = {
         service_id: serviceId,
@@ -566,6 +840,7 @@ export function PlaygroundPage() {
       let streamed = false;
       const toolCallsMap = new Map<string, ToolCallState>();
       let usageStats: UsageStats | null = null;
+      let streamEndTiming: { durationMs?: number; firstTokenMs?: number } | null = null as { durationMs?: number; firstTokenMs?: number } | null;
       let rafId: number | null = null;
 
       const isRequestValid = () => {
@@ -618,182 +893,415 @@ export function PlaygroundPage() {
         }
       };
 
-      try {
-        for await (const chunk of sseFetch<StreamChunk>("/api/v1/stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(req),
-          signal: abortController.signal,
-        })) {
-          // 检查请求是否仍有效（防止会话切换后仍更新旧会话的数据）
-          if (!isRequestValid()) {
-            console.log("Request cancelled or session changed, stopping stream processing");
-            break;
+      const processStreamChunk = (chunk: StreamChunk): boolean => {
+        const eventType = chunk?.event_type || "text_delta";
+
+        const usage = chunk?.metadata?.usage;
+        if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+          const normalized = normalizeUsage(usage as Record<string, unknown>);
+          if (normalized) {
+            usageStats = normalized;
           }
+        }
 
-          const eventType = chunk?.event_type || "text_delta";
+        if (eventType === "thinking") {
+          return false;
+        }
 
-          const usage = chunk?.metadata?.usage;
-          if (usage && typeof usage === "object" && !Array.isArray(usage)) {
-            const normalized = normalizeUsage(usage as Record<string, unknown>);
+        if (eventType === "text_delta") {
+          const delta = chunk?.content?.data;
+          if (typeof delta === "string" && delta) {
+            if (firstTokenTime === null) {
+              firstTokenTime = performance.now();
+            }
+            streamed = true;
+            acc += delta;
+            scheduleFlush();
+          }
+        }
+
+        if (eventType === "tool_call_start" || eventType === "tool_call_delta") {
+          streamed = true;
+          const tc = chunk?.tool_call;
+          if (tc) {
+            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
+            const existingTc = toolCallsMap.get(tcId);
+            const incomingArgs = tc.arguments || "";
+            if (existingTc) {
+              const resolvedArgs = resolveToolArguments(
+                existingTc.argsText,
+                incomingArgs,
+                existingTc.argsValid
+              );
+              const updatedTc: ToolCall = {
+                ...existingTc.toolCall,
+                name: tc.name || existingTc.toolCall.name,
+                arguments: resolvedArgs.text,
+                status: tc.status || existingTc.toolCall.status,
+              };
+              toolCallsMap.set(tcId, {
+                toolCall: updatedTc,
+                result: existingTc.result,
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            } else {
+              const resolvedArgs = resolveToolArguments("", incomingArgs, false);
+              toolCallsMap.set(tcId, {
+                toolCall: {
+                  tool_call_id: tcId,
+                  name: tc.name || "",
+                  arguments: resolvedArgs.text,
+                  status: tc.status || "running",
+                },
+                result: undefined,
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            }
+            scheduleFlush();
+          }
+        }
+
+        if (eventType === "tool_call_end") {
+          streamed = true;
+          const tc = chunk?.tool_call;
+          if (tc) {
+            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
+            const existingTc = toolCallsMap.get(tcId);
+            const incomingArgs = tc.arguments || "";
+            if (existingTc) {
+              const resolvedArgs = resolveToolArguments(
+                existingTc.argsText,
+                incomingArgs,
+                existingTc.argsValid
+              );
+              toolCallsMap.set(tcId, {
+                toolCall: {
+                  ...existingTc.toolCall,
+                  arguments: resolvedArgs.text,
+                  status: "completed",
+                },
+                result: existingTc.result,
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            } else {
+              const resolvedArgs = resolveToolArguments("", incomingArgs, false);
+              toolCallsMap.set(tcId, {
+                toolCall: {
+                  tool_call_id: tcId,
+                  name: tc.name || "",
+                  arguments: resolvedArgs.text,
+                  status: "completed",
+                },
+                result: undefined,
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            }
+            scheduleFlush();
+          }
+        }
+
+        if (eventType === "tool_result") {
+          streamed = true;
+          const tc = chunk?.tool_call;
+          const resultText = chunk?.content?.data;
+
+          if (tc) {
+            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
+            const existingTc = toolCallsMap.get(tcId);
+            const incomingArgs = tc.arguments || "";
+            if (existingTc) {
+              const resolvedArgs = resolveToolArguments(
+                existingTc.argsText,
+                incomingArgs,
+                existingTc.argsValid
+              );
+              toolCallsMap.set(tcId, {
+                toolCall: {
+                  ...existingTc.toolCall,
+                  arguments: resolvedArgs.text,
+                  status: "completed",
+                },
+                result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            } else {
+              const resolvedArgs = resolveToolArguments("", tc.arguments || "", false);
+              toolCallsMap.set(tcId, {
+                toolCall: {
+                  tool_call_id: tcId,
+                  name: tc.name || "",
+                  arguments: resolvedArgs.text,
+                  status: "completed",
+                },
+                result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
+                argsText: resolvedArgs.text,
+                argsValid: resolvedArgs.isValid,
+              });
+            }
+            scheduleFlush();
+          }
+        }
+
+        if (eventType === "stream_end") {
+          console.log("[STREAM] Received stream_end event with metadata:", chunk?.metadata);
+          const streamEndUsage = chunk?.metadata?.usage;
+          if (streamEndUsage && typeof streamEndUsage === "object") {
+            const normalized = normalizeUsage(streamEndUsage as Record<string, unknown>);
             if (normalized) {
               usageStats = normalized;
             }
-          }
-
-          // thinking 事件：保持思考状态，不做其他处理
-          if (eventType === "thinking") {
-            continue;
-          }
-
-          // 处理文本增量
-          if (eventType === "text_delta") {
-            const delta = chunk?.content?.data;
-            if (typeof delta === "string" && delta) {
-              // 记录首 token 时间
-              if (firstTokenTime === null) {
-                firstTokenTime = performance.now();
-              }
-              streamed = true;
-              acc += delta;
-              scheduleFlush();
+            const timing = extractTimingStats(streamEndUsage as Record<string, unknown>);
+            if (timing.durationMs != null) {
+              const finalFirstTokenMs = timing.firstTokenMs ?? (firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined);
+              streamEndTiming = {
+                durationMs: timing.durationMs,
+                firstTokenMs: finalFirstTokenMs,
+              };
+              console.log("[STREAM END] Captured timing stats:", streamEndTiming, "usage:", usageStats);
             }
           }
+          return true;
+        }
 
-          // 处理工具调用开始/增量
-          if (eventType === "tool_call_start" || eventType === "tool_call_delta") {
-            streamed = true;
-            const tc = chunk?.tool_call;
-            if (tc) {
-              const tcId = tc.tool_call_id || "unknown";
-              const existingTc = toolCallsMap.get(tcId);
-              const incomingArgs = tc.arguments || "";
-              if (existingTc) {
-                const resolvedArgs = resolveToolArguments(
-                  existingTc.argsText,
-                  incomingArgs,
-                  existingTc.argsValid
-                );
-                const updatedTc: ToolCall = {
-                  ...existingTc.toolCall,
-                  name: tc.name || existingTc.toolCall.name,
-                  arguments: resolvedArgs.text,
-                  status: tc.status || existingTc.toolCall.status,
-                };
-                toolCallsMap.set(tcId, {
-                  toolCall: updatedTc,
-                  result: existingTc.result,
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
-                });
-              } else {
-                const resolvedArgs = resolveToolArguments("", incomingArgs, false);
-                toolCallsMap.set(tcId, {
-                  toolCall: {
+        return false;
+      };
+
+
+      try {
+        if (useTransparentProxy) {
+          const payload = {
+            input: { messages: [{ role: "user", content: inputText }] },
+          };
+          const streamPath = threadId
+            ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
+            : `/api/v1/proxy/${serviceId}/runs/stream`;
+          // Track cumulative content from LangGraph (messages/partial returns full content, not delta)
+          let lastCumulativeContent = "";
+          for await (const evt of sseFetchEvents<unknown>(streamPath, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify(payload),
+            signal: abortController.signal,
+          })) {
+            if (!isRequestValid()) {
+              break;
+            }
+
+            const normalized = normalizeLangGraphEvent(evt as LangGraphStreamEvent);
+            const eventName = normalized.event || "";
+            const eventData = normalized.data;
+
+            if (eventName === "error") {
+              throw new Error(typeof eventData === "string" ? eventData : "LangGraph stream error");
+            }
+
+            if (eventName === "end") {
+              break;
+            }
+
+            if (eventName === "metadata" && eventData && typeof eventData === "object") {
+              const usage = (eventData as Record<string, unknown>).usage;
+              if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+                const normalizedUsage = normalizeUsage(usage as Record<string, unknown>);
+                if (normalizedUsage) {
+                  usageStats = normalizedUsage;
+                }
+              }
+              continue;
+            }
+
+            // Handle 'updates' events - these contain model output with tool_calls
+            // Structure: data.model.messages[] or data.<node_name>.messages[]
+            if (eventName === "updates" && eventData && typeof eventData === "object") {
+              const data = eventData as Record<string, unknown>;
+              // Find messages in any node (usually 'model' or agent name)
+              for (const [nodeName, nodeData] of Object.entries(data)) {
+                if (nodeData && typeof nodeData === "object") {
+                  const nd = nodeData as Record<string, unknown>;
+                  const msgs = nd.messages as unknown[];
+                  if (Array.isArray(msgs) && msgs.length > 0) {
+                    for (const msg of msgs) {
+                      if (!msg || typeof msg !== "object") continue;
+                      const message = msg as Record<string, unknown>;
+
+                      // Extract tool calls
+                      const toolUpdates = extractToolCallUpdates(message);
+                      for (const update of toolUpdates) {
+                        const tcId = update.id || `tc-${Date.now()}`;
+                        const eventType = toolCallsMap.has(tcId) ? "tool_call_delta" : "tool_call_start";
+                        processStreamChunk({
+                          request_id: "",
+                          chunk_index: 0,
+                          is_final: false,
+                          event_type: eventType,
+                          tool_call: {
+                            tool_call_id: tcId,
+                            name: update.name || "",
+                            arguments: update.args || "",
+                            status: "running",
+                          },
+                          content: { type: "tool_call", data: "" },
+                        });
+                      }
+
+                      // Extract tool results
+                      const toolResult = extractToolResult(message);
+                      if (toolResult) {
+                        const existingArgs = toolCallsMap.get(toolResult.id)?.argsText || "";
+                        processStreamChunk({
+                          request_id: "",
+                          chunk_index: 0,
+                          is_final: false,
+                          event_type: "tool_result",
+                          tool_call: {
+                            tool_call_id: toolResult.id || `auto-${++toolCallIdCounter}`,
+                            name: toolResult.name || "",
+                            arguments: existingArgs,
+                            status: "completed",
+                          },
+                          content: { type: "tool_result", data: toolResult.content },
+                        });
+                      }
+
+                      // Extract content (but only from final updates, not partial)
+                      const msgType = (message.type as string) || "";
+                      const role = (message.role as string) || "";
+                      const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
+                      if (!isToolMessage) {
+                        const content = normalizeContentDelta(message);
+                        if (content) {
+                          // For updates events, content is typically final - use full replace
+                          // Reset accumulator and set full content
+                          if (content.length > lastCumulativeContent.length) {
+                            const delta = content.slice(lastCumulativeContent.length);
+                            lastCumulativeContent = content;
+                            if (delta) {
+                              processStreamChunk({
+                                request_id: "",
+                                chunk_index: 0,
+                                is_final: false,
+                                event_type: "text_delta",
+                                content: { type: "text", data: delta },
+                              });
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              continue;
+            }
+
+            if (eventName.startsWith("messages") && eventName !== "messages/complete") {
+              const payload = extractMessagePayload(eventData);
+              if (!payload) {
+                continue;
+              }
+              const message = payload.message;
+              const msgType = (message.type as string) || "";
+              const role = (message.role as string) || "";
+              const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
+
+              const toolUpdates = extractToolCallUpdates(message);
+              for (const update of toolUpdates) {
+                const tcId = update.id || `auto-${++toolCallIdCounter}`;
+                const eventType = toolCallsMap.has(tcId) ? "tool_call_delta" : "tool_call_start";
+                const shouldStop = processStreamChunk({
+                  request_id: "",
+                  chunk_index: 0,
+                  is_final: false,
+                  event_type: eventType,
+                  tool_call: {
                     tool_call_id: tcId,
-                    name: tc.name || "",
-                    arguments: resolvedArgs.text,
-                    status: tc.status || "running",
+                    name: update.name || "",
+                    arguments: update.args || "",
+                    status: "running",
                   },
-                  result: undefined,
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
+                  content: { type: "tool_call", data: "" },
+                });
+                if (shouldStop) break;
+              }
+
+              const toolResult = extractToolResult(message);
+              if (toolResult) {
+                const existingArgs = toolCallsMap.get(toolResult.id)?.argsText || "";
+                processStreamChunk({
+                  request_id: "",
+                  chunk_index: 0,
+                  is_final: false,
+                  event_type: "tool_result",
+                  tool_call: {
+                    tool_call_id: toolResult.id || `auto-${++toolCallIdCounter}`,
+                    name: toolResult.name || "",
+                    arguments: existingArgs,
+                    status: "completed",
+                  },
+                  content: { type: "tool_result", data: toolResult.content },
                 });
               }
-              scheduleFlush();
-            }
-          }
 
-          // 处理工具调用结束
-          if (eventType === "tool_call_end") {
-            streamed = true;
-            const tc = chunk?.tool_call;
-            if (tc) {
-              const tcId = tc.tool_call_id || "unknown";
-              const existingTc = toolCallsMap.get(tcId);
-              const incomingArgs = tc.arguments || "";
-              if (existingTc) {
-                const resolvedArgs = resolveToolArguments(
-                  existingTc.argsText,
-                  incomingArgs,
-                  existingTc.argsValid
-                );
-                toolCallsMap.set(tcId, {
-                  toolCall: {
-                    ...existingTc.toolCall,
-                    arguments: resolvedArgs.text,
-                    status: "completed",
-                  },
-                  result: existingTc.result,
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
-                });
-              } else {
-                const resolvedArgs = resolveToolArguments("", incomingArgs, false);
-                toolCallsMap.set(tcId, {
-                  toolCall: {
-                    tool_call_id: tcId,
-                    name: tc.name || "",
-                    arguments: resolvedArgs.text,
-                    status: "completed",
-                  },
-                  result: undefined,
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
-                });
+              if (!isToolMessage) {
+                // LangGraph messages/partial returns cumulative content, not incremental delta
+                // We need to extract only the NEW portion by comparing with previous content
+                const cumulativeContent = normalizeContentDelta(message);
+                if (cumulativeContent) {
+                  // Calculate actual delta: new content that wasn't in lastCumulativeContent
+                  let actualDelta = "";
+                  if (cumulativeContent.startsWith(lastCumulativeContent)) {
+                    // Content grew at the end - extract only new part
+                    actualDelta = cumulativeContent.slice(lastCumulativeContent.length);
+                  } else if (lastCumulativeContent === "") {
+                    // First content chunk
+                    actualDelta = cumulativeContent;
+                  } else {
+                    // Content changed in unexpected way - use full content as fallback
+                    actualDelta = cumulativeContent;
+                  }
+                  lastCumulativeContent = cumulativeContent;
+
+                  if (actualDelta) {
+                    processStreamChunk({
+                      request_id: "",
+                      chunk_index: 0,
+                      is_final: false,
+                      event_type: "text_delta",
+                      content: { type: "text", data: actualDelta },
+                    });
+                  }
+                }
               }
-              scheduleFlush();
             }
           }
+        } else {
+          for await (const chunk of sseFetch<StreamChunk>("/api/v1/stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(req),
+            signal: abortController.signal,
+          })) {
+            if (!isRequestValid()) {
+              console.log("Request cancelled or session changed, stopping stream processing");
+              break;
+            }
 
-          // 处理工具结果
-          if (eventType === "tool_result") {
-            streamed = true;
-            const tc = chunk?.tool_call;
-            const resultText = chunk?.content?.data;
-
-            if (tc) {
-              const tcId = tc.tool_call_id || "unknown";
-              const existingTc = toolCallsMap.get(tcId);
-              const incomingArgs = tc.arguments || "";
-              if (existingTc) {
-                const resolvedArgs = resolveToolArguments(
-                  existingTc.argsText,
-                  incomingArgs,
-                  existingTc.argsValid
-                );
-                toolCallsMap.set(tcId, {
-                  toolCall: {
-                    ...existingTc.toolCall,
-                    arguments: resolvedArgs.text,
-                    status: "completed",
-                  },
-                  result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
-                });
-              } else {
-                const resolvedArgs = resolveToolArguments("", tc.arguments || "", false);
-                toolCallsMap.set(tcId, {
-                  toolCall: {
-                    tool_call_id: tcId,
-                    name: tc.name || "",
-                    arguments: resolvedArgs.text,
-                    status: "completed",
-                  },
-                  result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
-                  argsText: resolvedArgs.text,
-                  argsValid: resolvedArgs.isValid,
-                });
-              }
-              scheduleFlush();
+            if (processStreamChunk(chunk)) {
+              break;
             }
           }
-
-          if (chunk?.is_final) break;
         }
       } catch (streamErr) {
-        // 忽略取消导致的错误
+        // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
         if (streamErr instanceof Error && streamErr.name === 'AbortError') {
           console.log("Stream aborted");
           cancelFlush();
@@ -807,17 +1315,17 @@ export function PlaygroundPage() {
 
       cancelFlush();
 
-      // 检查请求是否仍有效
+      // 妫€鏌ヨ姹傛槸鍚︿粛鏈夋晥
       if (!isRequestValid()) return;
 
-      // 更新最终统计信息
+      // 鏇存柊鏈€缁堢粺璁′俊鎭?
       const endTime = performance.now();
-      const durationMs = Math.round(endTime - startTime);
-      const firstTokenMs = firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined;
-      const estimatedOutputTokens = estimateTokens(acc);
-      const inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
-      const outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
-      const totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
+      let durationMs = streamEndTiming?.durationMs ?? Math.round(endTime - startTime);
+      let firstTokenMs = streamEndTiming?.firstTokenMs ?? (firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined);
+      let estimatedOutputTokens = estimateTokens(acc);
+      let inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
+      let outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
+      let totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
 
       flushAssistant({
         isStreaming: false,
@@ -831,19 +1339,44 @@ export function PlaygroundPage() {
       });
 
       if (!streamed) {
-        // 流式失败，尝试同步调用
         console.log("Falling back to sync invoke");
         try {
-          const resp = await invokeService(req);
+          if (useTransparentProxy) {
+            const waitPath = threadId
+              ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/wait`
+              : `/api/v1/proxy/${serviceId}/runs/wait`;
+            const payload = {
+              input: { messages: [{ role: "user", content: inputText }] },
+            };
+            const resp = await fetch(waitPath, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              signal: abortController.signal,
+            });
+            if (!resp.ok) {
+              throw new Error(`Run wait failed: ${resp.status}`);
+            }
+            const data = await resp.json();
+            acc = extractRunWaitContent(data);
+          } else {
+            const resp = await invokeService(req);
+            acc = String(resp.outputs?.[0]?.data ?? "");
+            const usage = normalizeUsage(resp.usage as Record<string, unknown> | undefined);
+            if (usage) {
+              usageStats = usage;
+            }
+          }
+
           if (!isRequestValid()) return;
 
-          const out = resp.outputs?.[0]?.data ?? "";
-          acc = String(out);
-          const usage = normalizeUsage(resp.usage as Record<string, unknown> | undefined);
-          const outputTokens = usage?.outputTokens ?? estimateTokens(acc);
-          const inputTokens = usage?.inputTokens ?? estimatedInputTokens;
-          const totalTokens = usage?.totalTokens ?? (inputTokens + outputTokens);
+          estimatedOutputTokens = estimateTokens(acc);
+          inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
+          outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
+          totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
           const syncEndTime = performance.now();
+          durationMs = Math.round(syncEndTime - startTime);
+          firstTokenMs = undefined;
           setMessages((m) => {
             const next = [...m];
             if (next[assistantIndex]) {
@@ -853,7 +1386,7 @@ export function PlaygroundPage() {
                 isThinking: false,
                 isStreaming: false,
                 stats: {
-                  durationMs: Math.round(syncEndTime - startTime),
+                  durationMs,
                   inputTokens,
                   outputTokens,
                   totalTokens,
@@ -867,11 +1400,34 @@ export function PlaygroundPage() {
           throw syncErr;
         }
       }
+
+      if (shouldPersistManually && effectiveSessionId && (acc || toolCallsMap.size)) {
+        const toolCalls = Array.from(toolCallsMap.values()).map((tc) => ({
+          tool_call_id: tc.toolCall.tool_call_id,
+          name: tc.toolCall.name,
+          arguments: tc.argsText,
+          result: tc.result ?? null,
+        }));
+        addSessionMessage(effectiveSessionId, {
+          role: "assistant",
+          content: acc,
+          metadata: {
+            tool_calls: toolCalls,
+            stats: {
+              duration_ms: durationMs,
+              first_token_ms: firstTokenMs,
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+              total_tokens: totalTokens,
+            },
+          },
+        }).catch((err) => console.error("Failed to persist assistant message:", err));
+      }
     } catch (err) {
-      // 忽略取消导致的错误
+      // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
       if (err instanceof Error && err.name === 'AbortError') return;
 
-      const message = err instanceof Error ? err.message : "发生错误";
+      const message = err instanceof Error ? err.message : "鍙戠敓閿欒";
       setMessages((m) => {
         const next = [...m];
         if (next[assistantIndex]) {
@@ -887,7 +1443,7 @@ export function PlaygroundPage() {
         return next;
       });
     } finally {
-      // 只有当前请求完成时才清除 loading 状态
+      // 鍙湁褰撳墠璇锋眰瀹屾垚鏃舵墠娓呴櫎 loading 鐘舵€?
       if (abortControllerRef.current === abortController) {
         setLoading(false);
         abortControllerRef.current = null;
@@ -899,28 +1455,28 @@ export function PlaygroundPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-64px)] overflow-hidden rounded-2xl border border-border/50 bg-background/50">
+    <div className="flex overflow-hidden bg-card -m-6" style={{ height: 'calc(100vh - 64px)', width: 'calc(100% + 48px)' }}>
       {/* Sessions Sidebar */}
-      <aside className="hidden lg:flex w-[300px] flex-col border-r border-border/50 bg-background/40">
-        <div className="p-3 flex items-center gap-2">
+      <aside className="hidden lg:flex w-[280px] flex-col border-r border-border/60 bg-muted/20">
+        <div className="h-14 flex items-center px-4 border-b border-border/60">
           <Button
             size="sm"
             onClick={() => void handleNewSession()}
             disabled={!serviceId || loading}
-            className="w-full justify-start gap-2"
+            className="w-full gap-2 h-9"
           >
             <MessageSquarePlus className="h-4 w-4" />
             New chat
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 pb-3">
+        <div className="flex-1 overflow-y-auto p-2">
           {!serviceId ? (
             <div className="px-3 py-6 text-sm text-muted-foreground">
               Select an agent to view chats.
             </div>
           ) : sessionsLoading ? (
-            <div className="px-3 py-6 text-sm text-muted-foreground">Loading…</div>
+            <div className="px-3 py-6 text-sm text-muted-foreground">Loading...</div>
           ) : sessions.length === 0 ? (
             <div className="px-3 py-6 text-sm text-muted-foreground">
               No chats yet. Start a new one.
@@ -928,7 +1484,7 @@ export function PlaygroundPage() {
           ) : (
             <div className="space-y-1">
               {sessions.map((s) => {
-                // 优先使用 localTitles（同步更新），然后才是服务器端的 metadata
+                // 浼樺厛浣跨敤 localTitles锛堝悓姝ユ洿鏂帮級锛岀劧鍚庢墠鏄湇鍔″櫒绔殑 metadata
                 const title =
                   localTitles[s.session_id] ||
                   (s.metadata?.title as string | undefined) ||
@@ -941,10 +1497,10 @@ export function PlaygroundPage() {
                     key={s.session_id}
                     onClick={() => void handleSelectSession(s.session_id)}
                     className={cn(
-                      "w-full rounded-xl border px-3 py-2 text-left transition-colors",
+                      "w-full rounded-md px-3 py-2 text-left transition-colors",
                       active
-                        ? "bg-primary text-primary-foreground border-primary/30"
-                        : "bg-background/60 hover:bg-background border-border/50"
+                        ? "bg-primary text-primary-foreground"
+                        : "hover:bg-muted"
                     )}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -979,17 +1535,16 @@ export function PlaygroundPage() {
         </div>
       </aside>
 
-      <div className="flex-1 flex flex-col relative">
+      <div className="flex-1 flex flex-col relative overflow-hidden min-h-0">
       {/* Header / Config Bar */}
-      <div className="w-full border-b bg-background/50 backdrop-blur-sm" style={{ zIndex: "var(--z-base)" }}>
-        <div className="mx-auto w-full max-w-4xl px-4 py-3">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 flex-1">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-accent text-white shadow-lg shadow-primary/20">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
-              </div>
-              <div className="flex flex-col">
-                <span className="text-xs font-medium text-muted-foreground">Agent</span>
+      <div className="h-14 flex items-center border-b border-border/60 bg-background px-6">
+        <div className="flex items-center justify-between gap-4 w-full max-w-4xl mx-auto">
+          <div className="flex items-center gap-3 flex-1">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-blue-600 text-white shadow-md shadow-primary/25">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
+            </div>
+            <div className="flex flex-col -space-y-0.5">
+              <span className="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">Agent</span>
                 <Select value={serviceId} onValueChange={setServiceId}>
                   <SelectTrigger className="h-7 w-[200px] border-0 bg-transparent p-0 text-sm font-semibold focus:ring-0">
                     <SelectValue placeholder="Select an Agent" />
@@ -1005,56 +1560,51 @@ export function PlaygroundPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2 rounded-full border bg-background px-3 py-1.5">
-                <input
-                  type="checkbox"
-                  id="session-toggle"
-                  checked={sessionEnabled}
-                  onChange={(e) => setSessionEnabled(e.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-muted-foreground/30 accent-primary"
-                />
-                <label htmlFor="session-toggle" className="text-xs font-medium cursor-pointer select-none">
-                  Memory
-                </label>
-              </div>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-2 rounded-full border border-border/60 bg-muted/30 px-3 py-1.5 cursor-pointer select-none hover:bg-muted/50 transition-colors">
+              <input
+                type="checkbox"
+                id="session-toggle"
+                checked={sessionEnabled}
+                onChange={(e) => setSessionEnabled(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-muted-foreground/30 accent-primary"
+              />
+              <span className="text-xs font-medium">Memory</span>
+            </label>
 
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  if (sessionEnabled) {
-                    void handleNewSession();
-                  } else {
-                    setMessages([]);
-                    setActiveSessionId(undefined);
-                  }
-                }}
-                disabled={loading || (sessionEnabled ? !serviceId : messages.length === 0)}
-                className="text-muted-foreground hover:text-foreground"
-              >
-                Clear
-              </Button>
-            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (sessionEnabled) {
+                  void handleNewSession();
+                } else {
+                  setMessages([]);
+                  setActiveSessionId(undefined);
+                }
+              }}
+              disabled={loading || (sessionEnabled ? !serviceId : messages.length === 0)}
+              className="text-muted-foreground hover:text-foreground h-8"
+            >
+              Clear
+            </Button>
           </div>
         </div>
       </div>
 
       {/* Chat Area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto pb-32">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto pb-48 min-h-0 bg-background">
         {!serviceId ? (
-          <div className="flex h-full flex-col items-center justify-center p-8 text-center opacity-0 animate-in fade-in duration-500 delay-100 fill-mode-forwards" style={{ opacity: 1 }}>
-            <div className="mb-6 rounded-2xl bg-gradient-to-br from-primary/10 to-accent/10 p-6 shadow-sm ring-1 ring-inset ring-black/5 dark:ring-white/5">
-              <div className="h-16 w-16 mx-auto rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
-              </div>
+          <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+            <div className="mb-5 h-14 w-14 rounded-2xl bg-gradient-to-br from-primary to-blue-600 flex items-center justify-center shadow-lg shadow-primary/30">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
-            <h2 className="text-2xl font-semibold tracking-tight">How can I help you today?</h2>
-            <p className="mt-2 text-muted-foreground max-w-sm">Select an agent service from the dropdown above to start a conversation.</p>
+            <h2 className="text-xl font-semibold tracking-tight">How can I help you today?</h2>
+            <p className="mt-2 text-sm text-muted-foreground max-w-md">Select an agent service from the dropdown above to start a conversation.</p>
           </div>
         ) : historyLoading ? (
           <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
-            Loading chat history…
+            Loading chat history...
           </div>
         ) : messages.length === 0 ? (
           <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
@@ -1068,26 +1618,28 @@ export function PlaygroundPage() {
       </div>
 
       {/* Floating Input Area */}
-      <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background via-background/80 to-transparent pt-10 pb-6 px-4">
-        <div className="mx-auto w-full max-w-4xl shadow-2xl rounded-3xl border border-black/5 dark:border-white/10 bg-background/80 backdrop-blur-xl transition-all focus-within:ring-2 ring-primary/20">
-          <MultimodalInput
-            onSend={handleSend}
-            disabled={!serviceId || loading}
-            includeFiles={false} // Would be true if backend supported
-          />
-        </div>
-        <div className="mx-auto mt-3 flex w-full max-w-4xl items-center gap-2 text-xs text-muted-foreground">
-          <Switch
-            id="toggle-tool-calls"
-            checked={showToolCalls}
-            onCheckedChange={setShowToolCalls}
-          />
-          <label htmlFor="toggle-tool-calls" className="cursor-pointer select-none">
-            Show tool calls
-          </label>
-        </div>
-        <div className="mt-2 text-center text-[10px] text-muted-foreground/60">
-          AI generated responses may be inaccurate.
+      <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-70% to-transparent pt-8 pb-5 px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <div className="rounded-2xl border border-border/80 bg-card shadow-xl shadow-black/5 overflow-hidden">
+            <MultimodalInput
+              onSend={handleSend}
+              disabled={!serviceId || loading}
+              includeFiles={false}
+            />
+          </div>
+          <div className="mt-3 flex items-center justify-between px-2 text-xs text-muted-foreground/80">
+            <label className="flex items-center gap-2 cursor-pointer select-none hover:text-foreground transition-colors">
+              <Switch
+                id="toggle-tool-calls"
+                checked={showToolCalls}
+                onCheckedChange={setShowToolCalls}
+              />
+              Show tool calls
+            </label>
+            <span className="text-[10px]">
+              AI responses may be inaccurate
+            </span>
+          </div>
         </div>
       </div>
     </div>

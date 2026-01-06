@@ -536,6 +536,7 @@ class Container:
             inject_user_info=self.settings.proxy.inject_user_info,
             inject_request_info=self.settings.proxy.inject_request_info,
             forward_auth=self.settings.proxy.forward_auth,
+            forward_all_headers=self.settings.proxy.forward_all_headers,
             custom_headers=self.settings.proxy.custom_headers,
         )
     

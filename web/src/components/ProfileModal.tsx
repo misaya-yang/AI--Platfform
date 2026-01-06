@@ -52,7 +52,7 @@ export function ProfileModal({ open, onClose }: ProfileModalProps) {
 
     try {
       // Update profile via API
-      const response = await api.put(`/api/v1/users/${user?.user_id}/profile`, {
+      await api.put(`/api/v1/users/${user?.user_id}/profile`, {
         display_name: displayName.trim(),
       });
 

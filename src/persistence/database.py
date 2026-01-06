@@ -87,6 +87,20 @@ class DatabaseStorage:
             await self._pool.close()
             self._pool = None
 
+    async def fetchrow(self, query: str, *args) -> Optional[Any]:
+        """执行查询并返回单行结果"""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            return await conn.fetchrow(query, *args)
+
+    async def fetch(self, query: str, *args) -> List[Any]:
+        """执行查询并返回多行结果"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            return await conn.fetch(query, *args)
+
     async def execute_schema(self, schema_path: str) -> None:
         """执行 SQL 建表脚本"""
         if not self._pool:

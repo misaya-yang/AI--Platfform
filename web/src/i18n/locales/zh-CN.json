@@ -1,0 +1,244 @@
+{
+  "common": {
+    "loading": "加载中...",
+    "noData": "暂无数据",
+    "success": "成功",
+    "error": "错误",
+    "confirm": "确认",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "edit": "编辑",
+    "add": "添加",
+    "search": "搜索",
+    "filter": "筛选",
+    "reset": "重置",
+    "submit": "提交",
+    "back": "返回",
+    "next": "下一步",
+    "previous": "上一步",
+    "close": "关闭",
+    "refresh": "刷新",
+    "copy": "复制",
+    "copied": "已复制",
+    "enable": "启用",
+    "disable": "禁用",
+    "status": "状态",
+    "actions": "操作",
+    "all": "全部",
+    "active": "启用",
+    "disabled": "禁用",
+    "never": "从未",
+    "notSet": "未设置",
+    "retry": "重试"
+  },
+  "metrics": {
+    "title": "系统指标",
+    "totalRequests": "总请求数",
+    "successRate": "成功率",
+    "avgLatency": "平均延迟",
+    "activeServices": "活跃服务",
+    "hourlyTrend": "24小时请求趋势",
+    "lastUpdated": "更新于",
+    "error": {
+      "title": "无法加载指标数据",
+      "description": "请检查网络连接或稍后重试"
+    }
+  },
+  "nav": {
+    "dashboard": "仪表盘",
+    "services": "服务管理",
+    "knowledge": "知识库",
+    "knowledgeSync": "知识同步",
+    "playground": "智能对话",
+    "tasks": "任务管理",
+    "users": "用户管理",
+    "settings": "系统设置"
+  },
+  "theme": {
+    "light": "浅色模式",
+    "dark": "深色模式",
+    "switchToLight": "切换到浅色模式",
+    "switchToDark": "切换到深色模式"
+  },
+  "user": {
+    "profile": "个人资料",
+    "changePassword": "修改密码",
+    "logout": "退出登录",
+    "language": "语言"
+  },
+  "login": {
+    "title": "账号登录",
+    "username": "用户名",
+    "password": "密码",
+    "submit": "登录",
+    "forgotPassword": "忘记密码",
+    "rememberMe": "记住我"
+  },
+  "dashboard": {
+    "title": "仪表盘",
+    "loadingServices": "加载服务中...",
+    "metrics": {
+      "title": "指标概览",
+      "totalRequests": "总请求数",
+      "successRate": "成功率",
+      "avgLatency": "平均延迟",
+      "activeServices": "活跃服务"
+    }
+  },
+  "users": {
+    "title": "用户管理",
+    "addUser": "添加用户",
+    "createUser": "创建用户",
+    "editUser": "编辑用户",
+    "searchPlaceholder": "搜索邮箱或姓名...",
+    "allStatus": "全部状态",
+    "fields": {
+      "email": "邮箱",
+      "displayName": "显示名称",
+      "department": "部门",
+      "roles": "角色",
+      "status": "状态",
+      "lastLogin": "最后登录",
+      "createdAt": "创建时间"
+    },
+    "actions": {
+      "edit": "编辑",
+      "resetPassword": "重置密码",
+      "enable": "启用",
+      "disable": "禁用",
+      "delete": "删除"
+    },
+    "dialogs": {
+      "deleteTitle": "确认删除",
+      "deleteMessage": "确定要删除用户 \"{{name}}\" 吗？此操作无法撤销。",
+      "resetPasswordTitle": "重置密码",
+      "resetPasswordMessage": "确定要重置用户 \"{{name}}\" 的密码吗？",
+      "newPassword": "新密码"
+    },
+    "pagination": {
+      "showing": "显示 {{start}} 至 {{end}} 条，共 {{total}} 条",
+      "page": "第 {{current}}/{{total}} 页",
+      "first": "首页",
+      "last": "末页",
+      "prev": "上一页",
+      "next": "下一页",
+      "perPage": "{{count}}条/页"
+    },
+    "noUsers": "暂无用户",
+    "loading": "加载中..."
+  },
+  "tasks": {
+    "title": "任务管理",
+    "description": "查询和追踪异步任务的执行状态",
+    "searchPlaceholder": "输入任务 ID 进行查询...",
+    "query": "查询",
+    "querying": "查询中",
+    "taskDetail": "任务详情",
+    "taskResult": "执行结果",
+    "service": "服务",
+    "createdAt": "创建时间",
+    "errorInfo": "错误信息",
+    "status": {
+      "completed": "已完成",
+      "running": "运行中",
+      "pending": "等待中",
+      "failed": "失败",
+      "cancelled": "已取消"
+    },
+    "states": {
+      "initial": "输入任务 ID 开始查询",
+      "initialDesc": "支持查询异步任务的状态和执行结果",
+      "loading": "正在查询任务...",
+      "notFound": "未找到任务",
+      "notFoundDesc": "任务 ID \"{{id}}\" 不存在或已过期",
+      "error": "查询失败",
+      "errorDesc": "无法获取任务信息，请检查任务 ID 是否正确或稍后重试",
+      "retry": "重试"
+    }
+  },
+  "settings": {
+    "title": "系统设置",
+    "rateLimit": {
+      "title": "限流配置",
+      "scope": "作用域",
+      "global": "全局",
+      "service": "按服务",
+      "tenant": "按租户",
+      "scopeId": "作用域ID",
+      "requests": "请求数",
+      "requestsRange": "范围: 1 - 100,000",
+      "window": "时间窗口（秒）",
+      "windowRange": "范围: 1 - 86,400 (1天)",
+      "burst": "突发允许",
+      "burstRange": "范围: 0 - 1,000",
+      "addRule": "添加规则",
+      "currentRules": "当前规则",
+      "noRules": "暂无限流规则"
+    }
+  },
+  "knowledge": {
+    "create": {
+      "title": "创建知识库",
+      "step1": "基础信息",
+      "step2": "选择数据",
+      "step3": "索引设置",
+      "name": "知识库名称",
+      "nameRequired": "请输入知识库名称",
+      "namePlaceholder": "请输入知识库名称",
+      "nameLength": "1-100个字符",
+      "description": "知识库描述",
+      "descriptionPlaceholder": "请输入知识库描述",
+      "embeddingModel": "Embedding 模型",
+      "uploadFiles": "点击或拖拽上传文件",
+      "supportedFormats": "支持 .pdf, .doc, .docx, .txt, .md 等格式",
+      "fileSizeLimit": "单文档最大限制 100MB，单图片最大限制 20MB",
+      "addUrl": "或添加网页URL",
+      "urlPlaceholder": "输入网页URL，如 https://example.com/doc.html",
+      "urlTitle": "文档标题 (可选)",
+      "addButton": "添加",
+      "cancel": "取消",
+      "previous": "上一步",
+      "next": "下一步",
+      "confirm": "确认",
+      "creating": "创建中...",
+      "validation": {
+        "nameRequired": "请输入知识库名称",
+        "nameTooLong": "名称长度不能超过 {{max}} 个字符",
+        "dataRequired": "请至少上传一个文件或添加一个URL",
+        "invalidUrl": "请输入有效的URL地址，需以 http:// 或 https:// 开头",
+        "duplicateUrl": "该URL已添加",
+        "fileTooLarge": "文件 \"{{name}}\" 超过大小限制 ({{limit}})",
+        "duplicateFile": "文件 \"{{name}}\" 已添加"
+      }
+    }
+  },
+  "playground": {
+    "you": "你",
+    "assistant": "AI 助手",
+    "thinking": "思考中...",
+    "toolCalls": "工具调用",
+    "stats": {
+      "ttft": "首Token",
+      "tokens": "tokens",
+      "in": "输入",
+      "out": "输出"
+    },
+    "toolCall": {
+      "pending": "等待中",
+      "running": "执行中",
+      "completed": "已完成",
+      "error": "错误",
+      "arguments": "参数",
+      "argumentsPartial": "参数 (接收中...)",
+      "result": "结果",
+      "unknownTool": "未知工具",
+      "paramsPending": "参数等待中..."
+    }
+  },
+  "help": {
+    "title": "帮助",
+    "platformName": "AI Platform",
+    "description": "企业级AI服务网关平台"
+  }
+}

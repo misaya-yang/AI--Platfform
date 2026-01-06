@@ -18,8 +18,10 @@ import {
   QuestionCircleOutlined,
   TeamOutlined,
   LogoutOutlined,
+  GlobalOutlined,
 } from "@ant-design/icons";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
 import { useAuthStore } from "@/store/useAuthStore";
 import { logout } from "@/api/auth";
@@ -27,66 +29,59 @@ import { colors } from "@/theme/themeConfig";
 import { HelpModal } from "@/components/HelpModal";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
+import { languages } from "@/i18n";
 
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
 
-// 导航菜单配置
+// 导航菜单配置 (使用翻译键)
 const navItems = [
   {
     key: "/dashboard",
-    label: "仪表盘",
+    labelKey: "nav.dashboard",
     icon: <DashboardOutlined />,
-    description: "系统概览与数据统计",
     permission: "console:dashboard:view",
   },
   {
     key: "/services",
-    label: "服务管理",
+    labelKey: "nav.services",
     icon: <CloudServerOutlined />,
-    description: "管理已注册的服务",
     permission: "console:services:view",
   },
   {
     key: "/knowledge",
-    label: "知识库",
+    labelKey: "nav.knowledge",
     icon: <DatabaseOutlined />,
-    description: "管理知识库和文档",
     permission: "knowledge:dataset:view",
   },
   {
     key: "/confluence",
-    label: "Confluence",
+    labelKey: "nav.knowledgeSync",
     icon: <CloudSyncOutlined />,
-    description: "Confluence 文档同步",
     permission: "knowledge:confluence:manage",
   },
   {
     key: "/playground",
-    label: "智能对话",
+    labelKey: "nav.playground",
     icon: <ThunderboltOutlined />,
-    description: "AI 对话测试",
     permission: "conversation:playground:access",
   },
   {
     key: "/tasks",
-    label: "任务管理",
+    labelKey: "nav.tasks",
     icon: <UnorderedListOutlined />,
-    description: "异步任务追踪",
     permission: null, // 所有用户可见
   },
   {
     key: "/users",
-    label: "用户管理",
+    labelKey: "nav.users",
     icon: <TeamOutlined />,
-    description: "管理系统用户",
     permission: "user:list",
   },
   {
     key: "/settings",
-    label: "系统设置",
+    labelKey: "nav.settings",
     icon: <SettingOutlined />,
-    description: "系统配置选项",
     permission: "console:settings:view",
   },
 ];
@@ -162,13 +157,13 @@ function Logo({ collapsed }: { collapsed: boolean }) {
 }
 
 // 主题切换按钮
-function ThemeToggle({ darkMode, onToggle }: { darkMode: boolean; onToggle: () => void }) {
+function ThemeToggle({ darkMode, onToggle, tooltip }: { darkMode: boolean; onToggle: () => void; tooltip: string }) {
   return (
     <motion.div
       className="theme-toggle"
       whileTap={{ scale: 0.95 }}
     >
-      <Tooltip title={darkMode ? "切换到浅色模式" : "切换到深色模式"}>
+      <Tooltip title={tooltip}>
         <div
           onClick={onToggle}
           style={{
@@ -205,6 +200,7 @@ function ThemeToggle({ darkMode, onToggle }: { darkMode: boolean; onToggle: () =
 }
 
 export function AppLayout() {
+  const { t, i18n } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
@@ -217,13 +213,31 @@ export function AppLayout() {
   // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
 
+  // 语言切换
+  const handleLanguageChange = (langCode: string) => {
+    i18n.changeLanguage(langCode);
+  };
+
+  // 语言子菜单
+  const languageMenuItems: MenuProps['items'] = languages.map(lang => ({
+    key: lang.code,
+    label: `${lang.flag} ${lang.name}`,
+    onClick: () => handleLanguageChange(lang.code),
+  }));
+
   // 用户下拉菜单
   const userMenuItems: MenuProps['items'] = [
-    { key: 'profile', label: '个人设置', icon: <UserOutlined /> },
-    { key: 'change-password', label: '修改密码', icon: <SettingOutlined /> },
-    { key: 'help', label: '帮助文档', icon: <QuestionCircleOutlined /> },
+    { key: 'profile', label: t('user.profile'), icon: <UserOutlined /> },
+    { key: 'change-password', label: t('user.changePassword'), icon: <SettingOutlined /> },
+    {
+      key: 'language',
+      label: t('user.language'),
+      icon: <GlobalOutlined />,
+      children: languageMenuItems,
+    },
+    { key: 'help', label: t('help.title'), icon: <QuestionCircleOutlined /> },
     { type: 'divider' },
-    { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
+    { key: 'logout', label: t('user.logout'), icon: <LogoutOutlined />, danger: true },
   ];
 
   // Handle user menu click
@@ -277,7 +291,7 @@ export function AppLayout() {
     ),
     label: (
       <NavLink to={item.key} style={{ color: 'inherit' }}>
-        {item.label}
+        {t(item.labelKey)}
       </NavLink>
     ),
     onMouseEnter: () => setHoveredItem(item.key),
@@ -356,10 +370,14 @@ export function AppLayout() {
           }}>
             {!collapsed && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {darkMode ? '深色模式' : '浅色模式'}
+                {darkMode ? t('theme.dark') : t('theme.light')}
               </Text>
             )}
-            <ThemeToggle darkMode={darkMode} onToggle={toggleDarkMode} />
+            <ThemeToggle
+              darkMode={darkMode}
+              onToggle={toggleDarkMode}
+              tooltip={darkMode ? t('theme.switchToLight') : t('theme.switchToDark')}
+            />
           </div>
 
           {/* 折叠按钮 */}
@@ -418,7 +436,10 @@ export function AppLayout() {
           {/* 左侧 - 面包屑/标题 */}
           <div>
             <Text strong style={{ fontSize: 16 }}>
-              {filteredNavItems.find(item => location.pathname.startsWith(item.key))?.label || ''}
+              {(() => {
+                const item = filteredNavItems.find(item => location.pathname.startsWith(item.key));
+                return item ? t(item.labelKey) : '';
+              })()}
             </Text>
           </div>
 
@@ -460,7 +481,7 @@ export function AppLayout() {
         <Content style={{
           padding: '24px',
           minHeight: 'calc(100vh - 64px)',
-          overflow: 'auto',
+          overflow: 'hidden',
         }}>
           <motion.div
             initial={{ opacity: 0, y: 20 }}

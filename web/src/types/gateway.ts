@@ -15,7 +15,8 @@ export type StreamEventType =
   | "tool_call_end"
   | "tool_result"
   | "thinking"
-  | "final";
+  | "final"
+  | "stream_end";
 
 export interface ToolCall {
   tool_call_id: string;
@@ -41,6 +42,7 @@ export type ServiceType =
   | "processing"
   | "embedding"
   | "classification"
+  | "langgraph"
   | "custom";
 
 export interface ContentItem {

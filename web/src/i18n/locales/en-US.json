@@ -1,0 +1,244 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "noData": "No data",
+    "success": "Success",
+    "error": "Error",
+    "confirm": "Confirm",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "add": "Add",
+    "search": "Search",
+    "filter": "Filter",
+    "reset": "Reset",
+    "submit": "Submit",
+    "back": "Back",
+    "next": "Next",
+    "previous": "Previous",
+    "close": "Close",
+    "refresh": "Refresh",
+    "copy": "Copy",
+    "copied": "Copied",
+    "enable": "Enable",
+    "disable": "Disable",
+    "status": "Status",
+    "actions": "Actions",
+    "all": "All",
+    "active": "Active",
+    "disabled": "Disabled",
+    "never": "Never",
+    "notSet": "Not set",
+    "retry": "Retry"
+  },
+  "metrics": {
+    "title": "System Metrics",
+    "totalRequests": "Total Requests",
+    "successRate": "Success Rate",
+    "avgLatency": "Avg Latency",
+    "activeServices": "Active Services",
+    "hourlyTrend": "24-Hour Request Trend",
+    "lastUpdated": "Updated at",
+    "error": {
+      "title": "Failed to load metrics",
+      "description": "Please check your network connection or try again later"
+    }
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "services": "Services",
+    "knowledge": "Knowledge Base",
+    "knowledgeSync": "Knowledge Sync",
+    "playground": "Playground",
+    "tasks": "Tasks",
+    "users": "Users",
+    "settings": "Settings"
+  },
+  "theme": {
+    "light": "Light Mode",
+    "dark": "Dark Mode",
+    "switchToLight": "Switch to light mode",
+    "switchToDark": "Switch to dark mode"
+  },
+  "user": {
+    "profile": "Profile",
+    "changePassword": "Change Password",
+    "logout": "Logout",
+    "language": "Language"
+  },
+  "login": {
+    "title": "Sign In",
+    "username": "Username",
+    "password": "Password",
+    "submit": "Sign In",
+    "forgotPassword": "Forgot Password",
+    "rememberMe": "Remember me"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "loadingServices": "Loading services...",
+    "metrics": {
+      "title": "Metrics Overview",
+      "totalRequests": "Total Requests",
+      "successRate": "Success Rate",
+      "avgLatency": "Avg Latency",
+      "activeServices": "Active Services"
+    }
+  },
+  "users": {
+    "title": "User Management",
+    "addUser": "Add User",
+    "createUser": "Create User",
+    "editUser": "Edit User",
+    "searchPlaceholder": "Search by email or name...",
+    "allStatus": "All Status",
+    "fields": {
+      "email": "Email",
+      "displayName": "Display Name",
+      "department": "Department",
+      "roles": "Roles",
+      "status": "Status",
+      "lastLogin": "Last Login",
+      "createdAt": "Created At"
+    },
+    "actions": {
+      "edit": "Edit",
+      "resetPassword": "Reset Password",
+      "enable": "Enable",
+      "disable": "Disable",
+      "delete": "Delete"
+    },
+    "dialogs": {
+      "deleteTitle": "Confirm Delete",
+      "deleteMessage": "Are you sure you want to delete user \"{{name}}\"? This action cannot be undone.",
+      "resetPasswordTitle": "Reset Password",
+      "resetPasswordMessage": "Are you sure you want to reset password for user \"{{name}}\"?",
+      "newPassword": "New Password"
+    },
+    "pagination": {
+      "showing": "Showing {{start}} to {{end}} of {{total}} entries",
+      "page": "Page {{current}} of {{total}}",
+      "first": "First",
+      "last": "Last",
+      "prev": "Previous",
+      "next": "Next",
+      "perPage": "{{count}}/page"
+    },
+    "noUsers": "No users found",
+    "loading": "Loading..."
+  },
+  "tasks": {
+    "title": "Task Management",
+    "description": "Query and track async task execution status",
+    "searchPlaceholder": "Enter task ID to query...",
+    "query": "Query",
+    "querying": "Querying",
+    "taskDetail": "Task Details",
+    "taskResult": "Execution Result",
+    "service": "Service",
+    "createdAt": "Created At",
+    "errorInfo": "Error Info",
+    "status": {
+      "completed": "Completed",
+      "running": "Running",
+      "pending": "Pending",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "states": {
+      "initial": "Enter task ID to start query",
+      "initialDesc": "Query async task status and execution results",
+      "loading": "Querying task...",
+      "notFound": "Task not found",
+      "notFoundDesc": "Task ID \"{{id}}\" does not exist or has expired",
+      "error": "Query failed",
+      "errorDesc": "Unable to get task info, please check task ID or try again later",
+      "retry": "Retry"
+    }
+  },
+  "settings": {
+    "title": "System Settings",
+    "rateLimit": {
+      "title": "Rate Limiting",
+      "scope": "Scope",
+      "global": "Global",
+      "service": "Per Service",
+      "tenant": "Per Tenant",
+      "scopeId": "Scope ID",
+      "requests": "Requests",
+      "requestsRange": "Range: 1 - 100,000",
+      "window": "Time Window (seconds)",
+      "windowRange": "Range: 1 - 86,400 (1 day)",
+      "burst": "Burst Allowed",
+      "burstRange": "Range: 0 - 1,000",
+      "addRule": "Add Rule",
+      "currentRules": "Current Rules",
+      "noRules": "No rate limit rules"
+    }
+  },
+  "knowledge": {
+    "create": {
+      "title": "Create Knowledge Base",
+      "step1": "Basic Info",
+      "step2": "Select Data",
+      "step3": "Index Settings",
+      "name": "Name",
+      "nameRequired": "Please enter knowledge base name",
+      "namePlaceholder": "Enter knowledge base name",
+      "nameLength": "1-100 characters",
+      "description": "Description",
+      "descriptionPlaceholder": "Enter description",
+      "embeddingModel": "Embedding Model",
+      "uploadFiles": "Click or drag files to upload",
+      "supportedFormats": "Supports .pdf, .doc, .docx, .txt, .md and more",
+      "fileSizeLimit": "Max 100MB per document, 20MB per image",
+      "addUrl": "Or add web URL",
+      "urlPlaceholder": "Enter URL, e.g. https://example.com/doc.html",
+      "urlTitle": "Document title (optional)",
+      "addButton": "Add",
+      "cancel": "Cancel",
+      "previous": "Previous",
+      "next": "Next",
+      "confirm": "Confirm",
+      "creating": "Creating...",
+      "validation": {
+        "nameRequired": "Please enter knowledge base name",
+        "nameTooLong": "Name cannot exceed {{max}} characters",
+        "dataRequired": "Please upload at least one file or add a URL",
+        "invalidUrl": "Please enter a valid URL starting with http:// or https://",
+        "duplicateUrl": "This URL has already been added",
+        "fileTooLarge": "File \"{{name}}\" exceeds size limit ({{limit}})",
+        "duplicateFile": "File \"{{name}}\" has already been added"
+      }
+    }
+  },
+  "playground": {
+    "you": "You",
+    "assistant": "AI Assistant",
+    "thinking": "Thinking...",
+    "toolCalls": "Tool Calls",
+    "stats": {
+      "ttft": "TTFT",
+      "tokens": "tokens",
+      "in": "in",
+      "out": "out"
+    },
+    "toolCall": {
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "error": "Error",
+      "arguments": "Arguments",
+      "argumentsPartial": "Arguments (streaming...)",
+      "result": "Result",
+      "unknownTool": "Unknown tool",
+      "paramsPending": "Parameters pending..."
+    }
+  },
+  "help": {
+    "title": "Help",
+    "platformName": "AI Platform",
+    "description": "Enterprise AI Service Gateway Platform"
+  }
+}

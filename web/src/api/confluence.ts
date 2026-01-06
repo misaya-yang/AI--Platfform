@@ -11,7 +11,6 @@ import type {
   ConfluenceConnectionCreateRequest,
   ConfluenceConnectionUpdateRequest,
   ConfluenceConnectionTestResult,
-  ConfluenceSpace,
   ConfluenceSpaceListResponse,
   ConfluenceBinding,
   ConfluenceBindingCreateRequest,

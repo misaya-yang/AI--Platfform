@@ -47,6 +47,7 @@ class StreamEventType(str, Enum):
     TOOL_RESULT = "tool_result"
     THINKING = "thinking"
     FINAL = "final"
+    STREAM_END = "stream_end"
 
 
 class DatasetVisibility(str, Enum):

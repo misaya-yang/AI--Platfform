@@ -62,6 +62,17 @@ export async function updateSession(
   await api.patch(`/api/v1/sessions/${sessionId}`, body);
 }
 
+export async function addSessionMessage(
+  sessionId: string,
+  body: {
+    role: string;
+    content: unknown;
+    metadata?: SessionMessageMetadata | null;
+  }
+): Promise<void> {
+  await api.post(`/api/v1/sessions/${sessionId}/messages`, body);
+}
+
 export async function getSessionHistory(
   sessionId: string,
   params?: { limit?: number }
@@ -71,4 +82,3 @@ export async function getSessionHistory(
   });
   return data;
 }
-

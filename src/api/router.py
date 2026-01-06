@@ -8,6 +8,7 @@ from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.langgraph import router as langgraph_router
 from .v1.knowledge import router as knowledge_router
+from .v1.metrics import router as metrics_router
 from .v1.proxy import router as proxy_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
@@ -38,3 +39,4 @@ api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理（向
 api_router.include_router(proxy_router)  # 透明代理路由
 api_router.include_router(knowledge_router)  # KBMS Knowledge Base
 api_router.include_router(confluence_router)  # Confluence 集成
+api_router.include_router(metrics_router)  # 系统指标统计

@@ -381,25 +381,43 @@ export function SettingsPage() {
                   <Label>请求数</Label>
                   <Input
                     type="number"
+                    min={1}
+                    max={100000}
                     value={rateLimitForm.requests}
-                    onChange={(e) => setRateLimitForm({ ...rateLimitForm, requests: parseInt(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 1;
+                      setRateLimitForm({ ...rateLimitForm, requests: Math.max(1, Math.min(100000, val)) });
+                    }}
                   />
+                  <p className="text-xs text-muted-foreground">范围: 1 - 100,000</p>
                 </div>
                 <div className="space-y-2">
                   <Label>时间窗口（秒）</Label>
                   <Input
                     type="number"
+                    min={1}
+                    max={86400}
                     value={rateLimitForm.window}
-                    onChange={(e) => setRateLimitForm({ ...rateLimitForm, window: parseInt(e.target.value) || 60 })}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 60;
+                      setRateLimitForm({ ...rateLimitForm, window: Math.max(1, Math.min(86400, val)) });
+                    }}
                   />
+                  <p className="text-xs text-muted-foreground">范围: 1 - 86,400 (1天)</p>
                 </div>
                 <div className="space-y-2">
                   <Label>突发允许</Label>
                   <Input
                     type="number"
+                    min={0}
+                    max={1000}
                     value={rateLimitForm.burst}
-                    onChange={(e) => setRateLimitForm({ ...rateLimitForm, burst: parseInt(e.target.value) || 0 })}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 0;
+                      setRateLimitForm({ ...rateLimitForm, burst: Math.max(0, Math.min(1000, val)) });
+                    }}
                   />
+                  <p className="text-xs text-muted-foreground">范围: 0 - 1,000</p>
                 </div>
               </div>
 

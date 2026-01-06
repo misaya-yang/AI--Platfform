@@ -22,6 +22,12 @@ class SessionUpdate(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class SessionMessageCreate(BaseModel):
+    role: str
+    content: Any
+    metadata: Optional[Dict[str, Any]] = None
+
+
 @router.get("/sessions")
 async def list_sessions(
     service_id: Optional[str] = Query(default=None),
@@ -116,6 +122,27 @@ async def delete_session(
         raise HTTPException(status_code=404, detail="session not found")
     await session_manager.delete(session_id)
     return {"session_id": session_id, "status": "deleted"}
+
+
+@router.post("/sessions/{session_id}/messages")
+async def add_session_message(
+    session_id: str,
+    body: SessionMessageCreate,
+    session_manager: SessionManager = Depends(get_session_manager),
+    user: UserContext = Depends(get_user_context),
+):
+    session = await session_manager.get(session_id)
+    if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
+        raise HTTPException(status_code=404, detail="session not found")
+
+    await session_manager.add_message(
+        session_id=session_id,
+        role=body.role,
+        content=body.content,
+        metadata=body.metadata,
+    )
+
+    return {"session_id": session_id, "status": "added"}
 
 
 @router.get("/sessions/{session_id}/history")

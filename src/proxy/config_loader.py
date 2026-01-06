@@ -162,11 +162,27 @@ class ProxyConfigLoader:
             logger.error(f"Failed to load service config for {service_name}: {e}")
             return None
     
-    def _parse_service_row(self, row: Dict[str, Any]) -> ProxyServiceConfig:
+    def _parse_service_row(self, row) -> ProxyServiceConfig:
         """解析数据库行为配置对象"""
-        connector_config = row.get("connector_config") or {}
-        service_config = row.get("service_config") or {}
-        metadata = row.get("metadata") or {}
+        # 将 asyncpg.Record 转换为 dict
+        row_dict = dict(row) if hasattr(row, 'keys') else row
+
+        # 获取 JSONB 字段，处理可能的字符串情况
+        def get_json_field(field_name: str) -> dict:
+            value = row_dict.get(field_name)
+            if value is None:
+                return {}
+            if isinstance(value, str):
+                import json
+                try:
+                    return json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    return {}
+            return value if isinstance(value, dict) else {}
+
+        connector_config = get_json_field("connector_config")
+        service_config = get_json_field("service_config")
+        metadata = get_json_field("metadata")
         
         # 提取上游 URL
         upstream_url = (
@@ -187,8 +203,8 @@ class ProxyConfigLoader:
         rate_limit = service_config.get("rate_limit") or {}
         
         return ProxyServiceConfig(
-            service_id=row["service_id"],
-            service_name=row["name"],
+            service_id=row_dict.get("service_id", ""),
+            service_name=row_dict.get("name", ""),
             upstream_url=upstream_url,
             upstream_urls=upstream_urls,
             assistant_id=connector_config.get("assistant_id"),
@@ -205,7 +221,7 @@ class ProxyConfigLoader:
             rate_limit_window=rate_limit.get("window", 60),
             load_balance_strategy=connector_config.get("load_balance_strategy", "round_robin"),
             metadata=metadata,
-            enabled=row.get("status") == "active",
+            enabled=row_dict.get("status") == "active",
         )
     
     def set_config(self, service_name: str, config: ProxyServiceConfig) -> None:

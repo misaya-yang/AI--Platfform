@@ -86,11 +86,22 @@ async def stream(
                     timing["upstream_latency_ms"] = (first_chunk_time - t_stream_start) * 1000
                     logger.info(f"[TIMING] First chunk received: {timing['first_chunk_ms']:.2f}ms (upstream: {timing['upstream_latency_ms']:.2f}ms)")
                 
+                # Log event type and content for debugging streaming issues
+                event_type = getattr(chunk, "event_type", "unknown")
+                content_data = getattr(getattr(chunk, "content", None), "data", "")
+                content_len = len(content_data) if isinstance(content_data, str) else 0
+                tool_call = getattr(chunk, "tool_call", None)
+                tool_info = f", tool={getattr(tool_call, 'name', '')}" if tool_call else ""
+
+                # Log every chunk for debugging (use debug level to avoid log spam)
+                if chunk_count < 10 or chunk_count % 20 == 0:
+                    logger.debug(f"[STREAM] #{chunk_count}: event={event_type}, content_len={content_len}{tool_info}")
+
                 payload = StreamChunkSchema.from_domain(chunk).model_dump_json()
                 t_serialized = time.perf_counter()
-                
+
                 yield f"data: {payload}\n\n"
-                
+
                 if chunk_count == 0:
                     t_yielded = time.perf_counter()
                     logger.info(f"[TIMING] First chunk yielded: {(t_yielded - t0)*1000:.2f}ms (serialize: {(t_serialized - t_chunk_received)*1000:.2f}ms)")
@@ -98,8 +109,8 @@ async def stream(
 
             timing["total_chunks"] = chunk_count
             timing["stream_duration_ms"] = (time.perf_counter() - t_stream_start) * 1000
-            logger.debug(f"Stream completed: {chunk_count} chunks in {timing['stream_duration_ms']:.0f}ms")
-                
+            logger.info(f"[STREAM COMPLETE] Stream finished: {chunk_count} chunks in {timing['stream_duration_ms']:.0f}ms")
+
         except GatewayError as exc:
             logger.error(f"Stream gateway error: {exc}")
             yield f"event: error\ndata: {str(exc)}\n\n"

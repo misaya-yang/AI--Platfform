@@ -1,10 +1,11 @@
 import { motion } from "framer-motion";
 import { memo } from "react";
+import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
 import type { ToolCall } from "@/types/gateway";
-import { Bot, User } from "lucide-react";
+import { Bot, User, Clock, Zap, MessageSquare } from "lucide-react";
 
 export interface ToolCallWithResult {
   toolCall: ToolCall;
@@ -17,22 +18,69 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   toolCalls?: ToolCallWithResult[];
-  isThinking?: boolean; // 显示"AI思考中"状态
+  isThinking?: boolean;
   isStreaming?: boolean;
-  // 统计信息
   stats?: {
-    durationMs?: number;     // 响应耗时（毫秒）
-    inputTokens?: number;    // 输入 tokens
-    outputTokens?: number;   // 输出 tokens
-    totalTokens?: number;    // 总 tokens
-    firstTokenMs?: number;   // 首 token 延迟
+    durationMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    firstTokenMs?: number;
   };
 };
 
+// Stats badge component for cleaner rendering
+function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
+  const { t } = useTranslation();
+
+  const hasStats = stats.durationMs != null || stats.firstTokenMs != null || stats.totalTokens != null;
+  if (!hasStats) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+      className="flex flex-wrap items-center gap-2 text-[10px] mt-2"
+    >
+      {/* Duration */}
+      {stats.durationMs != null && (
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted/50 text-muted-foreground">
+          <Clock className="h-3 w-3" />
+          {(stats.durationMs / 1000).toFixed(2)}s
+        </span>
+      )}
+
+      {/* TTFT (First Token Time) */}
+      {stats.firstTokenMs != null && (
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400">
+          <Zap className="h-3 w-3" />
+          {t("playground.stats.ttft", "TTFT")}: {stats.firstTokenMs}ms
+        </span>
+      )}
+
+      {/* Token count */}
+      {stats.totalTokens != null && (
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted/50 text-muted-foreground group relative">
+          <MessageSquare className="h-3 w-3" />
+          <span>{stats.totalTokens} {t("playground.stats.tokens", "tokens")}</span>
+          {stats.inputTokens != null && stats.outputTokens != null && (
+            <span className="text-muted-foreground/50 ml-1">
+              ({stats.inputTokens} {t("playground.stats.in", "in")} / {stats.outputTokens} {t("playground.stats.out", "out")})
+            </span>
+          )}
+        </span>
+      )}
+    </motion.div>
+  );
+}
+
 const ChatMessageItem = memo(
   function ChatMessageItem({ message, showToolCalls }: { message: ChatMessage; showToolCalls: boolean }) {
+    const { t } = useTranslation();
     const isUser = message.role === "user";
     const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
+
     return (
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -55,22 +103,23 @@ const ChatMessageItem = memo(
         )}>
           {/* Name Label */}
           <span className="text-xs text-muted-foreground ml-1">
-            {isUser ? "You" : "AI Assistant"}
+            {isUser ? t("playground.you", "You") : t("playground.assistant", "AI Assistant")}
           </span>
 
           <div
             className={cn(
-              "relative rounded-2xl px-5 py-3.5 text-sm shadow-sm",
+              "relative px-5 py-3.5 text-sm shadow-sm",
               isUser
-                ? "bg-primary text-primary-foreground rounded-tr-sm"
-                : "bg-white dark:bg-zinc-900 border border-border/50 rounded-tl-sm"
+                ? "bg-primary text-primary-foreground rounded-tl-2xl rounded-tr-sm rounded-br-2xl rounded-bl-2xl"
+                : "bg-white dark:bg-zinc-900 border border-border/50 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl"
             )}
           >
+            {/* Tool Calls Section */}
             {!isUser && hasToolCalls && (
-              <div className="mb-3 rounded-xl border border-border/50 bg-muted/40 p-2">
-                <div className="mb-2 flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <div className="mb-3 space-y-2">
+                <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   <span className="h-1.5 w-1.5 rounded-full bg-primary/60" />
-                  Tool Calls
+                  {t("playground.toolCalls", "Tool Calls")}
                 </div>
                 <div className="space-y-2">
                   {message.toolCalls?.map((tc, idx) => (
@@ -85,10 +134,18 @@ const ChatMessageItem = memo(
                 </div>
               </div>
             )}
+
+            {/* Message Content */}
             {message.content ? (
               <div className={cn("leading-relaxed", isUser ? "text-white" : "text-foreground")}>
-                {isUser ? <div className="whitespace-pre-wrap">{message.content}</div> : (
-                  <StreamOutput text={message.content} isStreaming={!!message.isStreaming} enableTypingEffect={false} />
+                {isUser ? (
+                  <div className="whitespace-pre-wrap">{message.content}</div>
+                ) : (
+                  <StreamOutput
+                    text={message.content}
+                    isStreaming={!!message.isStreaming}
+                    enableTypingEffect={false}
+                  />
                 )}
               </div>
             ) : null}
@@ -98,7 +155,9 @@ const ChatMessageItem = memo(
               <div className="flex items-center gap-2 h-6">
                 {message.isThinking ? (
                   <>
-                    <span className="text-sm text-muted-foreground">Thinking...</span>
+                    <span className="text-sm text-muted-foreground">
+                      {t("playground.thinking", "Thinking...")}
+                    </span>
                     <div className="flex items-center gap-1">
                       <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
                       <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
@@ -116,35 +175,9 @@ const ChatMessageItem = memo(
             )}
           </div>
 
-          {/* Stats (ä»…åŠ©æ‰‹æ¶ˆæ¯æ˜¾ç¤? */}
+          {/* Stats (assistant messages only, after content loaded) */}
           {!isUser && message.stats && !message.isThinking && message.content && (
-            <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60 mt-1 ml-1">
-              {message.stats.durationMs != null && (
-                <span className="flex items-center gap-1">
-                  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10"/>
-                    <polyline points="12 6 12 12 16 14"/>
-                  </svg>
-                  {(message.stats.durationMs / 1000).toFixed(2)}s
-                </span>
-              )}
-              {message.stats.firstTokenMs != null && (
-                <span>TTFT: {message.stats.firstTokenMs}ms</span>
-              )}
-              {message.stats.totalTokens != null && (
-                <span className="flex items-center gap-1">
-                  <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                  </svg>
-                  {message.stats.totalTokens} tokens
-                  {message.stats.inputTokens != null && message.stats.outputTokens != null && (
-                    <span className="text-muted-foreground/40">
-                      ({message.stats.inputTokens} in / {message.stats.outputTokens} out)
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
+            <StatsBadge stats={message.stats} />
           )}
         </div>
       </motion.div>

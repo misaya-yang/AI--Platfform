@@ -41,20 +41,20 @@ export function MultimodalInput({
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-2 pb-4">
+    <div className="w-full">
       {files.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-2">
+        <div className="px-4 pt-3 pb-2 flex flex-wrap gap-2 border-b border-border/50">
           {files.map((f) => (
             <div
               key={f.name}
-              className="rounded-md border bg-card px-2 py-1 text-xs text-muted-foreground"
+              className="rounded-lg bg-muted px-2.5 py-1 text-xs text-muted-foreground"
             >
               {f.name}
             </div>
           ))}
         </div>
       )}
-      <div className="flex items-end gap-2 rounded-2xl border bg-card p-2 shadow-sm">
+      <div className="flex items-end gap-2 p-3">
         <input
           ref={fileRef}
           type="file"
@@ -72,8 +72,9 @@ export function MultimodalInput({
           disabled={disabled}
           onClick={() => fileRef.current?.click()}
           aria-label="添加附件"
+          className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
         >
-          <Paperclip className="h-4 w-4" />
+          <Paperclip className="h-5 w-5" />
         </Button>
         <Textarea
           placeholder="输入消息..."
@@ -81,7 +82,7 @@ export function MultimodalInput({
           onChange={(e) => setText(e.target.value)}
           rows={1}
           disabled={disabled}
-          className="min-h-[44px] resize-none border-0 focus-visible:ring-0"
+          className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-base placeholder:text-muted-foreground/60"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -95,8 +96,9 @@ export function MultimodalInput({
           disabled={disabled || (!text.trim() && files.length === 0)}
           onClick={handleSend}
           aria-label="发送"
+          className="h-10 w-10 shrink-0 rounded-xl bg-primary hover:bg-primary/90 shadow-md shadow-primary/25"
         >
-          <Send className="h-4 w-4" />
+          <Send className="h-5 w-5" />
         </Button>
       </div>
     </div>
