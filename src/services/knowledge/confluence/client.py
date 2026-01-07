@@ -199,6 +199,19 @@ class ConfluenceClient:
         params = {"body-format": body_format}
         data = await self._request("GET", f"/pages/{page_id}", params=params)
 
+        # 调试日志：检查 API 返回的数据结构
+        logger.info(f"Confluence API response for page {page_id}:")
+        logger.info(f"  - title: {data.get('title')}")
+        logger.info(f"  - body keys: {list(data.get('body', {}).keys()) if data.get('body') else 'NO BODY'}")
+        if data.get("body"):
+            for key, val in data["body"].items():
+                if isinstance(val, dict):
+                    logger.info(f"  - body.{key} keys: {list(val.keys())}")
+                    if "value" in val:
+                        logger.info(f"  - body.{key}.value length: {len(val.get('value', ''))}")
+                else:
+                    logger.info(f"  - body.{key} = {type(val)}")
+
         labels = []
         if include_labels:
             try:
@@ -217,8 +230,46 @@ class ConfluenceClient:
             except Exception:
                 pass
 
-        body_content = data.get("body", {}).get(body_format, {}).get("value", "")
+        # 提取 body 内容 - 增强处理多种可能的结构
+        body = data.get("body", {})
+        body_content = ""
+
+        if body:
+            # 首选：使用请求的格式
+            if body_format in body:
+                format_data = body[body_format]
+                if isinstance(format_data, dict):
+                    body_content = format_data.get("value", "")
+                elif isinstance(format_data, str):
+                    body_content = format_data
+
+            # 备选：尝试其他常见格式
+            if not body_content:
+                for fallback_format in ["storage", "view", "atlas_doc_format"]:
+                    if fallback_format in body and fallback_format != body_format:
+                        format_data = body[fallback_format]
+                        if isinstance(format_data, dict):
+                            body_content = format_data.get("value", "")
+                        elif isinstance(format_data, str):
+                            body_content = format_data
+                        if body_content:
+                            logger.info(f"Used fallback format '{fallback_format}' for page {page_id}")
+                            break
+
+        # 警告：body 为空
+        if not body_content:
+            logger.warning(
+                f"Empty body for page {page_id} (title: {data.get('title')}). "
+                f"API returned body: {body}. Check Confluence permissions or page content."
+            )
+        else:
+            logger.info(f"Page {page_id} body extracted successfully, length: {len(body_content)}")
+
         version_info = data.get("version", {})
+
+        # 构建完整的 web_url（API 返回的是相对路径）
+        webui_path = data.get("_links", {}).get("webui")
+        web_url = f"https://{self.credentials.domain}{webui_path}" if webui_path else None
 
         return ConfluencePage(
             page_id=str(data.get("id")),
@@ -232,7 +283,7 @@ class ConfluenceClient:
             created_at=data.get("createdAt"),
             updated_at=version_info.get("createdAt"),
             labels=labels,
-            web_url=data.get("_links", {}).get("webui"),
+            web_url=web_url,
         )
 
     async def get_page_by_url(self, url: str) -> ConfluencePage:
@@ -255,24 +306,54 @@ class ConfluenceClient:
     async def get_page_children(
         self,
         page_id: str,
-        limit: int = 25,
+        limit: int = 100,
+        fetch_all: bool = True,
     ) -> List[Dict[str, Any]]:
         """
-        获取页面的子页面
+        获取页面的子页面（支持分页）
 
         Args:
             page_id: 父页面 ID
-            limit: 返回数量限制
+            limit: 每页返回数量限制
+            fetch_all: 是否获取所有子页面（自动分页）
 
         Returns:
             子页面列表
         """
-        data = await self._request(
-            "GET",
-            f"/pages/{page_id}/children",
-            params={"limit": limit},
-        )
-        return data.get("results", [])
+        all_children: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+
+        while True:
+            params: Dict[str, Any] = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+
+            data = await self._request(
+                "GET",
+                f"/pages/{page_id}/children",
+                params=params,
+            )
+
+            results = data.get("results", [])
+            all_children.extend(results)
+
+            # 如果不需要获取所有或没有更多结果，退出循环
+            if not fetch_all:
+                break
+
+            # 检查是否有下一页
+            next_link = data.get("_links", {}).get("next")
+            if not next_link or len(results) < limit:
+                break
+
+            # 从 next link 提取 cursor
+            parsed = urlparse(next_link)
+            qs = parse_qs(parsed.query)
+            cursor = qs.get("cursor", [None])[0]
+            if not cursor:
+                break
+
+        return all_children
 
     async def list_space_pages(
         self,

@@ -11,7 +11,12 @@ import { UserManagementPage } from "@/pages/UserManagement";
 import { UserEditPage } from "@/pages/UserEdit";
 import { KnowledgeDatasetsPage, KnowledgeDatasetDetailPage } from "@/pages/knowledge";
 import DatasetCreatePage from "@/pages/knowledge/DatasetCreate";
-import ConfluencePage from "@/pages/confluence/ConfluencePage";
+import {
+  ConnectionListPage,
+  ConnectionCreatePage,
+  BindSpacePage,
+  SyncedPagesPage,
+} from "@/pages/confluence";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 
 export function AppRouter() {
@@ -70,11 +75,36 @@ export function AppRouter() {
             </ProtectedRoute>
           }
         />
+        {/* Confluence Routes - Multi-page architecture */}
         <Route
           path="/confluence"
           element={
             <ProtectedRoute requiredPermission="knowledge:confluence:manage">
-              <ConfluencePage />
+              <ConnectionListPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/confluence/connections/new"
+          element={
+            <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+              <ConnectionCreatePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/confluence/connections/:connectionId/bind"
+          element={
+            <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+              <BindSpacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/confluence/bindings/:bindingId/pages"
+          element={
+            <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+              <SyncedPagesPage />
             </ProtectedRoute>
           }
         />

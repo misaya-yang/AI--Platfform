@@ -240,5 +240,205 @@
     "title": "帮助",
     "platformName": "AI Platform",
     "description": "企业级AI服务网关平台"
+  },
+  "confluence": {
+    "title": "Confluence",
+    "subtitle": "知识同步",
+    "connections": "连接",
+    "bindings": "空间绑定",
+    "newConnection": "新建连接",
+    "bindSpace": "绑定空间",
+    "configure": "配置",
+    "searchConnections": "搜索连接...",
+    "noConnections": "暂无 Confluence 连接",
+    "noConnectionsDesc": "连接你的 Confluence 工作空间，将文档同步到知识库。",
+    "noSearchResults": "没有匹配的连接",
+    "status": {
+      "connected": "已连接",
+      "disabled": "已禁用",
+      "error": "错误"
+    },
+    "syncMode": {
+      "manual": "手动同步",
+      "polling": "自动同步",
+      "interval": "每 {{minutes}} 分钟"
+    },
+    "bindingStatus": {
+      "pending": "待同步",
+      "syncing": "同步中",
+      "completed": "已同步",
+      "error": "错误"
+    },
+    "actions": {
+      "test": "测试连接",
+      "sync": "同步",
+      "settings": "设置",
+      "delete": "删除",
+      "remove": "移除"
+    },
+    "dialogs": {
+      "deleteTitle": "删除连接",
+      "deleteMessage": "确定要删除 \"{{name}}\" 吗？这将同时移除所有空间绑定。此操作无法撤销。",
+      "removeBindingTitle": "移除绑定",
+      "removeBindingMessage": "确定要移除此空间绑定吗？已同步的文档不会被删除，但后续同步将停止。"
+    },
+    "test": {
+      "success": "连接成功",
+      "failed": "连接失败"
+    },
+    "create": {
+      "title": "新建连接",
+      "subtitle": "连接到 Confluence",
+      "connectionDetails": "连接详情",
+      "authentication": "身份验证",
+      "syncSettings": "同步设置",
+      "name": "连接名称",
+      "namePlaceholder": "我的 Confluence 工作空间",
+      "nameHint": "用于识别此连接的友好名称",
+      "domain": "Confluence 域名",
+      "domainPlaceholder": "company.atlassian.net",
+      "domainHint": "你的 Atlassian Cloud 域名 (例如: company.atlassian.net)",
+      "email": "邮箱地址",
+      "emailPlaceholder": "you@company.com",
+      "emailHint": "与 Atlassian 账户关联的邮箱",
+      "apiToken": "API Token",
+      "apiTokenPlaceholder": "输入你的 API Token",
+      "apiTokenHint": "在 id.atlassian.com/manage-profile/security/api-tokens 生成",
+      "testConnection": "测试连接",
+      "syncModeManual": "手动",
+      "syncModeManualDesc": "需要时手动同步",
+      "syncModeAuto": "自动",
+      "syncModeAutoDesc": "按计划自动同步",
+      "pollingInterval": "同步间隔",
+      "pollingIntervalHint": "检查更新的频率",
+      "intervals": {
+        "15min": "每 15 分钟",
+        "30min": "每 30 分钟",
+        "1hour": "每小时",
+        "2hours": "每 2 小时",
+        "6hours": "每 6 小时",
+        "12hours": "每 12 小时",
+        "daily": "每天"
+      },
+      "createButton": "创建连接",
+      "creating": "创建中...",
+      "verified": "已验证",
+      "errors": {
+        "nameRequired": "请输入连接名称",
+        "domainRequired": "请输入 Confluence 域名",
+        "domainInvalid": "请输入有效的 Atlassian 域名 (例如: company.atlassian.net)",
+        "emailRequired": "请输入邮箱地址",
+        "emailInvalid": "请输入有效的邮箱地址",
+        "tokenRequired": "请输入 API Token",
+        "createFailed": "创建连接失败"
+      }
+    },
+    "bind": {
+      "title": "绑定空间",
+      "steps": {
+        "dataset": "知识库",
+        "space": "空间",
+        "options": "选项"
+      },
+      "selectDataset": "选择目标知识库",
+      "selectDatasetDesc": "选择要将 Confluence 内容同步到的知识库",
+      "knowledgeBase": "知识库",
+      "searchDatasets": "搜索并选择知识库...",
+      "noDatasets": "未找到知识库",
+      "noDatasetsDesc": "请先创建知识库，然后再绑定 Confluence 空间。",
+      "createDataset": "创建知识库",
+      "selectSpace": "选择 Confluence 空间",
+      "selectSpaceDesc": "选择要同步的空间。你可以选择一个根页面作为同步起点。",
+      "space": "空间",
+      "searchSpaces": "输入搜索空间...",
+      "selectSpacePlaceholder": "选择一个空间...",
+      "rootPage": "根页面",
+      "rootPageOptional": "可选",
+      "rootPageDesc": "选择一个页面只同步其子页面。留空则同步整个空间。",
+      "entireSpace": "整个空间",
+      "entireSpaceDesc": "同步该空间中的所有页面",
+      "selectPages": "选择页面",
+      "selectPagesDesc": "选择要同步的特定页面或文件夹。选中文件夹将同步其所有子页面。",
+      "singlePageHint": "选择一个页面作为同步的根节点，将同步该页面及其所有子页面。",
+      "selectAllRoots": "全选顶级",
+      "clearSelection": "清除选择",
+      "selectedCount": "已选 {{count}} 项",
+      "pagesSelected": "个页面已选",
+      "noPages": "此空间没有页面",
+      "rootSelected": "根页面: {{title}}",
+      "syncOptions": "同步选项",
+      "syncOptionsDesc": "配置内容同步方式",
+      "depthLimit": "页面深度限制",
+      "depthLimitDesc": "要同步的页面层级深度",
+      "depths": {
+        "1": "1 级 (仅顶级页面)",
+        "2": "2 级",
+        "3": "3 级",
+        "5": "5 级",
+        "10": "10 级",
+        "unlimited": "无限制"
+      },
+      "depthExplanation": "深度控制同步时向下遍历页面的层数。例如，深度 2 会同步选中的页面及其直接子页面。选择「无限制」则同步所有层级。",
+      "includeAttachments": "包含附件",
+      "includeAttachmentsDesc": "同步页面的文件附件",
+      "includeComments": "包含评论",
+      "includeCommentsDesc": "将页面评论作为内容一部分同步",
+      "createBinding": "创建绑定",
+      "creating": "创建中...",
+      "failedToLoadSpaces": "加载空间失败",
+      "createFailed": "创建绑定失败"
+    },
+    "pages": {
+      "count": "{{synced}}/{{total}} 页",
+      "lastSync": "上次同步: {{time}}"
+    },
+    "spaceType": {
+      "global": "团队空间",
+      "personal": "个人空间"
+    },
+    "syncedPages": {
+      "title": "同步页面",
+      "subtitle": "共 {{count}} 个页面",
+      "searchPlaceholder": "搜索页面标题...",
+      "syncAll": "同步全部",
+      "syncPage": "重新同步",
+      "openInConfluence": "在 Confluence 中打开",
+      "batchSync": "批量同步",
+      "selectedCount": "已选 {{count}} 项",
+      "clearSelection": "清除选择",
+      "expandAll": "全部展开",
+      "collapseAll": "全部折叠",
+      "syncInProgress": "同步中...",
+      "noPages": "暂无同步页面",
+      "noPagesDesc": "还没有页面被同步到此绑定",
+      "status": {
+        "synced": "已同步",
+        "pending": "待同步",
+        "error": "错误",
+        "deleted": "已删除"
+      },
+      "columns": {
+        "title": "页面标题",
+        "status": "状态",
+        "version": "版本",
+        "lastSync": "最后同步",
+        "actions": "操作"
+      },
+      "viewDetails": "查看详情",
+      "addPages": "添加页面"
+    },
+    "addPages": {
+      "title": "添加页面",
+      "availablePages": "个可添加页面",
+      "searchPlaceholder": "搜索页面...",
+      "alreadySynced": "已同步",
+      "loadError": "加载页面列表失败",
+      "noPages": "没有可添加的页面",
+      "selected": "已选 {{count}} 项",
+      "clearSelection": "清除选择",
+      "adding": "添加中...",
+      "addButton": "添加 {{count}} 个页面",
+      "selectHint": "选择要添加的页面"
+    }
   }
 }

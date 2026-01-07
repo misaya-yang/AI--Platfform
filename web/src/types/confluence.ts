@@ -70,6 +70,27 @@ export interface ConfluenceSpaceListResponse {
 }
 
 // ============================================================
+// Page Tree Types (for folder/page hierarchy selection)
+// ============================================================
+
+export interface ConfluencePageTreeNode {
+  page_id: string;
+  title: string;
+  parent_id: string | null;
+  has_children: boolean;
+  children: ConfluencePageTreeNode[];
+  depth: number;
+  web_url: string | null;
+}
+
+export interface ConfluencePageTreeResponse {
+  space_key: string;
+  space_name: string;
+  root_pages: ConfluencePageTreeNode[];
+  total_pages: number;
+}
+
+// ============================================================
 // Binding Types
 // ============================================================
 
@@ -80,6 +101,8 @@ export interface ConfluenceBinding {
   space_key: string;
   space_id: string | null;
   space_name: string | null;
+  root_page_id: string | null;
+  root_page_title: string | null;
   include_patterns: string[];
   exclude_patterns: string[];
   max_depth: number;
@@ -98,6 +121,7 @@ export interface ConfluenceBinding {
 export interface ConfluenceBindingCreateRequest {
   dataset_id: string;
   space_key: string;
+  root_page_id?: string;
   include_patterns?: string[];
   exclude_patterns?: string[];
   max_depth?: number;
@@ -106,6 +130,7 @@ export interface ConfluenceBindingCreateRequest {
 }
 
 export interface ConfluenceBindingUpdateRequest {
+  root_page_id?: string;
   include_patterns?: string[];
   exclude_patterns?: string[];
   max_depth?: number;

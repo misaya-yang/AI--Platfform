@@ -240,5 +240,205 @@
     "title": "Help",
     "platformName": "AI Platform",
     "description": "Enterprise AI Service Gateway Platform"
+  },
+  "confluence": {
+    "title": "Confluence",
+    "subtitle": "Knowledge Sync",
+    "connections": "Connections",
+    "bindings": "Space Bindings",
+    "newConnection": "New Connection",
+    "bindSpace": "Bind Space",
+    "configure": "Configure",
+    "searchConnections": "Search connections...",
+    "noConnections": "No Confluence Connections",
+    "noConnectionsDesc": "Connect your Confluence workspace to sync documentation with your knowledge base.",
+    "noSearchResults": "No connections match your search",
+    "status": {
+      "connected": "Connected",
+      "disabled": "Disabled",
+      "error": "Error"
+    },
+    "syncMode": {
+      "manual": "Manual Sync",
+      "polling": "Auto Sync",
+      "interval": "Every {{minutes}}m"
+    },
+    "bindingStatus": {
+      "pending": "Pending",
+      "syncing": "Syncing",
+      "completed": "Synced",
+      "error": "Error"
+    },
+    "actions": {
+      "test": "Test Connection",
+      "sync": "Sync",
+      "settings": "Settings",
+      "delete": "Delete",
+      "remove": "Remove"
+    },
+    "dialogs": {
+      "deleteTitle": "Delete Connection",
+      "deleteMessage": "Are you sure you want to delete \"{{name}}\"? This will also remove all space bindings. This action cannot be undone.",
+      "removeBindingTitle": "Remove Binding",
+      "removeBindingMessage": "Are you sure you want to remove this space binding? Synced documents will not be deleted, but future syncs will stop."
+    },
+    "test": {
+      "success": "Connection Successful",
+      "failed": "Connection Failed"
+    },
+    "create": {
+      "title": "New Connection",
+      "subtitle": "Connect to Confluence",
+      "connectionDetails": "Connection Details",
+      "authentication": "Authentication",
+      "syncSettings": "Sync Settings",
+      "name": "Connection Name",
+      "namePlaceholder": "My Confluence Workspace",
+      "nameHint": "A friendly name to identify this connection",
+      "domain": "Confluence Domain",
+      "domainPlaceholder": "company.atlassian.net",
+      "domainHint": "Your Atlassian Cloud domain (e.g., company.atlassian.net)",
+      "email": "Email Address",
+      "emailPlaceholder": "you@company.com",
+      "emailHint": "The email associated with your Atlassian account",
+      "apiToken": "API Token",
+      "apiTokenPlaceholder": "Enter your API token",
+      "apiTokenHint": "Generate an API token at id.atlassian.com/manage-profile/security/api-tokens",
+      "testConnection": "Test Connection",
+      "syncModeManual": "Manual",
+      "syncModeManualDesc": "Sync manually when needed",
+      "syncModeAuto": "Automatic",
+      "syncModeAutoDesc": "Sync on a schedule",
+      "pollingInterval": "Polling Interval",
+      "pollingIntervalHint": "How often to check for updates",
+      "intervals": {
+        "15min": "Every 15 minutes",
+        "30min": "Every 30 minutes",
+        "1hour": "Every hour",
+        "2hours": "Every 2 hours",
+        "6hours": "Every 6 hours",
+        "12hours": "Every 12 hours",
+        "daily": "Daily"
+      },
+      "createButton": "Create Connection",
+      "creating": "Creating...",
+      "verified": "Verified",
+      "errors": {
+        "nameRequired": "Connection name is required",
+        "domainRequired": "Confluence domain is required",
+        "domainInvalid": "Please enter a valid Atlassian domain (e.g., company.atlassian.net)",
+        "emailRequired": "Email is required",
+        "emailInvalid": "Please enter a valid email address",
+        "tokenRequired": "API token is required",
+        "createFailed": "Failed to create connection"
+      }
+    },
+    "bind": {
+      "title": "Bind Space",
+      "steps": {
+        "dataset": "Dataset",
+        "space": "Space",
+        "options": "Options"
+      },
+      "selectDataset": "Select Target Dataset",
+      "selectDatasetDesc": "Choose a knowledge base to sync Confluence content to",
+      "knowledgeBase": "Knowledge Base",
+      "searchDatasets": "Search and select a dataset...",
+      "noDatasets": "No datasets found",
+      "noDatasetsDesc": "Create a knowledge base first before binding Confluence spaces.",
+      "createDataset": "Create Dataset",
+      "selectSpace": "Select Confluence Space",
+      "selectSpaceDesc": "Choose a space to sync. You can optionally select a root page.",
+      "space": "Space",
+      "searchSpaces": "Type to search spaces...",
+      "selectSpacePlaceholder": "Select a space...",
+      "rootPage": "Root Page",
+      "rootPageOptional": "Optional",
+      "rootPageDesc": "Select a page to sync only its children. Leave empty to sync entire space.",
+      "entireSpace": "Entire Space",
+      "entireSpaceDesc": "Sync all pages in this space",
+      "selectPages": "Select Pages",
+      "selectPagesDesc": "Choose specific pages or folders to sync. Selecting a folder will sync all its child pages.",
+      "singlePageHint": "Select a page as the sync root. The page and all its children will be synchronized.",
+      "selectAllRoots": "Select All Root",
+      "clearSelection": "Clear Selection",
+      "selectedCount": "{{count}} selected",
+      "pagesSelected": "pages selected",
+      "noPages": "No pages found in this space",
+      "rootSelected": "Root: {{title}}",
+      "syncOptions": "Sync Options",
+      "syncOptionsDesc": "Configure how content should be synchronized",
+      "depthLimit": "Page Depth Limit",
+      "depthLimitDesc": "Maximum depth of page hierarchy to sync",
+      "depths": {
+        "1": "1 level (top-level pages only)",
+        "2": "2 levels",
+        "3": "3 levels",
+        "5": "5 levels",
+        "10": "10 levels",
+        "unlimited": "Unlimited"
+      },
+      "depthExplanation": "Depth controls how many levels of child pages to traverse during sync. For example, depth 2 syncs the selected pages plus their direct children. Choose Unlimited to sync all levels.",
+      "includeAttachments": "Include Attachments",
+      "includeAttachmentsDesc": "Sync file attachments from pages",
+      "includeComments": "Include Comments",
+      "includeCommentsDesc": "Sync page comments as part of content",
+      "createBinding": "Create Binding",
+      "creating": "Creating...",
+      "failedToLoadSpaces": "Failed to load spaces",
+      "createFailed": "Failed to create binding"
+    },
+    "pages": {
+      "count": "{{synced}}/{{total}} pages",
+      "lastSync": "Last sync: {{time}}"
+    },
+    "spaceType": {
+      "global": "Global Space",
+      "personal": "Personal Space"
+    },
+    "syncedPages": {
+      "title": "Synced Pages",
+      "subtitle": "{{count}} pages total",
+      "searchPlaceholder": "Search page title...",
+      "syncAll": "Sync All",
+      "syncPage": "Re-sync",
+      "openInConfluence": "Open in Confluence",
+      "batchSync": "Batch Sync",
+      "selectedCount": "{{count}} selected",
+      "clearSelection": "Clear Selection",
+      "expandAll": "Expand All",
+      "collapseAll": "Collapse All",
+      "syncInProgress": "Syncing...",
+      "noPages": "No Synced Pages",
+      "noPagesDesc": "No pages have been synced to this binding yet",
+      "status": {
+        "synced": "Synced",
+        "pending": "Pending",
+        "error": "Error",
+        "deleted": "Deleted"
+      },
+      "columns": {
+        "title": "Title",
+        "status": "Status",
+        "version": "Version",
+        "lastSync": "Last Sync",
+        "actions": "Actions"
+      },
+      "viewDetails": "View Details",
+      "addPages": "Add Pages"
+    },
+    "addPages": {
+      "title": "Add Pages",
+      "availablePages": "pages available",
+      "searchPlaceholder": "Search pages...",
+      "alreadySynced": "Already synced",
+      "loadError": "Failed to load page list",
+      "noPages": "No pages available to add",
+      "selected": "{{count}} selected",
+      "clearSelection": "Clear Selection",
+      "adding": "Adding...",
+      "addButton": "Add {{count}} pages",
+      "selectHint": "Select pages to add"
+    }
   }
 }

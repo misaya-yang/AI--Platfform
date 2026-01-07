@@ -74,6 +74,7 @@ class ConfluenceSpaceBindingCreateSchema(BaseModel):
 
     dataset_id: str = Field(..., description="Target dataset ID")
     space_key: str = Field(..., description="Confluence space key (e.g., 'HFDSH')")
+    root_page_id: Optional[str] = Field(default=None, description="Root page ID to sync from (only sync this page and its children)")
     include_patterns: List[str] = Field(default_factory=list, description="Title patterns to include")
     exclude_patterns: List[str] = Field(default_factory=list, description="Title patterns to exclude")
     max_depth: int = Field(default=10, ge=1, le=100, description="Maximum page hierarchy depth")
@@ -85,6 +86,7 @@ class ConfluenceSpaceBindingUpdateSchema(BaseModel):
     """Update a space binding"""
     model_config = ConfigDict(extra="allow")
 
+    root_page_id: Optional[str] = None
     include_patterns: Optional[List[str]] = None
     exclude_patterns: Optional[List[str]] = None
     max_depth: Optional[int] = Field(default=None, ge=1, le=100)
@@ -96,10 +98,13 @@ class ConfluenceSpaceBindingResponseSchema(BaseModel):
     """Space binding response"""
     binding_id: str
     connection_id: str
+    tenant_id: Optional[str] = None
     dataset_id: str
     space_key: str
     space_id: Optional[str] = None
     space_name: Optional[str] = None
+    root_page_id: Optional[str] = None
+    root_page_title: Optional[str] = None
     include_patterns: List[str] = Field(default_factory=list)
     exclude_patterns: List[str] = Field(default_factory=list)
     max_depth: int
@@ -113,6 +118,8 @@ class ConfluenceSpaceBindingResponseSchema(BaseModel):
     created_by: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # 创建绑定时自动触发的首次同步任务 ID
+    initial_sync_task_id: Optional[str] = None
 
 
 # ============================================================
@@ -134,6 +141,29 @@ class ConfluenceSpaceListResponseSchema(BaseModel):
     """List of discovered spaces"""
     spaces: List[ConfluenceSpaceInfoSchema] = Field(default_factory=list)
     total: int = 0
+
+
+# ============================================================
+# Page Tree Schemas (for folder/page hierarchy selection)
+# ============================================================
+
+class ConfluencePageTreeNodeSchema(BaseModel):
+    """Page tree node for hierarchy display"""
+    page_id: str
+    title: str
+    parent_id: Optional[str] = None
+    has_children: bool = False
+    children: List["ConfluencePageTreeNodeSchema"] = Field(default_factory=list)
+    depth: int = 0
+    web_url: Optional[str] = None
+
+
+class ConfluencePageTreeResponseSchema(BaseModel):
+    """Page tree response for space hierarchy"""
+    space_key: str
+    space_name: str
+    root_pages: List[ConfluencePageTreeNodeSchema] = Field(default_factory=list)
+    total_pages: int = 0
 
 
 # ============================================================
@@ -305,6 +335,14 @@ class ConfluenceErrorSchema(BaseModel):
 # Batch Operation Schemas
 # ============================================================
 
+class ConfluenceBatchSyncRequestSchema(BaseModel):
+    """Request to batch sync multiple pages by their record IDs"""
+    model_config = ConfigDict(extra="allow")
+
+    page_record_ids: List[str] = Field(..., description="List of page record IDs from confluence_pages table")
+    force: bool = Field(default=False, description="Force re-sync even if content unchanged")
+
+
 class ConfluenceBatchSyncResultSchema(BaseModel):
     """Batch sync operation result"""
     total_pages: int = 0
@@ -319,3 +357,7 @@ class ConfluenceBatchSyncResultSchema(BaseModel):
     has_errors: bool = False
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+
+
+# Update forward references for self-referential schemas
+ConfluencePageTreeNodeSchema.model_rebuild()

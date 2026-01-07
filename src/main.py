@@ -271,6 +271,12 @@ def create_app() -> FastAPI:
             )
             app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
+            logger.info(f"知识库服务已启动 (worker_concurrency={settings.knowledge.worker_concurrency})")
+        else:
+            logger.warning(
+                f"知识库服务未启动: knowledge={getattr(settings, 'knowledge', None)}, "
+                f"enabled={getattr(getattr(settings, 'knowledge', None), 'enabled', None)}"
+            )
 
         # 启动 Confluence 集成服务（如果启用）
         if getattr(settings, "confluence", None) and settings.confluence.enabled:

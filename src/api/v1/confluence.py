@@ -18,6 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ..deps import get_knowledge_service, get_user_context
 from ..schemas.confluence import (
+    ConfluenceBatchSyncRequestSchema,
     ConfluenceBatchSyncResultSchema,
     ConfluenceConnectionCreateSchema,
     ConfluenceConnectionResponseSchema,
@@ -26,6 +27,8 @@ from ..schemas.confluence import (
     ConfluenceImportResultSchema,
     ConfluencePageListResponseSchema,
     ConfluencePageRecordSchema,
+    ConfluencePageTreeNodeSchema,
+    ConfluencePageTreeResponseSchema,
     ConfluenceSchedulerStatusSchema,
     ConfluenceSpaceBindingCreateSchema,
     ConfluenceSpaceBindingResponseSchema,
@@ -40,6 +43,7 @@ from ..schemas.confluence import (
 )
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...services.knowledge.confluence.sync_service import ConfluenceSyncError
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +178,61 @@ async def delete_connection(
         raise HTTPException(status_code=403, detail=str(exc))
 
 
+@router.post("/connections/test", response_model=ConfluenceConnectionTestResponseSchema)
+async def test_connection_credentials(
+    request: Request,
+    payload: Dict[str, Any] = Body(...),
+    user: UserContext = Depends(get_user_context),
+):
+    """Test Confluence credentials without creating a connection."""
+    from ...services.knowledge.confluence.client import ConfluenceClient, ConfluenceAPIError
+    from ...services.knowledge.confluence.models import ConfluenceCredentials
+
+    try:
+        # RBAC 检查：测试连接需要与创建连接相同的权限
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
+
+        domain = payload.get("domain", "")
+        email = payload.get("email", "")
+        api_token = payload.get("api_token", "")
+
+        logger.info(f"Testing Confluence connection: domain={domain}, email={email}")
+
+        if not all([domain, email, api_token]):
+            return {
+                "status": "error",
+                "message": "Missing required fields: domain, email, api_token",
+            }
+
+        credentials = ConfluenceCredentials(
+            domain=domain,
+            email=email,
+            api_token=api_token,
+        )
+
+        logger.info(f"Created credentials, API URL: {credentials.api_v2_url}")
+
+        async with ConfluenceClient(credentials) as client:
+            result = await client.test_connection()
+            logger.info(f"Test connection result: {result}")
+            return result
+
+    except ConfluenceAPIError as exc:
+        logger.error(f"Confluence API error during test: {exc}, status_code={exc.status_code}, body={exc.response_body}")
+        return {
+            "status": "error",
+            "message": f"API error ({exc.status_code}): {str(exc)}",
+        }
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Connection credentials test failed: {exc}\n{tb}")
+        return {
+            "status": "error",
+            "message": f"Connection test failed: {type(exc).__name__}: {str(exc)}",
+        }
+
+
 @router.post("/connections/{connection_id}/test", response_model=ConfluenceConnectionTestResponseSchema)
 async def test_connection(
     request: Request,
@@ -235,6 +294,36 @@ async def discover_spaces(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get(
+    "/connections/{connection_id}/discover/spaces/{space_key}/pages",
+    response_model=ConfluencePageTreeResponseSchema,
+)
+async def discover_space_pages(
+    request: Request,
+    connection_id: str,
+    space_key: str,
+    max_depth: int = Query(3, ge=1, le=10, description="Maximum depth to fetch"),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Discover page hierarchy in a Confluence space.
+
+    Returns a tree structure of pages for selection as root_page_id.
+    """
+    try:
+        svc = get_confluence_sync_service(request)
+        page_tree = await svc.discover_space_page_tree(
+            connection_id=connection_id,
+            tenant_id=user.tenant_id,
+            space_key=space_key,
+            max_depth=max_depth,
+        )
+        return page_tree
+    except Exception as exc:
+        logger.error(f"Failed to discover space pages: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ============================================================
 # Space Binding
 # ============================================================
@@ -263,6 +352,7 @@ async def create_space_binding(
             tenant_id=user.tenant_id,
             dataset_id=payload.dataset_id,
             space_key=payload.space_key,
+            root_page_id=payload.root_page_id,
             include_patterns=payload.include_patterns,
             exclude_patterns=payload.exclude_patterns,
             max_depth=payload.max_depth,
@@ -275,6 +365,12 @@ async def create_space_binding(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        # 包括重复绑定、连接不存在等业务错误
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Failed to create binding: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get(
@@ -293,6 +389,29 @@ async def list_space_bindings(
         return bindings
     except Exception as exc:
         logger.error(f"Failed to list bindings: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/bindings", response_model=List[ConfluenceSpaceBindingResponseSchema])
+async def list_all_bindings(
+    request: Request,
+    connection_id: Optional[str] = Query(None, description="Filter by connection ID"),
+    dataset_id: Optional[str] = Query(None, description="Filter by dataset ID"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    user: UserContext = Depends(get_user_context),
+):
+    """List all space bindings for the current tenant."""
+    try:
+        svc = get_confluence_sync_service(request)
+        bindings = await svc.list_all_bindings(
+            tenant_id=user.tenant_id,
+            connection_id=connection_id,
+            dataset_id=dataset_id,
+            status=status,
+        )
+        return bindings
+    except Exception as exc:
+        logger.error(f"Failed to list all bindings: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -353,6 +472,81 @@ async def delete_space_binding(
         return {"status": "success" if ok else "not_found", "binding_id": binding_id}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+
+
+@router.post("/bindings/{binding_id}/pages")
+async def add_pages_to_binding(
+    request: Request,
+    binding_id: str,
+    payload: Dict[str, Any] = Body(...),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Add specific Confluence pages to an existing binding.
+
+    This fetches the pages from Confluence and syncs them to the knowledge base.
+
+    Request body:
+        page_ids: List of Confluence page IDs to add
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:import")
+
+        page_ids = payload.get("page_ids", [])
+        if not page_ids:
+            raise HTTPException(status_code=400, detail="page_ids is required")
+
+        svc = get_confluence_sync_service(request)
+
+        # Verify binding exists
+        binding = await svc.get_binding(binding_id)
+        if not binding:
+            raise HTTPException(status_code=404, detail="Binding not found")
+
+        # Verify dataset access
+        knowledge_svc = get_knowledge_service(request)
+        await knowledge_svc.require_dataset_access(user, binding["dataset_id"], required="editor")
+
+        results = []
+        for page_id in page_ids:
+            try:
+                doc_id = await svc.sync_page_by_id(
+                    binding_id=binding_id,
+                    page_id=str(page_id),
+                    event_type="created",
+                )
+                results.append({
+                    "page_id": page_id,
+                    "status": "success" if doc_id else "skipped",
+                    "document_id": doc_id,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to sync page {page_id}: {e}")
+                results.append({
+                    "page_id": page_id,
+                    "status": "error",
+                    "error": str(e),
+                })
+
+        # Update binding page counts
+        await svc.refresh_binding_stats(binding_id)
+
+        success_count = sum(1 for r in results if r["status"] == "success")
+        return {
+            "status": "success",
+            "binding_id": binding_id,
+            "total": len(page_ids),
+            "success_count": success_count,
+            "results": results,
+        }
+
+    except HTTPException:
+        raise
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Failed to add pages to binding: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ============================================================
@@ -516,6 +710,37 @@ async def sync_single_page(
     except Exception as exc:
         logger.error(f"Page sync failed: {exc}")
         return {"status": "failed", "message": str(exc)}
+
+
+@router.post("/pages/batch-sync")
+async def batch_sync_pages(
+    request: Request,
+    payload: ConfluenceBatchSyncRequestSchema,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Batch sync multiple pages by their record IDs.
+
+    This endpoint accepts a list of page_record_ids (from confluence_pages table)
+    and triggers sync for all of them. Pages are grouped by binding and synced
+    as separate tasks.
+
+    Returns task IDs for progress tracking.
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:sync")
+        svc = get_confluence_sync_service(request)
+
+        result = await svc.batch_sync_pages(
+            page_record_ids=payload.page_record_ids,
+            force=payload.force,
+        )
+        return result
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Batch sync failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ============================================================

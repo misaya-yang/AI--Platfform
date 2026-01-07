@@ -1124,7 +1124,7 @@ export function PlaygroundPage() {
             if (eventName === "updates" && eventData && typeof eventData === "object") {
               const data = eventData as Record<string, unknown>;
               // Find messages in any node (usually 'model' or agent name)
-              for (const [nodeName, nodeData] of Object.entries(data)) {
+              for (const [, nodeData] of Object.entries(data)) {
                 if (nodeData && typeof nodeData === "object") {
                   const nd = nodeData as Record<string, unknown>;
                   const msgs = nd.messages as unknown[];

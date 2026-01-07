@@ -23,7 +23,11 @@ import {
   Settings,
   ExternalLink,
   ChevronRight,
+  ChevronDown,
   Zap,
+  Folder,
+  FolderOpen,
+  FileText,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -71,6 +75,7 @@ import {
   deleteConnection,
   testConnection,
   discoverSpaces,
+  discoverSpacePages,
   listBindings,
   createBinding,
   deleteBinding,
@@ -84,6 +89,8 @@ import type {
   ConfluenceBinding,
   ConfluenceSpace,
   ConfluenceBindingCreateRequest,
+  ConfluencePageTreeNode,
+  ConfluencePageTreeResponse,
 } from "@/types/confluence";
 import type { Dataset } from "@/types/knowledge";
 
@@ -231,6 +238,14 @@ function BindingCard({
               <span className="font-medium text-foreground">
                 {binding.space_name || binding.space_key}
               </span>
+              {binding.root_page_title && (
+                <>
+                  <span className="text-muted-foreground">/</span>
+                  <span className="text-sm text-foreground">
+                    {binding.root_page_title}
+                  </span>
+                </>
+              )}
               <ChevronRight className="h-4 w-4 text-muted-foreground" />
               <span className="text-sm text-muted-foreground">
                 {datasetName}
@@ -278,6 +293,90 @@ function BindingCard({
 }
 
 // ============================================================
+// Page Tree Node Component
+// ============================================================
+
+function PageTreeNode({
+  node,
+  selectedId,
+  expandedNodes,
+  onToggle,
+  onSelect,
+  depth = 0,
+}: {
+  node: ConfluencePageTreeNode;
+  selectedId: string | null;
+  expandedNodes: Set<string>;
+  onToggle: (pageId: string) => void;
+  onSelect: (pageId: string | null, title: string | null) => void;
+  depth?: number;
+}) {
+  const isExpanded = expandedNodes.has(node.page_id);
+  const isSelected = selectedId === node.page_id;
+  const hasChildren = node.children && node.children.length > 0;
+
+  return (
+    <div>
+      <div
+        className={`flex items-center gap-1 py-1 px-1 rounded cursor-pointer hover:bg-muted ${
+          isSelected ? "bg-primary/10 border border-primary/30" : ""
+        }`}
+        style={{ paddingLeft: `${depth * 16 + 4}px` }}
+        onClick={() => onSelect(node.page_id, node.title)}
+      >
+        {hasChildren ? (
+          <button
+            className="p-0.5 hover:bg-muted rounded"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle(node.page_id);
+            }}
+          >
+            {isExpanded ? (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+          </button>
+        ) : (
+          <span className="w-4" />
+        )}
+        {hasChildren ? (
+          isExpanded ? (
+            <FolderOpen className="h-4 w-4 text-amber-500" />
+          ) : (
+            <Folder className="h-4 w-4 text-amber-500" />
+          )
+        ) : (
+          <FileText className="h-4 w-4 text-muted-foreground" />
+        )}
+        <span className="text-sm truncate flex-1" title={node.title}>
+          {node.title}
+        </span>
+        {isSelected && (
+          <CheckCircle className="h-4 w-4 text-primary flex-shrink-0" />
+        )}
+      </div>
+      {hasChildren && isExpanded && (
+        <div>
+          {node.children.map((child) => (
+            <PageTreeNode
+              key={child.page_id}
+              node={child}
+              selectedId={selectedId}
+              expandedNodes={expandedNodes}
+              onToggle={onToggle}
+              onSelect={onSelect}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
 // Main Page Component
 // ============================================================
 
@@ -306,8 +405,13 @@ export default function ConfluencePage() {
   const [bindConnectionId, setBindConnectionId] = useState("");
   const [bindDatasetId, setBindDatasetId] = useState("");
   const [bindSpaceKey, setBindSpaceKey] = useState("");
+  const [bindRootPageId, setBindRootPageId] = useState<string | null>(null);
+  const [bindRootPageTitle, setBindRootPageTitle] = useState<string | null>(null);
   const [discoveredSpaces, setDiscoveredSpaces] = useState<ConfluenceSpace[]>([]);
   const [discoveringSpaces, setDiscoveringSpaces] = useState(false);
+  const [pageTree, setPageTree] = useState<ConfluencePageTreeResponse | null>(null);
+  const [loadingPageTree, setLoadingPageTree] = useState(false);
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
 
   // Auto-dismiss test result toast
   useEffect(() => {
@@ -410,7 +514,11 @@ export default function ConfluencePage() {
     setBindConnectionId("");
     setBindDatasetId("");
     setBindSpaceKey("");
+    setBindRootPageId(null);
+    setBindRootPageTitle(null);
     setDiscoveredSpaces([]);
+    setPageTree(null);
+    setExpandedNodes(new Set());
   };
 
   // Handle test connection
@@ -435,6 +543,42 @@ export default function ConfluencePage() {
     } finally {
       setDiscoveringSpaces(false);
     }
+  };
+
+  // Handle discover page tree for selected space
+  const handleDiscoverPageTree = async (connectionId: string, spaceKey: string) => {
+    setLoadingPageTree(true);
+    setPageTree(null);
+    setBindRootPageId(null);
+    setBindRootPageTitle(null);
+    setExpandedNodes(new Set());
+    try {
+      const result = await discoverSpacePages(connectionId, spaceKey, 5);
+      setPageTree(result);
+    } catch (error) {
+      console.error("Failed to discover page tree:", error);
+    } finally {
+      setLoadingPageTree(false);
+    }
+  };
+
+  // Toggle node expansion
+  const toggleNodeExpansion = (pageId: string) => {
+    setExpandedNodes((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(pageId)) {
+        newSet.delete(pageId);
+      } else {
+        newSet.add(pageId);
+      }
+      return newSet;
+    });
+  };
+
+  // Select a page as root
+  const selectRootPage = (pageId: string | null, title: string | null) => {
+    setBindRootPageId(pageId);
+    setBindRootPageTitle(title);
   };
 
   // Open edit dialog
@@ -503,12 +647,16 @@ export default function ConfluencePage() {
   // Create binding
   const handleBind = () => {
     if (!bindConnectionId || !bindDatasetId || !bindSpaceKey) return;
+    const bindingData: ConfluenceBindingCreateRequest = {
+      dataset_id: bindDatasetId,
+      space_key: bindSpaceKey,
+    };
+    if (bindRootPageId) {
+      bindingData.root_page_id = bindRootPageId;
+    }
     bindMutation.mutate({
       connectionId: bindConnectionId,
-      data: {
-        dataset_id: bindDatasetId,
-        space_key: bindSpaceKey,
-      },
+      data: bindingData,
     });
   };
 
@@ -853,12 +1001,12 @@ export default function ConfluencePage() {
 
       {/* Bind Space Dialog */}
       <Dialog open={bindDialogOpen} onOpenChange={setBindDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>绑定 Confluence 空间</DialogTitle>
-            <DialogDescription>选择要同步的空间和目标知识库</DialogDescription>
+            <DialogDescription>选择要同步的空间、目标知识库和可选的根页面</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="space-y-4 py-4 flex-1 overflow-y-auto">
             <div>
               <Label>选择空间</Label>
               {discoveringSpaces ? (
@@ -867,7 +1015,15 @@ export default function ConfluencePage() {
                   正在获取空间列表...
                 </div>
               ) : (
-                <Select value={bindSpaceKey} onValueChange={setBindSpaceKey}>
+                <Select
+                  value={bindSpaceKey}
+                  onValueChange={(value) => {
+                    setBindSpaceKey(value);
+                    if (value && bindConnectionId) {
+                      handleDiscoverPageTree(bindConnectionId, value);
+                    }
+                  }}
+                >
                   <SelectTrigger className="mt-1.5">
                     <SelectValue placeholder="选择 Confluence 空间" />
                   </SelectTrigger>
@@ -881,6 +1037,52 @@ export default function ConfluencePage() {
                 </Select>
               )}
             </div>
+
+            {/* Page Tree Selector */}
+            {bindSpaceKey && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <Label>选择同步范围（可选）</Label>
+                  {bindRootPageId && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs"
+                      onClick={() => selectRootPage(null, null)}
+                    >
+                      同步整个空间
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 mb-2">
+                  {bindRootPageId
+                    ? `已选择: ${bindRootPageTitle} (仅同步此页面及其子页面)`
+                    : "不选择则同步整个空间"}
+                </p>
+                {loadingPageTree ? (
+                  <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    正在加载页面结构...
+                  </div>
+                ) : pageTree && pageTree.root_pages.length > 0 ? (
+                  <div className="border rounded-md p-2 max-h-48 overflow-y-auto bg-muted/30">
+                    {pageTree.root_pages.map((node) => (
+                      <PageTreeNode
+                        key={node.page_id}
+                        node={node}
+                        selectedId={bindRootPageId}
+                        expandedNodes={expandedNodes}
+                        onToggle={toggleNodeExpansion}
+                        onSelect={selectRootPage}
+                      />
+                    ))}
+                  </div>
+                ) : pageTree ? (
+                  <p className="text-sm text-muted-foreground py-2">该空间暂无页面</p>
+                ) : null}
+              </div>
+            )}
+
             <div>
               <Label>目标知识库</Label>
               <Select value={bindDatasetId} onValueChange={setBindDatasetId}>
@@ -895,6 +1097,11 @@ export default function ConfluencePage() {
                   ))}
                 </SelectContent>
               </Select>
+              {datasets.length === 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  暂无知识库，请先创建知识库
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>

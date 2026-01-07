@@ -180,35 +180,43 @@ class DatabaseSessionManager:
         content: str,
         metadata: Optional[dict] = None,
     ) -> bool:
-        """添加消息到会话历史"""
-        session = await self.get(session_id)
-        if not session:
-            return False
-        
-        message = SessionMessage(
-            role=role,
-            content=content,
-            timestamp=datetime.utcnow(),
-            metadata=metadata,
-        )
-        session.history.append(message)
-        session.updated_at = datetime.utcnow()
+        """
+        添加消息到会话历史
+
+        使用数据库原子操作追加消息，避免竞态条件导致的消息丢失。
+        """
+        now = datetime.utcnow()
+
+        # 构建消息字典
+        message_dict = {
+            "role": role,
+            "content": content,
+            "timestamp": now.isoformat(),
+            "metadata": metadata,
+        }
 
         # Auto-title from first user message (ChatGPT-like sidebar)
+        metadata_update = None
         if role == "user":
-            session.metadata = session.metadata or {}
-            if not session.metadata.get("title"):
+            # 检查是否需要设置标题
+            session = await self.get(session_id)
+            if session and not session.metadata.get("title"):
                 title = str(content).strip().splitlines()[0][:40]
                 if title:
-                    session.metadata["title"] = title
+                    metadata_update = {"title": title}
 
-        # 保存到数据库（包含 history / metadata / updated_at）
-        await self._save_to_db(session)
+        # 使用原子操作追加消息（避免竞态条件）
+        result = await self.database.append_session_message(
+            session_id=session_id,
+            message=message_dict,
+            metadata_update=metadata_update,
+        )
 
-        # 更新缓存
-        await self._cache_session(session)
-        
-        return True
+        if result:
+            # 清除缓存，下次获取时从数据库重新加载
+            await self._remove_from_cache(session_id)
+
+        return result
     
     async def history(
         self,

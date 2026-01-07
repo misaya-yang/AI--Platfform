@@ -455,11 +455,8 @@ export default function DatasetCreatePage() {
       setNameError(null);
       setStep(2);
     } else if (step === 2) {
-      // Step 2 验证
-      if (pendingFiles.length === 0 && pendingUrls.length === 0) {
-        message.error("请至少上传一个文件或添加一个URL");
-        return;
-      }
+      // Step 2 无需强制验证，允许创建空知识库
+      // 后续可通过 Confluence 同步或手动添加文件
       setStep(3);
     }
   };
@@ -601,6 +598,13 @@ export default function DatasetCreatePage() {
         {/* Step 2: Select Data */}
         {step === 2 && (
           <div className="space-y-6">
+            {/* Optional Hint */}
+            <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-lg">
+              <p className="text-sm text-blue-700 dark:text-blue-300">
+                <span className="font-medium">提示：</span>此步骤为可选项。您可以先创建空知识库，后续通过 Confluence 同步或手动上传文件添加内容。
+              </p>
+            </div>
+
             {/* File Upload */}
             <div
               className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/40 transition cursor-pointer"

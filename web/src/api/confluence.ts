@@ -12,6 +12,7 @@ import type {
   ConfluenceConnectionUpdateRequest,
   ConfluenceConnectionTestResult,
   ConfluenceSpaceListResponse,
+  ConfluencePageTreeResponse,
   ConfluenceBinding,
   ConfluenceBindingCreateRequest,
   ConfluenceBindingUpdateRequest,
@@ -99,6 +100,21 @@ export async function discoverSpaces(connectionId: string): Promise<ConfluenceSp
   return data;
 }
 
+/**
+ * Discover page hierarchy for a space
+ */
+export async function discoverSpacePages(
+  connectionId: string,
+  spaceKey: string,
+  maxDepth = 3
+): Promise<ConfluencePageTreeResponse> {
+  const { data } = await api.get<ConfluencePageTreeResponse>(
+    `/api/v1/confluence/connections/${connectionId}/discover/spaces/${spaceKey}/pages`,
+    { params: { max_depth: maxDepth } }
+  );
+  return data;
+}
+
 // ============================================================
 // Binding APIs
 // ============================================================
@@ -158,6 +174,30 @@ export async function deleteBinding(bindingId: string, deleteDocuments = false):
   await api.delete(`/api/v1/confluence/bindings/${bindingId}`, {
     params: { delete_documents: deleteDocuments },
   });
+}
+
+/**
+ * Add specific Confluence pages to an existing binding
+ */
+export async function addPagesToBinding(
+  bindingId: string,
+  pageIds: string[]
+): Promise<{
+  status: string;
+  binding_id: string;
+  total: number;
+  success_count: number;
+  results: Array<{
+    page_id: string;
+    status: string;
+    document_id?: string;
+    error?: string;
+  }>;
+}> {
+  const { data } = await api.post(`/api/v1/confluence/bindings/${bindingId}/pages`, {
+    page_ids: pageIds,
+  });
+  return data;
 }
 
 // ============================================================
@@ -259,6 +299,44 @@ export async function listPages(
  */
 export async function getPageRecord(pageRecordId: string): Promise<ConfluencePageRecord> {
   const { data } = await api.get<ConfluencePageRecord>(`/api/v1/confluence/pages/${pageRecordId}`);
+  return data;
+}
+
+/**
+ * Sync a single page by its record ID
+ */
+export async function syncSinglePage(
+  pageRecordId: string
+): Promise<{ status: string; result?: unknown; message?: string }> {
+  const { data } = await api.post<{ status: string; result?: unknown; message?: string }>(
+    `/api/v1/confluence/pages/${pageRecordId}/sync`
+  );
+  return data;
+}
+
+/**
+ * Batch sync multiple pages by their record IDs
+ */
+export async function batchSyncPages(
+  pageRecordIds: string[],
+  force = false
+): Promise<{
+  status: string;
+  total: number;
+  bindings?: Array<{
+    binding_id: string;
+    task_id?: string;
+    page_count: number;
+    status: string;
+    error?: string;
+  }>;
+  not_found?: string[];
+  message?: string;
+}> {
+  const { data } = await api.post("/api/v1/confluence/pages/batch-sync", {
+    page_record_ids: pageRecordIds,
+    force,
+  });
   return data;
 }
 

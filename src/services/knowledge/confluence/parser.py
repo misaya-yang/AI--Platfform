@@ -163,12 +163,15 @@ class StorageFormatParser(HTMLParser):
             self.in_ignored_tag = max(0, self.in_ignored_tag - 1)
             return
 
-        if self.in_ignored_tag > 0:
-            return
-
-        # 处理 Confluence 宏结束
+        # 处理 Confluence 宏结束标签 - 即使在 in_ignored_tag 模式下也要处理
+        # 因为 toc 等宏会设置 in_ignored_tag，需要在宏结束时重置
         if tag.startswith("ac:"):
             self._handle_macro_end(tag)
+            # 如果还在忽略模式，继续忽略其他内容
+            if self.in_ignored_tag > 0:
+                return
+
+        if self.in_ignored_tag > 0:
             return
 
         if tag in ("strong", "b"):
@@ -331,12 +334,26 @@ def parse_storage_format(content: str, output_format: str = "markdown") -> str:
         转换后的内容
     """
     if not content:
+        logger.warning("parse_storage_format called with empty content")
         return ""
+
+    logger.info(f"parse_storage_format: input length={len(content)}, format={output_format}")
 
     try:
         parser = StorageFormatParser(output_format=output_format)
         parser.feed(content)
         result = parser.get_output()
+        logger.info(f"parse_storage_format: output length={len(result)}, in_ignored_tag={parser.in_ignored_tag}")
+        if len(result) == 0 and len(content) > 0:
+            logger.warning(
+                f"Parser returned empty result! in_ignored_tag={parser.in_ignored_tag}, "
+                f"current_macro={parser.current_macro}, in_code_block={parser.in_code_block}"
+            )
+            # 如果解析失败，使用降级方法
+            logger.info("Using fallback regex parsing due to empty result")
+            result = re.sub(r"<[^>]+>", " ", content)
+            result = re.sub(r"\s+", " ", result)
+            return result.strip()
         return result
     except Exception as e:
         logger.warning(f"Failed to parse storage format: {e}")

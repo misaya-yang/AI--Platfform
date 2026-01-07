@@ -72,6 +72,13 @@ class ConfluenceSyncService:
         self.worker = knowledge_worker
         self._clients: Dict[str, ConfluenceClient] = {}
 
+        # 检查 Worker 状态，如果未提供则记录警告
+        if not knowledge_worker:
+            logger.warning(
+                "⚠️ KnowledgeWorker not provided to ConfluenceSyncService - "
+                "documents will NOT be auto-indexed after sync!"
+            )
+
     async def close(self) -> None:
         """关闭所有客户端连接"""
         for client in self._clients.values():
@@ -287,6 +294,101 @@ class ConfluenceSyncService:
 
         return pages
 
+    async def discover_space_page_tree(
+        self,
+        connection_id: str,
+        tenant_id: str,
+        space_key: str,
+        max_depth: int = 3,
+    ) -> Dict[str, Any]:
+        """
+        发现空间中的页面层级结构
+
+        Args:
+            connection_id: 连接 ID
+            tenant_id: 租户 ID
+            space_key: 空间 Key
+            max_depth: 最大深度
+
+        Returns:
+            页面树结构
+        """
+        connection = await self.db.get_confluence_connection(connection_id)
+        if not connection:
+            raise ConfluenceSyncError(f"Connection not found: {connection_id}")
+
+        if connection["tenant_id"] and connection["tenant_id"] != tenant_id:
+            raise ConfluenceSyncError("Access denied")
+
+        client = await self._get_client(connection_id)
+        space = await client.get_space_by_key(space_key)
+
+        # 获取 domain 用于构建完整 URL
+        domain = connection["domain"]
+
+        # 获取所有页面
+        all_pages: Dict[str, Dict[str, Any]] = {}
+        async for page_data in client.iter_space_pages(space.space_id, batch_size=50):
+            page_id = str(page_data.get("id"))
+            # 构建完整的 web_url（API 返回的是相对路径）
+            webui_path = page_data.get("_links", {}).get("webui")
+            web_url = f"https://{domain}{webui_path}" if webui_path else None
+            all_pages[page_id] = {
+                "page_id": page_id,
+                "title": page_data.get("title", ""),
+                "parent_id": page_data.get("parentId"),
+                "has_children": False,
+                "children": [],
+                "depth": 0,
+                "web_url": web_url,
+            }
+
+        # 构建层级关系
+        root_pages = []
+        for page_id, page in all_pages.items():
+            parent_id = page.get("parent_id")
+            if parent_id and parent_id in all_pages:
+                parent = all_pages[parent_id]
+                parent["has_children"] = True
+                parent["children"].append(page)
+            else:
+                root_pages.append(page)
+
+        # 计算深度并裁剪
+        def set_depth_and_trim(node: Dict[str, Any], depth: int) -> None:
+            node["depth"] = depth
+            if depth >= max_depth:
+                # 当裁剪子节点时，标记有更多子节点被截断
+                if node["children"]:
+                    node["children_truncated"] = True
+                node["children"] = []
+                # 如果原来没有子节点，设置 has_children 为 False
+                if not node.get("has_children"):
+                    node["has_children"] = False
+                return
+            for child in node["children"]:
+                set_depth_and_trim(child, depth + 1)
+
+        for root in root_pages:
+            set_depth_and_trim(root, 0)
+
+        # 按标题排序
+        def sort_children(node: Dict[str, Any]) -> None:
+            node["children"].sort(key=lambda x: x.get("title", ""))
+            for child in node["children"]:
+                sort_children(child)
+
+        root_pages.sort(key=lambda x: x.get("title", ""))
+        for root in root_pages:
+            sort_children(root)
+
+        return {
+            "space_key": space_key,
+            "space_name": space.name,
+            "root_pages": root_pages,
+            "total_pages": len(all_pages),
+        }
+
     # ============ URL Import ============
 
     async def import_from_url(
@@ -400,9 +502,25 @@ class ConfluenceSyncService:
         extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """从 Confluence 页面创建文档"""
+        # 检查 body_storage 是否为空
+        if not page.body_storage or not page.body_storage.strip():
+            logger.warning(
+                f"Creating document from Confluence page with EMPTY body_storage! "
+                f"Page ID: {page.page_id}, Title: {page.title}. "
+                f"This will cause 'empty document' error during ingestion."
+            )
+
         # 转换内容
         content_text = extract_plain_text(page.body_storage)
         content_markdown = extract_markdown(page.body_storage)
+
+        # 日志记录内容长度
+        logger.info(
+            f"Document content extraction for page {page.page_id}: "
+            f"body_storage={len(page.body_storage or '')}, "
+            f"content_text={len(content_text)}, "
+            f"content_markdown={len(content_markdown)}"
+        )
 
         doc_id = str(uuid.uuid4())
         metadata = {
@@ -467,6 +585,7 @@ class ConfluenceSyncService:
         tenant_id: str,
         dataset_id: str,
         space_key: str,
+        root_page_id: Optional[str] = None,
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
         max_depth: int = 10,
@@ -482,6 +601,7 @@ class ConfluenceSyncService:
             tenant_id: 租户 ID
             dataset_id: 数据集 ID
             space_key: Confluence Space Key
+            root_page_id: 根页面 ID（可选，如果指定则只同步该页面及其子页面）
             include_patterns: 包含规则
             exclude_patterns: 排除规则
             max_depth: 最大深度
@@ -501,9 +621,29 @@ class ConfluenceSyncService:
         if connection["tenant_id"] and connection["tenant_id"] != tenant_id:
             raise ConfluenceSyncError("Access denied: connection belongs to different tenant")
 
+        # 检查是否已存在相同的绑定 (connection_id, space_key, dataset_id)
+        existing_bindings = await self.db.list_confluence_bindings(
+            connection_id=connection_id,
+            dataset_id=dataset_id,
+        )
+        for binding in existing_bindings:
+            if binding.get("space_key") == space_key:
+                raise ConfluenceSyncError(
+                    f"Binding already exists for space '{space_key}' and dataset '{dataset_id}'"
+                )
+
         # 获取空间信息
         client = await self._get_client(connection_id)
         space = await client.get_space_by_key(space_key)
+
+        # 如果指定了根页面 ID，获取页面标题
+        root_page_title = None
+        if root_page_id:
+            try:
+                root_page = await client.get_page(root_page_id)
+                root_page_title = root_page.title
+            except Exception as e:
+                logger.warning(f"Failed to get root page {root_page_id}: {e}")
 
         binding_id = str(uuid.uuid4())
         binding = {
@@ -514,6 +654,8 @@ class ConfluenceSyncService:
             "space_key": space_key,
             "space_id": space.space_id,
             "space_name": space.name,
+            "root_page_id": root_page_id,
+            "root_page_title": root_page_title,
             "include_patterns": include_patterns or [],
             "exclude_patterns": exclude_patterns or [],
             "max_depth": max_depth,
@@ -523,8 +665,21 @@ class ConfluenceSyncService:
             "created_by": created_by,
         }
 
-        await self.db.save_confluence_binding(binding)
-        return await self.db.get_confluence_binding(binding_id)
+        # 使用 RETURNING 在单个事务中保存并返回，确保原子性
+        result = await self.db.save_confluence_binding(binding)
+        if not result:
+            raise ConfluenceSyncError("Failed to save binding")
+
+        # 创建绑定后自动触发首次同步
+        try:
+            task_id = await self.trigger_sync(binding_id, force=False)
+            logger.info(f"Auto-triggered initial sync for binding {binding_id}, task_id: {task_id}")
+            result["initial_sync_task_id"] = task_id
+        except Exception as e:
+            # 同步失败不影响绑定创建，只记录警告
+            logger.warning(f"Failed to auto-trigger sync for binding {binding_id}: {e}")
+
+        return result
 
     async def delete_binding(
         self,
@@ -584,9 +739,58 @@ class ConfluenceSyncService:
             dataset_id=dataset_id,
         )
 
+    async def list_all_bindings(
+        self,
+        tenant_id: str,
+        connection_id: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        列出租户下所有空间绑定（带过滤）
+
+        Args:
+            tenant_id: 租户 ID
+            connection_id: 连接 ID（可选）
+            dataset_id: 数据集 ID（可选）
+            status: 状态过滤（可选）
+
+        Returns:
+            绑定列表
+        """
+        bindings = await self.db.list_confluence_bindings(
+            connection_id=connection_id,
+            tenant_id=tenant_id,
+            dataset_id=dataset_id,
+        )
+        # Filter by status if specified
+        if status:
+            bindings = [b for b in bindings if b.get("status") == status]
+        return bindings
+
     async def get_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
         """获取空间绑定详情"""
         return await self.db.get_confluence_binding(binding_id)
+
+    async def refresh_binding_stats(self, binding_id: str) -> None:
+        """
+        刷新绑定的页面统计信息
+
+        Args:
+            binding_id: 绑定 ID
+        """
+        pages = await self.db.list_confluence_pages(
+            binding_id=binding_id,
+            limit=10000,  # 获取所有页面
+        )
+
+        total_count = len(pages)
+        synced_count = sum(1 for p in pages if p.get("status") == "synced")
+
+        await self.db.update_confluence_binding(binding_id, {
+            "total_page_count": total_count,
+            "synced_page_count": synced_count,
+        })
 
     async def update_binding(
         self,
@@ -609,10 +813,25 @@ class ConfluenceSyncService:
 
         # 过滤允许更新的字段
         allowed_fields = {
-            "include_patterns", "exclude_patterns", "max_depth",
+            "root_page_id", "include_patterns", "exclude_patterns", "max_depth",
             "include_attachments", "include_comments", "status"
         }
         filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
+
+        # 如果更新了 root_page_id，需要获取页面标题
+        if "root_page_id" in filtered_updates:
+            root_page_id = filtered_updates["root_page_id"]
+            if root_page_id:
+                try:
+                    connection_id = binding["connection_id"]
+                    client = await self._get_client(connection_id)
+                    root_page = await client.get_page(root_page_id)
+                    filtered_updates["root_page_title"] = root_page.title
+                except Exception as e:
+                    logger.warning(f"Failed to get root page {root_page_id}: {e}")
+                    filtered_updates["root_page_title"] = None
+            else:
+                filtered_updates["root_page_title"] = None
 
         if filtered_updates:
             await self.db.update_confluence_binding(binding_id, filtered_updates)
@@ -620,6 +839,40 @@ class ConfluenceSyncService:
         return await self.db.get_confluence_binding(binding_id)
 
     # ============ Space Import ============
+
+    async def _get_page_descendants(
+        self,
+        client: ConfluenceClient,
+        root_page_id: str,
+        max_depth: int,
+    ) -> List[str]:
+        """
+        递归获取页面及其所有子页面的 ID 列表
+
+        Args:
+            client: Confluence 客户端
+            root_page_id: 根页面 ID
+            max_depth: 最大深度
+
+        Returns:
+            页面 ID 列表
+        """
+        result = [root_page_id]
+
+        async def collect_children(page_id: str, depth: int) -> None:
+            if depth >= max_depth:
+                return
+            try:
+                children = await client.get_page_children(page_id, limit=100)
+                for child in children:
+                    child_id = str(child.get("id"))
+                    result.append(child_id)
+                    await collect_children(child_id, depth + 1)
+            except Exception as e:
+                logger.warning(f"Failed to get children for page {page_id}: {e}")
+
+        await collect_children(root_page_id, 0)
+        return result
 
     async def import_space(
         self,
@@ -673,7 +926,7 @@ class ConfluenceSyncService:
         binding_id: str,
         task_id: str,
     ) -> SyncResult:
-        """同步空间中的所有页面"""
+        """同步空间中的所有页面（或指定根页面的子页面）"""
         result = SyncResult(started_at=datetime.utcnow())
 
         binding = await self.db.get_confluence_binding(binding_id)
@@ -684,6 +937,8 @@ class ConfluenceSyncService:
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
         space_id = binding["space_id"]
+        root_page_id = binding.get("root_page_id")
+        max_depth = binding.get("max_depth", 10)
 
         try:
             client = await self._get_client(connection_id)
@@ -693,22 +948,29 @@ class ConfluenceSyncService:
             existing_page_ids = {p["page_id"] for p in existing_pages}
             seen_page_ids = set()
 
-            # 计算总页面数
-            total_count = 0
-            async for _ in client.iter_space_pages(space_id, batch_size=50):
-                total_count += 1
+            # 如果指定了 root_page_id，则只同步该页面及其子页面
+            if root_page_id:
+                pages_to_sync = await self._get_page_descendants(
+                    client, root_page_id, max_depth
+                )
+            else:
+                # 获取空间中的所有页面
+                pages_to_sync = []
+                async for page_data in client.iter_space_pages(space_id, batch_size=50):
+                    pages_to_sync.append(str(page_data.get("id")))
+
+            total_count = len(pages_to_sync)
             result.total_pages = total_count
 
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "processing",
                 "total_items": total_count,
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.utcnow(),
             })
 
             # 遍历并同步页面
             processed = 0
-            async for page_data in client.iter_space_pages(space_id, batch_size=25):
-                page_id = str(page_data.get("id"))
+            for page_id in pages_to_sync:
                 seen_page_ids.add(page_id)
                 processed += 1
 
@@ -792,7 +1054,7 @@ class ConfluenceSyncService:
             # 更新绑定状态
             await self.db.update_confluence_binding(binding_id, {
                 "status": "completed",
-                "last_sync_at": datetime.utcnow().isoformat(),
+                "last_sync_at": datetime.utcnow(),
                 "synced_page_count": result.synced_pages,
                 "total_page_count": result.total_pages,
             })
@@ -801,7 +1063,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "completed",
                 "progress": 100,
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": datetime.utcnow(),
                 "result": result.to_dict(),
             })
 
@@ -817,7 +1079,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "failed",
                 "error": str(e),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": datetime.utcnow(),
             })
 
         return result
@@ -928,7 +1190,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "processing",
                 "total_items": len(page_ids),
-                "started_at": datetime.utcnow().isoformat(),
+                "started_at": datetime.utcnow(),
             })
 
             for i, page_id in enumerate(page_ids):
@@ -983,13 +1245,13 @@ class ConfluenceSyncService:
 
             await self.db.update_confluence_binding(binding_id, {
                 "status": "completed",
-                "last_sync_at": datetime.utcnow().isoformat(),
+                "last_sync_at": datetime.utcnow(),
             })
 
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "completed",
                 "progress": 100,
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": datetime.utcnow(),
                 "result": result.to_dict(),
             })
 
@@ -1005,7 +1267,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "failed",
                 "error": str(e),
-                "completed_at": datetime.utcnow().isoformat(),
+                "completed_at": datetime.utcnow(),
             })
 
         return result
@@ -1202,6 +1464,86 @@ class ConfluenceSyncService:
             limit=limit,
             offset=offset,
         )
+
+    # ============ Batch Sync Operations ============
+
+    async def batch_sync_pages(
+        self,
+        page_record_ids: List[str],
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        批量同步多个页面（通过 page_record_id 列表）
+
+        Args:
+            page_record_ids: confluence_pages 表中的记录 ID 列表
+            force: 是否强制同步（忽略内容哈希）
+
+        Returns:
+            批量同步结果，包含 task_id 用于进度追踪
+        """
+        if not page_record_ids:
+            return {
+                "status": "completed",
+                "total": 0,
+                "message": "No pages to sync",
+            }
+
+        # 获取所有页面记录，按 binding_id 分组
+        pages_by_binding: Dict[str, List[Dict[str, Any]]] = {}
+        not_found = []
+
+        for record_id in page_record_ids:
+            page = await self.db.get_confluence_page(record_id)
+            if page:
+                binding_id = page["binding_id"]
+                if binding_id not in pages_by_binding:
+                    pages_by_binding[binding_id] = []
+                pages_by_binding[binding_id].append(page)
+            else:
+                not_found.append(record_id)
+
+        if not pages_by_binding:
+            return {
+                "status": "error",
+                "message": "No valid pages found",
+                "not_found": not_found,
+            }
+
+        # 对每个 binding 触发同步
+        results = []
+        for binding_id, pages in pages_by_binding.items():
+            # 提取 Confluence page_ids
+            page_ids = [p["page_id"] for p in pages]
+            try:
+                task_id = await self.trigger_sync(
+                    binding_id=binding_id,
+                    force=force,
+                    page_ids=page_ids,
+                )
+                results.append({
+                    "binding_id": binding_id,
+                    "task_id": task_id,
+                    "page_count": len(page_ids),
+                    "status": "triggered",
+                })
+            except ConfluenceSyncError as e:
+                results.append({
+                    "binding_id": binding_id,
+                    "error": str(e),
+                    "page_count": len(page_ids),
+                    "status": "failed",
+                })
+
+        total_pages = sum(r.get("page_count", 0) for r in results)
+        triggered_count = sum(1 for r in results if r.get("status") == "triggered")
+
+        return {
+            "status": "triggered" if triggered_count > 0 else "failed",
+            "total": total_pages,
+            "bindings": results,
+            "not_found": not_found if not_found else None,
+        }
 
     # ============ Sync Task Management ============
 

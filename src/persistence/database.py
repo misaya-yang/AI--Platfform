@@ -411,6 +411,46 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
+    async def append_session_message(
+        self,
+        session_id: str,
+        message: Dict[str, Any],
+        metadata_update: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        原子追加消息到会话历史（避免竞态条件）
+
+        使用 PostgreSQL 的 JSONB 操作原子地追加消息，而不是读取-修改-写入模式。
+
+        Args:
+            session_id: 会话 ID
+            message: 消息字典 {role, content, timestamp, metadata}
+            metadata_update: 可选的 metadata 更新（如自动标题）
+
+        Returns:
+            是否成功
+        """
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            # 使用 JSONB || 操作符原子追加消息
+            if metadata_update:
+                result = await conn.execute("""
+                    UPDATE sessions
+                    SET history = history || $2::jsonb,
+                        metadata = metadata || $3::jsonb,
+                        updated_at = NOW()
+                    WHERE session_id = $1
+                """, session_id, json.dumps([message]), json.dumps(metadata_update))
+            else:
+                result = await conn.execute("""
+                    UPDATE sessions
+                    SET history = history || $2::jsonb,
+                        updated_at = NOW()
+                    WHERE session_id = $1
+                """, session_id, json.dumps([message]))
+            return result == "UPDATE 1"
+
     async def list_sessions(
         self,
         user_id: Optional[str] = None,
@@ -2276,22 +2316,32 @@ class DatabaseStorage:
     # Confluence Space Binding 表
     # =========================================================================
 
-    async def save_confluence_binding(self, binding: Dict[str, Any]) -> None:
-        """保存或更新 Confluence 空间绑定"""
+    async def save_confluence_binding(self, binding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        保存或更新 Confluence 空间绑定
+
+        使用 RETURNING 子句在单个事务中完成保存和返回，确保原子性。
+
+        Returns:
+            保存后的绑定数据，如果失败返回 None
+        """
         if not self._pool:
-            return
+            return None
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            row = await conn.fetchrow("""
                 INSERT INTO confluence_space_bindings (
-                    binding_id, connection_id, dataset_id, space_key, space_id,
-                    space_name, include_patterns, exclude_patterns, max_depth,
+                    binding_id, connection_id, tenant_id, dataset_id, space_key, space_id,
+                    space_name, root_page_id, root_page_title,
+                    include_patterns, exclude_patterns, max_depth,
                     include_attachments, include_comments, status,
                     last_sync_at, synced_page_count, total_page_count,
                     last_error, created_by
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
                 ON CONFLICT (binding_id) DO UPDATE SET
                     space_id = EXCLUDED.space_id,
                     space_name = EXCLUDED.space_name,
+                    root_page_id = EXCLUDED.root_page_id,
+                    root_page_title = EXCLUDED.root_page_title,
                     include_patterns = EXCLUDED.include_patterns,
                     exclude_patterns = EXCLUDED.exclude_patterns,
                     max_depth = EXCLUDED.max_depth,
@@ -2303,15 +2353,19 @@ class DatabaseStorage:
                     total_page_count = EXCLUDED.total_page_count,
                     last_error = EXCLUDED.last_error,
                     updated_at = NOW()
+                RETURNING *
             """,
                 binding.get("binding_id"),
                 binding.get("connection_id"),
+                binding.get("tenant_id"),
                 binding.get("dataset_id"),
                 binding.get("space_key"),
                 binding.get("space_id"),
                 binding.get("space_name"),
-                binding.get("include_patterns", []),
-                binding.get("exclude_patterns", []),
+                binding.get("root_page_id"),
+                binding.get("root_page_title"),
+                json.dumps(binding.get("include_patterns", [])),
+                json.dumps(binding.get("exclude_patterns", [])),
                 binding.get("max_depth", 10),
                 binding.get("include_attachments", False),
                 binding.get("include_comments", False),
@@ -2322,6 +2376,7 @@ class DatabaseStorage:
                 binding.get("last_error"),
                 binding.get("created_by"),
             )
+            return self._row_to_dict(row) if row else None
 
     async def get_confluence_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
         """获取 Confluence 空间绑定"""
@@ -2434,13 +2489,21 @@ class DatabaseStorage:
         allowed_fields = {
             "space_id", "space_name", "include_patterns", "exclude_patterns",
             "max_depth", "include_attachments", "include_comments", "status",
-            "last_sync_at", "synced_page_count", "total_page_count", "last_error"
+            "last_sync_at", "synced_page_count", "total_page_count", "last_error",
+            "root_page_id", "root_page_title"
         }
+
+        # JSON 字段需要序列化
+        json_fields = {"include_patterns", "exclude_patterns"}
 
         for key, value in updates.items():
             if key in allowed_fields:
                 set_clauses.append(f"{key} = ${param_idx}")
-                params.append(value)
+                # JSON 字段需要序列化为字符串
+                if key in json_fields and isinstance(value, (list, dict)):
+                    params.append(json.dumps(value))
+                else:
+                    params.append(value)
                 param_idx += 1
 
         if not set_clauses:
@@ -2457,6 +2520,7 @@ class DatabaseStorage:
     async def list_confluence_bindings(
         self,
         connection_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         dataset_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
@@ -2472,6 +2536,11 @@ class DatabaseStorage:
         if connection_id:
             query += f" AND connection_id = ${param_idx}"
             params.append(connection_id)
+            param_idx += 1
+
+        if tenant_id:
+            query += f" AND tenant_id = ${param_idx}"
+            params.append(tenant_id)
             param_idx += 1
 
         if dataset_id:
@@ -2716,6 +2785,17 @@ class DatabaseStorage:
 
         record_id = f"{binding_id}:{page_id}"
 
+        # 将 ISO 字符串转换为 datetime 对象
+        updated_at_dt = None
+        if confluence_updated_at:
+            if isinstance(confluence_updated_at, str):
+                # 处理 ISO 格式: '2025-08-12T04:04:43.266Z'
+                updated_at_dt = datetime.fromisoformat(
+                    confluence_updated_at.replace("Z", "+00:00")
+                )
+            else:
+                updated_at_dt = confluence_updated_at
+
         async with self._pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO confluence_pages (
@@ -2746,8 +2826,8 @@ class DatabaseStorage:
                 parent_page_id,
                 depth,
                 status,
-                confluence_updated_at,
-                labels or [],
+                updated_at_dt,
+                json.dumps(labels or []),  # JSONB 列需要 JSON 字符串
                 web_url,
                 author,
             )
@@ -3679,22 +3759,38 @@ class DatabaseStorage:
         if not row:
             return {}
         result = dict(row)
-        
-        # JSON 字段列表 - 需要解析为 Python 对象
-        json_fields = {"metadata", "embedding_config", "index_config", "history", "roles", "keywords"}
-        
+
+        # JSON 字段列表 - 需要解析为 Python 对象（字典类型）
+        json_dict_fields = {
+            "metadata", "embedding_config", "index_config", "result"
+        }
+
+        # JSON 字段列表 - 需要解析为 Python 对象（列表类型）
+        json_list_fields = {
+            "roles", "keywords", "include_patterns", "exclude_patterns",
+            "labels", "events", "history"
+        }
+
         for key, value in result.items():
             # 处理 datetime 类型
             if isinstance(value, datetime):
                 result[key] = value.isoformat()
-            # 处理 JSON 字段 - 确保它们是 Python 字典/列表
-            elif key in json_fields and value is not None:
+            # 处理 JSON 字典字段
+            elif key in json_dict_fields and value is not None:
                 if isinstance(value, str):
                     try:
                         result[key] = json.loads(value)
                     except (json.JSONDecodeError, TypeError):
                         result[key] = {}
-                elif not isinstance(value, (dict, list)):
-                    # 如果既不是字符串也不是字典/列表，设为空字典
+                elif not isinstance(value, dict):
                     result[key] = {}
+            # 处理 JSON 列表字段
+            elif key in json_list_fields and value is not None:
+                if isinstance(value, str):
+                    try:
+                        result[key] = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        result[key] = []
+                elif not isinstance(value, list):
+                    result[key] = []
         return result
