@@ -17,6 +17,7 @@ import {
   BindSpacePage,
   SyncedPagesPage,
 } from "@/pages/confluence";
+import { MonitoringDashboard } from "@/pages/monitoring";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 
 export function AppRouter() {
@@ -129,6 +130,14 @@ export function AppRouter() {
           element={
             <ProtectedRoute requiredPermission="console:settings:view">
               <SettingsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/monitoring"
+          element={
+            <ProtectedRoute requiredPermission="console:dashboard:view">
+              <MonitoringDashboard />
             </ProtectedRoute>
           }
         />

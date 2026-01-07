@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import {
   Plus,
@@ -111,6 +112,7 @@ function ConnectionCard({
   onTest: () => void;
   onCreateBinding: () => void;
 }) {
+  const { t } = useTranslation();
   const statusColors = {
     active: "bg-green-500/10 text-green-600 border-green-200",
     disabled: "bg-gray-500/10 text-gray-600 border-gray-200",
@@ -137,17 +139,17 @@ function ConnectionCard({
               <Badge variant="outline" className={statusColors[connection.status]}>
                 {statusIcons[connection.status]}
                 <span className="ml-1">
-                  {connection.status === "active" ? "已连接" : connection.status === "error" ? "错误" : "已禁用"}
+                  {t(`confluence.status.${connection.status === "active" ? "connected" : connection.status}`)}
                 </span>
               </Badge>
               <Badge variant="outline" className="text-muted-foreground">
                 {connection.sync_mode === "polling" ? (
                   <>
                     <Clock className="h-3 w-3 mr-1" />
-                    {connection.polling_interval_minutes}分钟
+                    {t("confluence.syncMode.interval", { minutes: connection.polling_interval_minutes })}
                   </>
                 ) : (
-                  "手动同步"
+                  t("confluence.syncMode.manual")
                 )}
               </Badge>
             </div>
@@ -163,20 +165,20 @@ function ConnectionCard({
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={onTest}>
               <Zap className="h-4 w-4 mr-2" />
-              测试连接
+              {t("confluence.actions.test")}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onCreateBinding}>
               <Link2 className="h-4 w-4 mr-2" />
-              绑定空间
+              {t("confluence.bindSpace")}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={onEdit}>
               <Edit3 className="h-4 w-4 mr-2" />
-              编辑
+              {t("confluence.actions.edit")}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onDelete} className="text-red-600">
               <Trash2 className="h-4 w-4 mr-2" />
-              删除
+              {t("confluence.actions.delete")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -190,7 +192,7 @@ function ConnectionCard({
 
       {connection.last_sync_at && (
         <p className="mt-3 text-xs text-muted-foreground">
-          最后同步: {new Date(connection.last_sync_at).toLocaleString("zh-CN")}
+          {t("confluence.lastSync")}: {new Date(connection.last_sync_at).toLocaleString()}
         </p>
       )}
     </Card>
@@ -212,6 +214,7 @@ function BindingCard({
   onSync: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   const statusColors = {
     pending: "bg-yellow-500/10 text-yellow-600 border-yellow-200",
     syncing: "bg-blue-500/10 text-blue-600 border-blue-200",
@@ -220,10 +223,10 @@ function BindingCard({
   };
 
   const statusLabels = {
-    pending: "等待同步",
-    syncing: "同步中",
-    completed: "已同步",
-    error: "同步失败",
+    pending: t("confluence.bindingStatus.pending"),
+    syncing: t("confluence.bindingStatus.syncing"),
+    completed: t("confluence.bindingStatus.completed"),
+    error: t("confluence.bindingStatus.error"),
   };
 
   return (
@@ -257,7 +260,7 @@ function BindingCard({
                 {statusLabels[binding.status]}
               </Badge>
               <span className="text-xs text-muted-foreground">
-                {binding.synced_page_count}/{binding.total_page_count} 页面
+                {binding.synced_page_count}/{binding.total_page_count} {t("confluence.pages")}
               </span>
             </div>
           </div>
@@ -275,7 +278,7 @@ function BindingCard({
             ) : (
               <Play className="h-4 w-4" />
             )}
-            <span className="ml-1.5">同步</span>
+            <span className="ml-1.5">{t("confluence.sync")}</span>
           </Button>
           <Button variant="ghost" size="icon" className="h-8 w-8 text-red-500" onClick={onDelete}>
             <Trash2 className="h-4 w-4" />
@@ -381,6 +384,7 @@ function PageTreeNode({
 // ============================================================
 
 export default function ConfluencePage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   // State
@@ -528,7 +532,7 @@ export default function ConfluencePage() {
       const result = await testConnection(connectionId);
       setTestResult(result);
     } catch (error) {
-      setTestResult({ status: "error", message: error instanceof Error ? error.message : "测试失败" });
+      setTestResult({ status: "error", message: error instanceof Error ? error.message : t("confluence.test.testFailed") });
     }
   };
 
@@ -677,8 +681,8 @@ export default function ConfluencePage() {
                 <Cloud className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-foreground">Confluence 集成</h1>
-                <p className="text-sm text-muted-foreground">管理 Confluence 连接和空间同步</p>
+                <h1 className="text-lg font-semibold text-foreground">{t("confluence.pageTitle")}</h1>
+                <p className="text-sm text-muted-foreground">{t("confluence.pageDesc")}</p>
               </div>
             </div>
 
@@ -693,7 +697,7 @@ export default function ConfluencePage() {
               </Button>
               <Button onClick={() => setCreateDialogOpen(true)} className="bg-primary hover:bg-primary/90">
                 <Plus className="h-4 w-4 mr-1.5" />
-                新建连接
+                {t("confluence.newConnection")}
               </Button>
             </div>
           </div>
@@ -704,7 +708,7 @@ export default function ConfluencePage() {
       <div className="max-w-[1400px] mx-auto px-6 py-6 space-y-8">
         {/* Connections Section */}
         <section>
-          <h2 className="text-base font-semibold text-foreground mb-4">连接配置</h2>
+          <h2 className="text-base font-semibold text-foreground mb-4">{t("confluence.connectionsSection")}</h2>
           {loadingConnections ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -712,11 +716,11 @@ export default function ConfluencePage() {
           ) : connections.length === 0 ? (
             <Card className="p-12 text-center border-dashed">
               <Cloud className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
-              <h3 className="font-medium text-foreground mb-1">暂无连接</h3>
-              <p className="text-sm text-muted-foreground mb-4">创建一个 Confluence 连接开始同步文档</p>
+              <h3 className="font-medium text-foreground mb-1">{t("confluence.noConnections")}</h3>
+              <p className="text-sm text-muted-foreground mb-4">{t("confluence.noConnectionsDesc")}</p>
               <Button onClick={() => setCreateDialogOpen(true)}>
                 <Plus className="h-4 w-4 mr-1.5" />
-                新建连接
+                {t("confluence.newConnection")}
               </Button>
             </Card>
           ) : (
@@ -737,7 +741,7 @@ export default function ConfluencePage() {
 
         {/* Bindings Section */}
         <section>
-          <h2 className="text-base font-semibold text-foreground mb-4">空间绑定</h2>
+          <h2 className="text-base font-semibold text-foreground mb-4">{t("confluence.bindingsSection")}</h2>
           {loadingBindings ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
@@ -745,8 +749,8 @@ export default function ConfluencePage() {
           ) : bindings.length === 0 ? (
             <Card className="p-8 text-center border-dashed">
               <Link2 className="h-10 w-10 mx-auto text-muted-foreground/50 mb-3" />
-              <p className="text-sm text-muted-foreground">暂无空间绑定</p>
-              <p className="text-xs text-muted-foreground/70 mt-1">在连接卡片上点击「绑定空间」添加</p>
+              <p className="text-sm text-muted-foreground">{t("confluence.noBindings")}</p>
+              <p className="text-xs text-muted-foreground/70 mt-1">{t("confluence.noBindingsHint")}</p>
             </Card>
           ) : (
             <div className="space-y-3">
@@ -754,7 +758,7 @@ export default function ConfluencePage() {
                 <BindingCard
                   key={binding.binding_id}
                   binding={binding}
-                  datasetName={datasetMap.get(binding.dataset_id)?.name || `知识库 ${binding.dataset_id.slice(0, 8)}...`}
+                  datasetName={datasetMap.get(binding.dataset_id)?.name || t("confluence.form.datasetFallback", { id: binding.dataset_id.slice(0, 8) })}
                   onSync={() => syncMutation.mutate(binding.binding_id)}
                   onDelete={() => openDeleteBindingDialog(binding.binding_id)}
                 />
@@ -768,45 +772,45 @@ export default function ConfluencePage() {
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>新建 Confluence 连接</DialogTitle>
-            <DialogDescription>配置 Confluence 站点的访问凭据</DialogDescription>
+            <DialogTitle>{t("confluence.dialogs.createTitle")}</DialogTitle>
+            <DialogDescription>{t("confluence.dialogs.createDesc")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div>
-              <Label>连接名称</Label>
+              <Label>{t("confluence.form.connectionName")}</Label>
               <Input
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                placeholder="例如: 公司文档库"
+                placeholder={t("confluence.form.connectionNamePlaceholder")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>Confluence 域名</Label>
+              <Label>{t("confluence.form.domain")}</Label>
               <Input
                 value={formDomain}
                 onChange={(e) => setFormDomain(e.target.value)}
-                placeholder="例如: yourcompany.atlassian.net"
+                placeholder={t("confluence.form.domainPlaceholder")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>邮箱</Label>
+              <Label>{t("confluence.form.email")}</Label>
               <Input
                 type="email"
                 value={formEmail}
                 onChange={(e) => setFormEmail(e.target.value)}
-                placeholder="用于认证的邮箱地址"
+                placeholder={t("confluence.form.emailPlaceholder")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>API Token</Label>
+              <Label>{t("confluence.form.apiToken")}</Label>
               <Input
                 type="password"
                 value={formApiToken}
                 onChange={(e) => setFormApiToken(e.target.value)}
-                placeholder="Atlassian API Token"
+                placeholder={t("confluence.form.apiTokenPlaceholder")}
                 className="mt-1.5"
               />
               <p className="text-xs text-muted-foreground mt-1">
@@ -816,26 +820,26 @@ export default function ConfluencePage() {
                   rel="noopener noreferrer"
                   className="text-primary hover:underline"
                 >
-                  获取 API Token
+                  {t("confluence.form.getApiToken")}
                   <ExternalLink className="h-3 w-3 inline ml-1" />
                 </a>
               </p>
             </div>
             <div>
-              <Label>同步模式</Label>
+              <Label>{t("confluence.form.syncMode")}</Label>
               <Select value={formSyncMode} onValueChange={(v) => setFormSyncMode(v as "manual" | "polling")}>
                 <SelectTrigger className="mt-1.5">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="manual">手动同步</SelectItem>
-                  <SelectItem value="polling">定时轮询</SelectItem>
+                  <SelectItem value="manual">{t("confluence.syncMode.manual")}</SelectItem>
+                  <SelectItem value="polling">{t("confluence.syncMode.polling")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             {formSyncMode === "polling" && (
               <div>
-                <Label>轮询间隔（分钟）</Label>
+                <Label>{t("confluence.form.pollingInterval")}</Label>
                 <Input
                   type="number"
                   min={5}
@@ -849,14 +853,14 @@ export default function ConfluencePage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
-              取消
+              {t("confluence.actions.cancel")}
             </Button>
             <Button
               onClick={handleCreate}
               disabled={createMutation.isPending || !formName || !formDomain || !formEmail || !formApiToken}
             >
               {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              创建
+              {t("confluence.actions.create")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -872,63 +876,63 @@ export default function ConfluencePage() {
       }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>编辑 Confluence 连接</DialogTitle>
-            <DialogDescription>修改连接配置（API Token 留空则不修改）</DialogDescription>
+            <DialogTitle>{t("confluence.dialogs.editTitle")}</DialogTitle>
+            <DialogDescription>{t("confluence.dialogs.editDesc")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div>
-              <Label>连接名称</Label>
+              <Label>{t("confluence.form.connectionName")}</Label>
               <Input
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                placeholder="例如: 公司文档库"
+                placeholder={t("confluence.form.connectionNamePlaceholder")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>Confluence 域名</Label>
+              <Label>{t("confluence.form.domain")}</Label>
               <Input
                 value={formDomain}
                 disabled
                 className="mt-1.5 bg-muted"
               />
-              <p className="text-xs text-muted-foreground mt-1">域名不可修改</p>
+              <p className="text-xs text-muted-foreground mt-1">{t("confluence.form.domainHint")}</p>
             </div>
             <div>
-              <Label>邮箱</Label>
+              <Label>{t("confluence.form.email")}</Label>
               <Input
                 type="email"
                 value={formEmail}
                 onChange={(e) => setFormEmail(e.target.value)}
-                placeholder="用于认证的邮箱地址"
+                placeholder={t("confluence.form.emailPlaceholder")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>API Token</Label>
+              <Label>{t("confluence.form.apiToken")}</Label>
               <Input
                 type="password"
                 value={formApiToken}
                 onChange={(e) => setFormApiToken(e.target.value)}
-                placeholder="留空则不修改"
+                placeholder={t("confluence.form.apiTokenHintEmpty")}
                 className="mt-1.5"
               />
             </div>
             <div>
-              <Label>同步模式</Label>
+              <Label>{t("confluence.form.syncMode")}</Label>
               <Select value={formSyncMode} onValueChange={(v) => setFormSyncMode(v as "manual" | "polling")}>
                 <SelectTrigger className="mt-1.5">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="manual">手动同步</SelectItem>
-                  <SelectItem value="polling">定时轮询</SelectItem>
+                  <SelectItem value="manual">{t("confluence.syncMode.manual")}</SelectItem>
+                  <SelectItem value="polling">{t("confluence.syncMode.polling")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             {formSyncMode === "polling" && (
               <div>
-                <Label>轮询间隔（分钟）</Label>
+                <Label>{t("confluence.form.pollingInterval")}</Label>
                 <Input
                   type="number"
                   min={5}
@@ -942,14 +946,14 @@ export default function ConfluencePage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
-              取消
+              {t("confluence.actions.cancel")}
             </Button>
             <Button
               onClick={handleUpdate}
               disabled={updateMutation.isPending || !formName || !formEmail}
             >
               {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              保存
+              {t("confluence.actions.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -959,19 +963,19 @@ export default function ConfluencePage() {
       <AlertDialog open={deleteConnectionDialogOpen} onOpenChange={setDeleteConnectionDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认删除连接</AlertDialogTitle>
+            <AlertDialogTitle>{t("confluence.dialogs.deleteTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要删除连接 "{selectedConnection?.name}" 吗？此操作不可撤销，相关的空间绑定也将被删除。
+              {t("confluence.dialogs.deleteMessage", { name: selectedConnection?.name })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("confluence.actions.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-red-600 hover:bg-red-700"
               onClick={() => selectedConnection && deleteMutation.mutate(selectedConnection.connection_id)}
             >
               {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              删除
+              {t("confluence.actions.delete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -981,19 +985,19 @@ export default function ConfluencePage() {
       <AlertDialog open={deleteBindingDialogOpen} onOpenChange={setDeleteBindingDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认解除绑定</AlertDialogTitle>
+            <AlertDialogTitle>{t("confluence.dialogs.removeBindingTitle")}</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要解除此空间绑定吗？已同步的文档不会被删除，但后续不再自动同步更新。
+              {t("confluence.dialogs.removeBindingMessage")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("confluence.actions.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-red-600 hover:bg-red-700"
               onClick={() => selectedBindingId && deleteBindingMutation.mutate(selectedBindingId)}
             >
               {deleteBindingMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              解除绑定
+              {t("confluence.actions.unbind")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1003,16 +1007,16 @@ export default function ConfluencePage() {
       <Dialog open={bindDialogOpen} onOpenChange={setBindDialogOpen}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
-            <DialogTitle>绑定 Confluence 空间</DialogTitle>
-            <DialogDescription>选择要同步的空间、目标知识库和可选的根页面</DialogDescription>
+            <DialogTitle>{t("confluence.dialogs.bindTitle")}</DialogTitle>
+            <DialogDescription>{t("confluence.dialogs.bindDesc")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4 flex-1 overflow-y-auto">
             <div>
-              <Label>选择空间</Label>
+              <Label>{t("confluence.form.selectSpace")}</Label>
               {discoveringSpaces ? (
                 <div className="flex items-center gap-2 mt-2 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在获取空间列表...
+                  {t("confluence.form.loadingSpaces")}
                 </div>
               ) : (
                 <Select
@@ -1025,7 +1029,7 @@ export default function ConfluencePage() {
                   }}
                 >
                   <SelectTrigger className="mt-1.5">
-                    <SelectValue placeholder="选择 Confluence 空间" />
+                    <SelectValue placeholder={t("confluence.form.selectSpacePlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
                     {discoveredSpaces.map((space) => (
@@ -1042,7 +1046,7 @@ export default function ConfluencePage() {
             {bindSpaceKey && (
               <div>
                 <div className="flex items-center justify-between">
-                  <Label>选择同步范围（可选）</Label>
+                  <Label>{t("confluence.form.selectSyncScope")}</Label>
                   {bindRootPageId && (
                     <Button
                       variant="ghost"
@@ -1050,19 +1054,19 @@ export default function ConfluencePage() {
                       className="h-6 text-xs"
                       onClick={() => selectRootPage(null, null)}
                     >
-                      同步整个空间
+                      {t("confluence.actions.syncEntireSpace")}
                     </Button>
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-0.5 mb-2">
                   {bindRootPageId
-                    ? `已选择: ${bindRootPageTitle} (仅同步此页面及其子页面)`
-                    : "不选择则同步整个空间"}
+                    ? t("confluence.form.selectedPage", { title: bindRootPageTitle })
+                    : t("confluence.form.noSelectionHint")}
                 </p>
                 {loadingPageTree ? (
                   <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    正在加载页面结构...
+                    {t("confluence.form.loadingPageTree")}
                   </div>
                 ) : pageTree && pageTree.root_pages.length > 0 ? (
                   <div className="border rounded-md p-2 max-h-48 overflow-y-auto bg-muted/30">
@@ -1078,16 +1082,16 @@ export default function ConfluencePage() {
                     ))}
                   </div>
                 ) : pageTree ? (
-                  <p className="text-sm text-muted-foreground py-2">该空间暂无页面</p>
+                  <p className="text-sm text-muted-foreground py-2">{t("confluence.form.noPages")}</p>
                 ) : null}
               </div>
             )}
 
             <div>
-              <Label>目标知识库</Label>
+              <Label>{t("confluence.form.targetDataset")}</Label>
               <Select value={bindDatasetId} onValueChange={setBindDatasetId}>
                 <SelectTrigger className="mt-1.5">
-                  <SelectValue placeholder="选择知识库" />
+                  <SelectValue placeholder={t("confluence.form.selectDataset")} />
                 </SelectTrigger>
                 <SelectContent>
                   {datasets.map((ds) => (
@@ -1099,21 +1103,21 @@ export default function ConfluencePage() {
               </Select>
               {datasets.length === 0 && (
                 <p className="text-xs text-muted-foreground mt-1">
-                  暂无知识库，请先创建知识库
+                  {t("confluence.form.noDatasets")}
                 </p>
               )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBindDialogOpen(false)}>
-              取消
+              {t("confluence.actions.cancel")}
             </Button>
             <Button
               onClick={handleBind}
               disabled={bindMutation.isPending || !bindSpaceKey || !bindDatasetId}
             >
               {bindMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
-              绑定
+              {t("confluence.actions.bind")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1139,7 +1143,7 @@ export default function ConfluencePage() {
                     testResult.status === "success" ? "text-green-800" : "text-red-800"
                   }`}
                 >
-                  {testResult.status === "success" ? "连接成功" : "连接失败"}
+                  {testResult.status === "success" ? t("confluence.test.success") : t("confluence.test.failed")}
                 </p>
                 <p
                   className={`text-sm ${

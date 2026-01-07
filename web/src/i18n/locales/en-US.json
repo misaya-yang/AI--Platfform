@@ -33,16 +33,36 @@
     "retry": "Retry"
   },
   "metrics": {
-    "title": "System Metrics",
+    "title": "Monitoring Dashboard",
     "totalRequests": "Total Requests",
     "successRate": "Success Rate",
     "avgLatency": "Avg Latency",
     "activeServices": "Active Services",
     "hourlyTrend": "24-Hour Request Trend",
     "lastUpdated": "Updated at",
+    "noData": "No data yet",
+    "totalTokens": "Token Usage",
+    "estimatedCost": "Estimated Cost",
+    "totalRuns": "Agent Runs",
+    "avgRunDuration": "Avg Run Duration",
+    "latencyPercentiles": "Latency Percentiles",
+    "latencyDistribution": "Latency Distribution",
+    "systemStatus": {
+      "healthy": "System Healthy",
+      "degraded": "Degraded",
+      "critical": "Critical"
+    },
+    "tokenBreakdown": "In: {{input}} / Out: {{output}}",
+    "runSuccessRate": "Success: {{rate}}%",
+    "waitingForData": "Waiting for data...",
+    "waitingForRun": "Waiting for runs...",
+    "peakValue": "Peak: {{value}} req/hr",
+    "p95Label": "P95: {{value}}",
+    "refreshData": "Refresh data",
+    "reload": "Reload",
     "error": {
       "title": "Failed to load metrics",
-      "description": "Please check your network connection or try again later"
+      "description": "Please check your network connection or service status"
     }
   },
   "nav": {
@@ -244,47 +264,97 @@
   "confluence": {
     "title": "Confluence",
     "subtitle": "Knowledge Sync",
+    "pageTitle": "Confluence Integration",
+    "pageDesc": "Manage Confluence connections and space syncing",
     "connections": "Connections",
+    "connectionsSection": "Connection Settings",
     "bindings": "Space Bindings",
+    "bindingsSection": "Space Bindings",
     "newConnection": "New Connection",
     "bindSpace": "Bind Space",
     "configure": "Configure",
     "searchConnections": "Search connections...",
-    "noConnections": "No Confluence Connections",
-    "noConnectionsDesc": "Connect your Confluence workspace to sync documentation with your knowledge base.",
+    "noConnections": "No Connections",
+    "noConnectionsDesc": "Create a Confluence connection to start syncing documents",
+    "noBindings": "No Space Bindings",
+    "noBindingsHint": "Click \"Bind Space\" on a connection card to add",
     "noSearchResults": "No connections match your search",
+    "lastSync": "Last sync",
+    "pages": "pages",
+    "sync": "Sync",
     "status": {
       "connected": "Connected",
       "disabled": "Disabled",
       "error": "Error"
     },
-    "syncMode": {
-      "manual": "Manual Sync",
-      "polling": "Auto Sync",
-      "interval": "Every {{minutes}}m"
-    },
     "bindingStatus": {
       "pending": "Pending",
       "syncing": "Syncing",
       "completed": "Synced",
-      "error": "Error"
+      "error": "Sync Failed"
+    },
+    "syncMode": {
+      "manual": "Manual Sync",
+      "polling": "Scheduled Polling",
+      "interval": "{{minutes}}m"
     },
     "actions": {
       "test": "Test Connection",
       "sync": "Sync",
       "settings": "Settings",
       "delete": "Delete",
-      "remove": "Remove"
+      "remove": "Remove",
+      "edit": "Edit",
+      "create": "Create",
+      "save": "Save",
+      "cancel": "Cancel",
+      "bind": "Bind",
+      "unbind": "Unbind",
+      "syncEntireSpace": "Sync Entire Space"
     },
     "dialogs": {
-      "deleteTitle": "Delete Connection",
-      "deleteMessage": "Are you sure you want to delete \"{{name}}\"? This will also remove all space bindings. This action cannot be undone.",
-      "removeBindingTitle": "Remove Binding",
-      "removeBindingMessage": "Are you sure you want to remove this space binding? Synced documents will not be deleted, but future syncs will stop."
+      "createTitle": "New Confluence Connection",
+      "createDesc": "Configure Confluence site access credentials",
+      "editTitle": "Edit Confluence Connection",
+      "editDesc": "Modify connection settings (leave API Token empty to keep current)",
+      "deleteTitle": "Confirm Delete Connection",
+      "deleteMessage": "Are you sure you want to delete connection \"{{name}}\"? This action cannot be undone and will also remove all space bindings.",
+      "removeBindingTitle": "Confirm Remove Binding",
+      "removeBindingMessage": "Are you sure you want to remove this space binding? Synced documents will not be deleted, but future auto-sync will stop.",
+      "bindTitle": "Bind Confluence Space",
+      "bindDesc": "Select the space to sync, target knowledge base, and optional root page"
     },
     "test": {
       "success": "Connection Successful",
-      "failed": "Connection Failed"
+      "failed": "Connection Failed",
+      "testFailed": "Test Failed"
+    },
+    "form": {
+      "connectionName": "Connection Name",
+      "connectionNamePlaceholder": "e.g., Company Docs",
+      "domain": "Confluence Domain",
+      "domainPlaceholder": "e.g., yourcompany.atlassian.net",
+      "domainHint": "Domain cannot be changed",
+      "email": "Email",
+      "emailPlaceholder": "Email for authentication",
+      "apiToken": "API Token",
+      "apiTokenPlaceholder": "Atlassian API Token",
+      "apiTokenHintEmpty": "Leave empty to keep current",
+      "getApiToken": "Get API Token",
+      "syncMode": "Sync Mode",
+      "pollingInterval": "Polling Interval (minutes)",
+      "selectSpace": "Select Space",
+      "selectSpacePlaceholder": "Select a Confluence space",
+      "loadingSpaces": "Loading spaces...",
+      "selectSyncScope": "Select Sync Scope (Optional)",
+      "selectedPage": "Selected: {{title}} (only syncs this page and its children)",
+      "noSelectionHint": "No selection means sync entire space",
+      "loadingPageTree": "Loading page tree...",
+      "noPages": "No pages in this space",
+      "targetDataset": "Target Knowledge Base",
+      "selectDataset": "Select knowledge base",
+      "noDatasets": "No knowledge bases yet, please create one first",
+      "datasetFallback": "Dataset {{id}}..."
     },
     "create": {
       "title": "New Connection",

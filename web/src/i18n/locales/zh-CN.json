@@ -33,16 +33,36 @@
     "retry": "重试"
   },
   "metrics": {
-    "title": "系统指标",
+    "title": "监控面板",
     "totalRequests": "总请求数",
     "successRate": "成功率",
     "avgLatency": "平均延迟",
     "activeServices": "活跃服务",
     "hourlyTrend": "24小时请求趋势",
     "lastUpdated": "更新于",
+    "noData": "暂无数据",
+    "totalTokens": "Token 消耗",
+    "estimatedCost": "预估成本",
+    "totalRuns": "Agent 执行",
+    "avgRunDuration": "平均执行时长",
+    "latencyPercentiles": "延迟百分位数",
+    "latencyDistribution": "延迟分布",
+    "systemStatus": {
+      "healthy": "系统正常",
+      "degraded": "性能下降",
+      "critical": "存在问题"
+    },
+    "tokenBreakdown": "输入: {{input}} / 输出: {{output}}",
+    "runSuccessRate": "成功率: {{rate}}%",
+    "waitingForData": "等待请求...",
+    "waitingForRun": "等待执行...",
+    "peakValue": "峰值: {{value}} 请求/小时",
+    "p95Label": "P95: {{value}}",
+    "refreshData": "刷新数据",
+    "reload": "重新加载",
     "error": {
-      "title": "无法加载指标数据",
-      "description": "请检查网络连接或稍后重试"
+      "title": "无法加载监控数据",
+      "description": "请检查网络连接或服务状态后重试"
     }
   },
   "nav": {
@@ -244,47 +264,97 @@
   "confluence": {
     "title": "Confluence",
     "subtitle": "知识同步",
+    "pageTitle": "Confluence 集成",
+    "pageDesc": "管理 Confluence 连接和空间同步",
     "connections": "连接",
+    "connectionsSection": "连接配置",
     "bindings": "空间绑定",
+    "bindingsSection": "空间绑定",
     "newConnection": "新建连接",
     "bindSpace": "绑定空间",
     "configure": "配置",
     "searchConnections": "搜索连接...",
-    "noConnections": "暂无 Confluence 连接",
-    "noConnectionsDesc": "连接你的 Confluence 工作空间，将文档同步到知识库。",
+    "noConnections": "暂无连接",
+    "noConnectionsDesc": "创建一个 Confluence 连接开始同步文档",
+    "noBindings": "暂无空间绑定",
+    "noBindingsHint": "在连接卡片上点击「绑定空间」添加",
     "noSearchResults": "没有匹配的连接",
+    "lastSync": "最后同步",
+    "pages": "页面",
+    "sync": "同步",
     "status": {
       "connected": "已连接",
       "disabled": "已禁用",
       "error": "错误"
     },
-    "syncMode": {
-      "manual": "手动同步",
-      "polling": "自动同步",
-      "interval": "每 {{minutes}} 分钟"
-    },
     "bindingStatus": {
-      "pending": "待同步",
+      "pending": "等待同步",
       "syncing": "同步中",
       "completed": "已同步",
-      "error": "错误"
+      "error": "同步失败"
+    },
+    "syncMode": {
+      "manual": "手动同步",
+      "polling": "定时轮询",
+      "interval": "{{minutes}}分钟"
     },
     "actions": {
       "test": "测试连接",
       "sync": "同步",
       "settings": "设置",
       "delete": "删除",
-      "remove": "移除"
+      "remove": "移除",
+      "edit": "编辑",
+      "create": "创建",
+      "save": "保存",
+      "cancel": "取消",
+      "bind": "绑定",
+      "unbind": "解除绑定",
+      "syncEntireSpace": "同步整个空间"
     },
     "dialogs": {
-      "deleteTitle": "删除连接",
-      "deleteMessage": "确定要删除 \"{{name}}\" 吗？这将同时移除所有空间绑定。此操作无法撤销。",
-      "removeBindingTitle": "移除绑定",
-      "removeBindingMessage": "确定要移除此空间绑定吗？已同步的文档不会被删除，但后续同步将停止。"
+      "createTitle": "新建 Confluence 连接",
+      "createDesc": "配置 Confluence 站点的访问凭据",
+      "editTitle": "编辑 Confluence 连接",
+      "editDesc": "修改连接配置（API Token 留空则不修改）",
+      "deleteTitle": "确认删除连接",
+      "deleteMessage": "确定要删除连接 \"{{name}}\" 吗？此操作不可撤销，相关的空间绑定也将被删除。",
+      "removeBindingTitle": "确认解除绑定",
+      "removeBindingMessage": "确定要解除此空间绑定吗？已同步的文档不会被删除，但后续不再自动同步更新。",
+      "bindTitle": "绑定 Confluence 空间",
+      "bindDesc": "选择要同步的空间、目标知识库和可选的根页面"
     },
     "test": {
       "success": "连接成功",
-      "failed": "连接失败"
+      "failed": "连接失败",
+      "testFailed": "测试失败"
+    },
+    "form": {
+      "connectionName": "连接名称",
+      "connectionNamePlaceholder": "例如: 公司文档库",
+      "domain": "Confluence 域名",
+      "domainPlaceholder": "例如: yourcompany.atlassian.net",
+      "domainHint": "域名不可修改",
+      "email": "邮箱",
+      "emailPlaceholder": "用于认证的邮箱地址",
+      "apiToken": "API Token",
+      "apiTokenPlaceholder": "Atlassian API Token",
+      "apiTokenHintEmpty": "留空则不修改",
+      "getApiToken": "获取 API Token",
+      "syncMode": "同步模式",
+      "pollingInterval": "轮询间隔（分钟）",
+      "selectSpace": "选择空间",
+      "selectSpacePlaceholder": "选择 Confluence 空间",
+      "loadingSpaces": "正在获取空间列表...",
+      "selectSyncScope": "选择同步范围（可选）",
+      "selectedPage": "已选择: {{title}} (仅同步此页面及其子页面)",
+      "noSelectionHint": "不选择则同步整个空间",
+      "loadingPageTree": "正在加载页面结构...",
+      "noPages": "该空间暂无页面",
+      "targetDataset": "目标知识库",
+      "selectDataset": "选择知识库",
+      "noDatasets": "暂无知识库，请先创建知识库",
+      "datasetFallback": "知识库 {{id}}..."
     },
     "create": {
       "title": "新建连接",

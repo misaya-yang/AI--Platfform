@@ -29,6 +29,8 @@ from .core.errors import (
 )
 from .core.observability.logging import configure_structured_logging, get_logger
 from .core.observability.metrics import get_metrics
+from .services.metrics.metrics_recorder import init_metrics_recorder
+from .services.metrics.realtime_metrics import init_realtime_metrics
 from .adapters.registry import auto_register_builtin_adapters
 # 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
 from .core.middleware.streaming import (
@@ -397,6 +399,12 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
         config=GuestSessionConfig(),
         redis_client=container.redis,
     )
+
+    # Initialize metrics recorder with Redis for dashboard
+    init_metrics_recorder(container.redis)
+
+    # Initialize realtime metrics service for LangSmith-style dashboard
+    init_realtime_metrics(container.redis)
 
 
 async def _load_services_from_database(container: Container, settings: Settings) -> None:

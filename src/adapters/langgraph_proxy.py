@@ -7,11 +7,13 @@ LangGraph Server 代理层
 - 限流检查：按用户层级应用不同限流策略
 - 权限验证：验证 Thread 所有权、Assistant 访问权限
 - 上下文注入：为 Run 注入用户上下文
+- 指标收集：记录 token 使用和 run 执行指标
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -19,6 +21,10 @@ from datetime import datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
+
+from ..services.metrics import get_metrics_recorder
+
+logger = logging.getLogger(__name__)
 
 
 # ============ 数据类定义 ============
@@ -692,13 +698,15 @@ class LangGraphProxy:
         interrupt_before: Optional[List[str]] = None,
         interrupt_after: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """创建 Run"""
+        """创建 Run（异步执行，立即返回）"""
 
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
+        start_time = time.time()
+        run_status = "success"
 
         try:
             client = await self._get_client(instance)
@@ -725,8 +733,23 @@ class LangGraphProxy:
             response = await client.post(f"/threads/{thread_id}/runs", json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
+        except Exception:
+            run_status = "error"
+            raise
         finally:
             instance.active_connections -= 1
+            # Record run metrics (async run, no token info available yet)
+            duration_ms = (time.time() - start_time) * 1000
+            try:
+                metrics_recorder = get_metrics_recorder()
+                await metrics_recorder.record_run(
+                    user_id=user.user_id,
+                    assistant_id=assistant_id,
+                    duration_ms=duration_ms,
+                    status=run_status,
+                )
+            except Exception:
+                pass
 
     async def create_run_wait(
         self,
@@ -744,6 +767,10 @@ class LangGraphProxy:
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
+        start_time = time.time()
+        run_status = "success"
+        input_tokens = 0
+        output_tokens = 0
 
         try:
             client = await self._get_client(instance)
@@ -760,9 +787,33 @@ class LangGraphProxy:
 
             response = await client.post(f"/threads/{thread_id}/runs/wait", json=payload, headers=headers)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+
+            # Extract token usage from response if available
+            usage = result.get("usage", {})
+            input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+
+            return result
+        except Exception:
+            run_status = "error"
+            raise
         finally:
             instance.active_connections -= 1
+            # Record run metrics
+            duration_ms = (time.time() - start_time) * 1000
+            try:
+                metrics_recorder = get_metrics_recorder()
+                await metrics_recorder.record_run(
+                    user_id=user.user_id,
+                    assistant_id=assistant_id,
+                    duration_ms=duration_ms,
+                    status=run_status,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            except Exception:
+                pass
 
     async def stream_run(
         self,
@@ -790,6 +841,11 @@ class LangGraphProxy:
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
+
+        # Metrics tracking
+        start_time = time.time()
+        token_tracker = {"input": 0, "output": 0}
+        run_status = "success"
 
         try:
             client = await self._get_client(instance)
@@ -821,11 +877,76 @@ class LangGraphProxy:
                         if data_str and data_str != "[DONE]":
                             try:
                                 data = json.loads(data_str)
+
+                                # Extract token usage from stream events
+                                extracted = self._extract_token_usage(current_event, data)
+                                token_tracker["input"] += extracted.get("input", 0)
+                                token_tracker["output"] += extracted.get("output", 0)
+
                                 yield {"event": current_event, "data": data}
                             except json.JSONDecodeError:
                                 continue
+
+        except Exception as e:
+            run_status = "error"
+            raise
         finally:
             instance.active_connections -= 1
+
+            # Record run metrics
+            duration_ms = (time.time() - start_time) * 1000
+            try:
+                metrics_recorder = get_metrics_recorder()
+                await metrics_recorder.record_run(
+                    user_id=user.user_id,
+                    assistant_id=assistant_id,
+                    duration_ms=duration_ms,
+                    status=run_status,
+                    input_tokens=token_tracker["input"],
+                    output_tokens=token_tracker["output"],
+                )
+            except Exception as metrics_err:
+                logger.debug(f"Failed to record run metrics: {metrics_err}")
+
+    def _extract_token_usage(
+        self,
+        event: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, int]:
+        """Extract token usage from stream event data
+
+        Supports various formats from different LLM providers:
+        - OpenAI format: usage.prompt_tokens, usage.completion_tokens
+        - Anthropic format: usage.input_tokens, usage.output_tokens
+        - LangGraph metadata format: metadata.usage.*
+
+        Returns:
+            Dict with 'input' and 'output' token counts
+        """
+        input_tokens = 0
+        output_tokens = 0
+
+        # Check for usage in data directly
+        usage = data.get("usage") or data.get("data", {}).get("usage", {})
+        if usage:
+            input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+
+        # Check metadata
+        metadata = data.get("metadata", {})
+        if metadata and "usage" in metadata:
+            meta_usage = metadata["usage"]
+            input_tokens = max(input_tokens, meta_usage.get("prompt_tokens", 0) or meta_usage.get("input_tokens", 0))
+            output_tokens = max(output_tokens, meta_usage.get("completion_tokens", 0) or meta_usage.get("output_tokens", 0))
+
+        # Check for messages event with usage
+        if event == "messages" and isinstance(data, dict):
+            msg_usage = data.get("usage", {})
+            if msg_usage:
+                input_tokens = max(input_tokens, msg_usage.get("prompt_tokens", 0) or msg_usage.get("input_tokens", 0))
+                output_tokens = max(output_tokens, msg_usage.get("completion_tokens", 0) or msg_usage.get("output_tokens", 0))
+
+        return {"input": input_tokens, "output": output_tokens}
     
     async def get_run(
         self,
@@ -896,6 +1017,10 @@ class LangGraphProxy:
         """创建无状态 Run（一次性对话）"""
         instance = await self.lb.select_instance()
         instance.active_connections += 1
+        start_time = time.time()
+        run_status = "success"
+        input_tokens = 0
+        output_tokens = 0
 
         try:
             client = await self._get_client(instance)
@@ -910,9 +1035,33 @@ class LangGraphProxy:
 
             response = await client.post("/runs/wait", json=payload, headers=headers)
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+
+            # Extract token usage from response if available
+            usage = result.get("usage", {})
+            input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+
+            return result
+        except Exception:
+            run_status = "error"
+            raise
         finally:
             instance.active_connections -= 1
+            # Record run metrics
+            duration_ms = (time.time() - start_time) * 1000
+            try:
+                metrics_recorder = get_metrics_recorder()
+                await metrics_recorder.record_run(
+                    user_id=user.user_id,
+                    assistant_id=assistant_id,
+                    duration_ms=duration_ms,
+                    status=run_status,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            except Exception:
+                pass
 
     # ============ Store API (Memory) ============
 

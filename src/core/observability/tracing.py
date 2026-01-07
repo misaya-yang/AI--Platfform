@@ -341,6 +341,129 @@ class TracingMiddleware(BaseHTTPMiddleware):
             clear_log_context()
 
 
+# ============ LangGraph & LLM Tracing Helpers ============
+
+
+def trace_langgraph_run(
+    assistant_id: str,
+    thread_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Optional[Span]:
+    """
+    Start tracing a LangGraph run
+
+    Usage:
+        span = trace_langgraph_run("assistant-123", thread_id="thread-456")
+        try:
+            # ... execute run
+            if span:
+                span.set_attribute("tokens.input", 100)
+                span.set_attribute("tokens.output", 50)
+        finally:
+            if span:
+                span.end("ok")
+    """
+    context = get_trace_context()
+    if not context:
+        return None
+
+    attributes = {
+        "langgraph.assistant_id": assistant_id,
+        "langgraph.run_type": "stream" if not run_id else "invoke",
+    }
+    if thread_id:
+        attributes["langgraph.thread_id"] = thread_id
+    if user_id:
+        attributes["user.id"] = user_id
+    if run_id:
+        attributes["langgraph.run_id"] = run_id
+
+    return context.start_span(f"langgraph.run.{assistant_id}", attributes)
+
+
+def trace_llm_call(
+    model: str,
+    provider: str = "unknown",
+    user_id: Optional[str] = None,
+) -> Optional[Span]:
+    """
+    Start tracing an LLM API call
+
+    Usage:
+        span = trace_llm_call("gpt-4", provider="openai")
+        try:
+            # ... call LLM
+            if span:
+                span.set_attribute("tokens.input", 500)
+                span.set_attribute("tokens.output", 200)
+        finally:
+            if span:
+                span.end("ok")
+    """
+    context = get_trace_context()
+    if not context:
+        return None
+
+    attributes = {
+        "llm.model": model,
+        "llm.provider": provider,
+    }
+    if user_id:
+        attributes["user.id"] = user_id
+
+    return context.start_span(f"llm.call.{model}", attributes)
+
+
+def record_token_usage(
+    span: Optional[Span],
+    input_tokens: int,
+    output_tokens: int,
+    model: Optional[str] = None,
+) -> None:
+    """Record token usage on a span"""
+    if span is None:
+        return
+
+    span.set_attribute("tokens.input", input_tokens)
+    span.set_attribute("tokens.output", output_tokens)
+    span.set_attribute("tokens.total", input_tokens + output_tokens)
+    if model:
+        span.set_attribute("llm.model", model)
+
+
+def record_run_completion(
+    span: Optional[Span],
+    duration_ms: float,
+    status: str = "success",
+    error_message: Optional[str] = None,
+) -> None:
+    """Record LangGraph run completion"""
+    if span is None:
+        return
+
+    span.set_attribute("run.duration_ms", duration_ms)
+    span.set_attribute("run.status", status)
+
+    if status == "error" and error_message:
+        span.set_attribute("error", True)
+        span.set_attribute("error.message", error_message)
+        span.end("error")
+    else:
+        span.end("ok")
+
+
+def inject_trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Inject trace context into headers for propagation to downstream services"""
+    context = get_trace_context()
+    if context:
+        headers["X-Trace-ID"] = context.trace_id
+        headers["X-Span-ID"] = context.current_span.span_id
+        if context.current_span.parent_span_id:
+            headers["X-Parent-Span-ID"] = context.current_span.parent_span_id
+    return headers
+
+
 def trace_span(name: str, attributes: Optional[Dict[str, Any]] = None):
     """
     追踪 Span 装饰器
