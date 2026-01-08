@@ -414,49 +414,56 @@ function DatasetCard({
   );
 }
 
-// 统计卡片组件
+// 统计卡片组件 - 增强版
 function StatCard({
   title,
   value,
   icon,
   color,
+  gradient,
   index,
 }: {
   title: string;
   value: number;
   icon: React.ReactNode;
   color: string;
+  gradient?: string;
   index: number;
 }) {
   const { darkMode } = useAppStore();
+  const defaultGradient = `linear-gradient(135deg, ${color} 0%, ${color}cc 100%)`;
 
   return (
     <motion.div
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.3, delay: index * 0.1 }}
+      whileHover={{ y: -2, transition: { duration: 0.2 } }}
     >
       <Card
+        hoverable
         style={{
-          borderRadius: 12,
+          borderRadius: 14,
           border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
           background: darkMode ? colors.neutral[800] : "#ffffff",
+          transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
         }}
         styles={{ body: { padding: "20px" } }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <div
             style={{
-              width: 48,
-              height: 48,
+              width: 52,
+              height: 52,
               borderRadius: 12,
-              background: `${color}15`,
+              background: gradient || defaultGradient,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
+              boxShadow: `0 4px 12px ${color}30`,
             }}
           >
-            <span style={{ fontSize: 22, color }}>{icon}</span>
+            <span style={{ fontSize: 24, color: "white" }}>{icon}</span>
           </div>
           <div>
             <Text type="secondary" style={{ fontSize: 13 }}>
@@ -677,6 +684,7 @@ export function KnowledgeDatasetsPage() {
             value={stats.total}
             icon={<DatabaseOutlined />}
             color={colors.primary[500]}
+            gradient={`linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%)`}
             index={0}
           />
         </Col>
@@ -686,6 +694,7 @@ export function KnowledgeDatasetsPage() {
             value={stats.documents}
             icon={<FileTextOutlined />}
             color={colors.cyan[500]}
+            gradient={`linear-gradient(135deg, #10b981 0%, #34d399 100%)`}
             index={1}
           />
         </Col>
@@ -695,6 +704,7 @@ export function KnowledgeDatasetsPage() {
             value={stats.segments}
             icon={<NodeIndexOutlined />}
             color={colors.purple[500]}
+            gradient={`linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%)`}
             index={2}
           />
         </Col>

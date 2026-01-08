@@ -70,6 +70,22 @@
     --transition-fast: 0.15s;
     --transition-normal: 0.25s;
     --transition-slow: 0.35s;
+
+    /* 阴影层级系统 */
+    --shadow-elevation-low: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-elevation-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    --shadow-elevation-high: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+    /* 渐变定义 */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)) 0%, #0ea5e9 100%);
+    --gradient-accent: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
+    --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+    --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+    --gradient-danger: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+
+    /* 交互变量 */
+    --card-hover-transform: translateY(-2px);
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   .dark {
@@ -100,6 +116,11 @@
     --border: 215 20% 22%;
     --input: 215 20% 22%;
     --ring: 213 94% 58%;
+
+    /* 深色模式阴影层级 */
+    --shadow-elevation-low: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25);
+    --shadow-elevation-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
+    --shadow-elevation-high: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
   }
 
   * {
@@ -246,6 +267,103 @@
     box-shadow:
       0 0 20px hsl(262 66% 50% / 0.15),
       0 0 40px hsl(262 66% 50% / 0.1);
+  }
+
+  /* ========================================
+     悬浮卡片效果
+     ======================================== */
+  .hover-card {
+    transition: var(--transition-smooth);
+  }
+
+  .hover-card:hover {
+    transform: var(--card-hover-transform);
+    box-shadow: var(--shadow-elevation-medium);
+  }
+
+  /* ========================================
+     渐变按钮系统
+     ======================================== */
+  .btn-gradient-primary {
+    background: var(--gradient-primary);
+    color: white;
+    box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.3);
+    transition: var(--transition-smooth);
+  }
+
+  .btn-gradient-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px 0 rgba(59, 130, 246, 0.4);
+  }
+
+  .btn-gradient-primary:active {
+    transform: translateY(0);
+  }
+
+  .btn-gradient-danger {
+    background: var(--gradient-danger);
+    color: white;
+    box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3);
+    transition: var(--transition-smooth);
+  }
+
+  .btn-gradient-danger:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px 0 rgba(239, 68, 68, 0.4);
+  }
+
+  /* ========================================
+     状态指示器
+     ======================================== */
+  .status-pulse {
+    animation: pulse-status 2s ease-in-out infinite;
+  }
+
+  .status-online {
+    background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+    animation: pulse-status 2s ease-in-out infinite;
+  }
+
+  /* ========================================
+     渐变图标背景
+     ======================================== */
+  .icon-gradient-blue {
+    background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
+    color: white;
+  }
+
+  .icon-gradient-green {
+    background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+    color: white;
+  }
+
+  .icon-gradient-amber {
+    background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+    color: white;
+  }
+
+  .icon-gradient-purple {
+    background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
+    color: white;
+  }
+
+  .icon-gradient-cyan {
+    background: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%);
+    color: white;
+  }
+
+  .icon-gradient-rose {
+    background: linear-gradient(135deg, #f43f5e 0%, #fb7185 100%);
+    color: white;
+  }
+
+  /* ========================================
+     左侧渐变边框（用于配置卡片）
+     ======================================== */
+  .border-gradient-left {
+    border-left: 4px solid transparent;
+    border-image: var(--gradient-primary) 1;
   }
 }
 
@@ -403,6 +521,59 @@
   border-radius: 16px !important;
 }
 
+/* Ant Design 表格行hover效果 */
+.ant-table-tbody > tr:hover > td {
+  background: rgba(59, 130, 246, 0.05) !important;
+}
+
+.dark .ant-table-tbody > tr:hover > td {
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+/* Ant Design Tab切换指示线动画 */
+.ant-tabs-ink-bar {
+  transition: left 0.3s ease, width 0.3s ease !important;
+}
+
+/* Ant Design 开关过渡动画 */
+.ant-switch {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* Ant Design 分页器当前页渐变 */
+.ant-pagination-item-active {
+  background: linear-gradient(135deg, #3b82f6 0%, #0ea5e9 100%) !important;
+  border-color: transparent !important;
+}
+
+.ant-pagination-item-active a {
+  color: white !important;
+}
+
+/* Ant Design 主按钮渐变 */
+.ant-btn-primary:not(.ant-btn-dangerous) {
+  background: linear-gradient(135deg, hsl(213 100% 54%) 0%, #0ea5e9 100%) !important;
+  border: none !important;
+  box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.3) !important;
+}
+
+.ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
+  background: linear-gradient(135deg, hsl(213 100% 50%) 0%, #0284c7 100%) !important;
+  box-shadow: 0 6px 20px 0 rgba(59, 130, 246, 0.4) !important;
+}
+
+/* Ant Design 危险按钮渐变 */
+.ant-btn-dangerous.ant-btn-primary {
+  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%) !important;
+  border: none !important;
+  box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3) !important;
+}
+
+.ant-btn-dangerous.ant-btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%) !important;
+  box-shadow: 0 6px 20px 0 rgba(239, 68, 68, 0.4) !important;
+}
+
 /* ========================================
    滚动条美化
    ======================================== */
@@ -491,6 +662,30 @@
   to {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+/* 状态脉动动画 - 用于在线状态指示 */
+@keyframes pulse-status {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.2);
+  }
+}
+
+/* 数字计数入场动画 */
+@keyframes countUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

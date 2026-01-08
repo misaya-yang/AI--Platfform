@@ -30,7 +30,8 @@
     "disabled": "Disabled",
     "never": "Never",
     "notSet": "Not set",
-    "retry": "Retry"
+    "retry": "Retry",
+    "clear": "Clear"
   },
   "metrics": {
     "title": "Monitoring Dashboard",
@@ -238,6 +239,20 @@
     "assistant": "AI Assistant",
     "thinking": "Thinking...",
     "toolCalls": "Tool Calls",
+    "newChat": "New chat",
+    "selectAgentToView": "Select an agent to view chats.",
+    "noChatsYet": "No chats yet. Start a new one.",
+    "deleteChat": "Delete chat",
+    "agent": "Agent",
+    "selectAgent": "Select an Agent",
+    "memory": "Memory",
+    "welcomeTitle": "How can I help you today?",
+    "welcomeDescription": "Select an agent service and start a conversation to explore its capabilities.",
+    "loadingHistory": "Loading chat history...",
+    "selectOrStartChat": "Select a chat on the left, or start a new one.",
+    "typeToStart": "Type a message to start.",
+    "showToolCalls": "Show tool calls",
+    "disclaimer": "AI responses may be inaccurate",
     "stats": {
       "ttft": "TTFT",
       "tokens": "tokens",

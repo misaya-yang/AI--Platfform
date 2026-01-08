@@ -72,7 +72,7 @@ export function MultimodalInput({
           disabled={disabled}
           onClick={() => fileRef.current?.click()}
           aria-label="添加附件"
-          className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground"
+          className="h-10 w-10 shrink-0 text-muted-foreground hover:text-foreground hover:bg-muted/60 rounded-xl transition-colors"
         >
           <Paperclip className="h-5 w-5" />
         </Button>
@@ -96,7 +96,7 @@ export function MultimodalInput({
           disabled={disabled || (!text.trim() && files.length === 0)}
           onClick={handleSend}
           aria-label="发送"
-          className="h-10 w-10 shrink-0 rounded-xl bg-primary hover:bg-primary/90 shadow-md shadow-primary/25"
+          className="h-10 w-10 shrink-0 rounded-xl bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:from-violet-600 hover:via-purple-600 hover:to-fuchsia-600 shadow-lg shadow-purple-500/30 transition-all duration-200 hover:shadow-purple-500/40 hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
         >
           <Send className="h-5 w-5" />
         </Button>

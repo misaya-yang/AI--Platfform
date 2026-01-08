@@ -30,7 +30,8 @@
     "disabled": "禁用",
     "never": "从未",
     "notSet": "未设置",
-    "retry": "重试"
+    "retry": "重试",
+    "clear": "清空"
   },
   "metrics": {
     "title": "监控面板",
@@ -238,6 +239,20 @@
     "assistant": "AI 助手",
     "thinking": "思考中...",
     "toolCalls": "工具调用",
+    "newChat": "新对话",
+    "selectAgentToView": "选择一个 Agent 以查看对话记录。",
+    "noChatsYet": "还没有对话记录，开始新对话吧。",
+    "deleteChat": "删除对话",
+    "agent": "Agent",
+    "selectAgent": "选择 Agent",
+    "memory": "记忆",
+    "welcomeTitle": "今天有什么可以帮您？",
+    "welcomeDescription": "选择一个 Agent 服务，开始对话探索其能力。",
+    "loadingHistory": "加载对话历史中...",
+    "selectOrStartChat": "从左侧选择一个对话，或开始新对话。",
+    "typeToStart": "输入消息开始对话。",
+    "showToolCalls": "显示工具调用",
+    "disclaimer": "AI 回答可能不准确",
     "stats": {
       "ttft": "首Token",
       "tokens": "tokens",

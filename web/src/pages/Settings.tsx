@@ -187,11 +187,13 @@ export function SettingsPage() {
       </div>
 
       {/* 配置层级说明 */}
-      <Card className="border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10">
-        <CardContent className="pt-4">
+      <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-r from-primary/5 to-transparent dark:from-primary/10 dark:to-transparent">
+        {/* Left gradient border */}
+        <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-violet-500 via-purple-500 to-fuchsia-500" />
+        <CardContent className="pt-4 pl-5">
           <div className="flex items-start gap-3">
-            <div className="mt-0.5 p-1.5 rounded-full bg-primary/10 dark:bg-primary/20">
-              <svg className="h-4 w-4 text-primary dark:text-primary/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="mt-0.5 p-1.5 rounded-full bg-gradient-to-br from-violet-500/20 to-purple-500/20 dark:from-violet-500/30 dark:to-purple-500/30">
+              <svg className="h-4 w-4 text-violet-600 dark:text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
@@ -219,23 +221,39 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-6">
-            <div className="flex items-center gap-2">
-              <div className={`h-2 w-2 rounded-full ${status.database?.connected ? "bg-green-500" : "bg-gray-300"}`} />
-              <span className="text-sm">PostgreSQL</span>
-              <Badge variant={status.database?.enabled ? "default" : "secondary"}>
+            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
+              <div className={`h-2.5 w-2.5 rounded-full ${status.database?.connected ? "bg-emerald-500 status-pulse" : "bg-gray-300 dark:bg-gray-600"}`} />
+              <span className="text-sm font-medium">PostgreSQL</span>
+              <Badge
+                variant="outline"
+                className={
+                  status.database?.connected
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
+                    : "bg-muted text-muted-foreground"
+                }
+              >
                 {status.database?.enabled ? (status.database?.connected ? "已连接" : "未连接") : "未启用"}
               </Badge>
             </div>
-            <div className="flex items-center gap-2">
-              <div className={`h-2 w-2 rounded-full ${status.redis?.connected ? "bg-green-500" : "bg-gray-300"}`} />
-              <span className="text-sm">Redis</span>
-              <Badge variant={status.redis?.enabled ? "default" : "secondary"}>
+            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
+              <div className={`h-2.5 w-2.5 rounded-full ${status.redis?.connected ? "bg-emerald-500 status-pulse" : "bg-gray-300 dark:bg-gray-600"}`} />
+              <span className="text-sm font-medium">Redis</span>
+              <Badge
+                variant="outline"
+                className={
+                  status.redis?.connected
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
+                    : "bg-muted text-muted-foreground"
+                }
+              >
                 {status.redis?.enabled ? (status.redis?.connected ? "已连接" : "未连接") : "未启用"}
               </Badge>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm">负载均衡</span>
-              <Badge variant="outline">{status.load_balancer?.strategy || "round_robin"}</Badge>
+            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
+              <span className="text-sm font-medium">负载均衡</span>
+              <Badge variant="outline" className="bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30">
+                {status.load_balancer?.strategy || "round_robin"}
+              </Badge>
             </div>
           </div>
         </CardContent>
@@ -330,6 +348,7 @@ export function SettingsPage() {
             <Button
               onClick={() => updateAuthMutation.mutate(authForm)}
               disabled={updateAuthMutation.isPending}
+              className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
             >
               {updateAuthMutation.isPending ? "保存中..." : "保存鉴权配置"}
             </Button>
@@ -424,6 +443,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createRateLimitMutation.mutate(rateLimitForm)}
                 disabled={createRateLimitMutation.isPending}
+                className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
               >
                 添加规则
               </Button>
@@ -483,20 +503,30 @@ export function SettingsPage() {
                 {lbStrategies.map((s: any) => (
                   <div
                     key={s.value}
-                    className={`flex items-center justify-between rounded-lg border p-4 cursor-pointer transition-colors ${
-                      lbStrategy === s.value ? "border-primary bg-primary/5" : "hover:bg-muted/50"
+                    className={`flex items-center justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 ${
+                      lbStrategy === s.value
+                        ? "border-violet-500/50 bg-gradient-to-r from-violet-500/10 to-purple-500/5 shadow-md shadow-violet-500/10"
+                        : "hover:bg-muted/50 hover:border-border/80"
                     }`}
                     onClick={() => setLbStrategy(s.value)}
                   >
                     <div>
-                      <div className="font-medium">{s.label}</div>
+                      <div className={`font-medium ${lbStrategy === s.value ? "text-violet-700 dark:text-violet-300" : ""}`}>{s.label}</div>
                       <div className="text-sm text-muted-foreground">{s.description}</div>
                     </div>
                     <div
-                      className={`h-4 w-4 rounded-full border-2 ${
-                        lbStrategy === s.value ? "border-primary bg-primary" : "border-muted-foreground"
+                      className={`h-5 w-5 rounded-full border-2 transition-all duration-200 flex items-center justify-center ${
+                        lbStrategy === s.value
+                          ? "border-violet-500 bg-gradient-to-br from-violet-500 to-purple-500"
+                          : "border-muted-foreground/50"
                       }`}
-                    />
+                    >
+                      {lbStrategy === s.value && (
+                        <svg className="h-3 w-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -505,6 +535,7 @@ export function SettingsPage() {
                 <Button
                   onClick={() => updateLbMutation.mutate({ strategy: lbStrategy })}
                   disabled={updateLbMutation.isPending}
+                  className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
                 >
                   {updateLbMutation.isPending ? "保存中..." : "保存负载均衡配置"}
                 </Button>
@@ -543,6 +574,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createApiKeyMutation.mutate(apiKeyForm)}
                 disabled={createApiKeyMutation.isPending || !apiKeyForm.name}
+                className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
               >
                 生成 API Key
               </Button>

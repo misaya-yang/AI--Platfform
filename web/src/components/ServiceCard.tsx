@@ -33,10 +33,10 @@ export function ServiceCard({
       >
         <Card
           className={cn(
-            "relative overflow-hidden cursor-pointer transition-colors border-0 shadow-lg",
+            "relative overflow-hidden cursor-pointer transition-all duration-300 border-0",
             selected
-              ? "ring-2 ring-primary bg-primary/5"
-              : "bg-card hover:bg-accent/5"
+              ? "shadow-[0_0_0_2px_hsl(var(--primary)),0_4px_20px_rgba(59,130,246,0.25)] bg-primary/5"
+              : "shadow-lg bg-card hover:bg-accent/5 hover:shadow-xl"
           )}
           onClick={onSelect}
         >
@@ -47,15 +47,19 @@ export function ServiceCard({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <CardTitle className="text-lg font-semibold tracking-tight">{service.name}</CardTitle>
-                {/* Custom Health Indicator */}
+                {/* Custom Health Indicator with pulse animation */}
                 <div
                   className={cn(
-                    "flex h-2.5 w-2.5 items-center justify-center rounded-full",
+                    "relative flex h-3 w-3 items-center justify-center rounded-full",
                     isHealthy ? "bg-green-500/20" : "bg-red-500/20"
                   )}
                   title={isHealthy ? "Healthy" : "Unhealthy"}
                 >
-                  <div className={cn("h-1.5 w-1.5 rounded-full", isHealthy ? "bg-green-500" : "bg-red-500")} />
+                  <div className={cn(
+                    "h-2 w-2 rounded-full",
+                    isHealthy ? "bg-green-500" : "bg-red-500",
+                    isHealthy && "status-pulse"
+                  )} />
                 </div>
               </div>
 
@@ -79,11 +83,11 @@ export function ServiceCard({
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-2 relative z-10">
-            <Badge variant="secondary" className="bg-secondary/50 backdrop-blur-sm text-[10px] px-2 py-0.5 font-normal uppercase tracking-wider text-muted-foreground border-0">
+            <Badge variant="secondary" className="bg-primary/10 backdrop-blur-sm text-[10px] px-2.5 py-0.5 font-medium uppercase tracking-wider text-primary/80 border-0 rounded-md">
               {service.service_type}
             </Badge>
             {service.supported_modes?.slice(0, 2).map((m) => (
-              <Badge key={m} variant="secondary" className="bg-secondary/50 backdrop-blur-sm text-[10px] px-2 py-0.5 font-normal text-muted-foreground border-0">
+              <Badge key={m} variant="secondary" className="bg-secondary/60 backdrop-blur-sm text-[10px] px-2.5 py-0.5 font-normal text-muted-foreground border-0 rounded-md">
                 {m}
               </Badge>
             ))}

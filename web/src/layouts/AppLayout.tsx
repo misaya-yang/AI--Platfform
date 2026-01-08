@@ -329,11 +329,23 @@ export function AppLayout() {
           display: 'flex',
           alignItems: 'center',
           gap: 12,
-          borderBottom: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
+          borderBottom: 'none',
           height: 64, // 与顶部 Header 高度一致
-          transition: 'padding 0.3s'
+          transition: 'padding 0.3s',
+          position: 'relative',
         }}>
           <Logo collapsed={collapsed} />
+          {/* 渐变分割线 - 中间深两边淡 */}
+          <div style={{
+            position: 'absolute',
+            bottom: 0,
+            left: '10%',
+            right: '10%',
+            height: 1,
+            background: darkMode
+              ? `linear-gradient(90deg, transparent, ${colors.neutral[600]}, transparent)`
+              : `linear-gradient(90deg, transparent, ${colors.neutral[300]}, transparent)`,
+          }} />
         </div>
 
         {/* 导航菜单 */}
@@ -425,6 +437,9 @@ export function AppLayout() {
             : 'rgba(255, 255, 255, 0.8)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
+          boxShadow: darkMode
+            ? '0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25)'
+            : '0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -435,7 +450,7 @@ export function AppLayout() {
         }}>
           {/* 左侧 - 面包屑/标题 */}
           <div>
-            <Text strong style={{ fontSize: 16 }}>
+            <Text strong style={{ fontSize: 16, fontWeight: 600 }}>
               {(() => {
                 const item = filteredNavItems.find(item => location.pathname.startsWith(item.key));
                 return item ? t(item.labelKey) : '';
@@ -450,28 +465,31 @@ export function AppLayout() {
               <motion.div
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
+                className="user-menu-trigger"
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
                   padding: '6px 12px',
-                  borderRadius: 8,
+                  borderRadius: 10,
                   cursor: 'pointer',
                   background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+                  transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
                 }}
               >
                 <div style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: 6,
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
                   background: `linear-gradient(135deg, ${colors.primary[400]}, ${colors.cyan[400]})`,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
+                  boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)',
                 }}>
                   <UserOutlined style={{ color: '#fff', fontSize: 14 }} />
                 </div>
-                <Text style={{ fontSize: 13 }}>{user?.display_name || user?.user_id || '用户'}</Text>
+                <Text style={{ fontSize: 13, fontWeight: 500 }}>{user?.display_name || user?.user_id || '用户'}</Text>
               </motion.div>
             </Dropdown>
           </Space>
@@ -549,13 +567,19 @@ export function AppLayout() {
           background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'} !important;
         }
 
+        /* 菜单项hover时图标轻微放大 */
+        .app-sider .ant-menu-item:hover .anticon {
+          transform: scale(1.1);
+          transition: transform 0.2s ease;
+        }
+
         .app-sider .ant-menu-item-selected {
           background: linear-gradient(135deg,
-            ${colors.primary[500]}18,
-            ${colors.cyan[500]}12
+            ${colors.primary[500]}25,
+            ${colors.cyan[500]}18
           ) !important;
           border-left: none !important;
-          box-shadow: 0 2px 8px ${colors.primary[500]}20;
+          box-shadow: 0 4px 12px ${colors.primary[500]}25;
         }
 
         .app-sider .ant-menu-item-selected::before {
@@ -572,6 +596,11 @@ export function AppLayout() {
 
         .app-sider .ant-menu-item-selected::after {
           display: none !important;
+        }
+
+        /* 用户菜单hover效果 */
+        .user-menu-trigger:hover {
+          background: ${darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)'} !important;
         }
 
         /* 滚动条美化 */

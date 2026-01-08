@@ -329,7 +329,12 @@ export function UserManagementPage() {
       <div className="flex items-center justify-between">
         <div className="text-xl font-semibold">{t('users.title')}</div>
         {canCreate && (
-          <Button onClick={() => setShowCreateModal(true)}>{t('users.addUser')}</Button>
+          <Button
+            onClick={() => setShowCreateModal(true)}
+            className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
+          >
+            {t('users.addUser')}
+          </Button>
         )}
       </div>
 
@@ -354,7 +359,7 @@ export function UserManagementPage() {
       </div>
 
       {/* Users table */}
-      <div className="rounded-md border">
+      <div className="rounded-xl border border-border/60 bg-card/50 backdrop-blur-sm shadow-sm overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow>
@@ -390,12 +395,12 @@ export function UserManagementPage() {
               </TableRow>
             ) : (
               sortedUsers.map((user) => (
-                <TableRow key={user.user_id}>
+                <TableRow key={user.user_id} className="transition-colors hover:bg-primary/5 dark:hover:bg-primary/10">
                   <TableCell>{user.email}</TableCell>
                   <TableCell>{user.display_name}</TableCell>
                   <TableCell>
                     {user.department ? (
-                      <Badge variant="outline">
+                      <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30">
                         {departmentOptions.find(d => d.value === user.department)?.label || user.department}
                       </Badge>
                     ) : (
@@ -403,19 +408,46 @@ export function UserManagementPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <div className="flex gap-1 flex-wrap">
-                      {user.roles.map((role) => (
-                        <Badge key={role} variant="secondary">
-                          {role}
-                        </Badge>
-                      ))}
+                    <div className="flex gap-1.5 flex-wrap">
+                      {user.roles.map((role) => {
+                        // Role color differentiation
+                        const roleColors: Record<string, string> = {
+                          admin: "bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-500/30",
+                          manager: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
+                          user: "bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/30",
+                        };
+                        const colorClass = roleColors[role.toLowerCase()] || roleColors.user;
+                        return (
+                          <Badge
+                            key={role}
+                            variant="outline"
+                            className={`font-medium ${colorClass}`}
+                          >
+                            {role}
+                          </Badge>
+                        );
+                      })}
                     </div>
                   </TableCell>
                   <TableCell>
                     <Badge
-                      variant={user.status === "active" ? "default" : "destructive"}
+                      variant="outline"
+                      className={
+                        user.status === "active"
+                          ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30"
+                          : "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
+                      }
                     >
-                      {user.status}
+                      <span className="flex items-center gap-1.5">
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            user.status === "active"
+                              ? "bg-emerald-500 status-pulse"
+                              : "bg-red-500"
+                          }`}
+                        />
+                        {user.status === "active" ? t('common.active') : t('common.disabled')}
+                      </span>
                     </Badge>
                   </TableCell>
                   <TableCell>

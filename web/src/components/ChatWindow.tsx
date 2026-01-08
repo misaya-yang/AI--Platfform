@@ -90,10 +90,12 @@ const ChatMessageItem = memo(
       >
         {/* Avatar */}
         <div className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm",
-          isUser ? "bg-primary text-primary-foreground" : "bg-white dark:bg-zinc-800"
+          "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-md transition-transform hover:scale-105",
+          isUser
+            ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white"
+            : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 text-white"
         )}>
-          {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5 text-primary" />}
+          {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5" />}
         </div>
 
         {/* Content Bubble */}
@@ -108,17 +110,17 @@ const ChatMessageItem = memo(
 
           <div
             className={cn(
-              "relative px-5 py-3.5 text-sm shadow-sm",
+              "relative px-5 py-3.5 text-sm shadow-lg",
               isUser
-                ? "bg-primary text-primary-foreground rounded-tl-2xl rounded-tr-sm rounded-br-2xl rounded-bl-2xl"
-                : "bg-white dark:bg-zinc-900 border border-border/50 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl"
+                ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white rounded-tl-2xl rounded-tr-sm rounded-br-2xl rounded-bl-2xl shadow-emerald-500/20"
+                : "bg-white dark:bg-zinc-900/90 border border-border/30 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl dark:shadow-black/20"
             )}
           >
             {/* Tool Calls Section */}
             {!isUser && hasToolCalls && (
               <div className="mb-3 space-y-2">
                 <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary/60" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-purple-500/60" />
                   {t("playground.toolCalls", "Tool Calls")}
                 </div>
                 <div className="space-y-2">
@@ -159,16 +161,16 @@ const ChatMessageItem = memo(
                       {t("playground.thinking", "Thinking...")}
                     </span>
                     <div className="flex items-center gap-1">
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                      <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-violet-500 [animation-delay:-0.3s]" />
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-purple-500 [animation-delay:-0.15s]" />
+                      <div className="h-2 w-2 animate-bounce rounded-full bg-fuchsia-500" />
                     </div>
                   </>
                 ) : (
                   <div className="flex items-center gap-1.5">
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                    <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-violet-500 [animation-delay:-0.3s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-purple-500 [animation-delay:-0.15s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-fuchsia-500" />
                   </div>
                 )}
               </div>
