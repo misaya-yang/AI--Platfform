@@ -1656,7 +1656,7 @@ export function PlaygroundPage() {
             <MultimodalInput
               onSend={handleSend}
               disabled={!serviceId || loading}
-              includeFiles={false}
+              includeFiles={true}
             />
           </div>
           <div className="mt-3 flex items-center justify-between px-2 text-xs text-muted-foreground/80">

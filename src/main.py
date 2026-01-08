@@ -32,6 +32,7 @@ from .core.observability.metrics import get_metrics
 from .services.metrics.metrics_recorder import init_metrics_recorder
 from .services.metrics.realtime_metrics import init_realtime_metrics
 from .adapters.registry import auto_register_builtin_adapters
+from .core.file_cleanup import get_cleanup_service
 # 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
 from .core.middleware.streaming import (
     StreamingAnonymousMiddleware,
@@ -305,6 +306,11 @@ def create_app() -> FastAPI:
 
             logger.info("Confluence 集成服务已启动")
 
+        # 启动文件清理服务
+        file_cleanup_service = get_cleanup_service()
+        await file_cleanup_service.start()
+        app.state.file_cleanup_service = file_cleanup_service
+
         # 打印启动信息
         _print_startup_info(settings)
     
@@ -325,6 +331,11 @@ def create_app() -> FastAPI:
         kb_service = getattr(app.state, "knowledge_service", None)
         if kb_service is not None:
             await kb_service.close()
+
+        # Stop file cleanup service
+        file_cleanup_service = getattr(app.state, "file_cleanup_service", None)
+        if file_cleanup_service is not None:
+            await file_cleanup_service.stop()
 
         await container.shutdown()
         logger.info("AI Gateway 已关闭")

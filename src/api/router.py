@@ -4,6 +4,7 @@ from .v1.auth import router as auth_router
 from .v1.config import router as config_router
 from .v1.confluence import router as confluence_router
 from .v1.conversations import router as conversations_router
+from .v1.files import router as files_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.langgraph import router as langgraph_router
@@ -42,3 +43,4 @@ api_router.include_router(knowledge_router)  # KBMS Knowledge Base
 api_router.include_router(confluence_router)  # Confluence 集成
 api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘
+api_router.include_router(files_router)  # 文件上传 API
