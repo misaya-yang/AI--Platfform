@@ -77,3 +77,7 @@ temp/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Windows reserved names
+nul
+NUL
