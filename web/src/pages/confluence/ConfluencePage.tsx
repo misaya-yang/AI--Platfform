@@ -68,6 +68,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { getErrorMessage } from "@/lib/utils";
 
 import {
   listConnections,
@@ -532,7 +533,7 @@ export default function ConfluencePage() {
       const result = await testConnection(connectionId);
       setTestResult(result);
     } catch (error) {
-      setTestResult({ status: "error", message: error instanceof Error ? error.message : t("confluence.test.testFailed") });
+      setTestResult({ status: "error", message: getErrorMessage(error) });
     }
   };
 

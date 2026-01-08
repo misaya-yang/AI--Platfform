@@ -471,7 +471,13 @@
       "createBinding": "Create Binding",
       "creating": "Creating...",
       "failedToLoadSpaces": "Failed to load spaces",
-      "createFailed": "Failed to create binding"
+      "createFailed": "Failed to create binding",
+      "errors": {
+        "alreadyBound": "This space is already bound to this knowledge base",
+        "connectionNotFound": "Connection not found or has been deleted",
+        "accessDenied": "You don't have permission to perform this action",
+        "unknown": "An error occurred while creating the binding, please try again"
+      }
     },
     "pages": {
       "count": "{{synced}}/{{total}} pages",

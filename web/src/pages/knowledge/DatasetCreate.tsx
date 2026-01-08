@@ -104,7 +104,14 @@ const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 // Sub-Components
 // ============================================================
 
-function ChunkPreviewSection({ datasetId, config }: { datasetId: string; config: any }) {
+interface ChunkPreviewConfig {
+  mode: string;
+  chunk_size: number;
+  chunk_overlap: number;
+  remove_extra_spaces?: boolean;
+}
+
+function ChunkPreviewSection({ datasetId, config }: { datasetId: string; config: ChunkPreviewConfig }) {
   const [text, setText] = useState(`# Sample Header
   
 Here is some sample text content to demonstrate how the chunking works.

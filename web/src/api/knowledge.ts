@@ -266,7 +266,7 @@ export interface ChunkPreviewItem {
   content: string;
   char_count: number;
   token_count: number;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ChunkPreviewResponse {

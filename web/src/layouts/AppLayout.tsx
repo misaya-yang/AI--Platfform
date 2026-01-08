@@ -262,6 +262,7 @@ export function AppLayout() {
   // Show password change modal if forced
   useEffect(() => {
     if (forcePasswordChange) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: modal state from auth
       setShowPasswordChange(true);
     }
   }, [forcePasswordChange]);

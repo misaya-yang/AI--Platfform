@@ -60,6 +60,7 @@ import {
 import { listDatasets } from "@/api/knowledge";
 import type { ConfluenceConnection, ConfluenceBinding } from "@/types/confluence";
 import type { Dataset } from "@/types/knowledge";
+import { getErrorMessage } from "@/lib/utils";
 
 // ============================================================
 // Connection Card Component
@@ -432,7 +433,7 @@ export default function ConnectionListPage() {
     } catch (error) {
       setTestResult({
         status: "error",
-        message: error instanceof Error ? error.message : "Test failed",
+        message: getErrorMessage(error),
       });
       setTimeout(() => setTestResult(null), 5000);
     }

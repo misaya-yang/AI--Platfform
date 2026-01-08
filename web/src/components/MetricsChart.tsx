@@ -60,6 +60,7 @@ export function MetricsChart() {
   const [hoveredBar, setHoveredBar] = useState<number | null>(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: hydration state
     setMounted(true);
   }, []);
 

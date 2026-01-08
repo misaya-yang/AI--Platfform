@@ -130,7 +130,7 @@ function mergeToolArguments(current: string, incoming: string): string {
     const prefix = incoming.slice(0, size);
     if (suffix === prefix) {
       // Avoid false positives with JSON structural characters
-      if (size <= 2 && /^[{}\[\]:,"]+$/.test(suffix)) {
+      if (size <= 2 && /^[{}[\]:,"]+$/.test(suffix)) {
         continue;
       }
       return current + incoming.slice(size);

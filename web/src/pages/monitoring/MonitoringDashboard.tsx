@@ -11,11 +11,9 @@
  * - WebSocket-powered real-time updates
  */
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
 import {
-  Activity,
   AlertTriangle,
   ArrowUpRight,
   ArrowDownRight,
@@ -25,7 +23,6 @@ import {
   Clock,
   Coins,
   Cpu,
-  Gauge,
   Layers,
   RefreshCw,
   Server,
@@ -42,7 +39,6 @@ import {
   getDashboardSummary,
   getDashboardWebSocket,
   type RealtimeDashboard,
-  type DashboardSummary,
   type AlertStatus,
   type WebSocketMessage,
 } from "@/api/dashboard";
@@ -375,7 +371,6 @@ function HourlyTrend({ data }: HourlyTrendProps) {
 // ============ Main Dashboard Component ============
 
 export function MonitoringDashboard() {
-  const { t } = useTranslation();
   const [isConnected, setIsConnected] = useState(false);
   const [liveData, setLiveData] = useState<Partial<RealtimeDashboard>>({});
   const [alerts, setAlerts] = useState<AlertStatus[]>([]);

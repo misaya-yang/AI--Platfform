@@ -92,6 +92,7 @@ export function Combobox({
 
   // Reset highlight when filtered options change
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: reset state on filter change
     setHighlightedIndex(0);
   }, [filteredOptions.length]);
 

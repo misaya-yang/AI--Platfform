@@ -47,6 +47,7 @@ import {
 
 import { createConnection } from "@/api/confluence";
 import type { ConfluenceConnectionCreateRequest } from "@/types/confluence";
+import { getErrorMessage } from "@/lib/utils";
 
 // ============================================================
 // Form Field Component
@@ -202,7 +203,7 @@ export default function ConnectionCreatePage() {
       }
     } catch (error) {
       setTestStatus("error");
-      setTestMessage(error instanceof Error ? error.message : t("confluence.test.failed"));
+      setTestMessage(getErrorMessage(error));
     }
   };
 
@@ -532,9 +533,7 @@ export default function ConnectionCreatePage() {
                     {t("confluence.create.errors.createFailed")}
                   </p>
                   <p className="text-sm text-rose-600 dark:text-rose-500">
-                    {createMutation.error instanceof Error
-                      ? createMutation.error.message
-                      : t("common.error")}
+                    {getErrorMessage(createMutation.error)}
                   </p>
                 </div>
               </div>

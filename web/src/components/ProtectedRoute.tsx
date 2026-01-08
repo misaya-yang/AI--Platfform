@@ -26,6 +26,7 @@ export function ProtectedRoute({
   useEffect(() => {
     // Zustand persist hydration happens synchronously on first render
     // but we need to wait for the next tick to ensure state is updated
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: hydration state
     setIsHydrated(true);
   }, []);
 

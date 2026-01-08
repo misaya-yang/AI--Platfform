@@ -45,7 +45,7 @@ export function PasswordChangeModal({
     if (!/\d/.test(password)) {
       errors.push("At least one number");
     }
-    if (!/[!@#$%^&*(),.?":{}|<>\-_=+\[\]\\;'`~]/.test(password)) {
+    if (!/[!@#$%^&*(),.?":{}|<>\-_=+[\]\\;'`~]/.test(password)) {
       errors.push("At least one special character");
     }
     return errors;

@@ -144,6 +144,7 @@ export function ServiceConfigDialog({
   });
 
   // 当配置加载后更新表单
+  /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from props */
   useEffect(() => {
     if (config) {
       setRateLimitForm(config.rate_limit);
@@ -160,7 +161,7 @@ export function ServiceConfigDialog({
 
   useEffect(() => {
     if (!serviceDetail) return;
-    const cc = (serviceDetail.connector_config || {}) as Record<string, any>;
+    const cc = (serviceDetail.connector_config || {}) as Record<string, unknown>;
     setBasicForm({
       name: serviceDetail.name || "",
       description: serviceDetail.description || "",
@@ -170,6 +171,7 @@ export function ServiceConfigDialog({
       session_enabled: Boolean(serviceDetail.session_enabled ?? true),
     });
   }, [serviceDetail]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 更新配置
   const updateMutation = useMutation({

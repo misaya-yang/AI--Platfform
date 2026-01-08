@@ -30,7 +30,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 import { discoverSpacePages, addPagesToBinding } from "@/api/confluence";
 import type { ConfluencePageTreeNode, ConfluenceBinding } from "@/types/confluence";
@@ -630,9 +630,7 @@ export default function AddPagesModal({
             )}>
               <p className="text-sm text-rose-700 dark:text-rose-400 flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                {addPagesMutation.error instanceof Error
-                  ? addPagesMutation.error.message
-                  : t("common.error")}
+                {getErrorMessage(addPagesMutation.error)}
               </p>
             </div>
           )}

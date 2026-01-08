@@ -31,6 +31,51 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 
+// ===== Types =====
+
+interface AuthConfig {
+  enabled: boolean;
+  provider: string;
+  [key: string]: unknown;
+}
+
+interface RateLimitRule {
+  scope: string;
+  scope_id?: string;
+  requests: number;
+  window: number;
+  burst: number;
+  enabled: boolean;
+}
+
+interface ApiKeyBody {
+  name: string;
+  expires_in?: number;
+}
+
+interface LoadBalancerConfig {
+  strategy: string;
+  health_check_interval?: number;
+  [key: string]: unknown;
+}
+
+interface LbStrategy {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+interface ApiKey {
+  id: string;
+  name: string;
+  key?: string;
+  tenant_id?: string;
+  roles?: string[];
+  enabled: boolean;
+  created_at: string;
+  expires_at?: string;
+}
+
 // ===== API 调用 =====
 
 async function getSystemStatus() {
@@ -43,7 +88,7 @@ async function getAuthConfig() {
   return data;
 }
 
-async function updateAuthConfig(config: any) {
+async function updateAuthConfig(config: AuthConfig) {
   const { data } = await api.put("/api/v1/config/auth", config);
   return data;
 }
@@ -53,7 +98,7 @@ async function getRateLimits() {
   return data;
 }
 
-async function createRateLimit(rule: any) {
+async function createRateLimit(rule: RateLimitRule) {
   const { data } = await api.post("/api/v1/config/rate-limits", rule);
   return data;
 }
@@ -63,7 +108,7 @@ async function getApiKeys() {
   return data;
 }
 
-async function createApiKey(body: any) {
+async function createApiKey(body: ApiKeyBody) {
   const { data } = await api.post("/api/v1/config/api-keys", body);
   return data;
 }
@@ -73,7 +118,7 @@ async function getLoadBalancerConfig() {
   return data;
 }
 
-async function updateLoadBalancerConfig(config: any) {
+async function updateLoadBalancerConfig(config: LoadBalancerConfig) {
   const { data } = await api.put("/api/v1/config/load-balancer", config);
   return data;
 }
@@ -108,6 +153,7 @@ export function SettingsPage() {
   // 负载均衡策略
   const [lbStrategy, setLbStrategy] = useState("round_robin");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from query data */
   useEffect(() => {
     if (authConfig) {
       setAuthForm({
@@ -127,6 +173,7 @@ export function SettingsPage() {
       setLbStrategy(lbConfig.strategy);
     }
   }, [lbConfig]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 限流表单
   const [rateLimitForm, setRateLimitForm] = useState({
@@ -470,7 +517,7 @@ export function SettingsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rateLimits.map((rule: any, idx: number) => (
+                    {rateLimits.map((rule: RateLimitRule, idx: number) => (
                       <TableRow key={idx}>
                         <TableCell>{rule.scope}</TableCell>
                         <TableCell>{rule.scope_id || "-"}</TableCell>
@@ -500,7 +547,7 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-3">
-                {lbStrategies.map((s: any) => (
+                {lbStrategies.map((s: LbStrategy) => (
                   <div
                     key={s.value}
                     className={`flex items-center justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 ${
@@ -621,7 +668,7 @@ export function SettingsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {apiKeys.map((key: any) => (
+                    {apiKeys.map((key: ApiKey) => (
                       <TableRow key={key.id}>
                         <TableCell>{key.name}</TableCell>
                         <TableCell>{key.tenant_id || "-"}</TableCell>

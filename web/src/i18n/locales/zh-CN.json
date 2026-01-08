@@ -471,7 +471,13 @@
       "createBinding": "创建绑定",
       "creating": "创建中...",
       "failedToLoadSpaces": "加载空间失败",
-      "createFailed": "创建绑定失败"
+      "createFailed": "创建绑定失败",
+      "errors": {
+        "alreadyBound": "该空间已绑定到此知识库",
+        "connectionNotFound": "连接不存在或已被删除",
+        "accessDenied": "没有权限执行此操作",
+        "unknown": "创建绑定时发生错误，请稍后重试"
+      }
     },
     "pages": {
       "count": "{{synced}}/{{total}} 页",

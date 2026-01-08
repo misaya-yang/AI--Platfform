@@ -54,7 +54,7 @@ import type {
   ConfluencePageTreeNode,
   ConfluenceBindingCreateRequest,
 } from "@/types/confluence";
-import { cn } from "@/lib/utils";
+import { cn, getErrorMessage } from "@/lib/utils";
 
 // ============================================================
 // Types
@@ -401,6 +401,25 @@ export default function BindSpacePage() {
       navigate("/confluence");
     },
   });
+
+  // Convert technical error messages to user-friendly messages
+  const getFriendlyErrorMessage = (error: unknown): string => {
+    const rawMessage = getErrorMessage(error);
+
+    // Match common error patterns and return friendly messages
+    if (rawMessage.includes("already exists") || rawMessage.includes("Binding already exists")) {
+      return t("confluence.bind.errors.alreadyBound");
+    }
+    if (rawMessage.includes("Connection not found")) {
+      return t("confluence.bind.errors.connectionNotFound");
+    }
+    if (rawMessage.includes("Access denied") || rawMessage.includes("Permission denied")) {
+      return t("confluence.bind.errors.accessDenied");
+    }
+
+    // For other errors, return a generic friendly message
+    return t("confluence.bind.errors.unknown");
+  };
 
   // Convert spaces to combobox options
   const spaceOptions: ComboboxOption[] = useMemo(() => {
@@ -932,17 +951,15 @@ export default function BindSpacePage() {
 
         {/* Error display */}
         {createBindingMutation.isError && (
-          <Card className="mt-4 p-4 border-rose-200 bg-rose-50 dark:bg-rose-950/30">
-            <div className="flex items-center gap-3">
-              <AlertCircle className="h-5 w-5 text-rose-600 flex-shrink-0" />
-              <div>
+          <Card className="mt-4 p-4 border-rose-200 bg-rose-50 dark:bg-rose-950/30 dark:border-rose-900">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
                 <p className="font-medium text-rose-800 dark:text-rose-400">
                   {t("confluence.bind.createFailed")}
                 </p>
-                <p className="text-sm text-rose-600 dark:text-rose-500">
-                  {createBindingMutation.error instanceof Error
-                    ? createBindingMutation.error.message
-                    : t("common.error")}
+                <p className="text-sm text-rose-600 dark:text-rose-500 mt-1">
+                  {getFriendlyErrorMessage(createBindingMutation.error)}
                 </p>
               </div>
             </div>
