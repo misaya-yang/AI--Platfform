@@ -323,14 +323,14 @@ export function AppLayout() {
           overflow: 'hidden',
         }}
       >
-        {/* Logo 区域 */}
+        {/* Logo 区域 - 与顶部 Header 对齐 */}
         <div style={{
-          padding: collapsed ? '20px 12px' : '20px 16px',
+          padding: collapsed ? '0 12px' : '0 20px',
           display: 'flex',
           alignItems: 'center',
           gap: 12,
           borderBottom: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
-          minHeight: 72,
+          height: 64, // 与顶部 Header 高度一致
           transition: 'padding 0.3s'
         }}>
           <Logo collapsed={collapsed} />
@@ -535,23 +535,39 @@ export function AppLayout() {
           min-width: 0;
         }
 
-        /* 侧边栏菜单样式优化 */
+        /* 侧边栏菜单样式优化 - 更圆润现代 */
         .app-sider .ant-menu-item {
-          margin: 4px 0 !important;
-          border-radius: 8px !important;
-          transition: all 0.2s var(--transition-timing) !important;
+          margin: 6px 4px !important;
+          border-radius: 12px !important;
+          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+          height: 44px !important;
+          line-height: 44px !important;
         }
 
         .app-sider .ant-menu-item:hover {
-          transform: translateX(2px);
+          transform: translateX(3px);
+          background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'} !important;
         }
 
         .app-sider .ant-menu-item-selected {
           background: linear-gradient(135deg,
-            ${colors.primary[500]}15,
-            ${colors.cyan[500]}10
+            ${colors.primary[500]}18,
+            ${colors.cyan[500]}12
           ) !important;
-          border-left: 3px solid ${colors.primary[500]} !important;
+          border-left: none !important;
+          box-shadow: 0 2px 8px ${colors.primary[500]}20;
+        }
+
+        .app-sider .ant-menu-item-selected::before {
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 4px;
+          height: 24px;
+          background: linear-gradient(180deg, ${colors.primary[400]}, ${colors.cyan[400]});
+          border-radius: 0 4px 4px 0;
         }
 
         .app-sider .ant-menu-item-selected::after {

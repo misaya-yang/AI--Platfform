@@ -52,7 +52,7 @@
     --input: 214 20% 90%;
     --ring: 213 100% 54%;
 
-    --radius: 0.5rem;
+    --radius: 0.75rem;
 
     /* Z-index 分层系统 */
     --z-base: 0;
@@ -213,20 +213,20 @@
     box-shadow: 0 8px 25px hsl(var(--primary) / 0.3);
   }
 
-  /* 科技感卡片 */
+  /* 科技感卡片 - 更圆润现代 */
   .tech-card {
     background: hsl(var(--card));
     border: 1px solid hsl(var(--border));
-    border-radius: 12px;
-    transition: all var(--transition-normal) ease;
+    border-radius: 16px;
+    transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   .tech-card:hover {
     border-color: hsl(var(--primary) / 0.3);
     box-shadow:
-      0 10px 40px hsl(var(--primary) / 0.1),
-      0 0 0 1px hsl(var(--primary) / 0.1);
-    transform: translateY(-4px);
+      0 12px 40px hsl(var(--primary) / 0.12),
+      0 0 0 1px hsl(var(--primary) / 0.08);
+    transform: translateY(-3px);
   }
 
   /* 发光效果 */
@@ -321,43 +321,86 @@
 
 /* Ant Design Modal 优化 */
 .ant-modal-content {
-  border-radius: 16px !important;
+  border-radius: 20px !important;
   overflow: hidden;
+  box-shadow: 0 25px 50px -12px hsl(0 0% 0% / 0.15) !important;
 }
 
 .ant-modal-header {
-  border-radius: 16px 16px 0 0 !important;
+  border-radius: 20px 20px 0 0 !important;
+}
+
+.ant-modal-footer {
+  border-radius: 0 0 20px 20px !important;
 }
 
 /* Ant Design Message 优化 */
 .ant-message-notice-content {
-  border-radius: 8px !important;
-  box-shadow: 0 6px 16px hsl(0 0% 0% / 0.08) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 24px hsl(0 0% 0% / 0.1) !important;
 }
 
 /* Ant Design Dropdown 优化 */
 .ant-dropdown-menu {
+  border-radius: 12px !important;
+  box-shadow: 0 8px 24px hsl(0 0% 0% / 0.1) !important;
+  padding: 6px !important;
+}
+
+.ant-dropdown-menu-item {
   border-radius: 8px !important;
-  box-shadow: 0 6px 16px hsl(0 0% 0% / 0.08) !important;
+  margin: 2px 0 !important;
 }
 
 /* Ant Design Tooltip 优化 */
 .ant-tooltip-inner {
-  border-radius: 6px !important;
+  border-radius: 10px !important;
 }
 
 /* Ant Design Tag 优化 */
 .ant-tag {
-  border-radius: 6px !important;
+  border-radius: 8px !important;
 }
 
 /* Ant Design Segmented 优化 */
 .ant-segmented {
-  border-radius: 8px !important;
+  border-radius: 12px !important;
+  padding: 4px !important;
 }
 
 .ant-segmented-item {
-  border-radius: 6px !important;
+  border-radius: 10px !important;
+}
+
+/* Ant Design Input 优化 */
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector {
+  border-radius: 10px !important;
+}
+
+.ant-input-lg,
+.ant-input-affix-wrapper-lg,
+.ant-select-lg .ant-select-selector {
+  border-radius: 12px !important;
+}
+
+/* Ant Design Button 圆润化 */
+.ant-btn {
+  border-radius: 10px !important;
+}
+
+.ant-btn-lg {
+  border-radius: 12px !important;
+}
+
+.ant-btn-sm {
+  border-radius: 8px !important;
+}
+
+/* Ant Design Card 优化 */
+.ant-card {
+  border-radius: 16px !important;
 }
 
 /* ========================================
