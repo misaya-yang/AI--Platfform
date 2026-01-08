@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { MessageSquarePlus, Trash2 } from "lucide-react";
+import { MessageSquarePlus, Trash2, ArrowDown } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
 import { useAuthStore } from "@/store/useAuthStore";
 
@@ -423,6 +423,7 @@ export function PlaygroundPage() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
@@ -599,6 +600,8 @@ export function PlaygroundPage() {
     const handleScroll = () => {
       const offset = el.scrollHeight - el.scrollTop - el.clientHeight;
       stickToBottomRef.current = offset < 120;
+      // Show scroll-to-bottom button when user scrolls up more than 200px
+      setShowScrollToBottom(offset > 200);
     };
     handleScroll();
     el.addEventListener("scroll", handleScroll, { passive: true });
@@ -1648,6 +1651,28 @@ export function PlaygroundPage() {
           <ChatWindow messages={messages} showToolCalls={showToolCalls} />
         )}
       </div>
+
+      {/* Scroll to Bottom Button */}
+      {showScrollToBottom && messages.length > 0 && (
+        <button
+          onClick={() => {
+            stickToBottomRef.current = true;
+            scheduleScrollToBottom("smooth");
+          }}
+          className={cn(
+            "absolute bottom-40 left-1/2 -translate-x-1/2 z-10",
+            "flex items-center justify-center",
+            "h-9 w-9 rounded-full",
+            "bg-card/95 border border-border/60 shadow-lg backdrop-blur-sm",
+            "text-muted-foreground hover:text-foreground hover:bg-accent",
+            "transition-all duration-200 hover:scale-105",
+            "ring-1 ring-black/5 dark:ring-white/5"
+          )}
+          aria-label="Scroll to bottom"
+        >
+          <ArrowDown className="h-4 w-4" />
+        </button>
+      )}
 
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">

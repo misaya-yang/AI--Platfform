@@ -1,141 +1,110 @@
-import { useState, useEffect, useRef } from "react";
+import { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { marked } from "marked";
 
 interface StreamOutputProps {
   text: string;
-  /** Render as plain text while streaming to reduce reflow */
+  /** Whether content is still streaming */
   isStreaming?: boolean;
-  /** Enable typing animation for text that arrives all at once */
-  enableTypingEffect?: boolean;
-  /** Characters per frame for typing effect (higher = faster) */
-  typingSpeed?: number;
+  /** Unique ID for keying memoized blocks */
+  id?: string;
 }
 
-export function StreamOutput({ 
-  text, 
+interface ParsedBlocks {
+  blocks: string[];
+  /** Global definitions (link references, footnotes) to prepend to each block */
+  definitions: string;
+}
+
+/**
+ * Parse markdown into discrete blocks using marked lexer.
+ * Extracts global definitions (link references, footnotes) and preserves them
+ * so they can be injected into each block for proper rendering.
+ */
+function parseMarkdownIntoBlocks(markdown: string): ParsedBlocks {
+  if (!markdown) return { blocks: [], definitions: "" };
+
+  try {
+    const tokens = marked.lexer(markdown);
+    const definitions: string[] = [];
+    const blocks: string[] = [];
+
+    for (const token of tokens) {
+      // Collect global definitions (link references, footnotes)
+      if (token.type === "def" || token.type === "footnote") {
+        definitions.push(token.raw);
+      } else if (token.raw && token.raw.trim()) {
+        blocks.push(token.raw);
+      }
+    }
+
+    return {
+      blocks,
+      definitions: definitions.join("\n"),
+    };
+  } catch {
+    // Fallback: render as single block to preserve structure
+    // Don't split - it would break code blocks, lists, etc.
+    return {
+      blocks: [markdown],
+      definitions: "",
+    };
+  }
+}
+
+/**
+ * Memoized individual markdown block.
+ * Once rendered, won't re-render unless content actually changes.
+ */
+const MemoizedMarkdownBlock = memo(
+  function MemoizedMarkdownBlock({ content, definitions }: { content: string; definitions: string }) {
+    // Prepend definitions to each block so references resolve correctly
+    const fullContent = definitions ? `${definitions}\n\n${content}` : content;
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        {fullContent}
+      </ReactMarkdown>
+    );
+  },
+  (prev, next) => prev.content === next.content && prev.definitions === next.definitions
+);
+
+/**
+ * High-performance streaming markdown renderer.
+ *
+ * Uses block-level memoization to achieve O(n) rendering instead of O(n²).
+ * - Parses markdown into discrete blocks (paragraphs, headings, lists, etc.)
+ * - Each completed block is memoized and won't re-render
+ * - Only the last (incomplete) block re-renders during streaming
+ *
+ * This is the same approach used by ChatGPT, Vercel AI SDK, etc.
+ *
+ * @see https://ai-sdk.dev/cookbook/next/markdown-chatbot-with-memoization
+ */
+export const StreamOutput = memo(function StreamOutput({
+  text,
   isStreaming = false,
-  enableTypingEffect = true,
-  typingSpeed = 8 
+  id = "msg"
 }: StreamOutputProps) {
-  const [displayedText, setDisplayedText] = useState("");
-  const prevTextRef = useRef("");
-  const animationFrameRef = useRef<number>();
-  const targetTextRef = useRef(text);
-  
-  useEffect(() => {
-    targetTextRef.current = text;
+  // Parse markdown into blocks for memoization, preserving global definitions
+  const { blocks, definitions } = useMemo(() => parseMarkdownIntoBlocks(text), [text]);
 
-    if (isStreaming) {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      setDisplayedText(text);
-      prevTextRef.current = text;
-      return;
-    }
-    
-    // If text was cleared, reset immediately
-    if (!text) {
-      setDisplayedText("");
-      prevTextRef.current = "";
-      return;
-    }
-    
-    // If typing effect is disabled, show text immediately
-    if (!enableTypingEffect) {
-      setDisplayedText(text);
-      prevTextRef.current = text;
-      return;
-    }
-    
-    // Calculate how much new text was added
-    const prevText = prevTextRef.current;
-    if (prevText === text) {
-      setDisplayedText(text);
-      return;
-    }
-    
-    // If this is incremental (streaming), just append directly
-    if (text.startsWith(prevText) && text.length > prevText.length) {
-      const newPart = text.slice(prevText.length);
-      // For small increments (real streaming), add immediately
-      if (newPart.length <= typingSpeed * 2) {
-        setDisplayedText(text);
-        prevTextRef.current = text;
-        return;
-      }
-    }
-    
-    // For large jumps (all text at once), animate typing
-    const animateTyping = () => {
-      setDisplayedText(current => {
-        const target = targetTextRef.current;
-        if (current.length >= target.length) {
-          prevTextRef.current = target;
-          return target;
-        }
-        
-        // Add characters per frame
-        const nextLength = Math.min(current.length + typingSpeed, target.length);
-        const nextText = target.slice(0, nextLength);
-        
-        // Continue animation if not complete
-        if (nextLength < target.length) {
-          animationFrameRef.current = requestAnimationFrame(animateTyping);
-        } else {
-          prevTextRef.current = target;
-        }
-        
-        return nextText;
-      });
-    };
-    
-    // Cancel any existing animation
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-    }
-    
-    // Start animation
-    animationFrameRef.current = requestAnimationFrame(animateTyping);
-    
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [text, enableTypingEffect, typingSpeed, isStreaming]);
-  
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, []);
-
-  if (isStreaming) {
-    return (
-      <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-        {text}
-        {/* Streaming cursor - blinking indicator */}
-        <span className="inline-block w-2 h-4 ml-0.5 bg-primary/70 animate-pulse rounded-sm align-middle" />
-      </div>
-    );
-  }
-
-  if (!enableTypingEffect) {
-    return (
-      <div className="prose prose-sm max-w-none dark:prose-invert">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-      </div>
-    );
-  }
+  if (!text) return null;
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayedText || text}</ReactMarkdown>
+    <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2">
+      {blocks.map((block, index) => (
+        <MemoizedMarkdownBlock
+          key={`${id}-block-${index}`}
+          content={block}
+          definitions={definitions}
+        />
+      ))}
+      {/* Streaming cursor */}
+      {isStreaming && (
+        <span className="inline-block w-1.5 h-4 ml-0.5 bg-primary/60 animate-pulse rounded-sm align-text-bottom" />
+      )}
     </div>
   );
-}
+});

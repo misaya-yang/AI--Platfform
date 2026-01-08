@@ -190,13 +190,12 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
   const isRunning = status === "running";
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
+    <div
       className={cn(
-        "relative rounded-xl border overflow-hidden",
+        "relative w-full rounded-xl border",
         "bg-gradient-to-br backdrop-blur-sm",
         "transition-all duration-300",
+        "animate-in fade-in-0 duration-200",
         config.bgGradient,
         config.borderColor,
         isExpanded ? "shadow-lg" : "shadow-sm hover:shadow-md"
@@ -334,6 +333,6 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
           50% { transform: translateY(400%); }
         }
       `}</style>
-    </motion.div>
+    </div>
   );
 }

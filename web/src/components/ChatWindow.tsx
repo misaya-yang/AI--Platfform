@@ -76,17 +76,17 @@ function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
 }
 
 const ChatMessageItem = memo(
-  function ChatMessageItem({ message, showToolCalls }: { message: ChatMessage; showToolCalls: boolean }) {
+  function ChatMessageItem({ message, showToolCalls, index }: { message: ChatMessage; showToolCalls: boolean; index: number }) {
     const { t } = useTranslation();
     const isUser = message.role === "user";
     const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
 
     return (
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: "easeOut" }}
-        className={cn("flex w-full gap-4", isUser ? "flex-row-reverse" : "flex-row")}
+      <div
+        className={cn(
+          "flex w-full gap-4 animate-in fade-in-0 slide-in-from-bottom-2 duration-300",
+          isUser ? "flex-row-reverse" : "flex-row"
+        )}
       >
         {/* Avatar */}
         <div className={cn(
@@ -100,8 +100,8 @@ const ChatMessageItem = memo(
 
         {/* Content Bubble */}
         <div className={cn(
-          "flex max-w-[85%] flex-col gap-2",
-          isUser ? "items-end" : "items-start"
+          "flex flex-col gap-2",
+          isUser ? "max-w-[85%] items-end" : "max-w-[85%] min-w-[280px] sm:min-w-[360px] items-start"
         )}>
           {/* Name Label */}
           <span className="text-xs text-muted-foreground ml-1">
@@ -110,7 +110,7 @@ const ChatMessageItem = memo(
 
           <div
             className={cn(
-              "relative px-5 py-3.5 text-sm shadow-lg",
+              "relative px-5 py-3.5 text-sm shadow-lg min-w-0",
               isUser
                 ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white rounded-tl-2xl rounded-tr-sm rounded-br-2xl rounded-bl-2xl shadow-emerald-500/20"
                 : "bg-white dark:bg-zinc-900/90 border border-border/30 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl dark:shadow-black/20"
@@ -118,12 +118,12 @@ const ChatMessageItem = memo(
           >
             {/* Tool Calls Section */}
             {!isUser && hasToolCalls && (
-              <div className="mb-3 space-y-2">
+              <div className="mb-3 space-y-2 w-full min-w-0">
                 <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   <span className="h-1.5 w-1.5 rounded-full bg-purple-500/60" />
                   {t("playground.toolCalls", "Tool Calls")}
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-2 w-full">
                   {message.toolCalls?.map((tc, idx) => (
                     <ToolCallBlock
                       key={tc.toolCall.tool_call_id || idx}
@@ -146,7 +146,7 @@ const ChatMessageItem = memo(
                   <StreamOutput
                     text={message.content}
                     isStreaming={!!message.isStreaming}
-                    enableTypingEffect={false}
+                    id={`msg-${index}`}
                   />
                 )}
               </div>
@@ -182,17 +182,17 @@ const ChatMessageItem = memo(
             <StatsBadge stats={message.stats} />
           )}
         </div>
-      </motion.div>
+      </div>
     );
   },
-  (prev, next) => prev.message === next.message && prev.showToolCalls === next.showToolCalls
+  (prev, next) => prev.message === next.message && prev.showToolCalls === next.showToolCalls && prev.index === next.index
 );
 
 export function ChatWindow({ messages, showToolCalls = true }: { messages: ChatMessage[]; showToolCalls?: boolean }) {
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8">
       {messages.map((message, i) => (
-        <ChatMessageItem key={i} message={message} showToolCalls={showToolCalls} />
+        <ChatMessageItem key={i} message={message} showToolCalls={showToolCalls} index={i} />
       ))}
     </div>
   );
