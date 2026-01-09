@@ -106,11 +106,18 @@ async def list_connections(
 ):
     """List all Confluence connections for the tenant."""
     try:
+        # DEBUG: Log user context
+        logger.info(f"[DEBUG] list_connections called - user_id={user.user_id}, tenant_id='{user.tenant_id}', is_auth={user.is_authenticated}, roles={user.roles}")
+
         svc = get_confluence_sync_service(request)
         connections = await svc.list_connections(
             tenant_id=user.tenant_id,
             status=status,
         )
+
+        # DEBUG: Log results
+        logger.info(f"[DEBUG] list_connections returning {len(connections)} connections")
+
         return [_connection_to_response(c) for c in connections]
     except Exception as exc:
         logger.error(f"Failed to list connections: {exc}")
@@ -402,6 +409,9 @@ async def list_all_bindings(
 ):
     """List all space bindings for the current tenant."""
     try:
+        # DEBUG: Log user context
+        logger.info(f"[DEBUG] list_all_bindings called - user_id={user.user_id}, tenant_id='{user.tenant_id}', is_auth={user.is_authenticated}")
+
         svc = get_confluence_sync_service(request)
         bindings = await svc.list_all_bindings(
             tenant_id=user.tenant_id,
@@ -409,6 +419,10 @@ async def list_all_bindings(
             dataset_id=dataset_id,
             status=status,
         )
+
+        # DEBUG: Log results
+        logger.info(f"[DEBUG] list_all_bindings returning {len(bindings)} bindings")
+
         return bindings
     except Exception as exc:
         logger.error(f"Failed to list all bindings: {exc}")

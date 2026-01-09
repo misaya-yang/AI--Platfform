@@ -31,6 +31,7 @@ from .models import (
     ConfluencePage,
     ConfluenceSpace,
     SyncResult,
+    ImageSegment,
 )
 from .parser import extract_plain_text, extract_markdown
 
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from ....persistence.database import DatabaseStorage
     from ..knowledge_service import KnowledgeService
     from ..worker import KnowledgeWorker
+    from .image_processor import ConfluenceImageProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +67,23 @@ class ConfluenceSyncService:
         database: "DatabaseStorage",
         knowledge_service: "KnowledgeService",
         knowledge_worker: Optional["KnowledgeWorker"] = None,
+        image_processor: Optional["ConfluenceImageProcessor"] = None,
+        image_storage_service: Optional[Any] = None,
+        multimodal_embedding: Optional[Any] = None,
+        vlm_service: Optional[Any] = None,
     ):
         self.settings = settings
         self.db = database
         self.knowledge_service = knowledge_service
         self.worker = knowledge_worker
+        self.image_processor = image_processor
         self._clients: Dict[str, ConfluenceClient] = {}
+
+        # 图片处理相关服务
+        self._image_storage_service = image_storage_service
+        self._multimodal_embedding = multimodal_embedding
+        self._vlm_service = vlm_service
+        self._image_processors: Dict[str, "ConfluenceImageProcessor"] = {}
 
         # 检查 Worker 状态，如果未提供则记录警告
         if not knowledge_worker:
@@ -78,6 +91,14 @@ class ConfluenceSyncService:
                 "⚠️ KnowledgeWorker not provided to ConfluenceSyncService - "
                 "documents will NOT be auto-indexed after sync!"
             )
+
+        if image_processor:
+            logger.info("Image processor configured - image sync enabled")
+        elif image_storage_service:
+            logger.info("Image storage service configured - image sync available")
+
+        if vlm_service:
+            logger.info("VLM service configured - image descriptions enabled")
 
     async def close(self) -> None:
         """关闭所有客户端连接"""
@@ -107,6 +128,78 @@ class ConfluenceSyncService:
         )
         self._clients[connection_id] = client
         return client
+
+    async def _get_image_processor(
+        self, connection_id: str, max_image_size: Optional[int] = None
+    ) -> Optional["ConfluenceImageProcessor"]:
+        """
+        获取或创建指定连接的图片处理器
+
+        Args:
+            connection_id: 连接 ID
+            max_image_size: 可选的最大图片大小配置（字节）。
+                           如果提供，将创建新的处理器而不使用缓存。
+
+        Returns:
+            图片处理器实例，如果无法创建则返回 None
+        """
+        # 如果已经有传入的 image_processor，直接使用
+        if self.image_processor:
+            return self.image_processor
+
+        # 如果没有存储服务，无法创建
+        if not self._image_storage_service:
+            return None
+
+        # 如果提供了自定义 max_image_size，创建新的处理器（不缓存）
+        if max_image_size is not None:
+            try:
+                from .image_processor import ConfluenceImageProcessor
+
+                client = await self._get_client(connection_id)
+                processor = ConfluenceImageProcessor(
+                    confluence_client=client,
+                    storage_service=self._image_storage_service,
+                    multimodal_embedding=self._multimodal_embedding,
+                    vlm_service=self._vlm_service,
+                    generate_vlm_descriptions=self._vlm_service is not None,
+                    max_image_size=max_image_size,
+                )
+                logger.debug(
+                    f"Created image processor for connection {connection_id} "
+                    f"with custom max_image_size={max_image_size}"
+                )
+                return processor
+            except Exception as e:
+                logger.warning(f"Failed to create image processor: {e}")
+                return None
+
+        # 检查是否已缓存
+        if connection_id in self._image_processors:
+            return self._image_processors[connection_id]
+
+        # 创建新的 image_processor（使用默认配置）
+        try:
+            # 延迟导入以避免循环依赖
+            from .image_processor import ConfluenceImageProcessor
+
+            client = await self._get_client(connection_id)
+            processor = ConfluenceImageProcessor(
+                confluence_client=client,
+                storage_service=self._image_storage_service,
+                multimodal_embedding=self._multimodal_embedding,
+                vlm_service=self._vlm_service,
+                generate_vlm_descriptions=self._vlm_service is not None,
+            )
+            self._image_processors[connection_id] = processor
+            logger.debug(
+                f"Created image processor for connection {connection_id} "
+                f"(vlm_enabled={self._vlm_service is not None})"
+            )
+            return processor
+        except Exception as e:
+            logger.warning(f"Failed to create image processor: {e}")
+            return None
 
     def _invalidate_client(self, connection_id: str) -> None:
         """使客户端缓存失效"""
@@ -500,6 +593,9 @@ class ConfluenceSyncService:
         binding_id: Optional[str] = None,
         created_by: Optional[str] = None,
         extra_metadata: Optional[Dict[str, Any]] = None,
+        sync_images: bool = False,
+        tenant_id: Optional[str] = None,
+        image_max_size_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
         """从 Confluence 页面创建文档"""
         # 检查 body_storage 是否为空
@@ -575,7 +671,346 @@ class ConfluenceSyncService:
                 confluence_updated_at=page.updated_at,
             )
 
+        # 处理图片（如果启用）
+        if sync_images:
+            if not tenant_id:
+                logger.warning(
+                    f"Image sync enabled but tenant_id is missing for page {page.page_id}, "
+                    "skipping image processing"
+                )
+            else:
+                # 获取或创建 image_processor（使用 binding 配置的图片大小限制）
+                img_processor = await self._get_image_processor(
+                    connection_id, max_image_size=image_max_size_bytes
+                )
+                if not img_processor:
+                    logger.debug(
+                        f"Image processor not available for page {page.page_id}, "
+                        "skipping image processing"
+                    )
+                else:
+                    try:
+                        image_result = await img_processor.process_page_images(
+                            page_id=page.page_id,
+                            document_id=doc_id,
+                            tenant_id=tenant_id,
+                            page_content=page.body_storage,
+                            page_title=page.title,
+                            generate_embeddings=True,
+                        )
+                        if image_result.processed_images > 0:
+                            vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
+                            logger.info(
+                                f"Processed {image_result.processed_images} images for page {page.page_id} "
+                                f"(vlm_descriptions={vlm_count})"
+                            )
+                            # Store image segments in database
+                            for idx, segment in enumerate(image_result.segments):
+                                await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
+                            doc["image_count"] = image_result.processed_images
+                        if image_result.errors:
+                            logger.warning(
+                                f"Image processing errors for page {page.page_id}: {image_result.errors}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to process images for page {page.page_id}: {e}")
+                        # Don't fail the document sync for image errors
+
         return doc
+
+    async def _save_image_segment(
+        self,
+        segment: ImageSegment,
+        dataset_id: str,
+        binding_id: Optional[str] = None,
+        position: int = 0,
+    ) -> None:
+        """保存图片段到数据库并存入向量库"""
+        try:
+            # Build text content from VLM description and context
+            # VLM description is the primary searchable text for RAG
+            text_content = ""
+            if segment.vlm_description:
+                text_content = segment.vlm_description
+            if segment.context_text:
+                if text_content:
+                    text_content = f"{text_content}\n\n---\n上下文：{segment.context_text}"
+                else:
+                    text_content = segment.context_text
+
+            # Generate text embedding and store in Qdrant for RAG search
+            vector_id = None
+            if text_content and self.knowledge_service:
+                try:
+                    # Get dataset info for collection name and embedding config
+                    dataset = await self.db.get_dataset(dataset_id)
+                    if dataset:
+                        collection = dataset.get("collection_name")
+                        if collection:
+                            # Create embedder using dataset's embedding config
+                            from ..embedding import create_embedding
+
+                            embedding_provider = str(dataset.get("embedding_provider") or "local")
+                            embedding_model = str(dataset.get("embedding_model") or "hash-384")
+                            embedding_config = dataset.get("embedding_config") or {}
+                            if not isinstance(embedding_config, dict):
+                                embedding_config = {}
+
+                            econf = self.knowledge_service._resolve_embedding_config(
+                                provider=embedding_provider,
+                                model=embedding_model,
+                                embedding_config=embedding_config,
+                            )
+
+                            # Check if segment has pre-computed multimodal embedding
+                            collection_dim = int(dataset.get("embedding_dimension") or 0)
+                            use_multimodal = False
+                            vector = None
+
+                            if segment.has_embedding:
+                                # Use pre-computed multimodal embedding if dimension matches
+                                if segment.embedding_dimension == collection_dim:
+                                    vector = segment.embedding
+                                    use_multimodal = True
+                                    logger.debug(
+                                        f"Using pre-computed multimodal embedding for {segment.filename} "
+                                        f"(dim={segment.embedding_dimension})"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"Multimodal embedding dimension mismatch for {segment.filename}: "
+                                        f"segment={segment.embedding_dimension}, collection={collection_dim}, "
+                                        f"falling back to text embedding"
+                                    )
+
+                            # Fall back to text embedding if no multimodal or dimension mismatch
+                            if vector is None and text_content:
+                                embedder = create_embedding(
+                                    econf, dimension=collection_dim or None
+                                )
+                                try:
+                                    vectors = await embedder.embed_documents([text_content])
+                                    if vectors and len(vectors) > 0:
+                                        vector = vectors[0]
+                                finally:
+                                    await embedder.close()
+
+                            if vector:
+                                vector_id = segment.segment_id
+
+                                # Import qdrant models
+                                from qdrant_client import models as qmodels
+
+                                # Prepare payload for Qdrant
+                                payload = {
+                                    "dataset_id": dataset_id,
+                                    "document_id": segment.document_id,
+                                    "segment_id": segment.segment_id,
+                                    "text": text_content,
+                                    "content_type": "image",
+                                    "image_filename": segment.filename,
+                                    "image_url": segment.storage_url,
+                                    "is_multimodal": use_multimodal,  # Track embedding type
+                                }
+
+                                # Upsert to Qdrant
+                                await self.knowledge_service.vector_store.upsert(
+                                    collection_name=collection,
+                                    points=[qmodels.PointStruct(
+                                        id=vector_id,
+                                        vector=vector,
+                                        payload=payload,
+                                    )],
+                                )
+                                logger.info(
+                                    f"Stored image vector in Qdrant: {segment.filename} "
+                                    f"(collection={collection}, multimodal={use_multimodal}, "
+                                    f"text_len={len(text_content) if text_content else 0})"
+                                )
+                except Exception as vec_err:
+                    logger.warning(f"Failed to store image vector: {vec_err}")
+                    # Continue to save segment to database even if vector storage fails
+
+            segment_data = {
+                "segment_id": segment.segment_id,
+                "document_id": segment.document_id,
+                "dataset_id": dataset_id,
+                "position": 100000 + position,  # Offset to avoid collision with text segments
+                "content_type": "image",
+                "image_url": segment.storage_url,
+                "image_attachment_id": segment.attachment_id,
+                "image_filename": segment.filename,
+                "image_media_type": segment.media_type,
+                "image_file_size": segment.file_size,
+                "text": text_content,  # Contains VLM description for RAG search
+                "vector_id": vector_id or segment.vector_id,
+                "metadata": {
+                    **segment.metadata,
+                    "has_vlm_description": bool(segment.vlm_description),
+                    "vlm_description_length": len(segment.vlm_description) if segment.vlm_description else 0,
+                    "vector_stored": vector_id is not None,
+                    # attachment_updated_at is already in segment.metadata for change detection
+                },
+            }
+            await self.db.save_image_segment(segment_data)
+            logger.debug(
+                f"Saved image segment {segment.segment_id} "
+                f"(vlm_description={'yes' if segment.vlm_description else 'no'}, "
+                f"text_length={len(text_content)}, vector_stored={vector_id is not None})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save image segment {segment.segment_id}: {e}")
+
+    async def _check_image_updates_needed(
+        self,
+        document_id: str,
+        connection_id: str,
+        page_id: str,
+    ) -> bool:
+        """
+        检查页面图片是否需要更新
+
+        通过比较 Confluence 附件的更新时间与已存储段落的元数据来判断。
+
+        Args:
+            document_id: 文档 ID
+            connection_id: 连接 ID
+            page_id: Confluence 页面 ID
+
+        Returns:
+            是否需要重新处理图片
+        """
+        try:
+            # 获取已存储的图片段
+            existing_segments = await self.db.get_image_segments_by_document(document_id)
+            if not existing_segments:
+                # 没有已存储的图片，需要处理
+                return True
+
+            # 获取 Confluence 当前附件
+            client = await self._get_client(connection_id)
+            current_attachments = await client.get_page_image_attachments(
+                page_id=page_id,
+                embeddable_only=True
+            )
+
+            if not current_attachments:
+                # 没有附件但有存储的段落，需要清理
+                return True
+
+            # 构建现有段落的附件ID映射
+            existing_map = {
+                seg.get("image_attachment_id"): seg
+                for seg in existing_segments
+                if seg.get("image_attachment_id")
+            }
+
+            # 检查是否有新增或更新的附件
+            for attachment in current_attachments:
+                existing_seg = existing_map.get(attachment.attachment_id)
+
+                if not existing_seg:
+                    # 新附件
+                    logger.debug(f"New attachment detected: {attachment.filename}")
+                    return True
+
+                # 检查更新时间
+                stored_updated_at = existing_seg.get("metadata", {}).get("attachment_updated_at")
+                if stored_updated_at and attachment.updated_at:
+                    if attachment.updated_at != stored_updated_at:
+                        logger.debug(
+                            f"Attachment updated: {attachment.filename} "
+                            f"({stored_updated_at} -> {attachment.updated_at})"
+                        )
+                        return True
+
+            # 检查是否有删除的附件
+            current_ids = {a.attachment_id for a in current_attachments}
+            for existing_id in existing_map:
+                if existing_id not in current_ids:
+                    logger.debug(f"Attachment removed: {existing_id}")
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"Failed to check image updates: {e}, will reprocess")
+            return True
+
+    async def _reprocess_document_images(
+        self,
+        document_id: str,
+        connection_id: str,
+        page: "ConfluencePage",
+        dataset_id: str,
+        tenant_id: str,
+        binding_id: Optional[str] = None,
+        image_max_size_bytes: Optional[int] = None,
+    ) -> int:
+        """
+        重新处理文档的图片（先删除旧图片）
+
+        Args:
+            document_id: 文档 ID
+            connection_id: 连接 ID
+            page: Confluence 页面
+            dataset_id: 数据集 ID
+            tenant_id: 租户 ID
+            binding_id: 绑定 ID
+            image_max_size_bytes: 图片最大大小限制（字节）
+
+        Returns:
+            处理的图片数量
+        """
+        img_processor = await self._get_image_processor(
+            connection_id, max_image_size=image_max_size_bytes
+        )
+        if not img_processor:
+            return 0
+
+        try:
+            # 先删除存储中的旧图片（S3/OSS）
+            if self._image_storage_service and tenant_id:
+                try:
+                    deleted_count = await self._image_storage_service.delete_document_images(
+                        tenant_id=tenant_id,
+                        document_id=document_id,
+                    )
+                    if deleted_count > 0:
+                        logger.info(
+                            f"Deleted {deleted_count} old images from storage for document {document_id}"
+                        )
+                except Exception as storage_err:
+                    logger.warning(f"Failed to delete old images from storage: {storage_err}")
+
+            # 删除旧的图片段（数据库）
+            await self.db.delete_image_segments_by_document(document_id)
+
+            # 处理新图片
+            image_result = await img_processor.process_page_images(
+                page_id=page.page_id,
+                document_id=document_id,
+                tenant_id=tenant_id,
+                page_content=page.body_storage,
+                page_title=page.title,
+                generate_embeddings=True,
+            )
+
+            if image_result.processed_images > 0:
+                vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
+                logger.info(
+                    f"Reprocessed {image_result.processed_images} images for page {page.page_id} "
+                    f"(vlm_descriptions={vlm_count})"
+                )
+                # 保存新的图片段
+                for idx, segment in enumerate(image_result.segments):
+                    await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
+
+            return image_result.processed_images
+
+        except Exception as e:
+            logger.error(f"Failed to reprocess images for page {page.page_id}: {e}")
+            return 0
 
     # ============ Space Binding ============
 
@@ -591,6 +1026,8 @@ class ConfluenceSyncService:
         max_depth: int = 10,
         include_attachments: bool = False,
         include_comments: bool = False,
+        sync_images: bool = False,
+        image_max_size_bytes: int = 3 * 1024 * 1024,  # 3 MB
         created_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -607,6 +1044,8 @@ class ConfluenceSyncService:
             max_depth: 最大深度
             include_attachments: 是否包含附件
             include_comments: 是否包含评论
+            sync_images: 是否同步并嵌入图片（需要多模态嵌入支持）
+            image_max_size_bytes: 最大图片大小（默认 3 MB）
             created_by: 创建者 ID
 
         Returns:
@@ -661,6 +1100,8 @@ class ConfluenceSyncService:
             "max_depth": max_depth,
             "include_attachments": include_attachments,
             "include_comments": include_comments,
+            "sync_images": sync_images,
+            "image_max_size_bytes": image_max_size_bytes,
             "status": "pending",
             "created_by": created_by,
         }
@@ -814,7 +1255,8 @@ class ConfluenceSyncService:
         # 过滤允许更新的字段
         allowed_fields = {
             "root_page_id", "include_patterns", "exclude_patterns", "max_depth",
-            "include_attachments", "include_comments", "status"
+            "include_attachments", "include_comments", "status",
+            "sync_images", "image_max_size_bytes",  # 图片同步配置
         }
         filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
 
@@ -983,7 +1425,46 @@ class ConfluenceSyncService:
 
                     if existing:
                         # 检查内容是否变化
-                        if existing.get("content_hash") == page.content_hash:
+                        content_unchanged = existing.get("content_hash") == page.content_hash
+
+                        if content_unchanged:
+                            # 内容没变，但检查是否需要处理图片
+                            doc_id = existing.get("document_id")
+                            sync_images_needed = binding.get("sync_images", False)
+
+                            if sync_images_needed and doc_id:
+                                # 使用完整的图片更新检查（检查新增、更新、删除的附件）
+                                try:
+                                    image_updates_needed = await self._check_image_updates_needed(
+                                        document_id=doc_id,
+                                        connection_id=connection_id,
+                                        page_id=page_id,
+                                    )
+                                    if image_updates_needed:
+                                        logger.info(
+                                            f"Page {page_id} content unchanged but image updates detected, "
+                                            f"reprocessing images..."
+                                        )
+                                        tenant_id = binding.get("tenant_id")
+                                        if not tenant_id:
+                                            logger.warning(
+                                                f"Binding {binding_id} has no tenant_id, skipping image reprocess"
+                                            )
+                                        else:
+                                            await self._reprocess_document_images(
+                                                document_id=doc_id,
+                                                connection_id=connection_id,
+                                                page=page,
+                                                dataset_id=dataset_id,
+                                                tenant_id=tenant_id,
+                                                binding_id=binding_id,
+                                                image_max_size_bytes=binding.get("image_max_size_bytes"),
+                                            )
+                                        result.synced_pages += 1
+                                        continue
+                                except Exception as img_err:
+                                    logger.warning(f"Failed to check/process images: {img_err}")
+
                             result.skipped_pages += 1
                             continue
 
@@ -1011,6 +1492,9 @@ class ConfluenceSyncService:
                             page=page,
                             binding_id=binding_id,
                             created_by=binding.get("created_by"),
+                            sync_images=binding.get("sync_images", False),
+                            tenant_id=binding.get("tenant_id"),
+                            image_max_size_bytes=binding.get("image_max_size_bytes"),
                         )
                         if self.worker:
                             await self.worker.enqueue(dataset_id, doc["document_id"])
@@ -1222,6 +1706,9 @@ class ConfluenceSyncService:
                             page=page,
                             binding_id=binding_id,
                             created_by=binding.get("created_by"),
+                            sync_images=binding.get("sync_images", False),
+                            tenant_id=binding.get("tenant_id"),
+                            image_max_size_bytes=binding.get("image_max_size_bytes"),
                         )
                         if self.worker:
                             await self.worker.enqueue(dataset_id, doc["document_id"])
@@ -1332,6 +1819,7 @@ class ConfluenceSyncService:
                     version=page.version,
                     content_hash=page.content_hash,
                     status="synced",
+                    web_url=page.web_url,
                 )
                 return {"status": "success", "action": "updated", "document_id": doc_id}
             else:
@@ -1342,6 +1830,9 @@ class ConfluenceSyncService:
                     page=page,
                     binding_id=binding_id,
                     created_by=binding.get("created_by"),
+                    sync_images=binding.get("sync_images", False),
+                    tenant_id=binding.get("tenant_id"),
+                    image_max_size_bytes=binding.get("image_max_size_bytes"),
                 )
                 if self.worker:
                     await self.worker.enqueue(dataset_id, doc["document_id"])
@@ -1422,6 +1913,7 @@ class ConfluenceSyncService:
                 version=page.version,
                 content_hash=page.content_hash,
                 status="synced",
+                web_url=page.web_url,
             )
             return doc_id
         else:
@@ -1432,6 +1924,9 @@ class ConfluenceSyncService:
                 page=page,
                 binding_id=binding_id,
                 created_by=binding.get("created_by"),
+                sync_images=binding.get("sync_images", False),
+                tenant_id=binding.get("tenant_id"),
+                image_max_size_bytes=binding.get("image_max_size_bytes"),
             )
             if self.worker:
                 await self.worker.enqueue(dataset_id, doc["document_id"])
@@ -1581,3 +2076,279 @@ class ConfluenceSyncService:
             任务详情
         """
         return await self.db.get_confluence_sync_task(task_id)
+
+    # ============ Incremental Sync (CQL-based) ============
+
+    async def incremental_sync(
+        self,
+        binding_id: str,
+        force: bool = False,
+    ) -> str:
+        """
+        增量同步：只同步自上次同步以来修改的页面
+
+        使用 CQL 查询 lastModified > "last_sync_at" 来获取变更页面，
+        比全量同步更高效。
+
+        Args:
+            binding_id: 绑定 ID
+            force: 是否强制同步（忽略正在进行的同步）
+
+        Returns:
+            任务 ID
+        """
+        binding = await self.db.get_confluence_binding(binding_id)
+        if not binding:
+            raise ConfluenceSyncError(f"Binding not found: {binding_id}")
+
+        # 检查是否已有同步在进行
+        if binding.get("status") == "syncing" and not force:
+            raise ConfluenceSyncError("A sync is already in progress")
+
+        # 创建同步任务
+        task_id = str(uuid.uuid4())
+        await self.db.create_confluence_sync_task(
+            task_id=task_id,
+            binding_id=binding_id,
+            task_type="incremental_sync",
+            priority=1,
+        )
+
+        # 更新状态
+        await self.db.update_confluence_binding(binding_id, {"status": "syncing"})
+
+        # 启动后台同步
+        asyncio.create_task(self._incremental_sync_pages(binding_id, task_id))
+
+        return task_id
+
+    async def _incremental_sync_pages(
+        self,
+        binding_id: str,
+        task_id: str,
+    ) -> SyncResult:
+        """
+        执行增量同步：只处理自上次同步以来修改的页面
+        """
+        result = SyncResult(started_at=datetime.utcnow(), task_id=task_id)
+
+        binding = await self.db.get_confluence_binding(binding_id)
+        if not binding:
+            logger.error(f"Binding not found: {binding_id}")
+            return result
+
+        connection_id = binding["connection_id"]
+        dataset_id = binding["dataset_id"]
+        space_key = binding["space_key"]
+        last_sync_at = binding.get("last_sync_at")
+
+        try:
+            client = await self._get_client(connection_id)
+
+            # 如果没有上次同步时间，执行全量同步
+            if not last_sync_at:
+                logger.info(f"No last_sync_at for binding {binding_id}, performing full sync")
+                await self.db.update_confluence_sync_task(task_id, {
+                    "status": "completed",
+                    "result": {"message": "Redirected to full sync"},
+                })
+                # 改为全量同步
+                await self._sync_space_pages(binding_id, task_id)
+                return result
+
+            # 确保 last_sync_at 是 datetime 对象
+            if isinstance(last_sync_at, str):
+                last_sync_at = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
+
+            # 使用 CQL 查询修改过的页面
+            logger.info(f"Incremental sync for binding {binding_id}, since {last_sync_at}")
+            modified_pages = await client.search_pages_modified_since(
+                space_key=space_key,
+                since=last_sync_at,
+            )
+
+            result.total_pages = len(modified_pages)
+
+            await self.db.update_confluence_sync_task(task_id, {
+                "status": "processing",
+                "total_items": len(modified_pages),
+                "started_at": datetime.utcnow(),
+            })
+
+            # 处理修改的页面
+            for i, page_stub in enumerate(modified_pages):
+                try:
+                    # 获取完整页面内容（CQL 搜索只返回基本信息）
+                    page = await client.get_page(page_stub.page_id)
+
+                    existing = await self.db.get_confluence_page_by_page_id(binding_id, page.page_id)
+
+                    if existing:
+                        # 检查内容是否真的变化
+                        if existing.get("content_hash") == page.content_hash:
+                            result.skipped_pages += 1
+                            continue
+
+                        # 更新现有文档
+                        doc_id = existing.get("document_id")
+                        if doc_id:
+                            content_text = extract_plain_text(page.body_storage)
+                            await self.db.update_document_fields(
+                                doc_id,
+                                {
+                                    "content": content_text,
+                                    "confluence_version": page.version,
+                                    "status": "uploaded",
+                                    "progress": 0,
+                                }
+                            )
+                            if self.worker:
+                                await self.worker.enqueue(dataset_id, doc_id)
+                            result.updated_documents.append(doc_id)
+
+                            # 更新页面记录
+                            await self.db.upsert_confluence_page(
+                                binding_id=binding_id,
+                                page_id=page.page_id,
+                                document_id=doc_id,
+                                space_key=page.space_key,
+                                title=page.title,
+                                version=page.version,
+                                content_hash=page.content_hash,
+                                status="synced",
+                                web_url=page.web_url,
+                            )
+                    else:
+                        # 创建新文档
+                        doc = await self._create_document_from_page(
+                            dataset_id=dataset_id,
+                            connection_id=connection_id,
+                            page=page,
+                            binding_id=binding_id,
+                            created_by=binding.get("created_by"),
+                            sync_images=binding.get("sync_images", False),
+                            tenant_id=binding.get("tenant_id"),
+                            image_max_size_bytes=binding.get("image_max_size_bytes"),
+                        )
+                        if self.worker:
+                            await self.worker.enqueue(dataset_id, doc["document_id"])
+                        result.created_documents.append(doc["document_id"])
+
+                    result.synced_pages += 1
+
+                    # 更新进度
+                    progress = ((i + 1) / len(modified_pages)) * 100 if modified_pages else 0
+                    await self.db.update_confluence_sync_task(task_id, {
+                        "processed_items": i + 1,
+                        "progress": progress,
+                    })
+
+                except Exception as e:
+                    result.failed_pages += 1
+                    result.errors.append({
+                        "page_id": page_stub.page_id,
+                        "error": str(e),
+                    })
+                    logger.error(f"Failed to sync page {page_stub.page_id}: {e}")
+
+            # 检测并处理已删除的页面
+            # 获取当前 binding 下所有已同步的页面
+            existing_pages = await self.db.list_confluence_pages(binding_id)
+            modified_page_ids = {p.page_id for p in modified_pages}
+
+            # 检查每个已同步的页面是否仍存在于 Confluence
+            deleted_count = 0
+            for page_record in existing_pages:
+                page_id = page_record.get("page_id")
+                # 跳过本次已处理的页面
+                if page_id in modified_page_ids:
+                    continue
+
+                try:
+                    # 尝试获取页面，如果返回 404 则表示已删除
+                    await client.get_page(page_id)
+                except ConfluenceAPIError as e:
+                    if e.status_code == 404:
+                        # 页面已删除，从知识库中移除
+                        doc_id = page_record.get("document_id")
+                        if doc_id:
+                            try:
+                                # 直接从数据库删除文档和相关数据
+                                await self.db.delete_document(doc_id)
+                                result.deleted_documents.append(doc_id)
+                                logger.info(f"Deleted document {doc_id} for removed page {page_id}")
+                            except Exception as del_err:
+                                logger.warning(f"Failed to delete document {doc_id}: {del_err}")
+                        # 删除页面记录
+                        await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
+                        deleted_count += 1
+                        logger.info(f"Removed deleted page {page_id} during incremental sync")
+                except Exception as check_err:
+                    # 其他错误（如网络问题）不视为删除
+                    logger.debug(f"Could not verify page {page_id}: {check_err}")
+
+            if deleted_count > 0:
+                logger.info(f"Removed {deleted_count} deleted pages during incremental sync")
+
+            result.completed_at = datetime.utcnow()
+
+            # 更新绑定状态
+            await self.db.update_confluence_binding(binding_id, {
+                "status": "completed",
+                "last_sync_at": datetime.utcnow(),
+                "last_sync_type": "incremental",
+            })
+
+            # 更新任务状态
+            await self.db.update_confluence_sync_task(task_id, {
+                "status": "completed",
+                "progress": 100,
+                "completed_at": datetime.utcnow(),
+                "result": result.to_dict(),
+            })
+
+            logger.info(
+                f"Incremental sync completed for binding {binding_id}: "
+                f"{result.synced_pages} synced, {result.skipped_pages} skipped, "
+                f"{result.failed_pages} failed"
+            )
+
+        except Exception as e:
+            logger.exception(f"Incremental sync failed: {e}")
+            result.errors.append({"error": str(e)})
+
+            await self.db.update_confluence_binding(binding_id, {
+                "status": "error",
+                "last_error": str(e),
+            })
+
+            await self.db.update_confluence_sync_task(task_id, {
+                "status": "failed",
+                "error": str(e),
+                "completed_at": datetime.utcnow(),
+            })
+
+        return result
+
+    async def list_bindings_for_polling(self) -> List[Dict[str, Any]]:
+        """
+        获取所有需要轮询同步的绑定
+
+        Returns:
+            启用了轮询的绑定列表
+        """
+        all_bindings = await self.db.list_confluence_bindings()
+        polling_bindings = []
+
+        for binding in all_bindings:
+            # 获取关联的连接配置
+            connection = await self.db.get_confluence_connection(binding["connection_id"])
+            if not connection:
+                continue
+
+            # 检查连接是否启用轮询
+            if connection.get("sync_mode") == "polling" and connection.get("status") == "active":
+                binding["polling_interval_minutes"] = connection.get("polling_interval_minutes", 60)
+                polling_bindings.append(binding)
+
+        return polling_bindings

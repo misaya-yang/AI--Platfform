@@ -96,6 +96,13 @@ export interface Segment {
   hit_count?: number;
   created_at?: string;
   created_by?: string;
+  // Image segment fields
+  content_type?: "text" | "image";
+  image_url?: string;
+  image_attachment_id?: string;
+  image_filename?: string;
+  image_media_type?: string;
+  image_file_size?: number;
 }
 
 // ============================================================

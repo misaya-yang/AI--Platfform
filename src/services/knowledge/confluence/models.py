@@ -243,3 +243,101 @@ class ConfluenceSyncTask:
     created_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+
+@dataclass
+class ConfluenceAttachment:
+    """Confluence 附件数据"""
+    attachment_id: str
+    page_id: str
+    filename: str
+    media_type: str
+    file_size: int
+    download_link: str
+    title: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    comment: Optional[str] = None
+
+    @property
+    def is_image(self) -> bool:
+        """判断是否为图片类型"""
+        image_types = {"image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/svg+xml"}
+        return self.media_type.lower() in image_types
+
+    @property
+    def is_embeddable_image(self) -> bool:
+        """判断是否可用于嵌入（支持的图片格式且大小合适）"""
+        # DashScope multimodal API limits: ≤3 MB
+        max_size = 3 * 1024 * 1024  # 3 MB
+        embeddable_types = {"image/jpeg", "image/png", "image/bmp", "image/webp"}
+        return self.media_type.lower() in embeddable_types and self.file_size <= max_size
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "attachment_id": self.attachment_id,
+            "page_id": self.page_id,
+            "filename": self.filename,
+            "media_type": self.media_type,
+            "file_size": self.file_size,
+            "download_link": self.download_link,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "comment": self.comment,
+            "is_image": self.is_image,
+            "is_embeddable_image": self.is_embeddable_image,
+        }
+
+
+@dataclass
+class ImageSegment:
+    """图片段数据（用于向量化存储）"""
+    segment_id: str
+    document_id: str
+    attachment_id: str
+    filename: str
+    media_type: str
+    file_size: int
+    storage_url: str  # S3/OSS URL
+    vector_id: Optional[str] = None
+    alt_text: Optional[str] = None
+    ocr_text: Optional[str] = None
+    context_text: Optional[str] = None  # Surrounding text from page
+    vlm_description: Optional[str] = None  # VLM-generated image description for RAG
+    embedding: Optional[List[float]] = None  # Multimodal embedding vector
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[datetime] = None
+
+    @property
+    def has_embedding(self) -> bool:
+        """Check if this segment has an embedding vector"""
+        return self.embedding is not None and len(self.embedding) > 0
+
+    @property
+    def embedding_dimension(self) -> int:
+        """Get embedding dimension"""
+        if self.embedding:
+            return len(self.embedding)
+        return 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            "segment_id": self.segment_id,
+            "document_id": self.document_id,
+            "attachment_id": self.attachment_id,
+            "filename": self.filename,
+            "media_type": self.media_type,
+            "file_size": self.file_size,
+            "storage_url": self.storage_url,
+            "vector_id": self.vector_id,
+            "alt_text": self.alt_text,
+            "ocr_text": self.ocr_text,
+            "context_text": self.context_text,
+            "has_embedding": self.has_embedding,
+            "embedding_dimension": self.embedding_dimension,
+            "metadata": self.metadata,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

@@ -494,6 +494,7 @@
       "syncAll": "Sync All",
       "syncPage": "Re-sync",
       "openInConfluence": "Open in Confluence",
+      "noUrl": "URL not available",
       "batchSync": "Batch Sync",
       "selectedCount": "{{count}} selected",
       "clearSelection": "Clear Selection",
@@ -516,7 +517,11 @@
         "actions": "Actions"
       },
       "viewDetails": "View Details",
-      "addPages": "Add Pages"
+      "addPages": "Add Pages",
+      "syncing": "Syncing \"{{title}}\"...",
+      "syncStarted": "Started syncing \"{{title}}\"",
+      "syncSuccess": "\"{{title}}\" synced successfully",
+      "syncFailed": "Failed to sync \"{{title}}\""
     },
     "addPages": {
       "title": "Add Pages",

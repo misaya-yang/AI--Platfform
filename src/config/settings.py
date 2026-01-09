@@ -169,29 +169,56 @@ class ConfluenceSettings(BaseModel):
 class ProxySettings(BaseModel):
     """透明代理配置"""
     enabled: bool = True
-    
+
     # 默认超时配置
     timeout_connect: float = 5.0
     timeout_read: float = 300.0
     timeout_write: float = 60.0
     timeout_pool: float = 60.0
-    
+
     # 配置缓存 TTL（秒）
     config_cache_ttl: float = 60.0
-    
+
     # 计费配置
     billing_enabled: bool = True
     billing_buffer_size: int = 100
     billing_flush_interval: float = 5.0
-    
+
     # 上下文注入配置
     inject_user_info: bool = True
     inject_request_info: bool = True
     forward_auth: bool = True
     forward_all_headers: bool = True
-    
+
     # 自定义头部（所有请求都会注入）
     custom_headers: Dict[str, str] = Field(default_factory=dict)
+
+
+class StorageS3Settings(BaseModel):
+    """S3 存储配置"""
+    bucket: str = ""
+    region: str = "us-east-1"
+    access_key: str = ""
+    secret_key: str = ""
+    endpoint_url: Optional[str] = None  # 用于 S3 兼容服务
+
+
+class StorageOSSSettings(BaseModel):
+    """阿里云 OSS 存储配置"""
+    bucket: str = ""
+    endpoint: str = ""  # e.g., oss-cn-beijing.aliyuncs.com
+    access_key: str = ""
+    secret_key: str = ""
+
+
+class StorageSettings(BaseModel):
+    """对象存储配置（用于 Confluence 图片等）"""
+    backend: str = "local"  # local | s3 | oss
+    local_base_path: str = "./data/images"
+    url_expiry_seconds: int = 3600
+
+    s3: StorageS3Settings = Field(default_factory=StorageS3Settings)
+    oss: StorageOSSSettings = Field(default_factory=StorageOSSSettings)
 
 
 class Settings(BaseSettings):
@@ -244,6 +271,9 @@ class Settings(BaseSettings):
 
     # 透明代理配置
     proxy: ProxySettings = Field(default_factory=ProxySettings)
+
+    # 对象存储配置（用于 Confluence 图片等）
+    storage: StorageSettings = Field(default_factory=StorageSettings)
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

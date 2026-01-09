@@ -277,6 +277,293 @@ class DashScopeEmbedding(BaseEmbedding):
         return all_vectors
 
 
+class DashScopeMultimodalEmbedding(BaseEmbedding):
+    """DashScope multimodal embeddings adapter for images.
+
+    Uses the official `dashscope` SDK for multimodal embedding.
+    Supports image embedding via DashScope's multimodal-embedding API.
+
+    Models:
+    - multimodal-embedding-v1: 1024 dimensions
+    - tongyi-embedding-vision-plus: 1024 dimensions (recommended)
+
+    API Limits:
+    - Max image size: 3MB (base64 encoded)
+    - Supported formats: JPEG, PNG, GIF, BMP, WebP
+    """
+
+    MODEL_DIMENSIONS: Dict[str, int] = {
+        "multimodal-embedding-v1": 1024,
+        "multimodal-embedding-one-peace": 1536,
+        "tongyi-embedding-vision-plus": 1024,
+        "qwen2.5-vl-embedding": 1024,  # Latest Qwen VL embedding model
+    }
+
+    # Max 3MB for DashScope multimodal API
+    MAX_IMAGE_SIZE_BYTES = 3 * 1024 * 1024
+
+    # Supported image MIME types
+    SUPPORTED_MEDIA_TYPES = {
+        "image/jpeg", "image/jpg", "image/png",
+        "image/gif", "image/bmp", "image/webp"
+    }
+
+    def __init__(
+        self,
+        model: str = "multimodal-embedding-v1",
+        api_key: str = "",
+        dimension: Optional[int] = None,
+        base_url: Optional[str] = None,
+    ):
+        dim = dimension or self.MODEL_DIMENSIONS.get(model) or 1024
+        super().__init__(provider="dashscope_multimodal", model=model, dimension=dim)
+        if not api_key:
+            raise EmbeddingError("DashScope api_key is required for multimodal embedding")
+        self.api_key = api_key
+        self.base_url = base_url
+
+        try:
+            from dashscope import MultiModalEmbedding  # type: ignore
+            import dashscope
+
+            self._MultiModalEmbedding = MultiModalEmbedding
+            if base_url:
+                dashscope.base_http_api_url = base_url
+        except ImportError as exc:
+            raise EmbeddingError(
+                "dashscope package is required for DashScopeMultimodalEmbedding "
+                "(pip install dashscope>=1.24.6)"
+            ) from exc
+
+    @property
+    def supports_multimodal(self) -> bool:
+        return True
+
+    def _image_to_base64_data_uri(self, image_bytes: bytes, media_type: str = "image/png") -> str:
+        """Convert image bytes to base64 data URI format."""
+        import base64
+        b64_data = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{media_type};base64,{b64_data}"
+
+    def _detect_media_type(self, image_bytes: bytes) -> str:
+        """Detect image media type from magic bytes."""
+        if len(image_bytes) < 8:
+            return "image/png"  # Default
+
+        # Check magic bytes
+        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        elif image_bytes[:2] == b'\xff\xd8':
+            return "image/jpeg"
+        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+        elif image_bytes[:2] == b'BM':
+            return "image/bmp"
+        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+            return "image/webp"
+        else:
+            return "image/png"  # Default fallback
+
+    async def embed_texts(
+        self, texts: List[str], text_type: Optional[str] = None
+    ) -> List[List[float]]:
+        """Embed text using multimodal model.
+
+        Note: While this model supports text, it's primarily designed for images.
+        For text-only embedding, consider using DashScopeEmbedding instead.
+        """
+        if not texts:
+            return []
+
+        all_vectors: List[List[float]] = []
+
+        for text in texts:
+            try:
+                # DashScope multimodal API accepts text input as well
+                resp = await asyncio.to_thread(
+                    self._MultiModalEmbedding.call,
+                    model=self.model,
+                    input=[{"text": text}],
+                    api_key=self.api_key,
+                )
+
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    raise EmbeddingError(
+                        f"DashScope multimodal text embedding failed: {status_code} {code} {message}"
+                    )
+
+                output = getattr(resp, "output", None)
+                vectors = self._parse_multimodal_output(output)
+                all_vectors.extend(vectors)
+
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                raise EmbeddingError(f"DashScope multimodal text embedding error: {exc}") from exc
+
+        if self._dimension is None and all_vectors:
+            self._dimension = len(all_vectors[0])
+
+        return all_vectors
+
+    async def embed_images(self, images: List[bytes]) -> List[List[float]]:
+        """Embed images using DashScope multimodal embedding API.
+
+        Args:
+            images: List of image bytes (JPEG, PNG, GIF, BMP, WebP)
+
+        Returns:
+            List of embedding vectors (1024 dimensions each)
+
+        Raises:
+            EmbeddingError: If image is too large or API call fails
+        """
+        if not images:
+            return []
+
+        all_vectors: List[List[float]] = []
+
+        for i, image_bytes in enumerate(images):
+            # Validate image size
+            if len(image_bytes) > self.MAX_IMAGE_SIZE_BYTES:
+                raise EmbeddingError(
+                    f"Image {i} exceeds max size: {len(image_bytes)} bytes > {self.MAX_IMAGE_SIZE_BYTES} bytes (3MB)"
+                )
+
+            try:
+                # Detect media type and convert to data URI
+                media_type = self._detect_media_type(image_bytes)
+                data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
+
+                # Call DashScope multimodal embedding API
+                resp = await asyncio.to_thread(
+                    self._MultiModalEmbedding.call,
+                    model=self.model,
+                    input=[{"image": data_uri}],
+                    api_key=self.api_key,
+                )
+
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    raise EmbeddingError(
+                        f"DashScope multimodal image embedding failed for image {i}: "
+                        f"{status_code} {code} {message}"
+                    )
+
+                output = getattr(resp, "output", None)
+                vectors = self._parse_multimodal_output(output)
+                all_vectors.extend(vectors)
+
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                raise EmbeddingError(
+                    f"DashScope multimodal image embedding error for image {i}: {exc}"
+                ) from exc
+
+        if self._dimension is None and all_vectors:
+            self._dimension = len(all_vectors[0])
+
+        return all_vectors
+
+    async def embed_image_and_text(
+        self,
+        image_bytes: bytes,
+        text: Optional[str] = None
+    ) -> List[float]:
+        """Embed an image with optional text context.
+
+        This combines image and text into a single multimodal embedding,
+        which can improve retrieval when images have associated captions.
+
+        Args:
+            image_bytes: Image content
+            text: Optional text description or caption
+
+        Returns:
+            Single embedding vector combining image and text
+        """
+        if len(image_bytes) > self.MAX_IMAGE_SIZE_BYTES:
+            raise EmbeddingError(
+                f"Image exceeds max size: {len(image_bytes)} bytes > {self.MAX_IMAGE_SIZE_BYTES} bytes"
+            )
+
+        try:
+            media_type = self._detect_media_type(image_bytes)
+            data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
+
+            # Build input with image and optional text
+            input_items: List[Dict[str, str]] = [{"image": data_uri}]
+            if text:
+                input_items.append({"text": text})
+
+            resp = await asyncio.to_thread(
+                self._MultiModalEmbedding.call,
+                model=self.model,
+                input=input_items,
+                api_key=self.api_key,
+            )
+
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+            if status_code and status_code >= 400:
+                code = getattr(resp, "code", "") or ""
+                message = getattr(resp, "message", "") or ""
+                raise EmbeddingError(
+                    f"DashScope multimodal embedding failed: {status_code} {code} {message}"
+                )
+
+            output = getattr(resp, "output", None)
+            vectors = self._parse_multimodal_output(output)
+
+            if not vectors:
+                raise EmbeddingError("No embedding returned from multimodal API")
+
+            return vectors[0]
+
+        except EmbeddingError:
+            raise
+        except Exception as exc:
+            raise EmbeddingError(f"DashScope multimodal embedding error: {exc}") from exc
+
+    def _parse_multimodal_output(self, output: Any) -> List[List[float]]:
+        """Parse DashScope multimodal embedding output."""
+        if output is None:
+            raise EmbeddingError("DashScope multimodal response missing output")
+
+        # Response format: {"embeddings": [{"embedding": [...], "type": "image|text"}]}
+        if isinstance(output, dict):
+            embeddings_list = output.get("embeddings")
+            if embeddings_list is None:
+                raise EmbeddingError(
+                    f"Unexpected DashScope multimodal output keys: {list(output.keys())}"
+                )
+            output = embeddings_list
+
+        if not isinstance(output, list):
+            raise EmbeddingError(
+                f"Unexpected DashScope multimodal output type: {type(output)}"
+            )
+
+        vectors: List[List[float]] = []
+        for entry in output:
+            if isinstance(entry, dict):
+                vec = entry.get("embedding") or entry.get("vector")
+                if isinstance(vec, list):
+                    vectors.append(vec)
+            elif isinstance(entry, list):
+                vectors.append(entry)
+
+        if not vectors:
+            raise EmbeddingError("DashScope multimodal response has no embeddings")
+
+        return vectors
+
+
 class LocalHashEmbedding(BaseEmbedding):
     """Lightweight local embedding via feature hashing (no external dependencies)."""
 
@@ -398,4 +685,33 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             dimension=dimension,
             base_url=config.base_url,
         )
+    if provider in {"dashscope_multimodal", "aliyun_multimodal", "multimodal"}:
+        return DashScopeMultimodalEmbedding(
+            model=config.model or "multimodal-embedding-v1",
+            api_key=config.api_key or "",
+            dimension=dimension,
+            base_url=config.base_url,
+        )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
+
+
+def create_multimodal_embedding(
+    api_key: str,
+    model: str = "multimodal-embedding-v1",
+    base_url: Optional[str] = None,
+) -> DashScopeMultimodalEmbedding:
+    """Convenience factory for creating multimodal embedding instances.
+
+    Args:
+        api_key: DashScope API key
+        model: Model name (default: multimodal-embedding-v1)
+        base_url: Optional base URL override
+
+    Returns:
+        DashScopeMultimodalEmbedding instance
+    """
+    return DashScopeMultimodalEmbedding(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )

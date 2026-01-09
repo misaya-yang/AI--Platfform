@@ -494,6 +494,7 @@
       "syncAll": "同步全部",
       "syncPage": "重新同步",
       "openInConfluence": "在 Confluence 中打开",
+      "noUrl": "链接不可用",
       "batchSync": "批量同步",
       "selectedCount": "已选 {{count}} 项",
       "clearSelection": "清除选择",
@@ -516,7 +517,11 @@
         "actions": "操作"
       },
       "viewDetails": "查看详情",
-      "addPages": "添加页面"
+      "addPages": "添加页面",
+      "syncing": "正在同步 \"{{title}}\"...",
+      "syncStarted": "开始同步 \"{{title}}\"",
+      "syncSuccess": "\"{{title}}\" 同步完成",
+      "syncFailed": "\"{{title}}\" 同步失败"
     },
     "addPages": {
       "title": "添加页面",

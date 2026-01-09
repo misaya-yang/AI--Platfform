@@ -17,10 +17,16 @@ from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...persistence.database import DatabaseStorage
 from .chunking import ChunkingConfig, process_document, flatten_chunks
-from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding
+from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, DashScopeMultimodalEmbedding
+from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
 from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
+
+# Type hint imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..storage.image_storage import ImageStorageService
 
 
 def _ensure_dict(value: Any) -> Dict[str, Any]:
@@ -59,9 +65,18 @@ class RetrieveResult:
 
 
 class KnowledgeService:
-    def __init__(self, settings: Settings, database: DatabaseStorage):
+    def __init__(
+        self,
+        settings: Settings,
+        database: DatabaseStorage,
+        multimodal_embedding: Optional[DashScopeMultimodalEmbedding] = None,
+        image_storage_service: Optional["ImageStorageService"] = None,
+    ):
         self.settings = settings
         self.db = database
+        self.multimodal_embedding = multimodal_embedding
+        self.image_storage_service = image_storage_service
+        self.pdf_image_processor = PDFImageProcessor()
 
         if not getattr(settings, "knowledge", None) or not settings.knowledge.enabled:
             raise RuntimeError("Knowledge service is disabled (GATEWAY_KNOWLEDGE__ENABLED=false)")
@@ -397,13 +412,61 @@ class KnowledgeService:
         mime_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        import logging
+        logger = logging.getLogger(__name__)
+
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc_id = str(uuid.uuid4())
 
-        # Run CPU-bound parsing in thread pool to avoid blocking event loop
-        text, detected_mime = await asyncio.to_thread(
-            self._extract_text_from_bytes, content_bytes, filename, mime_type
+        name = (filename or "").strip().lower()
+        mime = (mime_type or "").strip().lower()
+        is_pdf = (
+            content_bytes.startswith(b"%PDF")
+            or name.endswith(".pdf")
+            or "application/pdf" in mime
         )
+
+        extracted_images: List[ExtractedImage] = []
+        text: str = ""
+        detected_mime: str = ""
+
+        if is_pdf and self.multimodal_embedding:
+            # Use PDF image processor for PDFs when multimodal is available
+            logger.info(f"Processing PDF with image extraction: {filename}")
+            result = await asyncio.to_thread(
+                self.pdf_image_processor.process_pdf_bytes, content_bytes
+            )
+            text = result.text
+            extracted_images = result.embeddable_images
+            detected_mime = "application/pdf"
+            logger.info(
+                f"PDF extraction complete: {len(text)} chars, "
+                f"{result.total_images} images ({len(extracted_images)} embeddable)"
+            )
+        else:
+            # Standard text extraction
+            text, detected_mime = await asyncio.to_thread(
+                self._extract_text_from_bytes, content_bytes, filename, mime_type
+            )
+
+        # Prepare document metadata
+        doc_metadata = metadata or {}
+        if extracted_images:
+            # Store image metadata (not content) in document
+            doc_metadata["extracted_images"] = [
+                {
+                    "image_id": img.image_id,
+                    "mime_type": img.mime_type,
+                    "width": img.width,
+                    "height": img.height,
+                    "page_number": img.page_number,
+                    "size_bytes": img.size_bytes,
+                    "context_text": img.context_text[:200] if img.context_text else "",
+                }
+                for img in extracted_images
+            ]
+            doc_metadata["image_count"] = len(extracted_images)
+            logger.info(f"Document {doc_id} has {len(extracted_images)} embeddable images")
 
         doc = {
             "document_id": doc_id,
@@ -415,8 +478,16 @@ class KnowledgeService:
             "status": "uploaded",
             "progress": 0,
             "content": text,
-            "metadata": metadata or {},
+            "metadata": doc_metadata,
         }
+
+        # Store extracted images temporarily for ingestion
+        # Using a simple cache keyed by document_id
+        if extracted_images:
+            if not hasattr(self, "_pending_images"):
+                self._pending_images: Dict[str, List[ExtractedImage]] = {}
+            self._pending_images[doc_id] = extracted_images
+
         await self.db.save_document(doc)
         return await self.db.get_document(doc_id) or doc
 
@@ -807,6 +878,32 @@ class KnowledgeService:
                     updated["collection_name"] = collection
                     await self.db.save_dataset(updated)
 
+                # Process images if multimodal embedding is available
+                image_count = 0
+                if self.multimodal_embedding and hasattr(self, "_pending_images"):
+                    pending_images = self._pending_images.pop(document_id, [])
+                    if pending_images:
+                        await self.db.update_document_status(
+                            document_id, status="embedding_images", progress=96
+                        )
+                        try:
+                            image_count = await self._process_document_images(
+                                dataset_id=dataset_id,
+                                document_id=document_id,
+                                images=pending_images,
+                                collection=collection,
+                                base_position=len(segment_rows),
+                                tenant_id=str(dataset.get("tenant_id") or "default"),
+                            )
+                            logger.info(
+                                f"Processed {image_count} images for document {document_id}"
+                            )
+                        except Exception as img_err:
+                            logger.warning(
+                                f"Image embedding failed for document {document_id}: {img_err}"
+                            )
+                            # Continue even if image embedding fails
+
                 await self.db.update_document_status(document_id, status="completed", progress=100)
             except Exception as exc:
                 await self.db.update_document_status(
@@ -824,6 +921,145 @@ class KnowledgeService:
             except Exception:
                 pass
             return
+
+    async def _process_document_images(
+        self,
+        dataset_id: str,
+        document_id: str,
+        images: List[ExtractedImage],
+        collection: str,
+        base_position: int = 0,
+        tenant_id: str = "default",
+    ) -> int:
+        """
+        Process and embed images from a document.
+
+        Args:
+            dataset_id: Dataset ID
+            document_id: Document ID
+            images: List of extracted images
+            collection: Qdrant collection name
+            base_position: Starting position for image segments
+            tenant_id: Tenant ID for storage path
+
+        Returns:
+            Number of successfully processed images
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not self.multimodal_embedding or not images:
+            return 0
+
+        from qdrant_client.http import models as qmodels
+
+        processed = 0
+        image_points = []
+        image_segments = []
+
+        for idx, img in enumerate(images):
+            try:
+                if not img.is_embeddable:
+                    logger.debug(f"Skipping non-embeddable image: {img.image_id}")
+                    continue
+
+                # Embed the image
+                logger.debug(f"Embedding image {img.image_id} ({img.width}x{img.height})")
+                embeddings = await self.multimodal_embedding.embed_images([img.content])
+
+                if not embeddings or not embeddings[0]:
+                    logger.warning(f"No embedding returned for image {img.image_id}")
+                    continue
+
+                vector = embeddings[0]
+                seg_id = str(uuid.uuid4())
+                position = base_position + idx
+
+                # Prepare payload for Qdrant
+                payload = {
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "segment_id": seg_id,
+                    "position": position,
+                    "text": img.context_text or f"[Image: Page {img.page_number}]",
+                    "content_type": "image",
+                    "image_id": img.image_id,
+                    "image_mime_type": img.mime_type,
+                    "image_width": img.width,
+                    "image_height": img.height,
+                    "image_page": img.page_number,
+                }
+
+                image_points.append(
+                    qmodels.PointStruct(
+                        id=seg_id,
+                        vector=vector,
+                        payload=payload,
+                    )
+                )
+
+                # Prepare segment for database
+                image_segments.append({
+                    "segment_id": seg_id,
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "position": position,
+                    "text": img.context_text or "",
+                    "token_count": 0,
+                    "vector_id": seg_id,
+                    "content_type": "image",
+                    "image_url": "",  # Will be set if stored to S3/OSS
+                    "image_attachment_id": img.image_id,
+                    "image_filename": f"page{img.page_number}_{img.image_id}.{img.mime_type.split('/')[-1]}",
+                    "image_media_type": img.mime_type,
+                    "image_file_size": img.size_bytes,
+                    "metadata": {
+                        "width": img.width,
+                        "height": img.height,
+                        "page_number": img.page_number,
+                    },
+                })
+
+                processed += 1
+
+                # Optionally upload to S3/OSS storage
+                if self.image_storage_service:
+                    try:
+                        filename = image_segments[-1].get("image_filename", f"{img.image_id}.{img.mime_type.split('/')[-1]}")
+                        storage_url = await self.image_storage_service.upload_image(
+                            tenant_id=tenant_id,
+                            document_id=document_id,
+                            attachment_id=f"pdf_{idx}",
+                            filename=filename,
+                            content=img.content,
+                            content_type=img.mime_type,
+                        )
+                        image_segments[-1]["image_url"] = storage_url
+                        logger.debug(f"Uploaded image to storage: {storage_url}")
+                    except Exception as store_err:
+                        logger.warning(f"Failed to upload image to storage: {store_err}")
+
+            except Exception as e:
+                logger.warning(f"Failed to process image {img.image_id}: {e}")
+                continue
+
+        # Upsert image vectors to Qdrant
+        if image_points:
+            try:
+                await self.vector_store.upsert(collection_name=collection, points=image_points)
+                logger.info(f"Upserted {len(image_points)} image vectors to collection {collection}")
+            except Exception as e:
+                logger.error(f"Failed to upsert image vectors: {e}")
+                raise
+
+        # Save image segments to database
+        for seg in image_segments:
+            try:
+                await self.db.save_image_segment(seg)
+            except Exception as e:
+                logger.warning(f"Failed to save image segment {seg['segment_id']}: {e}")
+
+        return processed
 
     # ========================= Retrieval =========================
 

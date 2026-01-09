@@ -348,8 +348,77 @@ class ConfluenceScheduler:
                 self._active_syncs.discard(binding_id)
 
     async def _sync_binding(self, binding_id: str) -> None:
-        """执行绑定同步"""
-        await self.sync_service.trigger_sync(binding_id)
+        """执行绑定同步（使用增量同步）"""
+        try:
+            # 优先使用增量同步
+            await self.sync_service.incremental_sync(binding_id)
+        except Exception as e:
+            logger.warning(f"Incremental sync failed for {binding_id}, error: {e}")
+            # 如果增量同步失败（可能是首次同步），回退到全量同步
+            await self.sync_service.trigger_sync(binding_id)
+
+    async def reschedule_binding(self, binding_id: str, interval_minutes: int) -> None:
+        """
+        重新调度绑定（当配置变更时调用）
+
+        Args:
+            binding_id: 绑定 ID
+            interval_minutes: 新的轮询间隔（分钟）
+        """
+        if binding_id in self._tasks:
+            task = self._tasks[binding_id]
+            old_interval = task.interval_minutes
+            task.interval_minutes = interval_minutes
+            task.schedule_next()
+            logger.info(
+                f"Rescheduled binding {binding_id}: "
+                f"interval changed from {old_interval}min to {interval_minutes}min"
+            )
+        else:
+            # 如果任务不存在，添加新任务
+            await self.add_task(binding_id, interval_minutes)
+
+    async def disable_binding(self, binding_id: str) -> None:
+        """
+        禁用绑定的轮询
+
+        Args:
+            binding_id: 绑定 ID
+        """
+        await self.remove_task(binding_id)
+        logger.info(f"Disabled polling for binding {binding_id}")
+
+    async def reload_bindings(self) -> None:
+        """
+        重新加载所有绑定配置
+
+        在配置变更后调用以刷新调度
+        """
+        logger.info("Reloading polling bindings...")
+
+        # 获取当前应该轮询的绑定
+        polling_bindings = await self.sync_service.list_bindings_for_polling()
+        polling_binding_ids = {b["binding_id"] for b in polling_bindings}
+
+        # 移除不再需要轮询的任务
+        for binding_id in list(self._tasks.keys()):
+            if binding_id not in polling_binding_ids:
+                await self.remove_task(binding_id)
+
+        # 添加或更新轮询任务
+        for binding in polling_bindings:
+            binding_id = binding["binding_id"]
+            interval = binding.get("polling_interval_minutes", 60)
+
+            if binding_id in self._tasks:
+                # 更新间隔
+                if self._tasks[binding_id].interval_minutes != interval:
+                    await self.reschedule_binding(binding_id, interval)
+            else:
+                # 添加新任务
+                await self.add_task(binding_id, interval)
+
+        logger.info(f"Reloaded {self.task_count} polling tasks")
 
 
 class SchedulerManager:

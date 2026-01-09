@@ -9,14 +9,19 @@ Features:
 - Space-wide batch import
 - Manual and scheduled synchronization
 - Content parsing (Storage Format to plain text)
+- Image extraction and multimodal embedding
 
-Phase 1 (Current):
+Phase 1:
 - URL import
 - Space import
 - Manual sync
 - Polling sync
 
-Phase 2 (Future):
+Phase 2:
+- Image synchronization with S3/OSS storage
+- Multimodal embedding via DashScope
+
+Phase 3 (Future):
 - Webhook real-time sync
 - Encrypted API token storage
 """
@@ -31,9 +36,19 @@ from .models import (
     ConfluenceSpaceBinding,
     ConfluencePageRecord,
     ConfluenceSyncTask,
+    ConfluenceAttachment,
+    ImageSegment,
 )
-from .parser import parse_storage_format, extract_plain_text, extract_markdown
+from .parser import (
+    parse_storage_format,
+    extract_plain_text,
+    extract_markdown,
+    extract_image_references,
+    extract_embeddable_images,
+    ImageReference,
+)
 from .scheduler import ConfluenceScheduler, SchedulerManager
+from .image_processor import ConfluenceImageProcessor, create_image_processor
 
 __all__ = [
     # Client
@@ -48,11 +63,19 @@ __all__ = [
     "ConfluenceSpaceBinding",
     "ConfluencePageRecord",
     "ConfluenceSyncTask",
+    "ConfluenceAttachment",
+    "ImageSegment",
     # Parser
     "parse_storage_format",
     "extract_plain_text",
     "extract_markdown",
+    "extract_image_references",
+    "extract_embeddable_images",
+    "ImageReference",
     # Scheduler
     "ConfluenceScheduler",
     "SchedulerManager",
+    # Image Processing
+    "ConfluenceImageProcessor",
+    "create_image_processor",
 ]

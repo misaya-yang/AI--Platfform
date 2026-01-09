@@ -16,7 +16,9 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
-from .models import ConfluenceCredentials, ConfluencePage, ConfluenceSpace
+from datetime import datetime
+
+from .models import ConfluenceAttachment, ConfluenceCredentials, ConfluencePage, ConfluenceSpace
 
 logger = logging.getLogger(__name__)
 
@@ -621,3 +623,243 @@ class ConfluenceClient:
         """
         parsed = urlparse(url)
         return parsed.netloc
+
+    # ============ Incremental Sync ============
+
+    async def search_pages_modified_since(
+        self,
+        space_key: str,
+        since: datetime,
+        limit: int = 100,
+    ) -> List[ConfluencePage]:
+        """
+        搜索指定日期之后修改的页面（用于增量同步）
+
+        使用 CQL 查询：space=KEY AND type=page AND lastModified > "YYYY-MM-DD HH:mm"
+
+        Args:
+            space_key: 空间 Key
+            since: 起始时间
+            limit: 返回数量限制
+
+        Returns:
+            修改过的页面列表
+        """
+        # 格式化时间为 CQL 支持的格式
+        since_str = since.strftime("%Y-%m-%d %H:%M")
+        cql = f'space={space_key} AND type=page AND lastModified > "{since_str}"'
+
+        logger.info(f"Searching pages modified since {since_str} in space {space_key}")
+
+        all_pages: List[ConfluencePage] = []
+        start = 0
+
+        while True:
+            data = await self._request(
+                "GET",
+                "/content/search",
+                params={"cql": cql, "limit": limit, "start": start, "expand": "version"},
+                use_v1=True,
+            )
+
+            results = data.get("results", [])
+            if not results:
+                break
+
+            for item in results:
+                # 从 v1 API 结果解析页面基本信息
+                version_info = item.get("_expandable", {}).get("version") or item.get("version", {})
+                version_num = 1
+                updated_at = None
+
+                if isinstance(version_info, dict):
+                    version_num = version_info.get("number", 1)
+                    updated_at = version_info.get("when")
+
+                page = ConfluencePage(
+                    page_id=str(item.get("id")),
+                    space_key=space_key,
+                    title=item.get("title", ""),
+                    version=version_num,
+                    body_storage="",  # 需要单独获取
+                    updated_at=updated_at,
+                )
+                all_pages.append(page)
+
+            # 检查是否有更多结果
+            total_size = data.get("totalSize", 0)
+            start += len(results)
+            if start >= total_size or len(results) < limit:
+                break
+
+        logger.info(f"Found {len(all_pages)} pages modified since {since_str}")
+        return all_pages
+
+    async def get_deleted_pages_in_space(
+        self,
+        space_key: str,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取空间中已删除的页面（用于同步删除操作）
+
+        Args:
+            space_key: 空间 Key
+            limit: 返回数量限制
+
+        Returns:
+            已删除页面的 ID 列表
+        """
+        cql = f'space={space_key} AND type=page'
+
+        data = await self._request(
+            "GET",
+            "/content/search",
+            params={"cql": cql, "limit": limit, "status": "trashed"},
+            use_v1=True,
+        )
+
+        return [
+            {"page_id": str(item.get("id")), "title": item.get("title", "")}
+            for item in data.get("results", [])
+        ]
+
+    # ============ Attachment Operations ============
+
+    async def get_page_attachments(
+        self,
+        page_id: str,
+        media_type_filter: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[ConfluenceAttachment]:
+        """
+        获取页面的所有附件
+
+        Args:
+            page_id: 页面 ID
+            media_type_filter: 媒体类型过滤 (如 "image/")
+            limit: 返回数量限制
+
+        Returns:
+            附件列表
+        """
+        all_attachments: List[ConfluenceAttachment] = []
+        cursor: Optional[str] = None
+
+        while True:
+            params: Dict[str, Any] = {"limit": min(limit, 250)}
+            if cursor:
+                params["cursor"] = cursor
+            if media_type_filter:
+                params["mediaType"] = media_type_filter
+
+            try:
+                data = await self._request(
+                    "GET",
+                    f"/pages/{page_id}/attachments",
+                    params=params,
+                )
+            except ConfluenceAPIError as e:
+                if e.status_code == 404:
+                    logger.warning(f"Page {page_id} not found or no attachments")
+                    return []
+                raise
+
+            results = data.get("results", [])
+            for item in results:
+                attachment = ConfluenceAttachment(
+                    attachment_id=str(item.get("id")),
+                    page_id=page_id,
+                    filename=item.get("title", ""),
+                    media_type=item.get("mediaType", "application/octet-stream"),
+                    file_size=item.get("fileSize", 0),
+                    download_link=item.get("downloadLink", ""),
+                    title=item.get("title"),
+                    created_at=item.get("createdAt"),
+                    updated_at=item.get("version", {}).get("createdAt"),
+                    comment=item.get("comment"),
+                )
+                all_attachments.append(attachment)
+
+            # 检查分页
+            next_link = data.get("_links", {}).get("next")
+            if not next_link or len(results) < limit:
+                break
+
+            parsed = urlparse(next_link)
+            qs = parse_qs(parsed.query)
+            cursor = qs.get("cursor", [None])[0]
+            if not cursor:
+                break
+
+        return all_attachments
+
+    async def get_page_image_attachments(
+        self,
+        page_id: str,
+        embeddable_only: bool = True,
+    ) -> List[ConfluenceAttachment]:
+        """
+        获取页面的图片附件
+
+        Args:
+            page_id: 页面 ID
+            embeddable_only: 是否只返回可嵌入的图片（大小限制内）
+
+        Returns:
+            图片附件列表
+        """
+        attachments = await self.get_page_attachments(page_id)
+
+        if embeddable_only:
+            return [a for a in attachments if a.is_embeddable_image]
+        else:
+            return [a for a in attachments if a.is_image]
+
+    async def download_attachment(
+        self,
+        attachment: ConfluenceAttachment,
+    ) -> bytes:
+        """
+        下载附件内容
+
+        Args:
+            attachment: 附件对象
+
+        Returns:
+            附件二进制内容
+
+        Raises:
+            ConfluenceAPIError: 下载失败
+        """
+        if not attachment.download_link:
+            raise ConfluenceAPIError(f"No download link for attachment {attachment.attachment_id}")
+
+        client = await self._get_client()
+
+        # download_link 可能是相对路径或完整 URL
+        # Confluence Cloud API 返回的路径缺少 /wiki 前缀
+        if attachment.download_link.startswith("http"):
+            url = attachment.download_link
+        elif attachment.download_link.startswith("/wiki"):
+            url = f"https://{self.credentials.domain}{attachment.download_link}"
+        elif attachment.download_link.startswith("/download"):
+            # 添加 /wiki 前缀
+            url = f"https://{self.credentials.domain}/wiki{attachment.download_link}"
+        else:
+            url = f"https://{self.credentials.domain}/wiki{attachment.download_link}"
+
+        logger.info(f"Downloading attachment {attachment.filename} from {url}")
+
+        try:
+            # 需要跟随重定向
+            resp = await client.get(url, follow_redirects=True)
+            if resp.status_code >= 400:
+                raise ConfluenceAPIError(
+                    f"Failed to download attachment: {resp.status_code}",
+                    status_code=resp.status_code,
+                    response_body=resp.text[:500] if resp.text else None,
+                )
+            return resp.content
+        except httpx.RequestError as e:
+            raise ConfluenceAPIError(f"Download request failed: {e}")

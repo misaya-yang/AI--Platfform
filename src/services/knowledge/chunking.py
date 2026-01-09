@@ -46,26 +46,46 @@ class ChunkingMode(str, Enum):
 
 @dataclass
 class ChunkingConfig:
-    """Comprehensive chunking configuration"""
+    """Comprehensive chunking configuration
+
+    Best Practices (2025):
+    - Optimal chunk size: 400-512 tokens with 10-20% overlap
+    - RecursiveCharacterTextSplitter achieves 85-90% recall
+    - Parent-child chunking: parent 1500-2000 tokens, child 400-500 tokens
+    - Semantic chunking offers 70% accuracy improvement for knowledge bases
+    """
     mode: ChunkingMode = ChunkingMode.AUTOMATIC
-    
-    # Size parameters
-    chunk_size: int = 500           # Max characters per chunk
-    chunk_overlap: int = 50         # Overlap between chunks
-    max_chunk_size: int = 1000      # Absolute max (for safety)
-    min_chunk_size: int = 50        # Min chunk size
-    
-    # Token-based (optional)
-    use_token_count: bool = False
-    token_limit: int = 500
-    
-    # Separators
-    separators: List[str] = field(default_factory=lambda: ["\n\n", "\n", "。", ".", "！", "!", "？", "?", "；", ";", " "])
+
+    # Size parameters in CHARACTERS (optimized defaults based on industry research)
+    # Note: 1 token ≈ 4-5 chars (English) or 1.5-2 chars (Chinese)
+    # Target: 400-500 tokens = ~2000 chars for English
+    chunk_size: int = 2000          # ~400-500 tokens for most RAG
+    chunk_overlap: int = 300        # 15% overlap (~60-75 tokens)
+    max_chunk_size: int = 3000      # Absolute max (~600-750 tokens)
+    min_chunk_size: int = 400       # Min chunk size (~80-100 tokens)
+
+    # Token-based (recommended for production)
+    use_token_count: bool = True    # Token-based more accurate than char-based
+    token_limit: int = 500          # ~500 tokens optimal for most embedding models
+
+    # Separators (priority order: preserve semantic boundaries)
+    separators: List[str] = field(default_factory=lambda: [
+        "\n\n\n",    # Section breaks
+        "\n\n",      # Paragraphs
+        "\n",        # Lines
+        "。",        # Chinese sentence end
+        ".",         # English sentence end
+        "！", "!",   # Exclamations
+        "？", "?",   # Questions
+        "；", ";",   # Semicolons
+        "，", ",",   # Commas
+        " ",         # Words (last resort)
+    ])
     primary_separator: str = "\n\n"
-    
+
     # Regex pattern (for regex mode)
     regex_pattern: str = ""
-    
+
     # Heading detection (for heading mode)
     heading_patterns: List[str] = field(default_factory=lambda: [
         r"^#{1,6}\s+.+$",           # Markdown headings
@@ -73,12 +93,19 @@ class ChunkingConfig:
         r"^\d+\.\s+.+$",           # Numbered sections
         r"^[A-Z][A-Z\s]+:?\s*$",   # ALL CAPS headings
     ])
-    
-    # Hierarchical/Parent-child
-    parent_chunk_size: int = 2000
-    parent_overlap: int = 200
-    child_chunk_size: int = 300
-    parent_mode: str = "paragraph"  # full_doc | paragraph | section
+
+    # Hierarchical/Parent-child (optimized for retrieval)
+    # Parent provides context, child provides precision
+    # Note: sizes in CHARACTERS (1 token ≈ 4-5 chars English)
+    parent_chunk_size: int = 8000   # ~1500-2000 tokens for context
+    parent_overlap: int = 400       # 5% overlap between parents (~80-100 tokens)
+    child_chunk_size: int = 2000    # ~400-500 tokens for precision
+    child_overlap: int = 300        # 15% overlap between children (~60-75 tokens)
+    parent_mode: str = "recursive"  # recursive | paragraph | section | full_doc
+
+    # Image-aware chunking
+    preserve_images: bool = True    # Keep images with surrounding context
+    image_context_chars: int = 1000 # Characters around image to preserve (~200 tokens)
     
     # Preprocessing
     remove_extra_spaces: bool = True
@@ -120,20 +147,23 @@ class ChunkingConfig:
         
         return cls(
             mode=mode,
-            chunk_size=int(data.get("chunk_size")) if data.get("chunk_size") is not None else 500,
-            chunk_overlap=int(data.get("chunk_overlap")) if data.get("chunk_overlap") is not None else 50,
-            max_chunk_size=int(data.get("max_chunk_size", 1000)),
-            min_chunk_size=int(data.get("min_chunk_size", 50)),
-            use_token_count=bool(data.get("use_token_count", False)),
+            chunk_size=int(data.get("chunk_size")) if data.get("chunk_size") is not None else 2000,
+            chunk_overlap=int(data.get("chunk_overlap")) if data.get("chunk_overlap") is not None else 300,
+            max_chunk_size=int(data.get("max_chunk_size", 3000)),
+            min_chunk_size=int(data.get("min_chunk_size", 400)),
+            use_token_count=bool(data.get("use_token_count", True)),
             token_limit=int(data.get("token_limit", 500)),
-            separators=data.get("separators") or ["\n\n", "\n", "。", ".", " "],
+            separators=data.get("separators") or ["\n\n\n", "\n\n", "\n", "。", ".", "！", "!", "？", "?", " "],
             primary_separator=str(data.get("primary_separator") or data.get("separator") or "\n\n"),
             regex_pattern=str(data.get("regex_pattern") or data.get("regex") or ""),
             heading_patterns=data.get("heading_patterns") or [],
-            parent_chunk_size=int(data.get("parent_chunk_size", 2000)),
-            parent_overlap=int(data.get("parent_overlap", 200)),
-            child_chunk_size=int(data.get("child_chunk_size", 300)),
-            parent_mode=str(data.get("parent_mode", "paragraph")),
+            parent_chunk_size=int(data.get("parent_chunk_size", 8000)),
+            parent_overlap=int(data.get("parent_overlap", 400)),
+            child_chunk_size=int(data.get("child_chunk_size", 2000)),
+            child_overlap=int(data.get("child_overlap", 300)),
+            parent_mode=str(data.get("parent_mode", "recursive")),
+            preserve_images=bool(data.get("preserve_images", True)),
+            image_context_chars=int(data.get("image_context_chars", 1000)),
             remove_extra_spaces=bool(data.get("remove_extra_spaces", True)),
             remove_urls_emails=bool(data.get("remove_urls_emails", False)),
             normalize_whitespace=bool(data.get("normalize_whitespace", True)),
@@ -159,7 +189,10 @@ class ChunkingConfig:
             "parent_chunk_size": self.parent_chunk_size,
             "parent_overlap": self.parent_overlap,
             "child_chunk_size": self.child_chunk_size,
+            "child_overlap": self.child_overlap,
             "parent_mode": self.parent_mode,
+            "preserve_images": self.preserve_images,
+            "image_context_chars": self.image_context_chars,
             "remove_extra_spaces": self.remove_extra_spaces,
             "remove_urls_emails": self.remove_urls_emails,
             "normalize_whitespace": self.normalize_whitespace,
@@ -705,72 +738,198 @@ class RecursiveChunker(BaseChunker):
 
 
 class HierarchicalChunker(BaseChunker):
-    """Parent-child hierarchical chunking"""
-    
+    """
+    Parent-child hierarchical chunking (Small-to-Large retrieval).
+
+    Best for:
+    - Complex Q&A needing both precision and broad context
+    - Long documents where answers are specific but context matters
+    - Enterprise use cases with strict token budgets
+
+    Strategy:
+    - Index small "child" chunks for precision retrieval
+    - Keep larger "parent" chunks for context when needed
+    - Children are retrieved first, parent provides context
+    """
+
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
-        
-        # First create parent chunks using Recursive (more stable than Paragraph)
+
+        # First create parent chunks
         parent_config = ChunkingConfig(
             chunk_size=self.config.parent_chunk_size,
             chunk_overlap=self.config.parent_overlap,
+            min_chunk_size=self.config.min_chunk_size,
             separators=self.config.separators,
         )
-        
+
         if self.config.parent_mode == "full_doc":
             parents = [self._create_chunk(text, 0)]
         elif self.config.parent_mode == "section":
             parents = HeadingChunker(parent_config).chunk(text)
-        else:
+        elif self.config.parent_mode == "paragraph":
+            parents = ParagraphChunker(parent_config).chunk(text)
+        else:  # recursive (default)
             parents = RecursiveChunker(parent_config).chunk(text)
-        
+
         # Create child chunks for each parent
         all_chunks = []
-        
-        # Child config
+
+        # Child config with proper overlap
         child_config = ChunkingConfig(
             chunk_size=self.config.child_chunk_size,
-            chunk_overlap=int(self.config.child_chunk_size * 0.1),
+            chunk_overlap=self.config.child_overlap,  # Use configured overlap
+            min_chunk_size=max(50, self.config.min_chunk_size // 2),
             separators=self.config.separators,
         )
         child_chunker = RecursiveChunker(child_config)
-        
-        for parent in parents:
+
+        for parent_idx, parent in enumerate(parents):
+            parent.index = len(all_chunks)  # Use global unique index instead of parent_idx
             parent.metadata["is_parent"] = True
+            parent.metadata["chunk_type"] = "parent"
             all_chunks.append(parent)
-            
+
             # Create children using recursive splitter on parent text
             children = child_chunker.chunk(parent.text)
-            
-            for child in children:
+
+            for child_idx, child in enumerate(children):
                 child.index = len(all_chunks)
                 child.metadata["is_child"] = True
+                child.metadata["chunk_type"] = "child"
                 child.metadata["parent_index"] = parent.index
+                child.metadata["parent_hash"] = parent.hash_id
+                child.metadata["child_position"] = child_idx
                 child.parent_id = parent.hash_id
-                
+
                 parent.children.append(child)
                 all_chunks.append(child)
-        
+
         return all_chunks
 
 
 class AutomaticChunker(BaseChunker):
-    """Automatically detect and use best chunking strategy with strict fallbacks"""
-    
+    """
+    Intelligent automatic chunking with content-aware strategy selection.
+
+    Strategy Selection (Priority Order):
+    1. Structured documents (headings) → HeadingChunker
+    2. Long documents (>5000 chars) → HierarchicalChunker (parent-child)
+    3. Documents with images → preserve image context
+    4. Default → RecursiveChunker (85-90% recall, best general purpose)
+
+    This follows industry best practices:
+    - RecursiveCharacterTextSplitter for most documents
+    - Parent-child for complex Q&A scenarios
+    - Structure-aware for markdown/technical docs
+    """
+
+    # Image placeholder patterns
+    IMAGE_PATTERNS = [
+        r'\[Image\]',           # Our parser placeholder
+        r'\[图片\]',            # Chinese placeholder
+        r'!\[.*?\]\(.*?\)',     # Markdown images
+        r'<img[^>]+>',          # HTML images
+        r'\[IMAGE:.*?\]',       # Custom placeholder
+    ]
+
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
-        
-        # 1. Try Structure-Aware (Heading) first if Markdown/Headings detected
-        has_headings = bool(re.search(r'^#{1,6}\s+|^第[一二三四五六七八九十\d]+[章节]', text, re.MULTILINE))
+
+        # Analyze document characteristics
+        has_headings = bool(re.search(
+            r'^#{1,6}\s+|^第[一二三四五六七八九十\d]+[章节条款]|^\d+\.\d*\s+\w',
+            text, re.MULTILINE
+        ))
+        has_images = any(re.search(p, text) for p in self.IMAGE_PATTERNS)
+        doc_length = len(text)
+
+        # Strategy 1: Structured documents with headings
         if has_headings:
-            # HeadingChunker now has Recursive fallback for content
+            # Use heading-based chunking for structured documents
             return HeadingChunker(self.config).chunk(text)
-            
-        # 2. Try Recursive (General purpose high quality)
-        # This handles paragraphs/sentences automatically
+
+        # Strategy 2: Long documents benefit from hierarchical chunking
+        if doc_length > 5000:
+            # Use parent-child for better context preservation
+            return HierarchicalChunker(self.config).chunk(text)
+
+        # Strategy 3: Handle documents with images
+        if has_images and self.config.preserve_images:
+            return self._chunk_with_image_awareness(text)
+
+        # Strategy 4: Default to Recursive (best general purpose)
         return RecursiveChunker(self.config).chunk(text)
+
+    def _chunk_with_image_awareness(self, text: str) -> List[Chunk]:
+        """
+        Chunk text while preserving image context.
+
+        Images should not be split from their surrounding context.
+        We identify image placeholders and ensure they stay with
+        adjacent text for proper retrieval.
+        """
+        # Find all image positions
+        image_positions = []
+        for pattern in self.IMAGE_PATTERNS:
+            for match in re.finditer(pattern, text):
+                image_positions.append((match.start(), match.end()))
+
+        if not image_positions:
+            return RecursiveChunker(self.config).chunk(text)
+
+        # Sort by position
+        image_positions.sort(key=lambda x: x[0])
+
+        # Create chunks ensuring images stay with context
+        chunks = []
+        current_pos = 0
+        context_size = self.config.image_context_chars
+
+        for img_start, img_end in image_positions:
+            # Get text before this image (but after previous chunk)
+            pre_text = text[current_pos:img_start].strip()
+
+            if pre_text and len(pre_text) > self.config.min_chunk_size:
+                # Chunk the pre-image text
+                pre_chunks = RecursiveChunker(self.config).chunk(pre_text)
+                for c in pre_chunks:
+                    c.index = len(chunks)
+                    chunks.append(c)
+
+            # Create image chunk with surrounding context
+            ctx_start = max(0, img_start - context_size)
+            ctx_end = min(len(text), img_end + context_size)
+
+            # Extend to sentence boundaries
+            while ctx_start > 0 and text[ctx_start] not in '.。!！?？\n':
+                ctx_start -= 1
+            while ctx_end < len(text) and text[ctx_end - 1] not in '.。!！?？\n':
+                ctx_end += 1
+
+            image_chunk_text = text[ctx_start:ctx_end].strip()
+            if image_chunk_text:
+                chunk = self._create_chunk(
+                    image_chunk_text,
+                    len(chunks),
+                    {"has_image": True, "chunk_type": "image_context"}
+                )
+                chunks.append(chunk)
+
+            current_pos = ctx_end
+
+        # Handle remaining text after last image
+        if current_pos < len(text):
+            remaining = text[current_pos:].strip()
+            if remaining and len(remaining) > self.config.min_chunk_size:
+                remaining_chunks = RecursiveChunker(self.config).chunk(remaining)
+                for c in remaining_chunks:
+                    c.index = len(chunks)
+                    chunks.append(c)
+
+        return chunks if chunks else RecursiveChunker(self.config).chunk(text)
 
 
 def create_chunker(config: ChunkingConfig) -> BaseChunker:

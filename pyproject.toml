@@ -100,9 +100,15 @@ aiohttp = [
     "aiohttp>=3.13.0",
 ]
 
+# Cloud Storage (S3, OSS)
+storage = [
+    "aioboto3>=14.0.0",  # AWS S3 async client
+    "oss2>=2.18.0",      # Alibaba Cloud OSS client
+]
+
 # All optional dependencies
 all = [
-    "ai-gateway[database,knowledge,documents,grpc,aiohttp]",
+    "ai-gateway[database,knowledge,documents,grpc,aiohttp,storage]",
 ]
 
 # Development dependencies

@@ -269,12 +269,75 @@ def create_app() -> FastAPI:
             from .services.knowledge.knowledge_service import KnowledgeService
             from .services.knowledge.worker import KnowledgeWorker
 
+            # 初始化多模态嵌入服务（如果配置了 DashScope API Key）
+            multimodal_embedding = None
+            image_storage_service = None
+
+            dashscope_key = getattr(
+                getattr(settings, "knowledge", None), "dashscope", None
+            )
+            if dashscope_key and dashscope_key.api_key:
+                try:
+                    from .services.knowledge.embedding import DashScopeMultimodalEmbedding
+                    multimodal_embedding = DashScopeMultimodalEmbedding(
+                        model="qwen2.5-vl-embedding",
+                        api_key=dashscope_key.api_key,
+                    )
+                    logger.info("多模态嵌入服务已初始化 (DashScope qwen2.5-vl-embedding)")
+                except Exception as e:
+                    logger.warning(f"多模态嵌入服务初始化失败: {e}")
+
+            # 初始化图片存储服务（支持 S3/OSS/本地存储）
+            # 独立于多模态嵌入初始化 - Confluence VLM 图片描述只需要存储服务
+            if hasattr(settings, "storage") or dashscope_key:
+                try:
+                    from .services.storage.image_storage import (
+                        ImageStorageService,
+                        StorageConfig,
+                        StorageBackend,
+                    )
+                    # 确定存储后端：优先使用配置的，否则使用本地存储
+                    storage_backend = StorageBackend.LOCAL
+                    if hasattr(settings, "storage"):
+                        backend_str = getattr(settings.storage, "backend", "local")
+                        try:
+                            storage_backend = StorageBackend(backend_str)
+                        except ValueError:
+                            storage_backend = StorageBackend.LOCAL
+
+                    storage_config = StorageConfig(
+                        backend=storage_backend,
+                        s3_bucket=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "bucket", "") or "",
+                        s3_region=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "region", "") or "us-east-1",
+                        s3_access_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "access_key", "") or "",
+                        s3_secret_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "secret_key", "") or "",
+                        s3_endpoint_url=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "endpoint_url", None) or None,
+                        oss_bucket=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "bucket", "") or "",
+                        oss_endpoint=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "endpoint", "") or "",
+                        oss_access_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "access_key", "") or "",
+                        oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "secret_key", "") or "",
+                        local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/images",
+                        url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
+                    )
+                    image_storage_service = ImageStorageService(storage_config)
+                    app.state.image_storage_service = image_storage_service
+                    logger.info(f"图片存储服务已初始化 (backend={storage_backend.value})")
+                except Exception as e:
+                    logger.warning(f"图片存储服务初始化失败: {e}")
+
             app.state.knowledge_service = KnowledgeService(
-                settings=settings, database=container.database
+                settings=settings,
+                database=container.database,
+                multimodal_embedding=multimodal_embedding,
+                image_storage_service=image_storage_service,
             )
             app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
-            logger.info(f"知识库服务已启动 (worker_concurrency={settings.knowledge.worker_concurrency})")
+
+            if multimodal_embedding:
+                logger.info(f"知识库服务已启动 (支持图片嵌入, worker_concurrency={settings.knowledge.worker_concurrency})")
+            else:
+                logger.info(f"知识库服务已启动 (仅文本, worker_concurrency={settings.knowledge.worker_concurrency})")
         else:
             logger.warning(
                 f"知识库服务未启动: knowledge={getattr(settings, 'knowledge', None)}, "
@@ -286,11 +349,43 @@ def create_app() -> FastAPI:
             from .services.knowledge.confluence.sync_service import ConfluenceSyncService
             from .services.knowledge.confluence.scheduler import ConfluenceScheduler
 
+            # 复用 Knowledge Service 的图片处理服务
+            confluence_image_storage = getattr(app.state, "image_storage_service", None)
+            confluence_multimodal = None
+            confluence_vlm_service = None
+
+            # 如果 Knowledge Service 有多模态嵌入，从中获取
+            if hasattr(app.state, "knowledge_service") and app.state.knowledge_service:
+                confluence_multimodal = getattr(
+                    app.state.knowledge_service, "multimodal_embedding", None
+                )
+                confluence_image_storage = getattr(
+                    app.state.knowledge_service, "image_storage_service", None
+                ) or confluence_image_storage
+
+            # 初始化 VLM 服务用于图片描述生成
+            dashscope_key = getattr(
+                getattr(settings, "knowledge", None), "dashscope", None
+            )
+            if dashscope_key and dashscope_key.api_key and confluence_image_storage:
+                try:
+                    from .services.knowledge.vlm_service import DashScopeVLMService
+                    confluence_vlm_service = DashScopeVLMService(
+                        api_key=dashscope_key.api_key,
+                        model="qwen-vl-max",
+                    )
+                    logger.info("Confluence VLM 服务已初始化 (qwen-vl-max)")
+                except Exception as e:
+                    logger.warning(f"Confluence VLM 服务初始化失败: {e}")
+
             app.state.confluence_sync_service = ConfluenceSyncService(
                 settings=settings,
                 database=container.database,
                 knowledge_service=app.state.knowledge_service,
                 knowledge_worker=app.state.knowledge_worker,
+                image_storage_service=confluence_image_storage,
+                multimodal_embedding=confluence_multimodal,
+                vlm_service=confluence_vlm_service,
             )
 
             # 如果启用轮询，启动调度器

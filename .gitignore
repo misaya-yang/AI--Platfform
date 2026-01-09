@@ -81,3 +81,12 @@ Thumbs.db
 # Windows reserved names
 nul
 NUL
+
+# ======================== Debug & Temporary Scripts ========================
+# Debug scripts created during development (should stay in tests/)
+check_*.py
+check_*.json
+quick_test*.py
+test_output*.txt
+*_debug.py
+debug_*.py

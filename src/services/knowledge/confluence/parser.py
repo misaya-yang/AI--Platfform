@@ -13,11 +13,42 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from io import StringIO
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ImageReference:
+    """Reference to an image in Confluence content.
+
+    Extracted from <ac:image> elements in Confluence Storage Format.
+    """
+
+    filename: str  # ri:filename attribute
+    content_type: Optional[str] = None  # ri:content-type, e.g., "image/png"
+    attachment_id: Optional[str] = None  # ri:content-id if available
+    width: Optional[int] = None  # ac:width attribute
+    height: Optional[int] = None  # ac:height attribute
+    alt_text: Optional[str] = None  # ac:alt attribute
+    title: Optional[str] = None  # ac:title attribute
+    context_text: str = ""  # Surrounding text for context
+
+    @property
+    def is_embeddable(self) -> bool:
+        """Check if this image type can be embedded (for multimodal API)."""
+        if not self.content_type:
+            # Infer from extension
+            ext = self.filename.lower().rsplit(".", 1)[-1] if "." in self.filename else ""
+            return ext in {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+        embeddable_types = {
+            "image/png", "image/jpeg", "image/jpg",
+            "image/gif", "image/bmp", "image/webp"
+        }
+        return self.content_type.lower() in embeddable_types
 
 
 class StorageFormatParser(HTMLParser):
@@ -52,13 +83,19 @@ class StorageFormatParser(HTMLParser):
         self.in_link = False
         self.current_link_href = ""
 
-        # 要忽略的标签
-        self.ignore_tags = {"ac:placeholder", "ac:parameter", "ri:attachment", "ri:page"}
+        # 要忽略的标签 (removed ri:attachment to allow image extraction)
+        self.ignore_tags = {"ac:placeholder", "ac:parameter", "ri:page"}
         self.in_ignored_tag = 0
 
         # 当前宏信息
         self.current_macro = ""
         self.macro_params: Dict[str, str] = {}
+
+        # Image tracking
+        self.images: List[ImageReference] = []
+        self.in_image = False
+        self.current_image_attrs: Dict[str, str] = {}
+        self.recent_text_buffer: List[str] = []  # For context around images
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
         attrs_dict = {k: v for k, v in attrs if v is not None}
@@ -71,8 +108,8 @@ class StorageFormatParser(HTMLParser):
         if self.in_ignored_tag > 0:
             return
 
-        # 处理 Confluence 宏
-        if tag.startswith("ac:"):
+        # 处理 Confluence 宏和资源引用（ri: 标签）
+        if tag.startswith("ac:") or tag.startswith("ri:"):
             self._handle_macro_start(tag, attrs_dict)
             return
 
@@ -235,9 +272,63 @@ class StorageFormatParser(HTMLParser):
         cleaned = " ".join(data.split())
         if cleaned:
             self.output.write(cleaned)
+            # Track recent text for image context
+            self.recent_text_buffer.append(cleaned)
+            # Keep only last 10 text segments
+            if len(self.recent_text_buffer) > 10:
+                self.recent_text_buffer.pop(0)
 
     def _handle_macro_start(self, tag: str, attrs: Dict[str, str]):
         """处理 Confluence 宏开始标签"""
+        # Handle image elements
+        if tag == "ac:image":
+            self.in_image = True
+            self.current_image_attrs = {
+                "width": attrs.get("ac:width", ""),
+                "height": attrs.get("ac:height", ""),
+                "alt": attrs.get("ac:alt", ""),
+                "title": attrs.get("ac:title", ""),
+            }
+            # Add image placeholder to output
+            if self.output_format == "markdown":
+                self.output.write("\n[Image]")
+            return
+
+        if tag == "ri:attachment" and self.in_image:
+            # Extract attachment info for the current image
+            filename = attrs.get("ri:filename", "")
+            content_type = attrs.get("ri:content-type", "")
+            attachment_id = attrs.get("ri:content-id", "")
+
+            if filename:
+                # Get context from recent text
+                context = " ".join(self.recent_text_buffer[-5:]) if self.recent_text_buffer else ""
+
+                # Parse dimensions
+                width = None
+                height = None
+                try:
+                    if self.current_image_attrs.get("width"):
+                        width = int(self.current_image_attrs["width"])
+                    if self.current_image_attrs.get("height"):
+                        height = int(self.current_image_attrs["height"])
+                except ValueError:
+                    pass
+
+                image_ref = ImageReference(
+                    filename=filename,
+                    content_type=content_type or None,
+                    attachment_id=attachment_id or None,
+                    width=width,
+                    height=height,
+                    alt_text=self.current_image_attrs.get("alt") or None,
+                    title=self.current_image_attrs.get("title") or None,
+                    context_text=context,
+                )
+                self.images.append(image_ref)
+                logger.debug(f"Extracted image reference: {filename}")
+            return
+
         if tag == "ac:structured-macro":
             self.current_macro = attrs.get("ac:name", "")
 
@@ -294,6 +385,12 @@ class StorageFormatParser(HTMLParser):
 
     def _handle_macro_end(self, tag: str):
         """处理 Confluence 宏结束标签"""
+        # Handle image end
+        if tag == "ac:image":
+            self.in_image = False
+            self.current_image_attrs = {}
+            return
+
         if tag == "ac:structured-macro":
             if self.current_macro == "toc":
                 self.in_ignored_tag = max(0, self.in_ignored_tag - 1)
@@ -320,6 +417,14 @@ class StorageFormatParser(HTMLParser):
         result = "\n".join(lines)
 
         return result.strip()
+
+    def get_images(self) -> List[ImageReference]:
+        """获取提取的图片引用列表"""
+        return self.images.copy()
+
+    def get_embeddable_images(self) -> List[ImageReference]:
+        """获取可嵌入的图片引用列表（用于多模态 API）"""
+        return [img for img in self.images if img.is_embeddable]
 
 
 def parse_storage_format(content: str, output_format: str = "markdown") -> str:
@@ -397,6 +502,55 @@ def extract_markdown(content: str) -> str:
         Markdown 格式内容
     """
     return parse_storage_format(content, output_format="markdown")
+
+
+def extract_image_references(content: str) -> List[ImageReference]:
+    """
+    提取图片引用
+
+    从 Confluence 存储格式中提取所有图片引用。
+
+    Args:
+        content: Confluence 存储格式内容
+
+    Returns:
+        图片引用列表
+    """
+    if not content:
+        return []
+
+    try:
+        parser = StorageFormatParser(output_format="text")
+        parser.feed(content)
+        return parser.get_images()
+    except Exception as e:
+        logger.warning(f"Failed to extract image references: {e}")
+        return []
+
+
+def extract_embeddable_images(content: str) -> List[ImageReference]:
+    """
+    提取可嵌入的图片引用
+
+    从 Confluence 存储格式中提取所有可用于多模态 API 的图片引用。
+    只包括 JPEG, PNG, GIF, BMP, WebP 格式。
+
+    Args:
+        content: Confluence 存储格式内容
+
+    Returns:
+        可嵌入图片引用列表
+    """
+    if not content:
+        return []
+
+    try:
+        parser = StorageFormatParser(output_format="text")
+        parser.feed(content)
+        return parser.get_embeddable_images()
+    except Exception as e:
+        logger.warning(f"Failed to extract embeddable images: {e}")
+        return []
 
 
 def extract_headings(content: str) -> List[Dict[str, str]]:

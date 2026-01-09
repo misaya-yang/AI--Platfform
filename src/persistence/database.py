@@ -1332,6 +1332,131 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
+    async def save_image_segment(self, segment_data: Dict[str, Any]) -> None:
+        """保存图片段到数据库
+
+        Args:
+            segment_data: 包含以下字段的字典:
+                - segment_id: 段ID (必需)
+                - document_id: 文档ID (必需)
+                - dataset_id: 数据集ID (可选，如未提供会从文档中查询)
+                - content_type: 内容类型，默认 'image'
+                - image_url: 图片存储URL
+                - image_attachment_id: Confluence附件ID
+                - image_filename: 文件名
+                - image_media_type: MIME类型
+                - image_file_size: 文件大小
+                - vector_id: 向量ID (可选)
+                - text: 上下文文本 (可选)
+        """
+        if not self._pool:
+            return
+
+        # 获取 dataset_id，如果未提供则从文档中查询
+        dataset_id = segment_data.get("dataset_id")
+        if not dataset_id:
+            document = await self.get_document(segment_data.get("document_id"))
+            if document:
+                dataset_id = document.get("dataset_id")
+
+        if not dataset_id:
+            raise ValueError("dataset_id is required but could not be determined")
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO segments (
+                    segment_id, dataset_id, document_id, position,
+                    text, token_count, vector_id, metadata,
+                    content_type, image_url, image_attachment_id,
+                    image_filename, image_media_type, image_file_size,
+                    enabled, status
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13, $14, $15, $16
+                )
+                ON CONFLICT (segment_id) DO UPDATE SET
+                    dataset_id = EXCLUDED.dataset_id,
+                    document_id = EXCLUDED.document_id,
+                    vector_id = EXCLUDED.vector_id,
+                    content_type = EXCLUDED.content_type,
+                    image_url = EXCLUDED.image_url,
+                    image_attachment_id = EXCLUDED.image_attachment_id,
+                    image_filename = EXCLUDED.image_filename,
+                    image_media_type = EXCLUDED.image_media_type,
+                    image_file_size = EXCLUDED.image_file_size,
+                    updated_at = NOW()
+                """,
+                segment_data.get("segment_id"),
+                dataset_id,
+                segment_data.get("document_id"),
+                segment_data.get("position", 0),
+                segment_data.get("text", ""),  # context text
+                segment_data.get("token_count", 0),
+                segment_data.get("vector_id"),
+                json.dumps(segment_data.get("metadata", {})),
+                segment_data.get("content_type", "image"),
+                segment_data.get("image_url"),
+                segment_data.get("image_attachment_id"),
+                segment_data.get("image_filename"),
+                segment_data.get("image_media_type"),
+                segment_data.get("image_file_size"),
+                True,  # enabled
+                "completed",  # status
+            )
+
+    async def get_image_segments_by_document(
+        self, document_id: str
+    ) -> List[Dict[str, Any]]:
+        """获取文档的所有图片段
+
+        Args:
+            document_id: 文档ID
+
+        Returns:
+            图片段列表，每个包含 segment_id, image_attachment_id, metadata 等
+        """
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT segment_id, document_id, dataset_id, position,
+                       text, vector_id, metadata, content_type,
+                       image_url, image_attachment_id, image_filename,
+                       image_media_type, image_file_size,
+                       created_at, updated_at
+                FROM segments
+                WHERE document_id = $1 AND content_type = 'image'
+                ORDER BY position
+                """,
+                document_id,
+            )
+            return [dict(row) for row in rows]
+
+    async def delete_image_segments_by_document(self, document_id: str) -> int:
+        """删除文档的所有图片段
+
+        Args:
+            document_id: 文档ID
+
+        Returns:
+            删除的段数量
+        """
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM segments
+                WHERE document_id = $1 AND content_type = 'image'
+                """,
+                document_id,
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1])
+            return 0
+
     # =========================================================================
     # API Key 表 (api_keys)
     # =========================================================================

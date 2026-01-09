@@ -154,49 +154,56 @@ function PageListRow({
         className="flex-shrink-0"
       />
 
-      {/* Depth indicator */}
-      {page.depth > 0 && (
-        <div className="flex items-center gap-0.5" style={{ width: `${page.depth * 16}px` }}>
-          {Array.from({ length: page.depth }).map((_, i) => (
-            <span key={i} className="text-muted-foreground/30">│</span>
-          ))}
-        </div>
-      )}
+      {/* Title with depth indicator and icon */}
+      <div className="flex-1 min-w-0 flex items-center gap-2">
+        {/* Depth indicator */}
+        {page.depth > 0 && (
+          <div className="flex items-center gap-0.5 flex-shrink-0" style={{ width: `${page.depth * 12}px` }}>
+            {Array.from({ length: page.depth }).map((_, i) => (
+              <span key={i} className="text-muted-foreground/30">│</span>
+            ))}
+          </div>
+        )}
 
-      {/* Icon */}
-      <PageIcon hasChildren={page.depth === 0 || page.parent_page_id === null} />
+        {/* Icon */}
+        <PageIcon hasChildren={page.depth === 0 || page.parent_page_id === null} />
 
-      {/* Title */}
-      <div className="flex-1 min-w-0">
-        <span className="text-sm font-medium text-foreground truncate block">
+        {/* Title text */}
+        <span className="text-sm font-medium text-foreground truncate">
           {page.title}
         </span>
       </div>
 
       {/* Status */}
-      <StatusBadge status={page.status} />
+      <div className="w-24 flex-shrink-0">
+        <StatusBadge status={page.status} />
+      </div>
 
       {/* Version */}
-      <span className="text-xs text-muted-foreground w-12 text-center">
+      <span className="text-xs text-muted-foreground w-12 text-center flex-shrink-0">
         v{page.version}
       </span>
 
       {/* Last synced */}
-      <span className="text-xs text-muted-foreground w-28 text-right">
+      <span className="text-xs text-muted-foreground w-28 text-right flex-shrink-0">
         {page.last_synced_at
           ? new Date(page.last_synced_at).toLocaleDateString()
           : "-"}
       </span>
 
-      {/* Actions */}
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Actions - always visible for better UX */}
+      <div className="flex items-center gap-1 w-20 flex-shrink-0 justify-end">
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7"
+                className={`h-7 w-7 transition-all duration-200 ${
+                  isSyncing
+                    ? "text-primary bg-primary/10"
+                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                }`}
                 onClick={onSync}
                 disabled={isSyncing}
               >
@@ -207,27 +214,34 @@ function PageListRow({
                 )}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{t("confluence.syncedPages.syncPage")}</TooltipContent>
+            <TooltipContent>
+              {isSyncing ? t("confluence.syncedPages.syncing") : t("confluence.syncedPages.syncPage")}
+            </TooltipContent>
           </Tooltip>
         </TooltipProvider>
 
-        {page.web_url && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={() => window.open(page.web_url!, "_blank")}
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{t("confluence.syncedPages.openInConfluence")}</TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
-        )}
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={`h-7 w-7 transition-all duration-200 ${
+                  page.web_url
+                    ? "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                    : "text-muted-foreground/30 cursor-not-allowed"
+                }`}
+                onClick={() => page.web_url && window.open(page.web_url, "_blank")}
+                disabled={!page.web_url}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {page.web_url ? t("confluence.syncedPages.openInConfluence") : t("confluence.syncedPages.noUrl")}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
     </div>
   );
@@ -267,7 +281,7 @@ function TreeNodeRow({
   return (
     <>
       <div
-        className="group flex items-center gap-2 px-4 py-2.5 hover:bg-muted/40 transition-colors"
+        className="group flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 transition-colors"
         style={{ paddingLeft: `${16 + level * 20}px` }}
       >
         {/* Expand/collapse */}
@@ -308,38 +322,44 @@ function TreeNodeRow({
           )}
         </div>
 
-        {/* Icon */}
-        <PageIcon hasChildren={hasChildren} isExpanded={node.isExpanded} />
-
-        {/* Title */}
-        <span className="flex-1 text-sm font-medium text-foreground truncate">
-          {node.title}
-        </span>
+        {/* Icon + Title */}
+        <div className="flex-1 min-w-0 flex items-center gap-2">
+          <PageIcon hasChildren={hasChildren} isExpanded={node.isExpanded} />
+          <span className="text-sm font-medium text-foreground truncate">
+            {node.title}
+          </span>
+        </div>
 
         {/* Status */}
-        <StatusBadge status={node.status} />
+        <div className="w-24 flex-shrink-0">
+          <StatusBadge status={node.status} />
+        </div>
 
         {/* Version */}
-        <span className="text-xs text-muted-foreground w-10 text-center">
+        <span className="text-xs text-muted-foreground w-12 text-center flex-shrink-0">
           v{node.version}
         </span>
 
         {/* Last synced */}
-        <span className="text-xs text-muted-foreground w-24 text-right">
+        <span className="text-xs text-muted-foreground w-28 text-right flex-shrink-0">
           {node.last_synced_at
             ? new Date(node.last_synced_at).toLocaleDateString()
             : "-"}
         </span>
 
-        {/* Actions */}
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {/* Actions - always visible for better UX */}
+        <div className="flex items-center gap-1 w-20 flex-shrink-0 justify-end">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className={`h-7 w-7 transition-all duration-200 ${
+                    isSyncing
+                      ? "text-primary bg-primary/10"
+                      : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                  }`}
                   onClick={() => onSync(node.id)}
                   disabled={isSyncing}
                 >
@@ -350,27 +370,34 @@ function TreeNodeRow({
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>{t("confluence.syncedPages.syncPage")}</TooltipContent>
+              <TooltipContent>
+                {isSyncing ? t("confluence.syncedPages.syncing") : t("confluence.syncedPages.syncPage")}
+              </TooltipContent>
             </Tooltip>
           </TooltipProvider>
 
-          {node.web_url && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={() => window.open(node.web_url!, "_blank")}
-                  >
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t("confluence.syncedPages.openInConfluence")}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={`h-7 w-7 transition-all duration-200 ${
+                    node.web_url
+                      ? "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                      : "text-muted-foreground/30 cursor-not-allowed"
+                  }`}
+                  onClick={() => node.web_url && window.open(node.web_url, "_blank")}
+                  disabled={!node.web_url}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {node.web_url ? t("confluence.syncedPages.openInConfluence") : t("confluence.syncedPages.noUrl")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
 
@@ -416,6 +443,19 @@ export default function SyncedPagesPage() {
   const [isBatchSyncing, setIsBatchSyncing] = useState(false);
   const [isFullSyncing, setIsFullSyncing] = useState(false);
   const [showAddPagesModal, setShowAddPagesModal] = useState(false);
+
+  // Toast notification state
+  const [toast, setToast] = useState<{
+    message: string;
+    type: "success" | "error" | "info";
+    visible: boolean;
+  } | null>(null);
+
+  // Auto-dismiss toast
+  const showToast = useCallback((message: string, type: "success" | "error" | "info" = "info") => {
+    setToast({ message, type, visible: true });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
 
   // Queries
   const { data: binding } = useQuery({
@@ -533,12 +573,20 @@ export default function SyncedPagesPage() {
   }, [filteredPages, selectedIds]);
 
   const handleSyncPage = useCallback(async (pageId: string) => {
+    // Find page title for better feedback
+    const page = pages.find((p) => p.id === pageId);
+    const pageTitle = page?.title || "Page";
+
     setSyncingIds((prev) => new Set(prev).add(pageId));
+    showToast(t("confluence.syncedPages.syncStarted", { title: pageTitle }), "info");
+
     try {
       await syncSinglePage(pageId);
-      queryClient.invalidateQueries({ queryKey: ["confluence-pages", bindingId] });
+      await queryClient.invalidateQueries({ queryKey: ["confluence-pages", bindingId] });
+      showToast(t("confluence.syncedPages.syncSuccess", { title: pageTitle }), "success");
     } catch (error) {
       console.error("Failed to sync page:", error);
+      showToast(t("confluence.syncedPages.syncFailed", { title: pageTitle }), "error");
     } finally {
       setSyncingIds((prev) => {
         const next = new Set(prev);
@@ -546,7 +594,7 @@ export default function SyncedPagesPage() {
         return next;
       });
     }
-  }, [bindingId, queryClient]);
+  }, [bindingId, queryClient, pages, showToast, t]);
 
   const handleBatchSync = useCallback(async () => {
     if (selectedIds.size === 0) return;
@@ -795,11 +843,11 @@ export default function SyncedPagesPage() {
                 className="flex-shrink-0"
               />
             )}
-            <span className="flex-1">{t("confluence.syncedPages.columns.title")}</span>
-            <span className="w-24">{t("confluence.syncedPages.columns.status")}</span>
-            <span className="w-12 text-center">{t("confluence.syncedPages.columns.version")}</span>
-            <span className="w-28 text-right">{t("confluence.syncedPages.columns.lastSync")}</span>
-            <span className="w-20">{t("confluence.syncedPages.columns.actions")}</span>
+            <span className="flex-1 min-w-0">{t("confluence.syncedPages.columns.title")}</span>
+            <span className="w-24 flex-shrink-0">{t("confluence.syncedPages.columns.status")}</span>
+            <span className="w-12 text-center flex-shrink-0">{t("confluence.syncedPages.columns.version")}</span>
+            <span className="w-28 text-right flex-shrink-0">{t("confluence.syncedPages.columns.lastSync")}</span>
+            <span className="w-20 flex-shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
           </div>
 
           {/* Content */}
@@ -909,6 +957,42 @@ export default function SyncedPagesPage() {
             queryClient.invalidateQueries({ queryKey: ["confluence-binding", bindingId] });
           }}
         />
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300`}
+        >
+          <Card
+            className={`flex items-center gap-3 px-4 py-3 shadow-lg border ${
+              toast.type === "success"
+                ? "border-emerald-200 bg-emerald-50 dark:bg-emerald-950/50 dark:border-emerald-800"
+                : toast.type === "error"
+                  ? "border-rose-200 bg-rose-50 dark:bg-rose-950/50 dark:border-rose-800"
+                  : "border-blue-200 bg-blue-50 dark:bg-blue-950/50 dark:border-blue-800"
+            }`}
+          >
+            {toast.type === "success" ? (
+              <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+            ) : toast.type === "error" ? (
+              <AlertCircle className="h-4 w-4 text-rose-600 dark:text-rose-400" />
+            ) : (
+              <Loader2 className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
+            )}
+            <span
+              className={`text-sm font-medium ${
+                toast.type === "success"
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : toast.type === "error"
+                    ? "text-rose-700 dark:text-rose-300"
+                    : "text-blue-700 dark:text-blue-300"
+              }`}
+            >
+              {toast.message}
+            </span>
+          </Card>
+        </div>
       )}
     </div>
   );
