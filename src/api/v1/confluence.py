@@ -1,4 +1,4 @@
-"""
+﻿"""
 Confluence Integration API Endpoints.
 
 Provides REST API for Confluence integration management:
@@ -43,7 +43,10 @@ from ..schemas.confluence import (
 )
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
-from ...services.knowledge.confluence.sync_service import ConfluenceSyncError
+from ...services.knowledge.confluence.sync_service import (
+    ConfluenceAccessDeniedError,
+    ConfluenceSyncError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,19 +109,15 @@ async def list_connections(
 ):
     """List all Confluence connections for the tenant."""
     try:
-        # DEBUG: Log user context
-        logger.info(f"[DEBUG] list_connections called - user_id={user.user_id}, tenant_id='{user.tenant_id}', is_auth={user.is_authenticated}, roles={user.roles}")
-
         svc = get_confluence_sync_service(request)
         connections = await svc.list_connections(
+            user=user,
             tenant_id=user.tenant_id,
             status=status,
         )
-
-        # DEBUG: Log results
-        logger.info(f"[DEBUG] list_connections returning {len(connections)} connections")
-
         return [_connection_to_response(c) for c in connections]
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list connections: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -133,12 +132,12 @@ async def get_connection(
     """Get a Confluence connection by ID."""
     try:
         svc = get_confluence_sync_service(request)
-        connection = await svc.get_connection(connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="Connection not found")
-        if connection.get("tenant_id") != user.tenant_id and "admin" not in user.roles:
-            raise HTTPException(status_code=403, detail="Access denied")
+        connection = await svc.get_connection(connection_id, user=user)
         return _connection_to_response(connection)
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -157,12 +156,20 @@ async def update_connection(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
         svc = get_confluence_sync_service(request)
+
+        # 验证用户对 connection 的访问权限
+        await svc.get_connection(connection_id, user=user)
+
         connection = await svc.update_connection(
             connection_id=connection_id,
             tenant_id=user.tenant_id,
             **payload.model_dump(exclude_none=True),
         )
         return _connection_to_response(connection)
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -179,8 +186,16 @@ async def delete_connection(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
         svc = get_confluence_sync_service(request)
+
+        # 验证用户对 connection 的访问权限
+        await svc.get_connection(connection_id, user=user)
+
         ok = await svc.delete_connection(connection_id, user.tenant_id)
         return {"status": "success" if ok else "not_found", "connection_id": connection_id}
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
@@ -392,8 +407,14 @@ async def list_space_bindings(
     """List all space bindings for a connection."""
     try:
         svc = get_confluence_sync_service(request)
-        bindings = await svc.list_bindings(connection_id, user.tenant_id)
+        bindings = await svc.list_bindings(
+            user=user,
+            connection_id=connection_id,
+            tenant_id=user.tenant_id,
+        )
         return bindings
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list bindings: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -409,21 +430,17 @@ async def list_all_bindings(
 ):
     """List all space bindings for the current tenant."""
     try:
-        # DEBUG: Log user context
-        logger.info(f"[DEBUG] list_all_bindings called - user_id={user.user_id}, tenant_id='{user.tenant_id}', is_auth={user.is_authenticated}")
-
         svc = get_confluence_sync_service(request)
         bindings = await svc.list_all_bindings(
+            user=user,
             tenant_id=user.tenant_id,
             connection_id=connection_id,
             dataset_id=dataset_id,
             status=status,
         )
-
-        # DEBUG: Log results
-        logger.info(f"[DEBUG] list_all_bindings returning {len(bindings)} bindings")
-
         return bindings
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list all bindings: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -438,10 +455,12 @@ async def get_space_binding(
     """Get a space binding by ID."""
     try:
         svc = get_confluence_sync_service(request)
-        binding = await svc.get_binding(binding_id)
-        if not binding:
-            raise HTTPException(status_code=404, detail="Binding not found")
+        binding = await svc.get_binding(binding_id, user=user)
         return binding
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -460,11 +479,19 @@ async def update_space_binding(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
         svc = get_confluence_sync_service(request)
+
+        # 验证用户对 binding 的访问权限
+        await svc.get_binding(binding_id, user=user)
+
         binding = await svc.update_binding(
             binding_id=binding_id,
             **payload.model_dump(exclude_none=True),
         )
         return binding
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -482,8 +509,16 @@ async def delete_space_binding(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
         svc = get_confluence_sync_service(request)
+
+        # 验证用户对 binding 的访问权限
+        await svc.get_binding(binding_id, user=user)
+
         ok = await svc.delete_binding(binding_id, delete_documents=delete_documents)
         return {"status": "success" if ok else "not_found", "binding_id": binding_id}
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
@@ -512,10 +547,8 @@ async def add_pages_to_binding(
 
         svc = get_confluence_sync_service(request)
 
-        # Verify binding exists
-        binding = await svc.get_binding(binding_id)
-        if not binding:
-            raise HTTPException(status_code=404, detail="Binding not found")
+        # Verify binding exists and user has access
+        binding = await svc.get_binding(binding_id, user=user)
 
         # Verify dataset access
         knowledge_svc = get_knowledge_service(request)
@@ -613,11 +646,19 @@ async def import_space(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:import")
         svc = get_confluence_sync_service(request)
+
+        # 验证用户对 binding 的访问权限
+        await svc.get_binding(payload.binding_id, user=user)
+
         result = await svc.import_space(
             binding_id=payload.binding_id,
             force_full_sync=payload.force_full_sync,
         )
         return result.to_dict()
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -640,6 +681,9 @@ async def trigger_sync(
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:sync")
         svc = get_confluence_sync_service(request)
 
+        # 验证用户对 binding 的访问权限
+        await svc.get_binding(binding_id, user=user)
+
         force = payload.force if payload else False
         page_ids = payload.page_ids if payload else None
 
@@ -649,6 +693,10 @@ async def trigger_sync(
             page_ids=page_ids,
         )
         return {"status": "triggered", "task_id": task_id, "binding_id": binding_id}
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -664,8 +712,12 @@ async def get_sync_status(
     """Get sync status for a binding."""
     try:
         svc = get_confluence_sync_service(request)
-        status = await svc.get_sync_status(binding_id)
+        status = await svc.get_sync_status(binding_id, user=user)
         return status
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to get sync status: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -685,6 +737,7 @@ async def list_synced_pages(
         svc = get_confluence_sync_service(request)
         pages = await svc.list_pages(
             binding_id=binding_id,
+            user=user,
             status=status,
             limit=limit,
             offset=offset,
@@ -702,6 +755,10 @@ async def list_synced_pages(
             "pending": pending,
             "error": error,
         }
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list pages: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -717,8 +774,14 @@ async def sync_single_page(
     try:
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:sync")
         svc = get_confluence_sync_service(request)
-        result = await svc.sync_page(page_record_id)
+
+        # 传递 user 以验证对页面所属 binding 的访问权限
+        result = await svc.sync_page(page_record_id, user=user)
         return {"status": "success", "result": result}
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
@@ -745,11 +808,15 @@ async def batch_sync_pages(
         request.app.state.dispatcher.rbac.require(user.roles, "confluence:sync")
         svc = get_confluence_sync_service(request)
 
+        # 传递 user 以验证对每个页面所属 binding 的访问权限
         result = await svc.batch_sync_pages(
             page_record_ids=payload.page_record_ids,
             force=payload.force,
+            user=user,
         )
         return result
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
@@ -773,11 +840,14 @@ async def list_sync_tasks(
     try:
         svc = get_confluence_sync_service(request)
         tasks = await svc.list_sync_tasks(
+            user=user,
             binding_id=binding_id,
             status=status,
             limit=limit,
         )
         return tasks
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list tasks: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -792,10 +862,12 @@ async def get_sync_task(
     """Get a sync task by ID."""
     try:
         svc = get_confluence_sync_service(request)
-        task = await svc.get_sync_task(task_id)
+        task = await svc.get_sync_task(task_id, user=user)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         return task
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:

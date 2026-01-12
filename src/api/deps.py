@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import logging
@@ -202,10 +202,24 @@ async def get_user_context(
         elif "premium" in roles or "vip" in roles:
             tier = "premium"
 
+        # Merge permissions from DB (consistent with get_auth_context)
+        t_db_start = time.perf_counter()
+        db = getattr(request.app.state, "database", None)
+        if db and getattr(db, "enabled", False):
+            try:
+                db_permissions = await db.get_user_permissions(user_id)
+                for perm in db_permissions:
+                    if perm not in roles:
+                        roles.append(perm)
+            except Exception:
+                pass
+        t_db_done = time.perf_counter()
+
         logger.info(
             f"[AUTH][TIMING] JWT user={user_id} "
             f"decode={((t_jwt_decode - t_jwt_start) * 1000):.1f}ms "
             f"redis={((t_redis_done - t_redis_start) * 1000):.1f}ms "
+            f"db_perms={((t_db_done - t_db_start) * 1000):.1f}ms "
             f"total={((time.perf_counter() - t_start) * 1000):.1f}ms"
         )
         return _cache_and_return(UserContext(
@@ -230,6 +244,20 @@ async def get_user_context(
                     tenant_id = str(key_info.get("tenant_id") or "")
                     user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(api_key)
                     tier = str(key_info.get("tier") or "normal")
+
+                    # Cache API key metadata for downstream auth decisions (e.g., allowed_services).
+                    request.state.api_key_info = key_info
+                    request.state.api_key_hash = key_hash
+
+                    # Merge permissions from DB (consistent with JWT path)
+                    try:
+                        db_permissions = await db.get_user_permissions(user_id)
+                        for perm in db_permissions:
+                            if perm not in roles:
+                                roles.append(perm)
+                    except Exception:
+                        pass
+
                     logger.info(f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms")
                     return _cache_and_return(UserContext(
                         user_id=user_id,
@@ -356,7 +384,13 @@ async def get_auth_context(
         db = getattr(request.app.state, "database", None)
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
         if db and getattr(db, "enabled", False):
-            key_info = await db.get_api_key(key_hash)
+            # Reuse cached api_key_info from get_user_context to avoid duplicate use_count increment
+            cached_key_info = getattr(request.state, "api_key_info", None)
+            cached_key_hash = getattr(request.state, "api_key_hash", None)
+            if cached_key_info and cached_key_hash == key_hash:
+                key_info = cached_key_info
+            else:
+                key_info = await db.get_api_key(key_hash)
             if key_info:
                 roles = _normalize_roles(key_info.get("roles"))
                 tenant_id = str(key_info.get("tenant_id") or "")

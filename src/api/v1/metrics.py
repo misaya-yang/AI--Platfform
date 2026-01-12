@@ -1,4 +1,4 @@
-"""
+﻿"""
 Metrics API - 系统指标统计接口
 
 Provides dashboard metrics including:
@@ -121,7 +121,7 @@ async def get_metrics_summary(
     auth: AuthContext = Depends(get_auth_context),
 ) -> MetricsSummary:
     """
-    获取系统指标摘要
+    获取系统指标摘要（仅管理员/运营角色）
 
     返回:
     - total_requests: 总请求数
@@ -137,6 +137,9 @@ async def get_metrics_summary(
     - active_services: 活跃服务数
     - requests_by_hour: 24小时请求趋势
     """
+    # 权限检查：仅管理员或运营角色可查看 metrics
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
     # 从 MetricsRecorder 获取今日摘要
     metrics_recorder = get_metrics_recorder()
     summary = await metrics_recorder.get_today_summary()
@@ -196,7 +199,7 @@ async def get_metrics_timeseries(
     auth: AuthContext = Depends(get_auth_context),
 ) -> TimeSeriesResponse:
     """
-    获取时间序列数据
+    获取时间序列数据（仅管理员/运营角色）
 
     支持的指标:
     - requests: 请求数
@@ -205,6 +208,9 @@ async def get_metrics_timeseries(
     - errors: 错误数
     - runs: LangGraph 执行数
     """
+    # 权限检查：仅管理员或运营角色可查看 metrics
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
     redis = getattr(request.app.state, "redis", None)
     data = []
 
@@ -275,10 +281,13 @@ async def get_token_usage(
     auth: AuthContext = Depends(get_auth_context),
 ) -> TokenUsageResponse:
     """
-    获取 Token 使用统计
+    获取 Token 使用统计（仅管理员/运营角色）
 
     返回指定日期范围内的 Token 消耗情况
     """
+    # 权限检查：仅管理员或运营角色可查看 metrics
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
     redis = getattr(request.app.state, "redis", None)
 
     # 默认为过去 7 天
@@ -346,10 +355,13 @@ async def get_metrics_breakdown(
     auth: AuthContext = Depends(get_auth_context),
 ) -> BreakdownResponse:
     """
-    获取指标分解
+    获取指标分解（仅管理员/运营角色）
 
     按维度分解指标，返回 Top N 项目
     """
+    # 权限检查：仅管理员或运营角色可查看 metrics
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
     redis = getattr(request.app.state, "redis", None)
     items = []
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 透明代理路由
 
 提供通配符路由 /proxy/{service_name}/{path:path}，支持：
@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -27,6 +27,7 @@ from ..deps import (
 )
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError
 from ...core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimiter,
     RateLimitContext,
@@ -71,7 +72,162 @@ def get_proxy_config_loader(request: Request) -> ProxyConfigLoader:
     return loader
 
 
-# ============ 限流检查 ============
+# ============ 权限和限流检查 ============
+
+def _normalize_allowed_services(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return []
+
+
+async def _resolve_service_definition(registry, service_name: str):
+    if not registry:
+        return None
+    service = await registry.get(service_name)
+    if service:
+        return service
+    try:
+        services = await registry.list()
+    except Exception:
+        return None
+    for svc in services:
+        if getattr(svc, "name", None) == service_name:
+            return svc
+    return None
+
+
+def _service_allowed(allowed: List[str], candidates: set) -> bool:
+    if not allowed:
+        return True
+    if "*" in allowed:
+        return True
+    return any(name in allowed for name in candidates)
+
+
+async def check_service_authorization(
+    request: Request,
+    service_name: str,
+    user: UserContext,
+    auth: AuthContext,
+) -> None:
+    """
+    检查用户对服务的访问权限
+
+    验证顺序:
+    1. 基本 RBAC 权限 (service:invoke)
+    2. 服务级别认证配置 (allowed_roles, public)
+    3. 用户/API Key 级别 allowed_services (如果配置)
+    """
+    # 1. RBAC 权限检查: 需要 service:invoke 权限
+    try:
+        request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
+    except PermissionDeniedError:
+        logger.warning(
+            f"[ProxyAuth] User {user.user_id} lacks service:invoke permission for {service_name}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied: service:invoke required"
+        )
+
+    # 2. 服务级别认证配置检查
+    registry = getattr(request.app.state, "registry", None)
+    service = await _resolve_service_definition(registry, service_name)
+    service_aliases = {service_name}
+    if service:
+        if getattr(service, "service_id", None):
+            service_aliases.add(service.service_id)
+        if getattr(service, "name", None):
+            service_aliases.add(service.name)
+
+        service_config = service.get_service_config() if hasattr(service, "get_service_config") else None
+        if service_config and service_config.auth and service_config.auth.enabled:
+            auth_config = service_config.auth
+
+            # public 服务跳过服务级别检查，但仍需执行 allowed_services 约束
+            if not auth_config.public:
+                # require_auth
+                if auth_config.require_auth and not user.is_authenticated:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: authentication required for {service_name}"
+                    )
+
+                # allowed_roles
+                if auth_config.allowed_roles:
+                    has_role = any(role in auth.roles for role in auth_config.allowed_roles)
+                    # admin 始终有权限
+                    if not has_role and "admin" not in auth.roles:
+                        logger.warning(
+                            f"[ProxyAuth] User {user.user_id} role not in allowed_roles for {service_name}"
+                        )
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Permission denied: not authorized for service {service_name}"
+                        )
+
+                # allowed_api_keys (prefix allowlist)
+                if auth_config.allowed_api_keys:
+                    settings = getattr(request.app.state, "settings", None)
+                    api_key_header = None
+                    if settings and settings.authentication.api_key.enabled:
+                        api_key_header = settings.authentication.api_key.header_name
+                    api_key_value = request.headers.get(api_key_header) if api_key_header else None
+
+                    if not api_key_value:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Permission denied: API key required for service {service_name}"
+                        )
+
+                    if "*" not in auth_config.allowed_api_keys:
+                        matched = any(
+                            api_key_value.startswith(prefix) for prefix in auth_config.allowed_api_keys
+                        )
+                        if not matched:
+                            raise HTTPException(
+                                status_code=403,
+                                detail=f"Permission denied: API key not allowed for service {service_name}"
+                            )
+
+    # 3. 用户/API Key 级别 allowed_services 检查
+    db = getattr(request.app.state, "database", None)
+    if db and getattr(db, "enabled", False) and user.is_authenticated:
+        try:
+            allowed_sets: List[List[str]] = []
+
+            api_key_info = getattr(request.state, "api_key_info", None)
+            if api_key_info:
+                api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
+                if api_allowed:
+                    allowed_sets.append(api_allowed)
+
+            if user.tenant_id:
+                tenant = await db.get_tenant(user.tenant_id)
+                if tenant:
+                    tenant_allowed = _normalize_allowed_services(tenant.get("allowed_services"))
+                    if tenant_allowed:
+                        allowed_sets.append(tenant_allowed)
+
+            for allowed in allowed_sets:
+                if not _service_allowed(allowed, service_aliases):
+                    logger.warning(
+                        f"[ProxyAuth] Service {service_name} not in allowed_services for user {user.user_id}"
+                    )
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Permission denied: service {service_name} not in allowed services"
+                    )
+        except HTTPException:
+            raise
+        except Exception:
+            # 如果方法不存在或查询失败，继续（不阻止访问）
+            pass
+
 
 async def check_proxy_rate_limit(
     user: UserContext,
@@ -82,13 +238,13 @@ async def check_proxy_rate_limit(
     """检查代理限流"""
     if not rate_limiter:
         return
-    
+
     context = RateLimitContext.from_user_context(
         user=user,
         assistant_id=service_name,  # 复用 assistant_id 作为服务标识
         operation=operation,
     )
-    
+
     result = await rate_limiter.check(context)
     if not result.allowed:
         raise HTTPException(
@@ -123,25 +279,31 @@ async def transparent_proxy_handler(
     request: Request,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
     rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
 ):
     """
     透明代理主处理函数
 
     处理流程：
-    1. 限流检查
-    2. 提取请求上下文
-    3. 构建代理请求
-    4. 执行代理并返回响应
+    1. 权限检查（RBAC + 服务级别 + allowed_services）
+    2. 限流检查
+    3. 提取请求上下文
+    4. 构建代理请求
+    5. 执行代理并返回响应
     """
     # Performance timing
     t_start = time.perf_counter()
     t_auth_done = t_start  # User context already resolved via Depends
 
-    # 1. 检测操作类型（用于限流）
+    # 1. 权限检查
+    await check_service_authorization(request, service_name, user, auth)
+    t_auth_check = time.perf_counter()
+
+    # 2. 检测操作类型（用于限流）
     operation = TransparentProxy.detect_operation_type(request.method, path)
 
-    # 2. 限流检查
+    # 3. 限流检查
     await check_proxy_rate_limit(user, rate_limiter, service_name, operation)
     t_rate_limit = time.perf_counter()
 
@@ -171,7 +333,8 @@ async def transparent_proxy_handler(
     # Performance logging
     logger.info(
         f"[ProxyRoute][TIMING] {request.method} /proxy/{service_name}/{path} "
-        f"rate_limit={((t_rate_limit - t_auth_done) * 1000):.1f}ms "
+        f"auth_check={((t_auth_check - t_auth_done) * 1000):.1f}ms "
+        f"rate_limit={((t_rate_limit - t_auth_check) * 1000):.1f}ms "
         f"context={((t_context - t_rate_limit) * 1000):.1f}ms "
         f"body_read={((t_body - t_context) * 1000):.1f}ms "
         f"build={((t_build - t_body) * 1000):.1f}ms "
@@ -232,6 +395,7 @@ async def transparent_proxy_root_handler(
     request: Request,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
     rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
 ):
     """处理根路径请求"""
@@ -241,6 +405,7 @@ async def transparent_proxy_root_handler(
         request=request,
         proxy=proxy,
         user=user,
+        auth=auth,
         rate_limiter=rate_limiter,
     )
 
@@ -256,17 +421,30 @@ async def list_proxy_services(
     request: Request,
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """列出可用的代理服务"""
+    # 权限检查：需要 service:invoke 权限才能查看服务列表
+    try:
+        request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
+    except PermissionDeniedError:
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied: service:invoke required"
+        )
+
     services = await config_loader.list_services()
-    
+    is_admin = "admin" in auth.roles
+
+    # 非管理员只能看到基本信息，管理员可以看到完整信息
     return {
         "services": [
             {
                 "service_id": svc.service_id,
                 "service_name": svc.service_name,
-                "upstream_url": svc.upstream_url,
-                "assistant_id": svc.assistant_id,
+                # 仅管理员可见完整 URL
+                "upstream_url": svc.upstream_url if is_admin else None,
+                "assistant_id": svc.assistant_id if is_admin else None,
                 "enabled": svc.enabled,
             }
             for svc in services

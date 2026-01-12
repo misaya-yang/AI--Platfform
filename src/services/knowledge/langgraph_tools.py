@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import AuthenticationRequiredError
 from .knowledge_service import KnowledgeService, RetrieveResult
 
 
@@ -84,7 +85,7 @@ class KnowledgeRetriever:
         self,
         knowledge_service: KnowledgeService,
         dataset_id: str,
-        user_context: Optional[UserContext] = None,
+        user_context: UserContext,
         default_top_k: int = 5,
         default_mode: str = "hybrid",
         default_rerank: bool = False,
@@ -92,27 +93,41 @@ class KnowledgeRetriever:
     ):
         """
         Initialize the retriever.
-        
+
         Args:
             knowledge_service: The knowledge base service
             dataset_id: Default dataset to search
-            user_context: User context for authorization (uses system if None)
+            user_context: User context for authorization (REQUIRED)
             default_top_k: Default number of results to return
             default_mode: Default retrieval mode
             default_rerank: Whether to use reranking by default
             default_mmr: Whether to use MMR by default
+
+        Raises:
+            AuthenticationRequiredError: If user_context is None or not authenticated
         """
+        if user_context is None:
+            raise AuthenticationRequiredError("User context is required for knowledge retrieval")
+        if not user_context.is_authenticated:
+            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+
         self.kb = knowledge_service
         self.dataset_id = dataset_id
-        self.user_context = user_context or self._create_system_context()
+        self.user_context = user_context
         self.default_top_k = default_top_k
         self.default_mode = default_mode
         self.default_rerank = default_rerank
         self.default_mmr = default_mmr
-    
+
     @staticmethod
     def _create_system_context() -> UserContext:
-        """Create a system-level user context for internal use."""
+        """
+        Create a system-level user context.
+
+        WARNING: Only use this for background tasks where no user context is available
+        (e.g., scheduled sync jobs, admin operations). NEVER use in request handlers.
+        For request handlers, always pass the actual user context.
+        """
         return UserContext(
             user_id="system",
             tenant_id="system",
@@ -307,16 +322,34 @@ class MultiDatasetRetriever:
         self,
         knowledge_service: KnowledgeService,
         dataset_ids: List[str],
-        user_context: Optional[UserContext] = None,
+        user_context: UserContext,
         default_top_k: int = 5,
         default_mode: str = "hybrid",
     ):
+        """
+        Initialize multi-dataset retriever.
+
+        Args:
+            knowledge_service: The knowledge base service
+            dataset_ids: List of dataset IDs to search
+            user_context: User context for authorization (REQUIRED)
+            default_top_k: Default number of results to return
+            default_mode: Default retrieval mode
+
+        Raises:
+            AuthenticationRequiredError: If user_context is None or not authenticated
+        """
+        if user_context is None:
+            raise AuthenticationRequiredError("User context is required for knowledge retrieval")
+        if not user_context.is_authenticated:
+            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+
         self.kb = knowledge_service
         self.dataset_ids = dataset_ids
-        self.user_context = user_context or KnowledgeRetriever._create_system_context()
+        self.user_context = user_context
         self.default_top_k = default_top_k
         self.default_mode = default_mode
-        
+
         # Create individual retrievers
         self.retrievers = {
             ds_id: KnowledgeRetriever(
@@ -417,20 +450,33 @@ class MultiDatasetRetriever:
 def create_retrieval_tool(
     knowledge_service: KnowledgeService,
     dataset_id: str,
-    user_context: Optional[UserContext] = None,
+    user_context: UserContext,
     **kwargs,
 ) -> Callable:
     """
     Create a simple retrieval tool function for LangGraph.
-    
+
+    Args:
+        knowledge_service: The knowledge base service
+        dataset_id: Dataset ID to search
+        user_context: User context for authorization (REQUIRED)
+        **kwargs: Additional options for KnowledgeRetriever
+
+    Returns:
+        Async function for searching the knowledge base
+
+    Raises:
+        AuthenticationRequiredError: If user_context is None or not authenticated
+
     Usage in LangGraph:
     ```python
-    search_tool = create_retrieval_tool(kb_service, "my_dataset")
-    
+    search_tool = create_retrieval_tool(kb_service, "my_dataset", user_context)
+
     # In your graph node
     results = await search_tool("What is X?")
     ```
     """
+    # Validation happens in KnowledgeRetriever constructor
     retriever = KnowledgeRetriever(
         knowledge_service=knowledge_service,
         dataset_id=dataset_id,
@@ -480,10 +526,25 @@ class DifyCompatibleKBAPI:
     def __init__(
         self,
         knowledge_service: KnowledgeService,
-        default_user_context: Optional[UserContext] = None,
+        user_context: UserContext,
     ):
+        """
+        Initialize Dify-compatible KB API.
+
+        Args:
+            knowledge_service: The knowledge base service
+            user_context: User context for authorization (REQUIRED)
+
+        Raises:
+            AuthenticationRequiredError: If user_context is None or not authenticated
+        """
+        if user_context is None:
+            raise AuthenticationRequiredError("User context is required for knowledge retrieval")
+        if not user_context.is_authenticated:
+            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+
         self.kb = knowledge_service
-        self.user_context = default_user_context or KnowledgeRetriever._create_system_context()
+        self.user_context = user_context
     
     async def retrieve(
         self,

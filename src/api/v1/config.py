@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
@@ -160,7 +160,10 @@ async def get_auth_config(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """获取当前鉴权配置"""
+    """获取当前鉴权配置（仅管理员）"""
+    # 权限检查：仅管理员可查看鉴权配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     settings = request.app.state.settings
     return {
         "jwt": {
@@ -184,7 +187,10 @@ async def update_auth_config(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """更新鉴权配置（运行时）"""
+    """更新鉴权配置（运行时，仅管理员）"""
+    # 权限检查：仅管理员可修改鉴权配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     _runtime_config["auth"] = {
         "jwt_enabled": body.jwt_enabled,
         "jwt_secret": body.jwt_secret or "",
@@ -210,7 +216,10 @@ async def list_api_keys(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """列出所有 API Keys"""
+    """列出所有 API Keys（仅管理员）"""
+    # 权限检查：仅管理员可查看 API Keys
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     db = getattr(request.app.state, "database", None)
     if db and db.enabled:
         keys = await db.list_api_keys()
@@ -231,7 +240,10 @@ async def create_api_key(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """创建新的 API Key"""
+    """创建新的 API Key（仅管理员）"""
+    # 权限检查：仅管理员可创建 API Key
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     import secrets
     import hashlib
 
@@ -265,7 +277,10 @@ async def list_rate_limits(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """获取所有限流规则"""
+    """获取所有限流规则（仅管理员）"""
+    # 权限检查：仅管理员可查看限流规则
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     db = getattr(request.app.state, "database", None)
     if db and db.enabled:
         limits = await db.get_rate_limits()
@@ -280,7 +295,10 @@ async def create_rate_limit(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """创建限流规则"""
+    """创建限流规则（仅管理员）"""
+    # 权限检查：仅管理员可创建限流规则
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     rule = body.model_dump()
 
     db = getattr(request.app.state, "database", None)
@@ -305,7 +323,10 @@ async def delete_rate_limit(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """删除限流规则"""
+    """删除限流规则（仅管理员）"""
+    # 权限检查：仅管理员可删除限流规则
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     # TODO: 实现删除逻辑
     return {"status": "success", "message": "限流规则已删除"}
 
@@ -323,8 +344,14 @@ _load_balancer_config = {
 
 
 @router.get("/load-balancer")
-async def get_load_balancer_config(request: Request):
-    """获取负载均衡配置"""
+async def get_load_balancer_config(
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """获取负载均衡配置（仅管理员）"""
+    # 权限检查：仅管理员可查看负载均衡配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     settings = request.app.state.settings
     return {
         "strategy": settings.load_balancer.strategy,
@@ -344,7 +371,10 @@ async def update_load_balancer_config(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """更新负载均衡配置"""
+    """更新负载均衡配置（仅管理员）"""
+    # 权限检查：仅管理员可修改负载均衡配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     _load_balancer_config["strategy"] = body.strategy
 
     # 更新运行时负载均衡器策略
@@ -403,7 +433,10 @@ async def get_service_config(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """获取指定服务的配置"""
+    """获取指定服务的配置（仅管理员）"""
+    # 权限检查：仅管理员可查看服务配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     registry = request.app.state.registry
     service = await registry.get(service_id)
     if not service:
@@ -461,7 +494,10 @@ async def update_service_config(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """更新指定服务的配置"""
+    """更新指定服务的配置（仅管理员）"""
+    # 权限检查：仅管理员可修改服务配置
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     from ...models.service import (
         ServiceConfig,
         ServiceRateLimitConfig,
@@ -547,7 +583,10 @@ async def delete_service(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """删除服务"""
+    """删除服务（仅管理员）"""
+    # 权限检查：仅管理员可删除服务
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     registry = request.app.state.registry
     service = await registry.get(service_id)
     if not service:
@@ -572,8 +611,14 @@ async def delete_service(
 # ===== 系统状态 =====
 
 @router.get("/status")
-async def get_system_status(request: Request):
-    """获取系统状态"""
+async def get_system_status(
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """获取系统状态（仅管理员）"""
+    # 权限检查：仅管理员可查看系统状态
+    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+
     settings = request.app.state.settings
 
     db = getattr(request.app.state, "database", None)

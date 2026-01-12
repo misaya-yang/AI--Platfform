@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ....config.settings import Settings
+from ....core.auth.user_resolver import UserContext
 from .client import ConfluenceClient, ConfluenceAPIError
 from .models import (
     ConfluenceCredentials,
@@ -47,6 +48,14 @@ logger = logging.getLogger(__name__)
 class ConfluenceSyncError(Exception):
     """Confluence 同步错误"""
     pass
+
+
+class ConfluenceAccessDeniedError(Exception):
+    """Confluence 资源访问被拒绝"""
+    def __init__(self, resource_type: str, resource_id: str):
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+        super().__init__(f"Access denied to {resource_type}: {resource_id}")
 
 
 class ConfluenceSyncService:
@@ -128,6 +137,127 @@ class ConfluenceSyncService:
         )
         self._clients[connection_id] = client
         return client
+
+    def _verify_confluence_access(
+        self,
+        resource: Dict[str, Any],
+        resource_type: str,
+        user: UserContext,
+    ) -> None:
+        """
+        验证用户对 Confluence 资源的访问权限
+
+        访问规则：
+        1. Admin 用户可访问所有资源
+        2. 资源所有者 (owner_id 或 created_by 匹配) 可完全访问
+        3. 其他用户拒绝访问
+
+        Args:
+            resource: 资源数据字典，需包含 owner_id 或 created_by
+            resource_type: 资源类型 (connection, binding, task)
+            user: 用户上下文
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        resource_id = resource.get(f"{resource_type}_id", resource.get("id", "unknown"))
+
+        # 1. Admin 用户可访问所有资源
+        if user.tier == "admin":
+            return
+
+        # 2. 检查所有权
+        owner_id = resource.get("owner_id") or resource.get("created_by")
+        if owner_id and owner_id == user.user_id:
+            return
+
+        # 3. 默认拒绝
+        raise ConfluenceAccessDeniedError(resource_type, resource_id)
+
+    async def _verify_binding_access(
+        self,
+        binding_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        验证用户对 binding 的访问权限并返回 binding 数据
+
+        Args:
+            binding_id: 绑定 ID
+            user: 用户上下文
+
+        Returns:
+            binding 数据
+
+        Raises:
+            ConfluenceSyncError: binding 不存在
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        binding = await self.db.get_confluence_binding(binding_id)
+        if not binding:
+            raise ConfluenceSyncError(f"Binding not found: {binding_id}")
+        self._verify_confluence_access(binding, "binding", user)
+        return binding
+
+    async def _verify_connection_access(
+        self,
+        connection_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        验证用户对 connection 的访问权限并返回 connection 数据
+
+        Args:
+            connection_id: 连接 ID
+            user: 用户上下文
+
+        Returns:
+            connection 数据
+
+        Raises:
+            ConfluenceSyncError: connection 不存在
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        connection = await self.db.get_confluence_connection(connection_id)
+        if not connection:
+            raise ConfluenceSyncError(f"Connection not found: {connection_id}")
+        self._verify_confluence_access(connection, "connection", user)
+        return connection
+
+    async def _verify_page_access(
+        self,
+        page_record_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        验证用户对 page record 的访问权限并返回 page 数据
+
+        通过 page 所属的 binding 来验证访问权限
+
+        Args:
+            page_record_id: 页面记录 ID
+            user: 用户上下文
+
+        Returns:
+            page 数据
+
+        Raises:
+            ConfluenceSyncError: page 不存在
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        page_record = await self.db.get_confluence_page(page_record_id)
+        if not page_record:
+            raise ConfluenceSyncError(f"Page record not found: {page_record_id}")
+
+        # 通过 binding 验证访问权限
+        binding_id = page_record.get("binding_id")
+        if binding_id:
+            await self._verify_binding_access(binding_id, user)
+        else:
+            # 没有 binding_id 的 page record 不应该存在，但为安全起见处理这种情况
+            raise ConfluenceAccessDeniedError("page", page_record_id)
+
+        return page_record
 
     async def _get_image_processor(
         self, connection_id: str, max_image_size: Optional[int] = None
@@ -254,6 +384,7 @@ class ConfluenceSyncService:
             "sync_mode": sync_mode,
             "polling_interval_minutes": polling_interval_minutes,
             "status": "active",
+            "owner_id": created_by,  # ACL: 设置资源所有者
             "created_by": created_by,
         }
 
@@ -333,15 +464,52 @@ class ConfluenceSyncService:
 
     async def list_connections(
         self,
+        user: UserContext,
         tenant_id: Optional[str] = None,
         status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """列出连接"""
-        return await self.db.list_confluence_connections(tenant_id=tenant_id, status=status)
+        """
+        列出连接
 
-    async def get_connection(self, connection_id: str) -> Optional[Dict[str, Any]]:
-        """获取连接详情"""
-        return await self.db.get_confluence_connection(connection_id)
+        Args:
+            user: 用户上下文
+            tenant_id: 租户 ID（可选）
+            status: 状态过滤
+
+        Returns:
+            用户有权访问的连接列表（admin 可见全部，普通用户仅可见自己创建的）
+        """
+        connections = await self.db.list_confluence_connections(tenant_id=tenant_id, status=status)
+
+        # Admin 可见全部
+        if user.tier == "admin":
+            return connections
+
+        # 普通用户只能看到自己创建的
+        return [
+            c for c in connections
+            if (c.get("owner_id") or c.get("created_by")) == user.user_id
+        ]
+
+    async def get_connection(
+        self,
+        connection_id: str,
+        user: UserContext,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        获取连接详情
+
+        Args:
+            connection_id: 连接 ID
+            user: 用户上下文
+
+        Returns:
+            连接详情
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        return await self._verify_connection_access(connection_id, user)
 
     # ============ Space Discovery ============
 
@@ -1103,6 +1271,7 @@ class ConfluenceSyncService:
             "sync_images": sync_images,
             "image_max_size_bytes": image_max_size_bytes,
             "status": "pending",
+            "owner_id": created_by,  # ACL: 设置资源所有者
             "created_by": created_by,
         }
 
@@ -1159,6 +1328,7 @@ class ConfluenceSyncService:
 
     async def list_bindings(
         self,
+        user: UserContext,
         connection_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         dataset_id: Optional[str] = None,
@@ -1167,21 +1337,33 @@ class ConfluenceSyncService:
         列出空间绑定
 
         Args:
+            user: 用户上下文
             connection_id: 连接 ID（可选）
             tenant_id: 租户 ID（可选）
             dataset_id: 数据集 ID（可选）
 
         Returns:
-            绑定列表
+            用户有权访问的绑定列表
         """
-        return await self.db.list_confluence_bindings(
+        bindings = await self.db.list_confluence_bindings(
             connection_id=connection_id,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
         )
 
+        # Admin 可见全部
+        if user.tier == "admin":
+            return bindings
+
+        # 普通用户只能看到自己创建的
+        return [
+            b for b in bindings
+            if (b.get("owner_id") or b.get("created_by")) == user.user_id
+        ]
+
     async def list_all_bindings(
         self,
+        user: UserContext,
         tenant_id: str,
         connection_id: Optional[str] = None,
         dataset_id: Optional[str] = None,
@@ -1191,27 +1373,52 @@ class ConfluenceSyncService:
         列出租户下所有空间绑定（带过滤）
 
         Args:
+            user: 用户上下文
             tenant_id: 租户 ID
             connection_id: 连接 ID（可选）
             dataset_id: 数据集 ID（可选）
             status: 状态过滤（可选）
 
         Returns:
-            绑定列表
+            用户有权访问的绑定列表
         """
         bindings = await self.db.list_confluence_bindings(
             connection_id=connection_id,
             tenant_id=tenant_id,
             dataset_id=dataset_id,
         )
+
+        # Admin 可见全部，普通用户只能看到自己创建的
+        if user.tier != "admin":
+            bindings = [
+                b for b in bindings
+                if (b.get("owner_id") or b.get("created_by")) == user.user_id
+            ]
+
         # Filter by status if specified
         if status:
             bindings = [b for b in bindings if b.get("status") == status]
         return bindings
 
-    async def get_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
-        """获取空间绑定详情"""
-        return await self.db.get_confluence_binding(binding_id)
+    async def get_binding(
+        self,
+        binding_id: str,
+        user: UserContext,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        获取空间绑定详情
+
+        Args:
+            binding_id: 绑定 ID
+            user: 用户上下文
+
+        Returns:
+            绑定详情
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        return await self._verify_binding_access(binding_id, user)
 
     async def refresh_binding_stats(self, binding_id: str) -> None:
         """
@@ -1343,13 +1550,14 @@ class ConfluenceSyncService:
                 errors=[{"error": "Sync already in progress"}],
             )
 
-        # 创建同步任务
+        # 创建同步任务（继承 binding 的 owner_id 用于 ACL）
         task_id = str(uuid.uuid4())
         await self.db.create_confluence_sync_task(
             task_id=task_id,
             binding_id=binding_id,
             task_type="full_sync",
             priority=0,
+            owner_id=binding.get("owner_id") or binding.get("created_by"),
         )
 
         # 更新绑定状态
@@ -1570,11 +1778,26 @@ class ConfluenceSyncService:
 
     # ============ Sync Status ============
 
-    async def get_sync_status(self, binding_id: str) -> Dict[str, Any]:
-        """获取同步状态"""
-        binding = await self.db.get_confluence_binding(binding_id)
-        if not binding:
-            raise ConfluenceSyncError(f"Binding not found: {binding_id}")
+    async def get_sync_status(
+        self,
+        binding_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        获取同步状态
+
+        Args:
+            binding_id: 绑定 ID
+            user: 用户上下文
+
+        Returns:
+            同步状态信息
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        # 验证访问权限
+        binding = await self._verify_binding_access(binding_id, user)
 
         # 获取最新任务
         tasks = await self.db.list_confluence_sync_tasks(binding_id=binding_id, limit=1)
@@ -1629,7 +1852,7 @@ class ConfluenceSyncService:
         if binding.get("status") == "syncing" and not force:
             raise ConfluenceSyncError("A sync is already in progress")
 
-        # 创建同步任务
+        # 创建同步任务（继承 binding 的 owner_id 用于 ACL）
         task_type = "partial_sync" if page_ids else "full_sync"
         task_id = str(uuid.uuid4())
         await self.db.create_confluence_sync_task(
@@ -1637,6 +1860,7 @@ class ConfluenceSyncService:
             binding_id=binding_id,
             task_type=task_type,
             priority=1,
+            owner_id=binding.get("owner_id") or binding.get("created_by"),
         )
 
         # 更新状态
@@ -1764,20 +1988,29 @@ class ConfluenceSyncService:
     async def sync_page(
         self,
         page_record_id: str,
+        user: Optional[UserContext] = None,
     ) -> Dict[str, Any]:
         """
         同步单个页面（通过页面记录 ID）
 
         Args:
             page_record_id: 页面记录 ID（confluence_pages 表的主键）
+            user: 用户上下文（用于 ACL 验证）
 
         Returns:
             同步结果
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
         """
-        # 获取页面记录
-        page_record = await self.db.get_confluence_page(page_record_id)
-        if not page_record:
-            return {"status": "error", "message": "Page record not found"}
+        # 如果提供了用户上下文，验证访问权限
+        if user:
+            page_record = await self._verify_page_access(page_record_id, user)
+        else:
+            # 获取页面记录（内部调用不需要验证）
+            page_record = await self.db.get_confluence_page(page_record_id)
+            if not page_record:
+                return {"status": "error", "message": "Page record not found"}
 
         binding_id = page_record["binding_id"]
         page_id = page_record["page_id"]
@@ -1937,6 +2170,7 @@ class ConfluenceSyncService:
     async def list_pages(
         self,
         binding_id: str,
+        user: UserContext,
         status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
@@ -1946,13 +2180,20 @@ class ConfluenceSyncService:
 
         Args:
             binding_id: 绑定 ID
+            user: 用户上下文
             status: 状态过滤
             limit: 返回数量限制
             offset: 偏移量
 
         Returns:
             页面记录列表
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
         """
+        # 验证对 binding 的访问权限
+        await self._verify_binding_access(binding_id, user)
+
         return await self.db.list_confluence_pages(
             binding_id=binding_id,
             status=status,
@@ -1966,6 +2207,7 @@ class ConfluenceSyncService:
         self,
         page_record_ids: List[str],
         force: bool = False,
+        user: Optional[UserContext] = None,
     ) -> Dict[str, Any]:
         """
         批量同步多个页面（通过 page_record_id 列表）
@@ -1973,9 +2215,13 @@ class ConfluenceSyncService:
         Args:
             page_record_ids: confluence_pages 表中的记录 ID 列表
             force: 是否强制同步（忽略内容哈希）
+            user: 用户上下文（用于 ACL 验证）
 
         Returns:
             批量同步结果，包含 task_id 用于进度追踪
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
         """
         if not page_record_ids:
             return {
@@ -1987,11 +2233,21 @@ class ConfluenceSyncService:
         # 获取所有页面记录，按 binding_id 分组
         pages_by_binding: Dict[str, List[Dict[str, Any]]] = {}
         not_found = []
+        access_denied_bindings = set()
 
         for record_id in page_record_ids:
             page = await self.db.get_confluence_page(record_id)
             if page:
                 binding_id = page["binding_id"]
+                # 如果提供了用户上下文，验证对 binding 的访问权限
+                if user and binding_id not in access_denied_bindings:
+                    try:
+                        await self._verify_binding_access(binding_id, user)
+                    except ConfluenceAccessDeniedError:
+                        access_denied_bindings.add(binding_id)
+                        continue
+                if binding_id in access_denied_bindings:
+                    continue
                 if binding_id not in pages_by_binding:
                     pages_by_binding[binding_id] = []
                 pages_by_binding[binding_id].append(page)
@@ -2044,6 +2300,7 @@ class ConfluenceSyncService:
 
     async def list_sync_tasks(
         self,
+        user: UserContext,
         binding_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
@@ -2052,30 +2309,64 @@ class ConfluenceSyncService:
         列出同步任务
 
         Args:
+            user: 用户上下文
             binding_id: 绑定 ID（可选）
             status: 状态过滤
             limit: 返回数量限制
 
         Returns:
-            任务列表
+            用户有权访问的任务列表
         """
-        return await self.db.list_confluence_sync_tasks(
+        # 如果指定了 binding_id，先验证对该 binding 的访问权限
+        if binding_id:
+            await self._verify_binding_access(binding_id, user)
+
+        tasks = await self.db.list_confluence_sync_tasks(
             binding_id=binding_id,
             status=status,
             limit=limit,
         )
 
-    async def get_sync_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        # 如果没有指定 binding_id，需要过滤任务
+        if not binding_id and user.tier != "admin":
+            # 获取用户有权访问的 binding_ids
+            accessible_bindings = await self.list_bindings(user)
+            accessible_binding_ids = {b["binding_id"] for b in accessible_bindings}
+            tasks = [t for t in tasks if t.get("binding_id") in accessible_binding_ids]
+
+        return tasks
+
+    async def get_sync_task(
+        self,
+        task_id: str,
+        user: UserContext,
+    ) -> Optional[Dict[str, Any]]:
         """
         获取同步任务详情
 
         Args:
             task_id: 任务 ID
+            user: 用户上下文
 
         Returns:
             任务详情
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
         """
-        return await self.db.get_confluence_sync_task(task_id)
+        task = await self.db.get_confluence_sync_task(task_id)
+        if not task:
+            return None
+
+        # 通过 binding_id 验证访问权限
+        binding_id = task.get("binding_id")
+        if binding_id:
+            await self._verify_binding_access(binding_id, user)
+        else:
+            # 没有 binding_id 的任务，检查 owner_id
+            self._verify_confluence_access(task, "task", user)
+
+        return task
 
     # ============ Incremental Sync (CQL-based) ============
 
@@ -2105,13 +2396,14 @@ class ConfluenceSyncService:
         if binding.get("status") == "syncing" and not force:
             raise ConfluenceSyncError("A sync is already in progress")
 
-        # 创建同步任务
+        # 创建同步任务（继承 binding 的 owner_id 用于 ACL）
         task_id = str(uuid.uuid4())
         await self.db.create_confluence_sync_task(
             task_id=task_id,
             binding_id=binding_id,
             task_type="incremental_sync",
             priority=1,
+            owner_id=binding.get("owner_id") or binding.get("created_by"),
         )
 
         # 更新状态

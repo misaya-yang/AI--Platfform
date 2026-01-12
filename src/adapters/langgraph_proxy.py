@@ -1,4 +1,4 @@
-"""
+﻿"""
 LangGraph Server 代理层
 
 负责：
@@ -91,6 +91,18 @@ class ThreadNotFoundError(LangGraphProxyError):
     """Thread 不存在"""
     def __init__(self, thread_id: str):
         super().__init__(f"Thread not found: {thread_id}")
+
+
+class AssistantNotFoundError(LangGraphProxyError):
+    """Assistant 不存在"""
+    def __init__(self, assistant_id: str):
+        super().__init__(f"Assistant not found: {assistant_id}")
+
+
+class AssistantAccessDeniedError(LangGraphProxyError):
+    """Assistant 访问被拒绝"""
+    def __init__(self, assistant_id: str):
+        super().__init__(f"Access denied to assistant: {assistant_id}")
 
 
 # ============ 负载均衡器 ============
@@ -304,7 +316,16 @@ class LangGraphProxy:
         offset: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """列出 Assistants（带二级缓存）"""
+        """
+        列出用户可访问的 Assistants（带二级缓存）
+
+        访问规则:
+        1. admin 用户可查看所有 assistant
+        2. 普通用户只能查看:
+           - 自己创建的 assistant
+           - 被共享的 assistant
+           - 公开的 assistant (is_public=True)
+        """
         # 只缓存无特殊参数的列表请求
         use_cache = limit == 10 and offset == 0 and not metadata
         cache_key = user.user_id
@@ -332,13 +353,19 @@ class LangGraphProxy:
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
 
-        params = {"limit": limit, "offset": offset}
+        # 请求更多数据以便过滤后仍有足够结果
+        # admin 用户不需要过滤，直接使用原始 limit
+        fetch_limit = limit if user.tier == "admin" else limit * 3
+        params = {"limit": fetch_limit, "offset": offset}
         if metadata:
             params["metadata"] = json.dumps(metadata)
 
         response = await client.post("/assistants/search", json=params, headers=headers)
         response.raise_for_status()
-        result = response.json()
+        raw_result = response.json()
+
+        # 过滤用户可访问的 assistants
+        result = self._filter_accessible_assistants(raw_result, user, limit)
 
         # 更新缓存
         if use_cache:
@@ -355,13 +382,37 @@ class LangGraphProxy:
 
         return result
 
-    async def get_assistant(self, user: UserContext, assistant_id: str) -> Dict[str, Any]:
-        """获取 Assistant 详情（带二级缓存）"""
+    async def get_assistant(
+        self,
+        user: UserContext,
+        assistant_id: str,
+        require_write: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        获取 Assistant 详情（带二级缓存和所有权验证）
+
+        Args:
+            user: 用户上下文
+            assistant_id: Assistant ID
+            require_write: 是否需要写权限
+
+        Returns:
+            Assistant 详情
+
+        Raises:
+            AssistantNotFoundError: Assistant 不存在
+            AssistantAccessDeniedError: 无访问权限
+        """
+        # 使用用户特定的缓存键，防止跨用户数据泄露
+        cache_key = f"{assistant_id}:{user.user_id}"
+
         # L1: 检查本地缓存
-        cached = self._assistant_cache.get(assistant_id)
+        cached = self._assistant_cache.get(cache_key)
         if cached:
             data, cached_at = cached
             if time.time() - cached_at < self.ASSISTANT_CACHE_TTL:
+                # 缓存命中也需要验证权限（防止权限变更后缓存残留）
+                self._verify_assistant_ownership(data, user, require_write)
                 return data
 
         # L2: 检查 Redis 缓存
@@ -369,9 +420,13 @@ class LangGraphProxy:
             try:
                 cached_data = await self.redis.get_cached_assistant(assistant_id)
                 if cached_data:
-                    # 回填 L1 缓存
-                    self._assistant_cache[assistant_id] = (cached_data, time.time())
+                    # 验证所有权
+                    self._verify_assistant_ownership(cached_data, user, require_write)
+                    # 回填 L1 缓存（用户特定）
+                    self._assistant_cache[cache_key] = (cached_data, time.time())
                     return cached_data
+            except AssistantAccessDeniedError:
+                raise
             except Exception:
                 pass
 
@@ -380,13 +435,18 @@ class LangGraphProxy:
         headers = self._build_langgraph_headers(user)
 
         response = await client.get(f"/assistants/{assistant_id}", headers=headers)
+        if response.status_code == 404:
+            raise AssistantNotFoundError(assistant_id)
         response.raise_for_status()
         result = response.json()
 
+        # 验证所有权
+        self._verify_assistant_ownership(result, user, require_write)
+
         # 更新缓存
-        # L1 缓存
-        self._assistant_cache[assistant_id] = (result, time.time())
-        # L2 Redis 缓存
+        # L1 缓存（用户特定）
+        self._assistant_cache[cache_key] = (result, time.time())
+        # L2 Redis 缓存（共享，权限在读取时验证）
         if self.redis and self.redis.enabled:
             try:
                 await self.redis.cache_assistant(assistant_id, result, self.ASSISTANT_CACHE_TTL)
@@ -703,6 +763,9 @@ class LangGraphProxy:
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
 
+        # 验证 Assistant 访问权限
+        await self.get_assistant(user, assistant_id)
+
         instance = await self.lb.select_instance()
         instance.active_connections += 1
         start_time = time.time()
@@ -764,6 +827,9 @@ class LangGraphProxy:
 
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
+
+        # 验证 Assistant 访问权限
+        await self.get_assistant(user, assistant_id)
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
@@ -830,6 +896,9 @@ class LangGraphProxy:
         Args:
             skip_thread_validation: 跳过 thread 所有权验证（当调用方已验证时使用）
         """
+
+        # 验证 Assistant 访问权限（无论是否有 thread_id 都需要验证）
+        await self.get_assistant(user, assistant_id)
 
         # 如果有 thread_id 且需要验证所有权
         if thread_id:
@@ -1015,6 +1084,9 @@ class LangGraphProxy:
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """创建无状态 Run（一次性对话）"""
+        # 验证 Assistant 访问权限（关键！防止未授权访问任意 assistant）
+        await self.get_assistant(user, assistant_id)
+
         instance = await self.lb.select_instance()
         instance.active_connections += 1
         start_time = time.time()
@@ -1160,21 +1232,178 @@ class LangGraphProxy:
         """验证 Thread 所有权"""
         metadata = thread.get("metadata", {})
         owner_id = metadata.get("owner_id")
-        
+
         # 管理员可访问所有
         if user.tier == "admin":
             return
-        
+
         # 同租户可访问（企业版）
         if user.tier == "enterprise" and metadata.get("tenant_id") == user.tenant_id:
             return
-        
+
         # 所有者
         if owner_id == user.user_id:
             return
-        
+
         raise ForbiddenError("Access denied to this thread")
-    
+
+    def _verify_assistant_ownership(
+        self,
+        assistant: Dict[str, Any],
+        user: UserContext,
+        require_write: bool = False,
+    ) -> None:
+        """
+        验证 Assistant 所有权/访问权限
+
+        访问规则（按优先级）:
+        1. admin 用户可访问所有 assistant
+        2. 创建者（created_by）可完全访问
+        3. shared_with 列表中的用户可读取
+        4. is_public=True 的 assistant 所有人可读取
+
+        Args:
+            assistant: Assistant 数据
+            user: 当前用户上下文
+            require_write: 是否需要写权限（更新/删除操作）
+
+        Raises:
+            AssistantAccessDeniedError: 权限不足
+        """
+        metadata = assistant.get("metadata") or {}
+        created_by = metadata.get("created_by")
+        is_public = self._coerce_bool(metadata.get("is_public", False))
+        shared_with = self._normalize_shared_with(metadata.get("shared_with"))
+        assistant_id = assistant.get("assistant_id", "unknown")
+
+        # 1. 管理员可访问所有
+        if user.tier == "admin":
+            return
+
+        # 2. 创建者拥有完全访问权
+        if created_by == user.user_id:
+            return
+
+        # 写操作只允许创建者和管理员
+        if require_write:
+            raise AssistantAccessDeniedError(assistant_id)
+
+        # 3. 检查是否在共享列表中
+        if user.user_id in shared_with:
+            return
+
+        # 4. 公开 assistant 所有人可读
+        if is_public:
+            return
+
+        # 默认拒绝访问
+        raise AssistantAccessDeniedError(assistant_id)
+
+    @staticmethod
+    def _normalize_shared_with(shared_with: Any) -> List[str]:
+        if not shared_with:
+            return []
+        if isinstance(shared_with, str):
+            return [shared_with]
+        if isinstance(shared_with, list):
+            return [str(item) for item in shared_with if item]
+        return []
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "y"}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return bool(value)
+
+    def _filter_accessible_assistants(
+        self,
+        assistants: Any,
+        user: UserContext,
+        limit: int,
+    ) -> Any:
+        """
+        过滤用户可访问的 Assistants
+
+        访问规则与 _verify_assistant_ownership 一致:
+        1. admin 用户可访问所有
+        2. 创建者可访问
+        3. shared_with 列表中的用户可访问
+        4. is_public=True 的可访问
+        """
+        if isinstance(assistants, dict):
+            list_key = None
+            for key in ("items", "assistants", "data", "results"):
+                if isinstance(assistants.get(key), list):
+                    list_key = key
+                    break
+            if not list_key:
+                return assistants
+            filtered_list = self._filter_accessible_assistants(assistants[list_key], user, limit)
+            payload = dict(assistants)
+            payload[list_key] = filtered_list
+            if "count" in payload:
+                payload["count"] = len(filtered_list)
+            if "total" in payload and isinstance(payload["total"], int):
+                payload["total"] = len(filtered_list)
+            return payload
+
+        if not isinstance(assistants, list):
+            return assistants
+
+        # admin 用户返回所有结果
+        if user.tier == "admin":
+            return assistants[:limit]
+
+        filtered = []
+        for assistant in assistants:
+            metadata = assistant.get("metadata") or {}
+            created_by = metadata.get("created_by")
+            is_public = self._coerce_bool(metadata.get("is_public", False))
+            shared_with = self._normalize_shared_with(metadata.get("shared_with"))
+
+            # 检查访问权限
+            can_access = False
+
+            # 创建者
+            if created_by == user.user_id:
+                can_access = True
+            # 共享列表
+            elif user.user_id in shared_with:
+                can_access = True
+            # 公开 assistant
+            elif is_public:
+                can_access = True
+
+            if can_access:
+                filtered.append(assistant)
+                if len(filtered) >= limit:
+                    break
+
+        return filtered
+
+    def _invalidate_assistant_cache(self, assistant_id: str) -> None:
+        """使 Assistant 缓存失效（包括所有用户特定的缓存）"""
+        # 删除所有以该 assistant_id 开头的缓存键
+        keys_to_remove = [k for k in self._assistant_cache if k.startswith(f"{assistant_id}:")]
+        for key in keys_to_remove:
+            self._assistant_cache.pop(key, None)
+
+        # 失效 Redis 缓存
+        if self.redis and self.redis.enabled:
+            import asyncio
+            asyncio.create_task(self._async_invalidate_redis_assistant(assistant_id))
+
+    async def _async_invalidate_redis_assistant(self, assistant_id: str) -> None:
+        """异步失效 Redis 中的 Assistant 缓存"""
+        try:
+            await self.redis.delete(f"lg:assistant:{assistant_id}")
+        except Exception:
+            pass
+
     def _build_run_config(self, user: UserContext, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """构建 Run 配置，注入用户上下文"""
         run_config = config or {}

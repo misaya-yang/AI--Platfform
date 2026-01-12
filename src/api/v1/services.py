@@ -42,7 +42,44 @@ _SERVICE_MUTABLE_FIELDS = {
 }
 
 
-def _service_to_dict(service) -> dict:
+# 敏感配置字段（需要脱敏）
+_SENSITIVE_CONNECTOR_FIELDS = {
+    "auth_token", "api_key", "api_secret", "password", "secret",
+    "access_token", "refresh_token", "private_key", "credentials",
+    "langsmith_api_key", "headers",
+}
+
+
+def _mask_sensitive_config(config: dict) -> dict:
+    """脱敏敏感配置字段"""
+    if not config:
+        return {}
+    masked = {}
+    for key, value in config.items():
+        if key.lower() in _SENSITIVE_CONNECTOR_FIELDS:
+            if isinstance(value, str) and value:
+                masked[key] = f"***{value[-4:]}" if len(value) > 4 else "***"
+            elif isinstance(value, dict):
+                masked[key] = "***[hidden]***"
+            else:
+                masked[key] = "***"
+        else:
+            masked[key] = value
+    return masked
+
+
+def _service_to_dict(service, mask_secrets: bool = False) -> dict:
+    """
+    将 Service 转换为字典
+
+    Args:
+        service: Service 对象
+        mask_secrets: 是否脱敏敏感字段（非管理员时应为 True）
+    """
+    connector_config = service.connector_config or {}
+    if mask_secrets:
+        connector_config = _mask_sensitive_config(connector_config)
+
     data = {
         "service_id": service.service_id,
         "name": service.name,
@@ -57,7 +94,7 @@ def _service_to_dict(service) -> dict:
         "connector_type": service.connector_type.value
         if hasattr(service.connector_type, "value")
         else service.connector_type,
-        "connector_config": service.connector_config or {},
+        "connector_config": connector_config,
         "input_schema": service.input_schema or {},
         "output_schema": service.output_schema or {},
         "accepted_content_types": [
@@ -107,11 +144,16 @@ async def register_service(
 
 @router.get("/services")
 async def list_services(
+    request: Request,
     service_type: Optional[str] = Query(default=None),
     tags: Optional[List[str]] = Query(default=None),
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    """列出服务（需要 service:view 权限）"""
+    # 权限检查：需要 service:view 权限
+    request.app.state.dispatcher.rbac.require(auth.roles, "service:view")
+
     st = ServiceType(service_type) if service_type else None
     services = await registry.list(service_type=st, tags=tags)
     return [
@@ -135,14 +177,21 @@ async def list_services(
 @router.get("/services/{service_id}")
 async def get_service(
     service_id: str,
+    request: Request,
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    """获取服务详情（需要 service:view 权限，非管理员脱敏敏感字段）"""
+    # 权限检查：需要 service:view 权限
+    request.app.state.dispatcher.rbac.require(auth.roles, "service:view")
+
     service = await registry.get(service_id)
     if not service:
         raise HTTPException(status_code=404, detail="service not found")
-    
-    return _service_to_dict(service)
+
+    # 非管理员需要脱敏敏感配置
+    is_admin = "admin" in auth.roles
+    return _service_to_dict(service, mask_secrets=not is_admin)
 
 @router.put("/services/{service_id}")
 async def update_service(

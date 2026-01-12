@@ -20,6 +20,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..deps import require_langgraph_proxy, get_user_context, get_rate_limiter
 from ...adapters.langgraph_proxy import (
+    AssistantAccessDeniedError,
+    AssistantNotFoundError,
     ForbiddenError,
     LangGraphProxy,
     NoHealthyInstanceError,
@@ -83,9 +85,13 @@ def handle_proxy_error(e: Exception):
     """处理代理层异常"""
     if isinstance(e, ForbiddenError):
         raise HTTPException(status_code=403, detail=str(e))
+    elif isinstance(e, AssistantAccessDeniedError):
+        raise HTTPException(status_code=403, detail=str(e))
     elif isinstance(e, QuotaExceededError):
         raise HTTPException(status_code=429, detail=str(e))
     elif isinstance(e, ThreadNotFoundError):
+        raise HTTPException(status_code=404, detail=str(e))
+    elif isinstance(e, AssistantNotFoundError):
         raise HTTPException(status_code=404, detail=str(e))
     elif isinstance(e, NoHealthyInstanceError):
         raise HTTPException(status_code=503, detail=str(e))

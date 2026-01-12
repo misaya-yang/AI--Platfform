@@ -2254,8 +2254,8 @@ class DatabaseStorage:
                 INSERT INTO confluence_connections (
                     connection_id, tenant_id, name, domain, email, api_token,
                     sync_mode, polling_interval_minutes, status,
-                    last_sync_at, last_error, created_by
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    last_sync_at, last_error, created_by, owner_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 ON CONFLICT (connection_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     domain = EXCLUDED.domain,
@@ -2280,6 +2280,8 @@ class DatabaseStorage:
                 connection.get("last_sync_at"),
                 connection.get("last_error"),
                 connection.get("created_by"),
+                # owner_id: 优先使用显式设置的 owner_id，否则回退到 created_by
+                connection.get("owner_id") or connection.get("created_by"),
             )
 
     async def get_confluence_connection(self, connection_id: str) -> Optional[Dict[str, Any]]:
@@ -2460,8 +2462,8 @@ class DatabaseStorage:
                     include_patterns, exclude_patterns, max_depth,
                     include_attachments, include_comments, status,
                     last_sync_at, synced_page_count, total_page_count,
-                    last_error, created_by
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                    last_error, created_by, owner_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
                 ON CONFLICT (binding_id) DO UPDATE SET
                     space_id = EXCLUDED.space_id,
                     space_name = EXCLUDED.space_name,
@@ -2500,6 +2502,8 @@ class DatabaseStorage:
                 binding.get("total_page_count", 0),
                 binding.get("last_error"),
                 binding.get("created_by"),
+                # owner_id: 优先使用显式设置的 owner_id，否则回退到 created_by
+                binding.get("owner_id") or binding.get("created_by"),
             )
             return self._row_to_dict(row) if row else None
 
@@ -2988,8 +2992,8 @@ class DatabaseStorage:
                     task_id, binding_id, page_id, task_type, priority,
                     status, retry_count, max_retries, progress,
                     total_items, processed_items, error, result,
-                    started_at, completed_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    started_at, completed_at, owner_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 ON CONFLICT (task_id) DO UPDATE SET
                     status = EXCLUDED.status,
                     retry_count = EXCLUDED.retry_count,
@@ -3017,6 +3021,7 @@ class DatabaseStorage:
                 json.dumps(task.get("result")) if task.get("result") else None,
                 task.get("started_at"),
                 task.get("completed_at"),
+                task.get("owner_id"),  # ACL: owner_id for access control
             )
 
     async def get_confluence_sync_task(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -3133,6 +3138,7 @@ class DatabaseStorage:
         page_id: Optional[str] = None,
         task_type: str = "full_sync",
         priority: int = 0,
+        owner_id: Optional[str] = None,
     ) -> None:
         """创建 Confluence 同步任务"""
         if not self._pool:
@@ -3143,14 +3149,15 @@ class DatabaseStorage:
                 INSERT INTO confluence_sync_tasks (
                     task_id, binding_id, page_id, task_type, priority,
                     status, retry_count, max_retries, progress,
-                    total_items, processed_items
-                ) VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, 0, 0)
+                    total_items, processed_items, owner_id
+                ) VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, 0, 0, $6)
             """,
                 task_id,
                 binding_id,
                 page_id,
                 task_type,
                 priority,
+                owner_id,  # ACL: owner_id for access control
             )
 
     async def update_confluence_sync_task(
