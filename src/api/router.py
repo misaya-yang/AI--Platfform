@@ -9,6 +9,7 @@ from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.langgraph import router as langgraph_router
 from .v1.knowledge import router as knowledge_router
+from .v1.kb_tools import router as kb_tools_router
 from .v1.metrics import router as metrics_router
 from .v1.dashboard import router as dashboard_router
 from .v1.proxy import router as proxy_router
@@ -41,6 +42,7 @@ api_router.include_router(conversations_router)  # 简化的对话 API
 api_router.include_router(langgraph_router)  # LangGraph 官方 API 代理（向后兼容）
 api_router.include_router(proxy_router)  # 透明代理路由
 api_router.include_router(knowledge_router)  # KBMS Knowledge Base
+api_router.include_router(kb_tools_router)  # KB Tools API for LangGraph agents
 api_router.include_router(confluence_router)  # Confluence 集成
 api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘

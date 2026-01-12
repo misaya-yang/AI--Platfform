@@ -9,6 +9,17 @@ Provides a production-grade RAG system with:
 - MMR diversity
 - LLM-based QA testing
 - LangGraph-compatible tools
+
+Quick Start for LangGraph Agents:
+
+    from agent_gateway.services.knowledge import create_kb_tool
+
+    # Create a KB tool for your agent
+    kb_tool = create_kb_tool(kb_service, "my_dataset", user_context)
+
+    # Use with LangGraph ToolNode
+    from langgraph.prebuilt import ToolNode
+    tool_node = ToolNode([kb_tool])
 """
 
 from .chunking import (
@@ -47,10 +58,29 @@ from .retrieval_config import (
     get_preset_config,
 )
 
+# LangGraph Tools - Primary API for agent integration
+from .langgraph_tools import (
+    # Factory functions (recommended)
+    create_kb_tool,
+    create_multi_kb_tool,
+    create_langchain_kb_tool,
+    create_retrieval_tool,
+    # Tool classes
+    KnowledgeBaseTool,
+    MultiKnowledgeBaseTool,
+    KnowledgeRetriever,
+    MultiDatasetRetriever,
+    # Configuration
+    KBToolConfig,
+    KBSearchResult,
+    # Dify compatibility
+    DifyCompatibleKBAPI,
+)
+
 __all__ = [
     # Chunking
     "ChunkingConfig",
-    "ChunkingMode", 
+    "ChunkingMode",
     "Chunk",
     "TextPreprocessor",
     "BaseChunker",
@@ -80,4 +110,16 @@ __all__ = [
     "DatasetIndexConfig",
     "DEFAULT_CONFIGS",
     "get_preset_config",
+    # LangGraph Tools
+    "create_kb_tool",
+    "create_multi_kb_tool",
+    "create_langchain_kb_tool",
+    "create_retrieval_tool",
+    "KnowledgeBaseTool",
+    "MultiKnowledgeBaseTool",
+    "KnowledgeRetriever",
+    "MultiDatasetRetriever",
+    "KBToolConfig",
+    "KBSearchResult",
+    "DifyCompatibleKBAPI",
 ]

@@ -5,17 +5,48 @@ Provides tools that can be used directly by LangGraph agents
 for knowledge base retrieval operations.
 
 Compatible with both LangChain tools format and direct function calls.
+
+Usage Examples:
+
+1. Create a simple tool function:
+    ```python
+    from agent_gateway.services.knowledge import create_kb_tool
+
+    kb_tool = create_kb_tool(kb_service, "my_dataset", user_context)
+    result = await kb_tool("What is our refund policy?")
+    ```
+
+2. Create a LangChain-compatible tool:
+    ```python
+    from agent_gateway.services.knowledge import create_langchain_kb_tool
+
+    tool = create_langchain_kb_tool(kb_service, "my_dataset", user_context)
+    # Use with LangGraph
+    from langgraph.prebuilt import ToolNode
+    tool_node = ToolNode([tool])
+    ```
+
+3. Create a multi-dataset tool:
+    ```python
+    from agent_gateway.services.knowledge import create_multi_kb_tool
+
+    tool = create_multi_kb_tool(kb_service, ["docs", "wiki"], user_context)
+    ```
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import asdict, dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+import logging
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
 
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import AuthenticationRequiredError
 from .knowledge_service import KnowledgeService, RetrieveResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -612,4 +643,550 @@ class DifyCompatibleKBAPI:
                 "dataset_id": dataset_id,
             },
         }
+
+
+# ============================================================
+# LangChain-Compatible Tool Interface
+# ============================================================
+
+# Try to import LangChain types for better integration
+# These are optional - tools work without LangChain installed
+try:
+    from langchain_core.tools import BaseTool, StructuredTool
+    from langchain_core.callbacks import CallbackManagerForToolRun, AsyncCallbackManagerForToolRun
+    from pydantic import BaseModel as PydanticBaseModel, Field as PydanticField
+    LANGCHAIN_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_AVAILABLE = False
+    BaseTool = object
+    StructuredTool = None
+    CallbackManagerForToolRun = None
+    AsyncCallbackManagerForToolRun = None
+    PydanticBaseModel = None
+    PydanticField = None
+
+
+@dataclass
+class KBToolConfig:
+    """Configuration for KB tool creation."""
+    top_k: int = 5
+    mode: str = "hybrid"
+    rerank: bool = False
+    mmr: bool = False
+    include_scores: bool = True
+    max_content_length: int = 2000
+
+
+def _format_results_for_llm(
+    results: List[KBSearchResult],
+    include_scores: bool = True,
+    max_content_length: int = 2000,
+) -> str:
+    """Format search results for LLM consumption."""
+    if not results:
+        return "No relevant information found in the knowledge base."
+
+    formatted_parts = []
+    for i, r in enumerate(results, 1):
+        content = r.content
+        if len(content) > max_content_length:
+            content = content[:max_content_length] + "..."
+
+        if include_scores:
+            formatted_parts.append(f"[{i}] (score: {r.score:.3f})\n{content}")
+        else:
+            formatted_parts.append(f"[{i}]\n{content}")
+
+    return "\n\n---\n\n".join(formatted_parts)
+
+
+class KnowledgeBaseTool:
+    """
+    LangChain-compatible Knowledge Base search tool.
+
+    This class implements the interface expected by LangChain/LangGraph
+    for tool integration. It can be used directly with ToolNode.
+
+    Attributes:
+        name: Tool name (used in function calling)
+        description: Tool description (shown to LLM)
+        args_schema: Pydantic model for input validation
+    """
+
+    def __init__(
+        self,
+        knowledge_service: KnowledgeService,
+        dataset_id: str,
+        user_context: UserContext,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        config: Optional[KBToolConfig] = None,
+    ):
+        """
+        Initialize the KB tool.
+
+        Args:
+            knowledge_service: The KB service instance
+            dataset_id: Dataset to search
+            user_context: User context for auth
+            name: Custom tool name (default: search_{dataset_id})
+            description: Custom description
+            config: Tool configuration
+        """
+        if user_context is None:
+            raise AuthenticationRequiredError("User context is required")
+        if not user_context.is_authenticated:
+            raise AuthenticationRequiredError("Authenticated user context required")
+
+        self.kb = knowledge_service
+        self.dataset_id = dataset_id
+        self.user_context = user_context
+        self.config = config or KBToolConfig()
+
+        # LangChain tool properties
+        self.name = name or f"search_{dataset_id.replace('-', '_')}"
+        self.description = description or (
+            f"Search the '{dataset_id}' knowledge base for relevant information. "
+            f"Use this tool when you need to find specific facts, documentation, or context."
+        )
+
+        # Build args schema as dict (compatible with OpenAI function calling)
+        self.args_schema = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to find relevant information"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results to return (default: 5)",
+                    "default": self.config.top_k
+                }
+            },
+            "required": ["query"]
+        }
+
+    async def _arun(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> str:
+        """Async execution (primary method for LangGraph)."""
+        try:
+            results, meta = await self.kb.retrieve(
+                user=self.user_context,
+                dataset_id=self.dataset_id,
+                query=query,
+                top_k=top_k or self.config.top_k,
+                mode=self.config.mode,
+                rerank=self.config.rerank,
+                mmr=self.config.mmr,
+            )
+
+            search_results = [
+                KBSearchResult(
+                    content=r.text,
+                    score=r.score,
+                    segment_id=r.segment_id,
+                    document_id=r.document_id,
+                    metadata=r.metadata,
+                )
+                for r in results
+            ]
+
+            return _format_results_for_llm(
+                search_results,
+                include_scores=self.config.include_scores,
+                max_content_length=self.config.max_content_length,
+            )
+
+        except Exception as e:
+            logger.exception(f"KB search failed: {e}")
+            return f"Error searching knowledge base: {str(e)}"
+
+    def _run(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> str:
+        """Sync execution (runs async in new event loop)."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If there's already a running loop, create a new one in a thread
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(
+                        asyncio.run,
+                        self._arun(query, top_k, **kwargs)
+                    )
+                    return future.result()
+            else:
+                return loop.run_until_complete(self._arun(query, top_k, **kwargs))
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(self._arun(query, top_k, **kwargs))
+
+    async def ainvoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+        """LangChain ainvoke interface."""
+        if isinstance(input, str):
+            return await self._arun(input, **kwargs)
+        return await self._arun(**input, **kwargs)
+
+    def invoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+        """LangChain invoke interface."""
+        if isinstance(input, str):
+            return self._run(input, **kwargs)
+        return self._run(**input, **kwargs)
+
+    def __call__(self, query: str, **kwargs) -> str:
+        """Direct call interface."""
+        return self._run(query, **kwargs)
+
+    def to_openai_function(self) -> Dict[str, Any]:
+        """Convert to OpenAI function calling format."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema
+            }
+        }
+
+    def to_langchain_tool(self) -> Dict[str, Any]:
+        """Convert to LangChain tool dict format."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "func": self._run,
+            "coroutine": self._arun,
+            "args_schema": self.args_schema,
+        }
+
+
+class MultiKnowledgeBaseTool:
+    """
+    LangChain-compatible tool for searching multiple knowledge bases.
+    """
+
+    def __init__(
+        self,
+        knowledge_service: KnowledgeService,
+        dataset_ids: List[str],
+        user_context: UserContext,
+        name: str = "search_knowledge_bases",
+        description: Optional[str] = None,
+        config: Optional[KBToolConfig] = None,
+    ):
+        if user_context is None:
+            raise AuthenticationRequiredError("User context is required")
+        if not user_context.is_authenticated:
+            raise AuthenticationRequiredError("Authenticated user context required")
+
+        self.kb = knowledge_service
+        self.dataset_ids = dataset_ids
+        self.user_context = user_context
+        self.config = config or KBToolConfig()
+
+        self.name = name
+        dataset_list = ", ".join(f"'{d}'" for d in dataset_ids)
+        self.description = description or (
+            f"Search across multiple knowledge bases for relevant information. "
+            f"Available datasets: {dataset_list}. "
+            f"Optionally specify a dataset_id to search only that dataset."
+        )
+
+        self.args_schema = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query"
+                },
+                "dataset_id": {
+                    "type": "string",
+                    "description": f"Optional: specific dataset to search ({', '.join(dataset_ids)})",
+                    "enum": dataset_ids
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results (default: 5)",
+                    "default": self.config.top_k
+                }
+            },
+            "required": ["query"]
+        }
+
+    async def _arun(
+        self,
+        query: str,
+        dataset_id: Optional[str] = None,
+        top_k: Optional[int] = None,
+        **kwargs,
+    ) -> str:
+        """Async execution."""
+        top_k = top_k or self.config.top_k
+        datasets_to_search = [dataset_id] if dataset_id else self.dataset_ids
+
+        all_results: List[KBSearchResult] = []
+
+        async def search_dataset(ds_id: str):
+            try:
+                results, _ = await self.kb.retrieve(
+                    user=self.user_context,
+                    dataset_id=ds_id,
+                    query=query,
+                    top_k=top_k,
+                    mode=self.config.mode,
+                    rerank=self.config.rerank,
+                    mmr=self.config.mmr,
+                )
+                return [
+                    KBSearchResult(
+                        content=r.text,
+                        score=r.score,
+                        segment_id=r.segment_id,
+                        document_id=r.document_id,
+                        metadata={**r.metadata, "dataset_id": ds_id},
+                    )
+                    for r in results
+                ]
+            except Exception as e:
+                logger.warning(f"Search failed for dataset {ds_id}: {e}")
+                return []
+
+        # Search datasets in parallel
+        tasks = [search_dataset(ds_id) for ds_id in datasets_to_search]
+        results_lists = await asyncio.gather(*tasks)
+
+        for results in results_lists:
+            all_results.extend(results)
+
+        # Sort by score and take top_k
+        all_results.sort(key=lambda x: x.score, reverse=True)
+        all_results = all_results[:top_k]
+
+        return _format_results_for_llm(
+            all_results,
+            include_scores=self.config.include_scores,
+            max_content_length=self.config.max_content_length,
+        )
+
+    def _run(self, query: str, **kwargs) -> str:
+        """Sync execution."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, self._arun(query, **kwargs))
+                    return future.result()
+            else:
+                return loop.run_until_complete(self._arun(query, **kwargs))
+        except RuntimeError:
+            return asyncio.run(self._arun(query, **kwargs))
+
+    async def ainvoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+        if isinstance(input, str):
+            return await self._arun(input, **kwargs)
+        return await self._arun(**input, **kwargs)
+
+    def invoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+        if isinstance(input, str):
+            return self._run(input, **kwargs)
+        return self._run(**input, **kwargs)
+
+    def __call__(self, query: str, **kwargs) -> str:
+        return self._run(query, **kwargs)
+
+    def to_openai_function(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema
+            }
+        }
+
+
+# ============================================================
+# Factory Functions (Recommended API)
+# ============================================================
+
+def create_kb_tool(
+    knowledge_service: KnowledgeService,
+    dataset_id: str,
+    user_context: UserContext,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    top_k: int = 5,
+    mode: str = "hybrid",
+    rerank: bool = False,
+    mmr: bool = False,
+) -> KnowledgeBaseTool:
+    """
+    Create a knowledge base search tool for LangGraph agents.
+
+    This is the primary factory function for creating KB tools.
+    Returns a tool that works with LangGraph's ToolNode.
+
+    Args:
+        knowledge_service: The KB service instance
+        dataset_id: Dataset to search
+        user_context: User context for authorization
+        name: Custom tool name (default: search_{dataset_id})
+        description: Custom tool description
+        top_k: Default number of results
+        mode: Retrieval mode (hybrid/dense/bm25)
+        rerank: Enable reranking
+        mmr: Enable MMR diversity
+
+    Returns:
+        KnowledgeBaseTool instance
+
+    Example:
+        ```python
+        from agent_gateway.services.knowledge import create_kb_tool
+        from langgraph.prebuilt import ToolNode
+
+        # Create tool
+        kb_tool = create_kb_tool(
+            kb_service,
+            "company-docs",
+            user_context,
+            top_k=5,
+        )
+
+        # Use with LangGraph
+        tool_node = ToolNode([kb_tool])
+        ```
+    """
+    config = KBToolConfig(
+        top_k=top_k,
+        mode=mode,
+        rerank=rerank,
+        mmr=mmr,
+    )
+
+    return KnowledgeBaseTool(
+        knowledge_service=knowledge_service,
+        dataset_id=dataset_id,
+        user_context=user_context,
+        name=name,
+        description=description,
+        config=config,
+    )
+
+
+def create_multi_kb_tool(
+    knowledge_service: KnowledgeService,
+    dataset_ids: List[str],
+    user_context: UserContext,
+    name: str = "search_knowledge_bases",
+    description: Optional[str] = None,
+    top_k: int = 5,
+    mode: str = "hybrid",
+    rerank: bool = False,
+    mmr: bool = False,
+) -> MultiKnowledgeBaseTool:
+    """
+    Create a multi-dataset knowledge base search tool.
+
+    Args:
+        knowledge_service: The KB service instance
+        dataset_ids: List of datasets to search
+        user_context: User context for authorization
+        name: Tool name
+        description: Custom description
+        top_k: Default number of results
+        mode: Retrieval mode
+        rerank: Enable reranking
+        mmr: Enable MMR diversity
+
+    Returns:
+        MultiKnowledgeBaseTool instance
+
+    Example:
+        ```python
+        kb_tool = create_multi_kb_tool(
+            kb_service,
+            ["docs", "wiki", "faq"],
+            user_context,
+        )
+        ```
+    """
+    config = KBToolConfig(
+        top_k=top_k,
+        mode=mode,
+        rerank=rerank,
+        mmr=mmr,
+    )
+
+    return MultiKnowledgeBaseTool(
+        knowledge_service=knowledge_service,
+        dataset_ids=dataset_ids,
+        user_context=user_context,
+        name=name,
+        description=description,
+        config=config,
+    )
+
+
+def create_langchain_kb_tool(
+    knowledge_service: KnowledgeService,
+    dataset_id: str,
+    user_context: UserContext,
+    **kwargs,
+) -> Any:
+    """
+    Create a LangChain StructuredTool for KB search.
+
+    This requires langchain-core to be installed.
+    Falls back to KnowledgeBaseTool if LangChain is not available.
+
+    Returns:
+        StructuredTool if LangChain available, else KnowledgeBaseTool
+    """
+    kb_tool = create_kb_tool(knowledge_service, dataset_id, user_context, **kwargs)
+
+    if LANGCHAIN_AVAILABLE and StructuredTool is not None:
+        # Create a proper LangChain StructuredTool
+        return StructuredTool.from_function(
+            func=kb_tool._run,
+            coroutine=kb_tool._arun,
+            name=kb_tool.name,
+            description=kb_tool.description,
+        )
+
+    return kb_tool
+
+
+# ============================================================
+# Exports
+# ============================================================
+
+__all__ = [
+    # Dataclasses
+    "KBRetrievalInput",
+    "KBRetrievalOutput",
+    "KBSearchResult",
+    "KBToolConfig",
+    # Classes
+    "KnowledgeRetriever",
+    "MultiDatasetRetriever",
+    "KnowledgeBaseTool",
+    "MultiKnowledgeBaseTool",
+    "DifyCompatibleKBAPI",
+    "DifyExternalDatasetConfig",
+    # Factory functions (recommended)
+    "create_kb_tool",
+    "create_multi_kb_tool",
+    "create_langchain_kb_tool",
+    "create_retrieval_tool",
+]
 

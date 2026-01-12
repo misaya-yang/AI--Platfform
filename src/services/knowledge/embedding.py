@@ -709,6 +709,14 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             dimension=dimension,
             base_url=config.base_url,
         )
+    if provider in {"unified_multimodal", "unified", "cross_modal"}:
+        return UnifiedMultimodalEmbedding(
+            model=config.model or "tongyi-embedding-vision-plus",
+            api_key=config.api_key or "",
+            dimension=dimension,
+            base_url=config.base_url,
+            max_concurrent=(config.extra or {}).get("max_concurrent", 5),
+        )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
 
 
@@ -731,4 +739,405 @@ def create_multimodal_embedding(
         model=model,
         api_key=api_key,
         base_url=base_url,
+    )
+
+
+# ============================================================
+# Unified Multimodal Embedding (Phase 2: Cross-Modal Search)
+# ============================================================
+
+@dataclass
+class UnifiedEmbeddingResult:
+    """Result from unified multimodal embedding."""
+    vector: List[float]
+    content_type: str  # "text" | "image" | "mixed"
+    dimension: int
+    model: str
+
+
+class UnifiedMultimodalEmbedding(BaseEmbedding):
+    """Unified embedding for text and images in the SAME vector space.
+
+    This is the key component for cross-modal retrieval (Dify 1.11 approach).
+    Both text and images are embedded using the same multimodal model,
+    ensuring they can be directly compared via cosine similarity.
+
+    Key Features:
+    - Text queries can find relevant images
+    - Image queries can find relevant text
+    - Mixed content (text + image) embedding supported
+    - Consistent 1024D vector space
+
+    Recommended Model:
+    - tongyi-embedding-vision-plus: Best for unified cross-modal search
+
+    Usage:
+        # Create unified embedding instance
+        unified = UnifiedMultimodalEmbedding(api_key="your-key")
+
+        # Embed text
+        text_vectors = await unified.embed_texts(["What is our refund policy?"])
+
+        # Embed images
+        image_vectors = await unified.embed_images([image_bytes])
+
+        # Both vectors are in the same space - can compare directly!
+        similarity = cosine_similarity(text_vectors[0], image_vectors[0])
+    """
+
+    # Recommended model for unified cross-modal embedding
+    DEFAULT_MODEL = "tongyi-embedding-vision-plus"
+
+    MODEL_DIMENSIONS: Dict[str, int] = {
+        "tongyi-embedding-vision-plus": 1024,
+        "multimodal-embedding-v1": 1024,
+        "qwen2.5-vl-embedding": 1024,
+    }
+
+    MAX_IMAGE_SIZE_BYTES = 3 * 1024 * 1024  # 3MB
+    MAX_TEXT_CHARS = 8000
+
+    SUPPORTED_MEDIA_TYPES = {
+        "image/jpeg", "image/jpg", "image/png",
+        "image/gif", "image/bmp", "image/webp"
+    }
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "tongyi-embedding-vision-plus",
+        dimension: Optional[int] = None,
+        base_url: Optional[str] = None,
+        max_concurrent: int = 5,
+    ):
+        """Initialize unified multimodal embedding.
+
+        Args:
+            api_key: DashScope API key
+            model: Model to use (recommended: tongyi-embedding-vision-plus)
+            dimension: Vector dimension (auto-detected from model)
+            base_url: Optional API base URL override
+            max_concurrent: Max concurrent API calls
+        """
+        dim = dimension or self.MODEL_DIMENSIONS.get(model, 1024)
+        super().__init__(provider="unified_multimodal", model=model, dimension=dim)
+
+        if not api_key:
+            raise EmbeddingError("API key is required for UnifiedMultimodalEmbedding")
+
+        self.api_key = api_key
+        self.base_url = base_url
+        self.max_concurrent = max_concurrent
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+        try:
+            from dashscope import MultiModalEmbedding
+            import dashscope
+
+            self._MultiModalEmbedding = MultiModalEmbedding
+            if base_url:
+                dashscope.base_http_api_url = base_url
+        except ImportError as exc:
+            raise EmbeddingError(
+                "dashscope package required (pip install dashscope>=1.24.6)"
+            ) from exc
+
+    @property
+    def supports_multimodal(self) -> bool:
+        return True
+
+    def _detect_media_type(self, image_bytes: bytes) -> str:
+        """Detect image MIME type from magic bytes."""
+        if len(image_bytes) < 8:
+            return "image/png"
+
+        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        elif image_bytes[:2] == b'\xff\xd8':
+            return "image/jpeg"
+        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+        elif image_bytes[:2] == b'BM':
+            return "image/bmp"
+        elif image_bytes[:4] == b'RIFF' and len(image_bytes) > 12 and image_bytes[8:12] == b'WEBP':
+            return "image/webp"
+        return "image/png"
+
+    def _to_base64_data_uri(self, image_bytes: bytes, media_type: str) -> str:
+        """Convert image bytes to base64 data URI."""
+        import base64
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{media_type};base64,{b64}"
+
+    def _sanitize_text(self, text: str) -> str:
+        """Clean and truncate text for embedding."""
+        if not text:
+            return "empty"
+
+        # Remove control characters
+        text = text.replace("\x00", "")
+        text = "".join(c if c.isprintable() or c in "\n\t" else " " for c in text)
+
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # Truncate if needed
+        if len(text) > self.MAX_TEXT_CHARS:
+            text = text[:self.MAX_TEXT_CHARS]
+
+        return text if text else "empty"
+
+    async def _call_api(self, input_items: List[Dict[str, str]]) -> List[float]:
+        """Call DashScope multimodal embedding API."""
+        async with self._semaphore:
+            try:
+                resp = await asyncio.to_thread(
+                    self._MultiModalEmbedding.call,
+                    model=self.model,
+                    input=input_items,
+                    api_key=self.api_key,
+                )
+
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    raise EmbeddingError(
+                        f"Unified embedding API failed: {status_code} {code} {message}"
+                    )
+
+                output = getattr(resp, "output", None)
+                vectors = self._parse_output(output)
+                if not vectors:
+                    raise EmbeddingError("No vectors returned from API")
+                return vectors[0]
+
+            except EmbeddingError:
+                raise
+            except Exception as exc:
+                raise EmbeddingError(f"Unified embedding error: {exc}") from exc
+
+    def _parse_output(self, output: Any) -> List[List[float]]:
+        """Parse API response to extract vectors."""
+        if output is None:
+            raise EmbeddingError("Response missing output")
+
+        if isinstance(output, dict):
+            embeddings_list = output.get("embeddings")
+            if embeddings_list is None:
+                raise EmbeddingError(f"Unexpected output keys: {list(output.keys())}")
+            output = embeddings_list
+
+        if not isinstance(output, list):
+            raise EmbeddingError(f"Unexpected output type: {type(output)}")
+
+        vectors: List[List[float]] = []
+        for entry in output:
+            if isinstance(entry, dict):
+                vec = entry.get("embedding") or entry.get("vector")
+                if isinstance(vec, list):
+                    vectors.append(vec)
+            elif isinstance(entry, list):
+                vectors.append(entry)
+
+        return vectors
+
+    async def embed_texts(
+        self,
+        texts: List[str],
+        text_type: Optional[str] = None,
+    ) -> List[List[float]]:
+        """Embed text in the unified multimodal space.
+
+        IMPORTANT: Use this instead of DashScopeEmbedding when you need
+        cross-modal retrieval (text queries finding images).
+
+        Args:
+            texts: List of text strings
+            text_type: Ignored (for API compatibility)
+
+        Returns:
+            List of 1024D vectors in the same space as image embeddings
+        """
+        if not texts:
+            return []
+
+        vectors: List[List[float]] = []
+
+        for text in texts:
+            sanitized = self._sanitize_text(text)
+            vec = await self._call_api([{"text": sanitized}])
+            vectors.append(vec)
+
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
+
+        return vectors
+
+    async def embed_query(self, query: str) -> List[float]:
+        """Embed a query for cross-modal search.
+
+        The resulting vector can find both relevant text AND images.
+        """
+        vectors = await self.embed_texts([query])
+        return vectors[0]
+
+    async def embed_images(
+        self,
+        images: List[bytes],
+        max_concurrent: Optional[int] = None,
+    ) -> List[List[float]]:
+        """Embed images in the unified multimodal space.
+
+        Args:
+            images: List of image bytes
+            max_concurrent: Override max concurrent calls
+
+        Returns:
+            List of 1024D vectors in the same space as text embeddings
+        """
+        if not images:
+            return []
+
+        # Validate sizes
+        for i, img in enumerate(images):
+            if len(img) > self.MAX_IMAGE_SIZE_BYTES:
+                raise EmbeddingError(
+                    f"Image {i} exceeds 3MB limit ({len(img)} bytes)"
+                )
+
+        # Process concurrently
+        async def embed_single(idx: int, img_bytes: bytes) -> List[float]:
+            media_type = self._detect_media_type(img_bytes)
+            data_uri = self._to_base64_data_uri(img_bytes, media_type)
+            return await self._call_api([{"image": data_uri}])
+
+        tasks = [embed_single(i, img) for i, img in enumerate(images)]
+        vectors = await asyncio.gather(*tasks)
+
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
+
+        return list(vectors)
+
+    async def embed_image_with_context(
+        self,
+        image_bytes: bytes,
+        context_text: Optional[str] = None,
+    ) -> List[float]:
+        """Embed image with optional text context.
+
+        This creates a combined embedding that captures both visual
+        content and textual context (e.g., captions, surrounding text).
+
+        Args:
+            image_bytes: Image content
+            context_text: Optional text context (caption, description)
+
+        Returns:
+            Combined embedding vector
+        """
+        if len(image_bytes) > self.MAX_IMAGE_SIZE_BYTES:
+            raise EmbeddingError("Image exceeds 3MB limit")
+
+        media_type = self._detect_media_type(image_bytes)
+        data_uri = self._to_base64_data_uri(image_bytes, media_type)
+
+        input_items: List[Dict[str, str]] = [{"image": data_uri}]
+        if context_text:
+            input_items.append({"text": self._sanitize_text(context_text)})
+
+        return await self._call_api(input_items)
+
+    async def embed_mixed_batch(
+        self,
+        items: List[Dict[str, Any]],
+    ) -> List[UnifiedEmbeddingResult]:
+        """Embed a batch of mixed text and image content.
+
+        Args:
+            items: List of dicts with either:
+                   {"type": "text", "content": "text string"}
+                   {"type": "image", "content": image_bytes}
+                   {"type": "mixed", "text": str, "image": bytes}
+
+        Returns:
+            List of UnifiedEmbeddingResult with vectors and metadata
+        """
+        results: List[UnifiedEmbeddingResult] = []
+
+        for item in items:
+            item_type = item.get("type", "text")
+
+            if item_type == "text":
+                text = item.get("content", "")
+                vec = (await self.embed_texts([text]))[0]
+                results.append(UnifiedEmbeddingResult(
+                    vector=vec,
+                    content_type="text",
+                    dimension=len(vec),
+                    model=self.model,
+                ))
+
+            elif item_type == "image":
+                img = item.get("content", b"")
+                vec = (await self.embed_images([img]))[0]
+                results.append(UnifiedEmbeddingResult(
+                    vector=vec,
+                    content_type="image",
+                    dimension=len(vec),
+                    model=self.model,
+                ))
+
+            elif item_type == "mixed":
+                text = item.get("text", "")
+                img = item.get("image", b"")
+                vec = await self.embed_image_with_context(img, text)
+                results.append(UnifiedEmbeddingResult(
+                    vector=vec,
+                    content_type="mixed",
+                    dimension=len(vec),
+                    model=self.model,
+                ))
+
+        return results
+
+
+def create_unified_embedding(
+    api_key: str,
+    model: str = "tongyi-embedding-vision-plus",
+    base_url: Optional[str] = None,
+    max_concurrent: int = 5,
+) -> UnifiedMultimodalEmbedding:
+    """Create a unified multimodal embedding instance.
+
+    This is the recommended way to create embeddings for cross-modal search.
+    Both text and images will be in the same 1024D vector space.
+
+    Args:
+        api_key: DashScope API key
+        model: Model name (default: tongyi-embedding-vision-plus)
+        base_url: Optional API base URL
+        max_concurrent: Max concurrent API calls
+
+    Returns:
+        UnifiedMultimodalEmbedding instance
+
+    Example:
+        ```python
+        unified = create_unified_embedding(api_key=os.environ["DASHSCOPE_KEY"])
+
+        # Embed text query
+        query_vec = await unified.embed_query("What does the architecture diagram show?")
+
+        # This query can now find both:
+        # 1. Text segments discussing architecture
+        # 2. Image segments containing architecture diagrams
+        ```
+    """
+    return UnifiedMultimodalEmbedding(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        max_concurrent=max_concurrent,
     )
