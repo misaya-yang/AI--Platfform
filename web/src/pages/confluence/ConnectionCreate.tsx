@@ -22,8 +22,6 @@ import {
   EyeOff,
   Zap,
   HelpCircle,
-  Clock,
-  RefreshCcw,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -31,13 +29,6 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Tooltip,
   TooltipContent,
@@ -409,80 +400,6 @@ export default function ConnectionCreatePage() {
                   </div>
                 )}
               </div>
-            </div>
-          </Card>
-
-          {/* Sync Settings Card */}
-          <Card className="p-6 border-border/60">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                <RefreshCcw className="h-4 w-4 text-violet-500" />
-              </div>
-              <h2 className="font-semibold text-foreground">{t("confluence.create.syncSettings")}</h2>
-            </div>
-
-            <div className="space-y-5">
-              <FormField label={t("confluence.create.syncSettings")} hint={t("confluence.create.pollingIntervalHint")}>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => updateField("sync_mode", "manual")}
-                    className={`p-4 rounded-lg border-2 text-left transition-all ${
-                      formData.sync_mode === "manual"
-                        ? "border-primary bg-primary/5"
-                        : "border-border/60 hover:border-border"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-2">
-                      <User className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">{t("confluence.create.syncModeManual")}</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {t("confluence.create.syncModeManualDesc")}
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => updateField("sync_mode", "polling")}
-                    className={`p-4 rounded-lg border-2 text-left transition-all ${
-                      formData.sync_mode === "polling"
-                        ? "border-primary bg-primary/5"
-                        : "border-border/60 hover:border-border"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-2">
-                      <Clock className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium text-sm">{t("confluence.create.syncModeAuto")}</span>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {t("confluence.create.syncModeAutoDesc")}
-                    </p>
-                  </button>
-                </div>
-              </FormField>
-
-              {formData.sync_mode === "polling" && (
-                <FormField label={t("confluence.create.pollingInterval")} hint={t("confluence.create.pollingIntervalHint")}>
-                  <Select
-                    value={String(formData.polling_interval_minutes)}
-                    onValueChange={(v) => updateField("polling_interval_minutes", Number(v))}
-                  >
-                    <SelectTrigger className="bg-background">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="15">{t("confluence.create.intervals.15min")}</SelectItem>
-                      <SelectItem value="30">{t("confluence.create.intervals.30min")}</SelectItem>
-                      <SelectItem value="60">{t("confluence.create.intervals.1hour")}</SelectItem>
-                      <SelectItem value="120">{t("confluence.create.intervals.2hours")}</SelectItem>
-                      <SelectItem value="360">{t("confluence.create.intervals.6hours")}</SelectItem>
-                      <SelectItem value="720">{t("confluence.create.intervals.12hours")}</SelectItem>
-                      <SelectItem value="1440">{t("confluence.create.intervals.daily")}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormField>
-              )}
             </div>
           </Card>
 

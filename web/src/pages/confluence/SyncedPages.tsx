@@ -30,6 +30,8 @@ import {
   Square,
   MinusSquare,
   Plus,
+  Settings,
+  Hand,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -60,6 +62,8 @@ import {
 } from "@/api/confluence";
 import type { ConfluencePageRecord, ConfluenceBinding } from "@/types/confluence";
 import AddPagesModal from "./AddPagesModal";
+import { BindingSyncConfigDialog } from "./BindingSyncConfigDialog";
+import { PageSyncConfigDialog } from "./PageSyncConfigDialog";
 
 // ============================================================
 // Types
@@ -77,13 +81,60 @@ interface TreeNode extends ConfluencePageRecord {
 // Status Badge Component
 // ============================================================
 
-function StatusBadge({ status }: { status: ConfluencePageRecord["status"] }) {
+interface StatusBadgeProps {
+  status: ConfluencePageRecord["status"];
+  documentStatus?: string;
+  documentProgress?: number;
+}
+
+function StatusBadge({ status, documentStatus, documentProgress }: StatusBadgeProps) {
   const { t } = useTranslation();
-  const config = {
+
+  // 根据文档处理状态确定显示的状态
+  // 优先使用 documentStatus（文档的实际处理状态）
+  const getEffectiveStatus = () => {
+    if (!documentStatus) {
+      // 没有关联文档，使用 confluence_pages.status
+      return status;
+    }
+
+    // 文档处理状态映射
+    switch (documentStatus) {
+      case "completed":
+        return "synced"; // 文档处理完成 = 真正的"已同步"
+      case "failed":
+        return "error";
+      case "parsing":
+      case "segmenting":
+      case "embedding":
+      case "embedding_images":
+        return "processing"; // 处理中
+      case "uploaded":
+        return "uploaded"; // 已上传，待处理
+      default:
+        return status;
+    }
+  };
+
+  const effectiveStatus = getEffectiveStatus();
+
+  const config: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
     synced: {
       color: "bg-emerald-500/10 text-emerald-600 border-emerald-200 dark:border-emerald-800",
       icon: <CheckCircle className="h-3 w-3" />,
       label: t("confluence.syncedPages.status.synced"),
+    },
+    processing: {
+      color: "bg-blue-500/10 text-blue-600 border-blue-200 dark:border-blue-800",
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: documentProgress
+        ? t("confluence.syncedPages.status.processing") + ` ${Math.round(documentProgress)}%`
+        : t("confluence.syncedPages.status.processing"),
+    },
+    uploaded: {
+      color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
+      icon: <Clock className="h-3 w-3" />,
+      label: t("confluence.syncedPages.status.uploaded"),
     },
     pending: {
       color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
@@ -102,7 +153,7 @@ function StatusBadge({ status }: { status: ConfluencePageRecord["status"] }) {
     },
   };
 
-  const c = config[status] || config.pending;
+  const c = config[effectiveStatus] || config.pending;
   return (
     <Badge variant="outline" className={c.color}>
       {c.icon}
@@ -136,14 +187,19 @@ function PageListRow({
   isSyncing,
   onSelect,
   onSync,
+  onConfigureSync,
 }: {
   page: ConfluencePageRecord;
   isSelected: boolean;
   isSyncing: boolean;
   onSelect: (checked: boolean) => void;
   onSync: () => void;
+  onConfigureSync: () => void;
 }) {
   const { t } = useTranslation();
+
+  // Show sync mode indicator if page has custom sync config
+  const hasSyncConfig = page.sync_mode !== null;
 
   return (
     <div className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/40 border-b border-border/40 last:border-b-0 transition-colors">
@@ -160,7 +216,7 @@ function PageListRow({
         {page.depth > 0 && (
           <div className="flex items-center gap-0.5 flex-shrink-0" style={{ width: `${page.depth * 12}px` }}>
             {Array.from({ length: page.depth }).map((_, i) => (
-              <span key={i} className="text-muted-foreground/30">│</span>
+              <span key={i} className="text-muted-foreground/30">|</span>
             ))}
           </div>
         )}
@@ -172,11 +228,26 @@ function PageListRow({
         <span className="text-sm font-medium text-foreground truncate">
           {page.title}
         </span>
+
+        {/* Custom sync mode indicator */}
+        {hasSyncConfig && (
+          <Badge variant="outline" className="text-xs px-1.5 py-0">
+            {page.sync_mode === "polling" ? (
+              <Clock className="h-3 w-3" />
+            ) : (
+              <Hand className="h-3 w-3" />
+            )}
+          </Badge>
+        )}
       </div>
 
       {/* Status */}
       <div className="w-24 flex-shrink-0">
-        <StatusBadge status={page.status} />
+        <StatusBadge
+          status={page.status}
+          documentStatus={page.document_status}
+          documentProgress={page.document_progress}
+        />
       </div>
 
       {/* Version */}
@@ -192,7 +263,25 @@ function PageListRow({
       </span>
 
       {/* Actions - always visible for better UX */}
-      <div className="flex items-center gap-1 w-20 flex-shrink-0 justify-end">
+      <div className="flex items-center gap-1 w-28 flex-shrink-0 justify-end">
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 transition-all duration-200 text-muted-foreground hover:text-primary hover:bg-primary/10"
+                onClick={onConfigureSync}
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {t("confluence.pageSyncConfig.configure")}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -260,6 +349,7 @@ function TreeNodeRow({
   onToggle,
   onSelect,
   onSync,
+  onConfigureSync,
 }: {
   node: TreeNode;
   level: number;
@@ -269,6 +359,7 @@ function TreeNodeRow({
   onToggle: (id: string) => void;
   onSelect: (id: string, checked: boolean) => void;
   onSync: (id: string) => void;
+  onConfigureSync: (id: string) => void;
 }) {
   const { t } = useTranslation();
   const hasChildren = node.children.length > 0;
@@ -328,11 +419,25 @@ function TreeNodeRow({
           <span className="text-sm font-medium text-foreground truncate">
             {node.title}
           </span>
+          {/* Custom sync mode indicator */}
+          {node.sync_mode !== null && (
+            <Badge variant="outline" className="text-xs px-1.5 py-0">
+              {node.sync_mode === "polling" ? (
+                <Clock className="h-3 w-3" />
+              ) : (
+                <Hand className="h-3 w-3" />
+              )}
+            </Badge>
+          )}
         </div>
 
         {/* Status */}
         <div className="w-24 flex-shrink-0">
-          <StatusBadge status={node.status} />
+          <StatusBadge
+            status={node.status}
+            documentStatus={node.document_status}
+            documentProgress={node.document_progress}
+          />
         </div>
 
         {/* Version */}
@@ -348,7 +453,25 @@ function TreeNodeRow({
         </span>
 
         {/* Actions - always visible for better UX */}
-        <div className="flex items-center gap-1 w-20 flex-shrink-0 justify-end">
+        <div className="flex items-center gap-1 w-28 flex-shrink-0 justify-end">
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 transition-all duration-200 text-muted-foreground hover:text-primary hover:bg-primary/10"
+                  onClick={() => onConfigureSync(node.id)}
+                >
+                  <Settings className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {t("confluence.pageSyncConfig.configure")}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -415,6 +538,7 @@ function TreeNodeRow({
               onToggle={onToggle}
               onSelect={onSelect}
               onSync={onSync}
+              onConfigureSync={onConfigureSync}
             />
           ))}
         </div>
@@ -443,6 +567,8 @@ export default function SyncedPagesPage() {
   const [isBatchSyncing, setIsBatchSyncing] = useState(false);
   const [isFullSyncing, setIsFullSyncing] = useState(false);
   const [showAddPagesModal, setShowAddPagesModal] = useState(false);
+  const [showSyncConfigDialog, setShowSyncConfigDialog] = useState(false);
+  const [pageSyncConfigPage, setPageSyncConfigPage] = useState<ConfluencePageRecord | null>(null);
 
   // Toast notification state
   const [toast, setToast] = useState<{
@@ -680,6 +806,31 @@ export default function SyncedPagesPage() {
             </div>
 
             <div className="flex items-center gap-3">
+              {/* Sync mode badge */}
+              <Badge variant="outline" className="text-muted-foreground border-border/60">
+                {binding?.sync_mode === "polling" ? (
+                  <>
+                    <Clock className="h-3 w-3 mr-1" />
+                    {t("confluence.syncMode.interval", { minutes: binding?.polling_interval_minutes || 60 })}
+                  </>
+                ) : (
+                  <>
+                    <Hand className="h-3 w-3 mr-1" />
+                    {t("confluence.syncMode.manual")}
+                  </>
+                )}
+              </Badge>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowSyncConfigDialog(true)}
+                disabled={!binding}
+              >
+                <Settings className="h-4 w-4 mr-1.5" />
+                {t("confluence.syncConfig.configure")}
+              </Button>
+
               <Button
                 variant="outline"
                 size="sm"
@@ -847,7 +998,7 @@ export default function SyncedPagesPage() {
             <span className="w-24 flex-shrink-0">{t("confluence.syncedPages.columns.status")}</span>
             <span className="w-12 text-center flex-shrink-0">{t("confluence.syncedPages.columns.version")}</span>
             <span className="w-28 text-right flex-shrink-0">{t("confluence.syncedPages.columns.lastSync")}</span>
-            <span className="w-20 flex-shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
+            <span className="w-28 flex-shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
           </div>
 
           {/* Content */}
@@ -875,6 +1026,7 @@ export default function SyncedPagesPage() {
                   isSyncing={syncingIds.has(page.id)}
                   onSelect={(checked) => handleSelect(page.id, checked)}
                   onSync={() => handleSyncPage(page.id)}
+                  onConfigureSync={() => setPageSyncConfigPage(page)}
                 />
               ))}
             </div>
@@ -891,6 +1043,10 @@ export default function SyncedPagesPage() {
                   onToggle={handleToggleExpand}
                   onSelect={handleSelect}
                   onSync={handleSyncPage}
+                  onConfigureSync={(id) => {
+                    const page = pages.find((p) => p.id === id);
+                    if (page) setPageSyncConfigPage(page);
+                  }}
                 />
               ))}
             </div>
@@ -956,6 +1112,26 @@ export default function SyncedPagesPage() {
             refetchPages();
             queryClient.invalidateQueries({ queryKey: ["confluence-binding", bindingId] });
           }}
+        />
+      )}
+
+      {/* Binding Sync Config Dialog */}
+      {binding && (
+        <BindingSyncConfigDialog
+          binding={binding}
+          open={showSyncConfigDialog}
+          onOpenChange={setShowSyncConfigDialog}
+        />
+      )}
+
+      {/* Page Sync Config Dialog */}
+      {pageSyncConfigPage && bindingId && (
+        <PageSyncConfigDialog
+          page={pageSyncConfigPage}
+          bindingId={bindingId}
+          open={!!pageSyncConfigPage}
+          onOpenChange={(open) => !open && setPageSyncConfigPage(null)}
+          onSuccess={() => refetchPages()}
         />
       )}
 

@@ -116,6 +116,12 @@ export interface ConfluenceBinding {
   created_by: string | null;
   created_at: string | null;
   updated_at: string | null;
+  // Sync mode configuration (binding-level)
+  sync_mode: "manual" | "polling";
+  polling_interval_minutes: number;
+  last_incremental_sync_at: string | null;
+  sync_enabled: boolean;
+  next_sync_at: string | null;
 }
 
 export interface ConfluenceBindingCreateRequest {
@@ -136,6 +142,9 @@ export interface ConfluenceBindingUpdateRequest {
   max_depth?: number;
   include_attachments?: boolean;
   include_comments?: boolean;
+  // Sync mode configuration (binding-level)
+  sync_mode?: "manual" | "polling";
+  polling_interval_minutes?: number;
 }
 
 // ============================================================
@@ -226,6 +235,22 @@ export interface ConfluencePageRecord {
   author: string | null;
   created_at: string | null;
   updated_at: string | null;
+  // Page-level sync configuration (overrides binding defaults)
+  sync_mode: "manual" | "polling" | null;  // null = inherit from binding
+  polling_interval_minutes: number | null;
+  sync_enabled: boolean;
+  next_sync_at: string | null;
+  sync_priority: number;
+  // Document processing status (from documents table via JOIN)
+  document_status?: string | null;  // uploaded/parsing/embedding/completed/failed
+  document_progress?: number | null;  // 0-100
+}
+
+export interface ConfluencePageSyncConfigUpdateRequest {
+  sync_mode?: "manual" | "polling" | null;
+  polling_interval_minutes?: number;
+  sync_enabled?: boolean;
+  sync_priority?: number;
 }
 
 export interface ConfluencePageListResponse {

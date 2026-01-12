@@ -388,16 +388,27 @@ def create_app() -> FastAPI:
                 vlm_service=confluence_vlm_service,
             )
 
-            # 如果启用轮询，启动调度器
-            if settings.confluence.polling_enabled:
+            # 启动调度器（支持绑定级别的 sync_mode 配置）
+            # 调度器会自动加载 sync_mode = "polling" 的绑定和页面
+            polling_enabled = getattr(settings.confluence, "polling_enabled", False)
+
+            if polling_enabled:
                 app.state.confluence_scheduler = ConfluenceScheduler(
                     sync_service=app.state.confluence_sync_service,
-                    max_concurrent=settings.confluence.sync_max_concurrent,
+                    max_concurrent=getattr(settings.confluence, "sync_max_concurrent", 3),
+                    check_interval_seconds=getattr(
+                        settings.confluence, "polling_check_interval_seconds", 30
+                    ),
+                    test_mode=getattr(settings.confluence, "test_mode", False),
+                    test_interval_seconds=getattr(
+                        settings.confluence, "test_polling_interval_seconds", 10
+                    ),
                 )
                 await app.state.confluence_scheduler.start()
-                logger.info("Confluence 调度器已启动")
+                logger.info("Confluence 调度器已启动 (支持绑定级别轮询)")
             else:
                 app.state.confluence_scheduler = None
+                logger.info("Confluence 调度器未启动 (polling_enabled=False)")
 
             logger.info("Confluence 集成服务已启动")
 

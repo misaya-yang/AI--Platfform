@@ -382,7 +382,7 @@ export default function AddPagesModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop with blur */}
       <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-md"
+        className="absolute inset-0 bg-background/60 backdrop-blur-sm"
         onClick={onClose}
       />
 
@@ -390,19 +390,19 @@ export default function AddPagesModal({
       <div className={cn(
         "relative z-10 w-full max-w-2xl max-h-[85vh]",
         "flex flex-col",
-        "bg-white dark:bg-slate-900",
+        "bg-card",
         "rounded-2xl overflow-hidden",
         "shadow-2xl shadow-black/20 dark:shadow-black/40",
-        "border border-slate-200/50 dark:border-slate-700/50",
+        "border border-border/50",
         "animate-in fade-in-0 zoom-in-95 duration-300"
       )}>
         {/* Gradient top border accent */}
         <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-500 to-blue-500" />
 
         {/* Header */}
-        <div className="relative px-6 py-5 border-b border-slate-200/80 dark:border-slate-700/80">
+        <div className="relative px-6 py-5 border-b border-border/60">
           {/* Background pattern */}
-          <div className="absolute inset-0 bg-gradient-to-br from-slate-50 to-white dark:from-slate-800/50 dark:to-slate-900" />
+          <div className="absolute inset-0 bg-gradient-to-br from-muted/50 to-card dark:from-muted/30 dark:to-card" />
           <div className="absolute inset-0 opacity-[0.03] dark:opacity-[0.05]" style={{
             backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
           }} />
@@ -451,7 +451,7 @@ export default function AddPagesModal({
         </div>
 
         {/* Search Bar */}
-        <div className="px-6 py-4 bg-slate-50/50 dark:bg-slate-800/30 border-b border-slate-100 dark:border-slate-800">
+        <div className="px-6 py-4 bg-muted/30 border-b border-border/50">
           <div className="relative">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
             <Input
@@ -460,8 +460,8 @@ export default function AddPagesModal({
               placeholder={t("confluence.addPages.searchPlaceholder")}
               className={cn(
                 "pl-10 h-10 rounded-xl",
-                "bg-white dark:bg-slate-900",
-                "border-slate-200 dark:border-slate-700",
+                "bg-background",
+                "border-border",
                 "focus:border-blue-400 dark:focus:border-blue-500",
                 "focus:ring-2 focus:ring-blue-500/20",
                 "shadow-sm",
@@ -473,7 +473,7 @@ export default function AddPagesModal({
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-4 min-h-0 bg-slate-50/30 dark:bg-slate-900/50">
+        <div className="flex-1 overflow-y-auto p-4 min-h-0 bg-muted/20">
           {loadingPageTree ? (
             <div className="flex flex-col items-center justify-center py-16">
               <div className="relative">
@@ -501,8 +501,8 @@ export default function AddPagesModal({
           ) : pageTreeResponse?.root_pages && pageTreeResponse.root_pages.length > 0 ? (
             <div className={cn(
               "rounded-xl overflow-hidden",
-              "bg-white dark:bg-slate-900",
-              "border border-slate-200/80 dark:border-slate-700/80",
+              "bg-card",
+              "border border-border/60",
               "shadow-sm"
             )}>
               <div className="p-2">
@@ -536,8 +536,8 @@ export default function AddPagesModal({
         {/* Footer */}
         <div className={cn(
           "px-6 py-4",
-          "border-t border-slate-200/80 dark:border-slate-700/80",
-          "bg-slate-50/80 dark:bg-slate-800/50"
+          "border-t border-border/60",
+          "bg-muted/30"
         )}>
           <div className="flex items-center justify-between">
             {/* Selection info */}

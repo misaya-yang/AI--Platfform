@@ -313,6 +313,44 @@
       "polling": "Scheduled Polling",
       "interval": "{{minutes}}m"
     },
+    "syncConfig": {
+      "title": "Sync Configuration",
+      "description": "Configure sync settings for {{spaceName}}",
+      "mode": "Sync Mode",
+      "manual": "Manual",
+      "polling": "Auto Sync",
+      "manualDesc": "Trigger sync manually when needed, full control over timing",
+      "pollingDesc": "System automatically detects Confluence changes and syncs",
+      "interval": "Sync Interval",
+      "intervals": {
+        "30min": "Every 30 minutes",
+        "hourly": "Every hour",
+        "3hours": "Every 3 hours",
+        "6hours": "Every 6 hours",
+        "12hours": "Every 12 hours",
+        "daily": "Daily"
+      },
+      "configure": "Configure Sync",
+      "updateSuccess": "Sync configuration updated",
+      "updateError": "Update failed, please retry"
+    },
+    "pageSyncConfig": {
+      "title": "Page Sync Configuration",
+      "description": "Configure sync settings for \"{{pageTitle}}\"",
+      "configure": "Configure Page Sync",
+      "enabled": "Enable Sync",
+      "enabledDesc": "When disabled, this page will not be auto-synced",
+      "mode": "Sync Mode",
+      "inherit": "Inherit",
+      "inheritDesc": "Use the space binding's sync configuration",
+      "priority": "Sync Priority",
+      "priorityDesc": "Higher priority pages are synced first",
+      "priorities": {
+        "normal": "Normal",
+        "high": "High",
+        "critical": "Critical"
+      }
+    },
     "actions": {
       "test": "Test Connection",
       "sync": "Sync",
@@ -506,6 +544,8 @@
       "status": {
         "synced": "Synced",
         "pending": "Pending",
+        "processing": "Processing",
+        "uploaded": "Uploaded",
         "error": "Error",
         "deleted": "Deleted"
       },

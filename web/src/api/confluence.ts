@@ -23,6 +23,7 @@ import type {
   ConfluenceSyncTriggerRequest,
   ConfluencePageRecord,
   ConfluencePageListResponse,
+  ConfluencePageSyncConfigUpdateRequest,
   ConfluenceSchedulerStatus,
   ConfluenceBatchSyncResult,
 } from "@/types/confluence";
@@ -349,5 +350,19 @@ export async function batchSyncPages(
  */
 export async function getSchedulerStatus(): Promise<ConfluenceSchedulerStatus> {
   const { data } = await api.get<ConfluenceSchedulerStatus>("/api/v1/confluence/scheduler/status");
+  return data;
+}
+
+/**
+ * Update page-level sync configuration
+ */
+export async function updatePageSyncConfig(
+  pageRecordId: string,
+  payload: ConfluencePageSyncConfigUpdateRequest
+): Promise<ConfluencePageRecord> {
+  const { data } = await api.put<ConfluencePageRecord>(
+    `/api/v1/confluence/pages/${pageRecordId}/sync-config`,
+    payload
+  );
   return data;
 }

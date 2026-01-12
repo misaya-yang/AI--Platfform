@@ -20,43 +20,96 @@ from collections import Counter
 
 
 @dataclass
+class AssociatedImageInfo:
+    """Image associated with a text segment for multimodal retrieval."""
+    image_segment_id: str
+    storage_url: str
+    filename: str = ""
+    vlm_description: Optional[str] = None
+    proximity_score: float = 1.0
+    media_type: str = "image/png"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "image_segment_id": self.image_segment_id,
+            "storage_url": self.storage_url,
+            "filename": self.filename,
+            "vlm_description": self.vlm_description,
+            "proximity_score": self.proximity_score,
+            "media_type": self.media_type,
+        }
+
+
+@dataclass
 class RetrievalCandidate:
-    """A candidate result with scores from each retrieval stage."""
+    """A candidate result with scores from each retrieval stage.
+
+    P3 Multimodal Extension:
+    - Supports text, image, and mixed content types
+    - Text segments can have associated images
+    - Image segments have VLM descriptions and storage URLs
+    - Cross-modal scoring for multimodal reranking
+    """
     segment_id: str
     document_id: str
     text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+
     # Source tracking
     sources: Set[str] = field(default_factory=set)  # "dense", "bm25", or both
-    
+
     # Stage 1: Raw retrieval scores
     dense_score: Optional[float] = None  # Vector similarity [0, 1]
     bm25_score: Optional[float] = None   # BM25 score (raw)
-    
+
     # Stage 2: Normalized scores [0, 1]
     dense_score_norm: Optional[float] = None
     bm25_score_norm: Optional[float] = None
-    
+
     # Stage 3: Fusion score [0, 1]
     fusion_score: Optional[float] = None
-    
+
     # Stage 4: MMR score (can be negative due to diversity penalty)
     mmr_score: Optional[float] = None
     mmr_relevance: Optional[float] = None
     mmr_max_sim: Optional[float] = None
-    
+
     # Stage 5: Rerank score [0, 1]
     rerank_score: Optional[float] = None
-    
+
     # Final score for ranking
     final_score: float = 0.0
-    
+
     # Text match info (for display)
     exact_match: bool = False
     term_matches: int = 0
     term_ratio: float = 0.0
-    
+
+    # P3: Multimodal fields
+    content_type: str = "text"  # "text" | "image" | "mixed"
+    image_url: Optional[str] = None  # Storage URL for image segments
+    vlm_description: Optional[str] = None  # VLM-generated description
+    associated_images: List[AssociatedImageInfo] = field(default_factory=list)
+
+    # P3: Cross-modal scoring (for multimodal reranker)
+    multimodal_score: Optional[float] = None  # VLM-based relevance score
+    image_query_score: Optional[float] = None  # Image-to-query similarity
+
+    @property
+    def is_image_segment(self) -> bool:
+        """Check if this is an image segment."""
+        return self.content_type == "image"
+
+    @property
+    def has_images(self) -> bool:
+        """Check if this text segment has associated images."""
+        return len(self.associated_images) > 0
+
+    @property
+    def image_count(self) -> int:
+        """Number of associated images."""
+        return len(self.associated_images)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with N/A for missing scores."""
         result = {
@@ -79,6 +132,9 @@ class RetrievalCandidate:
                 "mmr_relevance": round(self.mmr_relevance, 4) if self.mmr_relevance is not None else "N/A",
                 # Stage 5: Rerank
                 "rerank": round(self.rerank_score, 4) if self.rerank_score is not None else "N/A",
+                # P3: Multimodal scores
+                "multimodal": round(self.multimodal_score, 4) if self.multimodal_score is not None else "N/A",
+                "image_query": round(self.image_query_score, 4) if self.image_query_score is not None else "N/A",
                 # Final
                 "final": round(self.final_score, 4),
             },
@@ -86,6 +142,16 @@ class RetrievalCandidate:
                 "exact_match": self.exact_match,
                 "term_matches": self.term_matches,
                 "term_ratio": round(self.term_ratio, 4),
+            },
+            # P3: Multimodal info
+            "multimodal": {
+                "content_type": self.content_type,
+                "is_image": self.is_image_segment,
+                "has_images": self.has_images,
+                "image_count": self.image_count,
+                "image_url": self.image_url,
+                "vlm_description": self.vlm_description,
+                "associated_images": [img.to_dict() for img in self.associated_images],
             },
         }
         return result

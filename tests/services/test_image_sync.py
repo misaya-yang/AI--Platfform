@@ -1381,3 +1381,264 @@ class TestConfluenceAttachmentModel:
         assert data["filename"] == "test.png"
         assert data["is_image"] is True
         assert data["is_embeddable_image"] is True
+
+
+# ============ S3 Metadata Sanitization Tests ============
+
+class TestS3MetadataSanitization:
+    """
+    Tests for _sanitize_for_s3_metadata function.
+
+    S3 metadata can only contain ASCII characters. This test suite verifies
+    that the sanitization function correctly handles:
+    - Normal ASCII strings
+    - Unicode narrow no-break space (U+202F) - common in macOS time formatting
+    - Other special Unicode characters and spaces
+    - Empty strings and edge cases
+    - Multiple spaces cleanup
+    """
+
+    def test_normal_ascii_string(self):
+        """Test that normal ASCII strings pass through unchanged"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Simple ASCII
+        assert _sanitize_for_s3_metadata("hello.png") == "hello.png"
+        assert _sanitize_for_s3_metadata("test_image_123.jpg") == "test_image_123.jpg"
+        assert _sanitize_for_s3_metadata("Screenshot 2025-01-16 at 2.38.53 pm.png") == \
+               "Screenshot 2025-01-16 at 2.38.53 pm.png"
+
+    def test_unicode_narrow_no_break_space(self):
+        """
+        Test handling of U+202F (narrow no-break space).
+
+        This is the original bug: macOS uses U+202F in time formatting,
+        e.g., "2:38:53 pm" where the space before "pm" is actually U+202F.
+        """
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # The problematic filename from the bug report
+        # Contains U+202F between "2.38.53" and "pm"
+        problematic_filename = "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png"
+
+        result = _sanitize_for_s3_metadata(problematic_filename)
+
+        # Should be pure ASCII after sanitization
+        assert result.isascii(), f"Result contains non-ASCII: {repr(result)}"
+
+        # The narrow no-break space should become a regular space
+        expected = "Screenshot 2025-01-16 at 2.38.53 pm.png"
+        assert result == expected, f"Expected {repr(expected)}, got {repr(result)}"
+
+        # Verify it can be encoded as ASCII without errors
+        result.encode('ascii')
+
+    def test_various_unicode_spaces(self):
+        """Test handling of various Unicode space characters"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # U+00A0 Non-breaking space
+        assert _sanitize_for_s3_metadata("test\u00A0file.png").isascii()
+
+        # U+2002 En space
+        assert _sanitize_for_s3_metadata("test\u2002file.png").isascii()
+
+        # U+2003 Em space
+        assert _sanitize_for_s3_metadata("test\u2003file.png").isascii()
+
+        # U+2009 Thin space
+        assert _sanitize_for_s3_metadata("test\u2009file.png").isascii()
+
+        # U+200A Hair space
+        assert _sanitize_for_s3_metadata("test\u200Afile.png").isascii()
+
+        # U+3000 Ideographic space (CJK)
+        assert _sanitize_for_s3_metadata("test\u3000file.png").isascii()
+
+    def test_unicode_diacritics(self):
+        """Test handling of Unicode characters with diacritics"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # NFKD normalization should convert these
+        result = _sanitize_for_s3_metadata("café.png")
+        assert result.isascii()
+
+        result = _sanitize_for_s3_metadata("naïve.jpg")
+        assert result.isascii()
+
+        result = _sanitize_for_s3_metadata("résumé.pdf")
+        assert result.isascii()
+
+    def test_chinese_characters_removed(self):
+        """Test that Chinese characters are removed (can't be normalized to ASCII)"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Chinese characters should be removed
+        result = _sanitize_for_s3_metadata("截图2025.png")
+        assert result.isascii()
+        assert "截图" not in result
+
+        result = _sanitize_for_s3_metadata("测试图片.jpg")
+        assert result.isascii()
+
+    def test_japanese_characters_removed(self):
+        """Test that Japanese characters are removed"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        result = _sanitize_for_s3_metadata("スクリーンショット.png")
+        assert result.isascii()
+
+    def test_korean_characters_removed(self):
+        """Test that Korean characters are removed"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        result = _sanitize_for_s3_metadata("스크린샷.png")
+        assert result.isascii()
+
+    def test_empty_string(self):
+        """Test handling of empty strings"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        assert _sanitize_for_s3_metadata("") == ""
+
+    def test_none_value(self):
+        """Test handling of None values"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Should return None if input is None/falsy
+        assert _sanitize_for_s3_metadata(None) is None
+        assert _sanitize_for_s3_metadata("") == ""
+
+    def test_multiple_spaces_cleanup(self):
+        """Test that multiple consecutive spaces are collapsed"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Multiple regular spaces
+        result = _sanitize_for_s3_metadata("test    file.png")
+        assert "    " not in result
+        assert result == "test file.png"
+
+        # Mixed unicode and regular spaces
+        result = _sanitize_for_s3_metadata("test\u202F  \u00A0file.png")
+        assert result.isascii()
+        # All spaces should be collapsed to single regular space
+        assert "  " not in result
+
+    def test_leading_trailing_spaces(self):
+        """Test that leading/trailing spaces are handled"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        result = _sanitize_for_s3_metadata("  test.png  ")
+        assert not result.startswith(" ")
+        assert not result.endswith(" ")
+        assert result == "test.png"
+
+    def test_special_characters_preserved(self):
+        """Test that valid ASCII special characters are preserved"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Underscores, hyphens, dots should be preserved
+        result = _sanitize_for_s3_metadata("test_image-2025.01.16.png")
+        assert result == "test_image-2025.01.16.png"
+
+        # Parentheses
+        result = _sanitize_for_s3_metadata("image (1).png")
+        assert result == "image (1).png"
+
+    def test_emoji_removed(self):
+        """Test that emoji characters are removed"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        result = _sanitize_for_s3_metadata("test📸image.png")
+        assert result.isascii()
+        assert "📸" not in result
+
+        result = _sanitize_for_s3_metadata("🎉celebration.jpg")
+        assert result.isascii()
+
+    def test_real_world_macos_filename(self):
+        """
+        Test real-world macOS screenshot filename.
+
+        macOS generates filenames like:
+        "Screenshot 2025-01-16 at 2.38.53 pm.png"
+        where the space before "pm" is U+202F (narrow no-break space)
+        """
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # Simulating exactly what macOS generates
+        macos_filename = "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png"
+
+        result = _sanitize_for_s3_metadata(macos_filename)
+
+        # Must be pure ASCII for S3
+        assert result.isascii()
+
+        # Must be able to encode as ASCII
+        encoded = result.encode('ascii')
+        assert encoded is not None
+
+        # Should preserve the meaningful content
+        assert "Screenshot" in result
+        assert "2025-01-16" in result
+        assert "pm.png" in result
+
+    def test_mixed_content(self):
+        """Test filenames with mixed ASCII and Unicode content"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        # ASCII + Chinese
+        result = _sanitize_for_s3_metadata("report_报告_2025.pdf")
+        assert result.isascii()
+        assert "report" in result
+        assert "2025" in result
+
+        # ASCII + emoji + special space
+        result = _sanitize_for_s3_metadata("my\u202Fphoto📷2025.jpg")
+        assert result.isascii()
+
+    def test_full_unicode_filename(self):
+        """Test filename that is entirely non-ASCII"""
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        result = _sanitize_for_s3_metadata("截图测试文件.png")
+        assert result.isascii()
+        # Only .png should remain
+        assert ".png" in result
+
+    def test_s3_metadata_safe(self):
+        """
+        Integration test: verify sanitized value can be used as S3 metadata.
+
+        S3 metadata requirements:
+        - ASCII characters only
+        - No control characters
+        """
+        from src.services.storage.image_storage import _sanitize_for_s3_metadata
+
+        test_cases = [
+            "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png",  # The bug case
+            "测试文件.png",  # Chinese
+            "café résumé.pdf",  # Diacritics
+            "file\u00A0name.jpg",  # NBSP
+            "emoji📸file.png",  # Emoji
+            "normal_file.png",  # Normal
+        ]
+
+        for original in test_cases:
+            result = _sanitize_for_s3_metadata(original)
+
+            # Must be ASCII
+            assert result.isascii(), f"Failed for {repr(original)}: {repr(result)}"
+
+            # Must be encodable as ASCII
+            try:
+                result.encode('ascii')
+            except UnicodeEncodeError:
+                pytest.fail(f"Cannot encode as ASCII: {repr(result)}")
+
+            # Must not contain control characters (except for empty strings)
+            if result:
+                for char in result:
+                    assert ord(char) >= 32 or char in '\t\n\r', \
+                        f"Control character found in result: {repr(result)}"

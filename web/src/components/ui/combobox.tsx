@@ -275,14 +275,10 @@ export function Combobox({
 
     return createPortal(
       <>
-        {/* Backdrop - semi-transparent overlay */}
+        {/* Backdrop - theme-aware semi-transparent overlay */}
         <div
-          className="fixed inset-0"
-          style={{
-            zIndex: 99998,
-            backgroundColor: "rgba(0, 0, 0, 0.15)",
-            backdropFilter: "blur(1px)",
-          }}
+          className="fixed inset-0 bg-background/60 backdrop-blur-[2px]"
+          style={{ zIndex: 99998 }}
           onClick={() => {
             setOpen(false);
             setSearchQuery("");
@@ -297,11 +293,10 @@ export function Combobox({
             // Container
             "rounded-xl overflow-hidden",
             // Border & Shadow - prominent to stand out
-            "border border-border/50",
-            "shadow-[0_10px_40px_-10px_rgba(0,0,0,0.3)]",
-            "dark:shadow-[0_10px_40px_-10px_rgba(0,0,0,0.5)]",
-            // Solid background
-            "bg-white dark:bg-zinc-950",
+            "border border-border/60 ring-1 ring-black/5 dark:ring-white/10",
+            "shadow-xl",
+            // Solid background - using theme colors
+            "bg-popover",
             // Animation
             "animate-in fade-in-0 zoom-in-[0.98] duration-150"
           )}
@@ -319,7 +314,7 @@ export function Combobox({
                 placeholder={searchPlaceholder}
                 className={cn(
                   "w-full h-10 pl-9 pr-9 rounded-lg text-sm",
-                  "bg-white dark:bg-zinc-900",
+                  "bg-background",
                   "border border-border/60",
                   "outline-none",
                   "placeholder:text-muted-foreground/50",
@@ -341,7 +336,7 @@ export function Combobox({
           {/* Options List */}
           <div
             ref={listRef}
-            className="max-h-[240px] overflow-y-auto p-2 bg-white dark:bg-zinc-950"
+            className="max-h-[240px] overflow-y-auto p-2 bg-popover"
           >
             {loading ? (
               <div className="flex items-center justify-center py-8 text-muted-foreground">

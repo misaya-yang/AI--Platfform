@@ -10,18 +10,26 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-md",
+        // Modern gradient primary button
+        default:
+          "bg-gradient-to-r from-primary to-sky-500 text-primary-foreground shadow-md hover:shadow-lg hover:from-primary/90 hover:to-sky-500/90 hover:-translate-y-0.5 active:translate-y-0",
+        // Subtle secondary button
         secondary:
-          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80 border border-border/50",
+        // Clean outline button
         outline:
-          "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+          "border border-input bg-background hover:bg-accent hover:text-accent-foreground hover:border-primary/50",
+        // Minimal ghost button
         ghost: "hover:bg-accent hover:text-accent-foreground",
+        // Gradient destructive button
         destructive:
-          "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+          "bg-gradient-to-r from-destructive to-rose-500 text-destructive-foreground shadow-md hover:shadow-lg hover:from-destructive/90 hover:to-rose-500/90 hover:-translate-y-0.5 active:translate-y-0",
+        // Link style
+        link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
         default: "h-10 px-4 py-2",
-        sm: "h-9 rounded-lg px-3",
+        sm: "h-9 rounded-lg px-3 text-xs",
         lg: "h-11 rounded-xl px-8",
         icon: "h-10 w-10 rounded-xl",
       },

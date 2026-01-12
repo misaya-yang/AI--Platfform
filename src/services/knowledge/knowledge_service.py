@@ -16,7 +16,7 @@ from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...persistence.database import DatabaseStorage
-from .chunking import ChunkingConfig, process_document, flatten_chunks
+from .chunking import ChunkingConfig, process_document, flatten_chunks, ContentType, AssociatedImage
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, DashScopeMultimodalEmbedding
 from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
@@ -62,6 +62,11 @@ class RetrieveResult:
     score: float
     text: str
     metadata: Dict[str, Any]
+    # P3: Multimodal fields
+    content_type: str = "text"  # "text" | "image"
+    image_url: Optional[str] = None
+    vlm_description: Optional[str] = None
+    associated_images: tuple = ()  # Using tuple for frozen dataclass compatibility
 
 
 class KnowledgeService:
@@ -789,13 +794,9 @@ class KnowledgeService:
 
             await self.db.update_document_status(document_id, status="embedding", progress=35)
 
-            # Remove old vectors + segments (best-effort)
-            if old_point_ids and collection:
-                try:
-                    await self.vector_store.delete_points(collection, old_point_ids)
-                except Exception:
-                    pass
-            await self.db.delete_segments_by_document(document_id)
+            # NOTE: We use "insert-first-delete-later" strategy for zero-downtime updates.
+            # Old vectors are deleted AFTER new vectors are inserted to ensure the document
+            # remains searchable throughout the update process.
 
             # Embed + upsert
             segment_rows: List[Dict[str, Any]] = []
@@ -868,6 +869,22 @@ class KnowledgeService:
 
                 await self.vector_store.upsert(collection_name=collection, points=points)
                 await self.db.insert_segments(segment_rows)
+
+                # Zero-downtime cleanup: Delete old vectors AFTER new ones are searchable
+                # This ensures the document remains searchable throughout the update process
+                if old_point_ids and collection:
+                    try:
+                        await self.vector_store.delete_points(collection, old_point_ids)
+                        logger.debug(
+                            f"Cleaned up {len(old_point_ids)} old vectors for document {document_id}"
+                        )
+                    except Exception as cleanup_err:
+                        # Non-fatal: old vectors may cause slight duplication but won't break search
+                        logger.warning(
+                            f"Failed to cleanup old vectors for document {document_id}: {cleanup_err}"
+                        )
+                # Delete old segments from DB (after vectors are cleaned up)
+                await self.db.delete_segments_by_document(document_id, exclude_ids=[s["segment_id"] for s in segment_rows])
 
                 # Persist dataset dimension/collection if missing.
                 if int(dataset.get("embedding_dimension") or 0) != dim or not dataset.get(
@@ -1790,6 +1807,141 @@ class KnowledgeService:
 
         return results, meta
 
+    async def retrieve_with_images(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
+        include_images: bool = True,
+        content_type_filter: Optional[str] = None,
+        multimodal_rerank: bool = False,
+        **kwargs: Any,
+    ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
+        """
+        Retrieve with associated images attached to results.
+
+        This is the multimodal-aware retrieval method that:
+        1. Performs standard retrieval (dense/bm25/hybrid)
+        2. Optionally filters by content type (text/image)
+        3. Attaches associated images to text segments
+        4. Optionally performs multimodal reranking via VLM
+
+        Args:
+            user: User context
+            dataset_id: Dataset ID
+            query: Query text
+            top_k: Number of results
+            include_images: Whether to attach associated images
+            content_type_filter: Filter by content type ("text", "image", or None for all)
+            multimodal_rerank: Use VLM for multimodal reranking (requires VLM service)
+            **kwargs: Additional arguments passed to retrieve()
+
+        Returns:
+            Tuple of (results with images, metadata)
+        """
+        # Fetch more results if filtering to ensure we get enough after filter
+        effective_top_k = top_k * 2 if content_type_filter else top_k
+
+        # Perform standard retrieval
+        results, meta = await self.retrieve(
+            user=user,
+            dataset_id=dataset_id,
+            query=query,
+            top_k=effective_top_k,
+            **kwargs,
+        )
+
+        # Apply content_type_filter if specified
+        if content_type_filter and content_type_filter in ("text", "image"):
+            filtered_results = []
+            for r in results:
+                segment_content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                if segment_content_type == content_type_filter:
+                    filtered_results.append(r)
+            results = filtered_results[:top_k]
+            meta["content_type_filter"] = content_type_filter
+            meta["filtered_count"] = len(filtered_results)
+
+        if not include_images or not results:
+            return results, meta
+
+        # Get segment IDs that might have associated images
+        segment_ids = [r.segment_id for r in results]
+
+        # Batch fetch associated images
+        associations = await self.db.get_segment_associations_batch(segment_ids)
+
+        # Enhance results with associated images
+        enhanced_results: List[RetrieveResult] = []
+        for r in results:
+            # Create enhanced metadata with images
+            enhanced_meta = dict(r.metadata)
+
+            # Build associated images list
+            associated_imgs: List[Dict[str, Any]] = []
+            if r.segment_id in associations and associations[r.segment_id]:
+                associated_imgs = [
+                    {
+                        "image_segment_id": img["image_segment_id"],
+                        "storage_url": img.get("storage_url", ""),
+                        "filename": img.get("filename", ""),
+                        "vlm_description": img.get("vlm_description"),
+                        "proximity_score": float(img.get("proximity_score", 1.0)),
+                        "media_type": img.get("media_type", "image/png"),
+                    }
+                    for img in associations[r.segment_id]
+                ]
+                enhanced_meta["has_images"] = True
+                enhanced_meta["image_count"] = len(associated_imgs)
+            else:
+                enhanced_meta["has_images"] = False
+                enhanced_meta["image_count"] = 0
+
+            # Get content_type from metadata or original result
+            content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            image_url = r.metadata.get("image_url", getattr(r, "image_url", None))
+            vlm_description = r.metadata.get("vlm_description", getattr(r, "vlm_description", None))
+
+            enhanced_results.append(
+                RetrieveResult(
+                    segment_id=r.segment_id,
+                    document_id=r.document_id,
+                    score=r.score,
+                    text=r.text,
+                    metadata=enhanced_meta,
+                    # P3: Multimodal fields
+                    content_type=content_type,
+                    image_url=image_url,
+                    vlm_description=vlm_description,
+                    associated_images=tuple(associated_imgs),
+                )
+            )
+
+        # Update meta to indicate multimodal retrieval
+        meta["multimodal"] = True
+        meta["include_images"] = include_images
+
+        # Count segments with images
+        segments_with_images = sum(
+            1 for r in enhanced_results
+            if r.metadata.get("has_images", False)
+        )
+        meta["segments_with_images"] = segments_with_images
+
+        # Apply multimodal reranking if requested
+        if multimodal_rerank:
+            # Note: Full VLM-based reranking requires MultimodalReranker service
+            # This is a placeholder that logs the request; implement with VLM when available
+            logger.info(
+                f"Multimodal rerank requested for {len(enhanced_results)} results. "
+                "VLM reranking not yet implemented - using standard scores."
+            )
+            meta["multimodal_rerank"] = False  # Indicate feature was requested but not applied
+            meta["multimodal_rerank_message"] = "VLM reranking not yet implemented"
+
+        return enhanced_results, meta
+
     # ========================= helpers =========================
 
     def _sanitize_text_for_db(self, text: str) -> str:
@@ -2634,3 +2786,294 @@ class KnowledgeService:
             "enabled": doc.get("enabled", True),
             "archived": doc.get("archived", False),
         }
+
+    # ========================= P3: Multimodal Image-Chunk Association =========================
+
+    async def associate_images_to_chunks(
+        self,
+        document_id: str,
+        max_images_per_chunk: int = 10,
+        proximity_threshold: float = 0.3,
+    ) -> Dict[str, Any]:
+        """
+        Associate image segments with text segments based on proximity.
+
+        This implements Dify-style Smart Attachment Handling where each text
+        chunk can have up to max_images_per_chunk associated images.
+
+        Association Strategy:
+        1. Get all text segments and image segments for the document
+        2. For each text segment, find nearby image segments
+        3. Compute proximity score based on:
+           - Same page: 0.7-1.0
+           - Adjacent position: 0.5-0.7
+           - Same document section: 0.3-0.5
+        4. Associate top-k images (by proximity) to each text chunk
+
+        Args:
+            document_id: The document to process
+            max_images_per_chunk: Maximum images per text chunk (default 10, Dify pattern)
+            proximity_threshold: Minimum proximity score to create association
+
+        Returns:
+            Statistics about associations created
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Get all segments for the document
+        doc = await self.db.get_document(document_id)
+        if not doc:
+            raise ValidationFailedError("document not found")
+
+        dataset_id = str(doc.get("dataset_id"))
+
+        # Get text and image segments separately
+        all_segments = await self.db.list_segments(
+            dataset_id=dataset_id, document_id=document_id, limit=10000, offset=0
+        )
+
+        text_segments = [
+            s for s in all_segments
+            if str(s.get("content_type", "text")).lower() == "text"
+        ]
+        image_segments = [
+            s for s in all_segments
+            if str(s.get("content_type", "text")).lower() == "image"
+        ]
+
+        if not text_segments or not image_segments:
+            logger.info(f"Document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments - skipping association")
+            return {
+                "document_id": document_id,
+                "text_segments": len(text_segments),
+                "image_segments": len(image_segments),
+                "associations_created": 0,
+            }
+
+        logger.info(f"Associating images for document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments")
+
+        # Build associations
+        associations: List[Dict[str, Any]] = []
+        segments_with_images = 0
+
+        for text_seg in text_segments:
+            text_seg_id = str(text_seg.get("segment_id"))
+            text_position = int(text_seg.get("position", 0))
+            text_metadata = _ensure_dict(text_seg.get("metadata"))
+            text_page = text_metadata.get("page") or text_metadata.get("page_number")
+
+            # Find candidate images and compute proximity scores
+            candidates: List[Tuple[Dict[str, Any], float]] = []
+
+            for img_seg in image_segments:
+                img_position = int(img_seg.get("position", 0))
+                img_metadata = _ensure_dict(img_seg.get("metadata"))
+                img_page = img_metadata.get("page") or img_metadata.get("page_number")
+
+                # Compute proximity score
+                score = self._compute_image_proximity_score(
+                    text_position=text_position,
+                    text_page=text_page,
+                    image_position=img_position,
+                    image_page=img_page,
+                    total_segments=len(all_segments),
+                )
+
+                if score >= proximity_threshold:
+                    candidates.append((img_seg, score))
+
+            # Sort by score and take top-k
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            top_candidates = candidates[:max_images_per_chunk]
+
+            if top_candidates:
+                segments_with_images += 1
+
+            for position, (img_seg, score) in enumerate(top_candidates):
+                associations.append({
+                    "segment_id": text_seg_id,
+                    "image_segment_id": str(img_seg.get("segment_id")),
+                    "position": position,
+                    "proximity_score": score,
+                    "char_offset": int(img_seg.get("position", 0)),
+                    "page_number": img_seg.get("metadata", {}).get("page"),
+                })
+
+        # Batch insert associations
+        if associations:
+            count = await self.db.add_segment_image_associations_batch(associations)
+            logger.info(f"Created {count} image associations for document {document_id}")
+
+            # Update segment flags in batch
+            affected_segment_ids = list(set(a["segment_id"] for a in associations))
+            for seg_id in affected_segment_ids:
+                await self.db.update_segment_image_flags(seg_id)
+
+        return {
+            "document_id": document_id,
+            "text_segments": len(text_segments),
+            "image_segments": len(image_segments),
+            "associations_created": len(associations),
+            "segments_with_images": segments_with_images,
+        }
+
+    def _compute_image_proximity_score(
+        self,
+        text_position: int,
+        text_page: Optional[int],
+        image_position: int,
+        image_page: Optional[int],
+        total_segments: int,
+    ) -> float:
+        """
+        Compute proximity score between a text segment and an image segment.
+
+        Scoring strategy:
+        - Same page (if pages are tracked): base score 0.7
+        - Position distance: closer = higher score
+        - Bonus for adjacent positions
+
+        Args:
+            text_position: Position index of text segment
+            text_page: Page number of text segment (if available)
+            image_position: Position index of image segment
+            image_page: Page number of image segment (if available)
+            total_segments: Total segments in document (for normalization)
+
+        Returns:
+            Proximity score [0.0, 1.0]
+        """
+        score = 0.0
+
+        # Page-based scoring (if pages are available)
+        if text_page is not None and image_page is not None:
+            if text_page == image_page:
+                score = 0.7  # Same page is strong signal
+            else:
+                page_distance = abs(text_page - image_page)
+                if page_distance == 1:
+                    score = 0.4  # Adjacent page
+                elif page_distance <= 3:
+                    score = 0.2  # Within 3 pages
+                else:
+                    return 0.0  # Too far
+
+        # Position-based scoring
+        position_distance = abs(text_position - image_position)
+
+        if position_distance == 0:
+            # Same position (unlikely but possible in some chunking strategies)
+            position_score = 1.0
+        elif position_distance == 1:
+            # Adjacent positions - very close
+            position_score = 0.9
+        elif position_distance <= 3:
+            # Within 3 positions
+            position_score = 0.7
+        elif position_distance <= 10:
+            # Within 10 positions
+            position_score = 0.5 - (position_distance - 3) * 0.05
+        else:
+            # Normalize based on total segments
+            normalized_distance = position_distance / max(total_segments, 1)
+            position_score = max(0.0, 0.3 - normalized_distance)
+
+        # Combine scores
+        if score > 0:
+            # If we have page info, weight it more heavily
+            final_score = 0.6 * score + 0.4 * position_score
+        else:
+            # Position-only scoring
+            final_score = position_score
+
+        return min(1.0, max(0.0, final_score))
+
+    async def get_segments_with_images(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        document_id: Optional[str] = None,
+        include_images: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get segments with their associated images attached.
+
+        This is used for multimodal retrieval where text segments need
+        their associated images for context.
+
+        Args:
+            user: User context for permission check
+            dataset_id: Dataset ID
+            document_id: Optional document ID to filter
+            include_images: Whether to include associated image details
+
+        Returns:
+            List of segments with associated_images field populated
+        """
+        await self.require_dataset_access(user, dataset_id, required="viewer")
+
+        segments = await self.db.list_segments(
+            dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
+        )
+
+        if not include_images:
+            return segments
+
+        # Get text segments that have images
+        text_segment_ids = [
+            s.get("segment_id") for s in segments
+            if str(s.get("content_type", "text")).lower() == "text"
+            and s.get("has_images", False)
+        ]
+
+        if not text_segment_ids:
+            return segments
+
+        # Batch fetch associated images
+        associations = await self.db.get_segment_associations_batch(text_segment_ids)
+
+        # Attach images to segments
+        result = []
+        for seg in segments:
+            seg_dict = dict(seg)
+            seg_id = seg_dict.get("segment_id")
+
+            if seg_id in associations:
+                seg_dict["associated_images"] = [
+                    AssociatedImage(
+                        image_segment_id=img["image_segment_id"],
+                        storage_url=img.get("storage_url", ""),
+                        filename=img.get("filename", ""),
+                        vlm_description=img.get("vlm_description"),
+                        proximity_score=float(img.get("proximity_score", 1.0)),
+                        char_offset=int(img.get("char_offset", 0)),
+                        page_number=img.get("page_number"),
+                        media_type=img.get("media_type", "image/png"),
+                    ).to_dict()
+                    for img in associations[seg_id]
+                ]
+            else:
+                seg_dict["associated_images"] = []
+
+            result.append(seg_dict)
+
+        return result
+
+    async def clear_image_associations(
+        self,
+        document_id: str,
+    ) -> int:
+        """
+        Clear all image associations for a document.
+
+        This should be called before re-processing a document's
+        image associations.
+
+        Args:
+            document_id: Document ID to clear associations for
+
+        Returns:
+            Number of associations deleted
+        """
+        return await self.db.delete_image_associations_by_document(document_id)

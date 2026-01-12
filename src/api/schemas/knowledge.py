@@ -177,6 +177,22 @@ class RetrieveRequestSchema(BaseModel):
     mmr_lambda: Optional[float] = None
     mmr_threshold: Optional[float] = None
 
+    # P3: Multimodal retrieval options
+    include_images: bool = True  # Include image segments in results
+    include_associated_images: bool = True  # Attach associated images to text segments
+    multimodal_rerank: bool = False  # Use VLM for multimodal reranking
+    content_type_filter: Optional[str] = None  # Filter by content type: text|image|None (all)
+
+
+class AssociatedImageSchema(BaseModel):
+    """Schema for associated image in retrieval results."""
+    image_segment_id: str
+    storage_url: str
+    filename: str = ""
+    vlm_description: Optional[str] = None
+    proximity_score: float = 1.0
+    media_type: str = "image/png"
+
 
 class RetrieveHitSchema(BaseModel):
     segment_id: str
@@ -184,6 +200,12 @@ class RetrieveHitSchema(BaseModel):
     score: float
     text: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # P3: Multimodal fields
+    content_type: str = "text"  # "text" | "image"
+    image_url: Optional[str] = None  # For image segments
+    vlm_description: Optional[str] = None  # VLM-generated description for images
+    associated_images: List[AssociatedImageSchema] = Field(default_factory=list)  # Associated images for text segments
 
 
 class RetrieveResponseSchema(BaseModel):

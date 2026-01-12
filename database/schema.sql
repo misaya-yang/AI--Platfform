@@ -336,10 +336,40 @@ CREATE TABLE IF NOT EXISTS segments (
     token_count INTEGER NOT NULL DEFAULT 0 CHECK (token_count >= 0),
     vector_id VARCHAR(255),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Image segment fields (from 010_image_segments)
+    content_type VARCHAR(50) NOT NULL DEFAULT 'text',  -- text | image
+    image_url TEXT,
+    image_attachment_id VARCHAR(100),
+    image_filename VARCHAR(255),
+    image_media_type VARCHAR(100),
+    image_file_size INTEGER,
+    -- Multimodal chunk fields (from 014_multimodal_chunks)
+    has_images BOOLEAN NOT NULL DEFAULT FALSE,
+    image_count INTEGER NOT NULL DEFAULT 0 CHECK (image_count >= 0),
+    vlm_description TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(document_id, position)
 );
+
+-- Image-Chunk Association Table (014_multimodal_chunks, 015_segment_images_fk)
+-- Links image segments to text segments for multimodal retrieval
+CREATE TABLE IF NOT EXISTS segment_images (
+    id BIGSERIAL PRIMARY KEY,
+    segment_id VARCHAR(255) NOT NULL REFERENCES segments(segment_id) ON DELETE CASCADE,
+    image_segment_id VARCHAR(255) NOT NULL REFERENCES segments(segment_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    proximity_score FLOAT NOT NULL DEFAULT 1.0 CHECK (proximity_score >= 0 AND proximity_score <= 1),
+    char_offset INTEGER DEFAULT 0,
+    page_number INTEGER DEFAULT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(segment_id, image_segment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_segment_images_segment ON segment_images(segment_id);
+CREATE INDEX IF NOT EXISTS idx_segment_images_image ON segment_images(image_segment_id);
+CREATE INDEX IF NOT EXISTS idx_segments_content_type ON segments(content_type);
+CREATE INDEX IF NOT EXISTS idx_segments_has_images ON segments(has_images) WHERE has_images = TRUE;
 
 CREATE TABLE IF NOT EXISTS dataset_permissions (
     id BIGSERIAL PRIMARY KEY,

@@ -25,6 +25,7 @@ import {
   Clock,
   Search,
   MoreHorizontal,
+  Hand,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
 
 import {
   listConnections,
@@ -254,6 +256,20 @@ function ConnectionCard({
                         <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                       )}
                       {bStatus.label}
+                    </Badge>
+                    {/* Sync mode badge */}
+                    <Badge variant="outline" className="text-muted-foreground border-border/60">
+                      {binding.sync_mode === "polling" ? (
+                        <>
+                          <Clock className="h-3 w-3 mr-1" />
+                          {t("confluence.syncMode.interval", { minutes: binding.polling_interval_minutes || 60 })}
+                        </>
+                      ) : (
+                        <>
+                          <Hand className="h-3 w-3 mr-1" />
+                          {t("confluence.syncMode.manual")}
+                        </>
+                      )}
                     </Badge>
                     <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       <Button
@@ -612,6 +628,7 @@ export default function ConnectionListPage() {
           </Card>
         </div>
       )}
+
     </div>
   );
 }

@@ -346,32 +346,66 @@ async def retrieve(
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        results, meta = await svc.retrieve(
-            user=user,
-            dataset_id=dataset_id,
-            query=payload.query,
-            top_k=payload.top_k,
-            mode=payload.mode,
-            document_id=payload.document_id,
-            dense_weight=payload.dense_weight,
-            bm25_weight=payload.bm25_weight,
-            fusion_method=payload.fusion_method,
-            alpha=payload.alpha,
-            score_threshold=payload.score_threshold,
-            vector_top_k=payload.vector_top_k,
-            keyword_top_k=payload.keyword_top_k,
-            candidate_top_k=payload.candidate_top_k,
-            keyword_candidate_k=payload.keyword_candidate_k,
-            fusion=payload.fusion,
-            rrf_k=payload.rrf_k,
-            rrf_weights=payload.rrf_weights,
-            rerank=payload.rerank,
-            rerank_model=payload.rerank_model,
-            rerank_top_n=payload.rerank_top_n,
-            mmr=payload.mmr,
-            mmr_lambda=payload.mmr_lambda,
-            mmr_threshold=payload.mmr_threshold,
-        )
+        # Use multimodal retrieval if include_associated_images is requested
+        if payload.include_associated_images:
+            results, meta = await svc.retrieve_with_images(
+                user=user,
+                dataset_id=dataset_id,
+                query=payload.query,
+                top_k=payload.top_k,
+                mode=payload.mode,
+                document_id=payload.document_id,
+                dense_weight=payload.dense_weight,
+                bm25_weight=payload.bm25_weight,
+                fusion_method=payload.fusion_method,
+                alpha=payload.alpha,
+                score_threshold=payload.score_threshold,
+                vector_top_k=payload.vector_top_k,
+                keyword_top_k=payload.keyword_top_k,
+                candidate_top_k=payload.candidate_top_k,
+                keyword_candidate_k=payload.keyword_candidate_k,
+                fusion=payload.fusion,
+                rrf_k=payload.rrf_k,
+                rrf_weights=payload.rrf_weights,
+                rerank=payload.rerank,
+                rerank_model=payload.rerank_model,
+                rerank_top_n=payload.rerank_top_n,
+                mmr=payload.mmr,
+                mmr_lambda=payload.mmr_lambda,
+                mmr_threshold=payload.mmr_threshold,
+                include_images=payload.include_images,
+                content_type_filter=payload.content_type_filter,
+                multimodal_rerank=payload.multimodal_rerank,
+            )
+        else:
+            results, meta = await svc.retrieve(
+                user=user,
+                dataset_id=dataset_id,
+                query=payload.query,
+                top_k=payload.top_k,
+                mode=payload.mode,
+                document_id=payload.document_id,
+                dense_weight=payload.dense_weight,
+                bm25_weight=payload.bm25_weight,
+                fusion_method=payload.fusion_method,
+                alpha=payload.alpha,
+                score_threshold=payload.score_threshold,
+                vector_top_k=payload.vector_top_k,
+                keyword_top_k=payload.keyword_top_k,
+                candidate_top_k=payload.candidate_top_k,
+                keyword_candidate_k=payload.keyword_candidate_k,
+                fusion=payload.fusion,
+                rrf_k=payload.rrf_k,
+                rrf_weights=payload.rrf_weights,
+                rerank=payload.rerank,
+                rerank_model=payload.rerank_model,
+                rerank_top_n=payload.rerank_top_n,
+                mmr=payload.mmr,
+                mmr_lambda=payload.mmr_lambda,
+                mmr_threshold=payload.mmr_threshold,
+            )
+
+        # Build response with multimodal fields
         return {
             "results": [
                 {
@@ -380,6 +414,11 @@ async def retrieve(
                     "score": r.score,
                     "text": r.text,
                     "metadata": r.metadata,
+                    # P3: Multimodal fields
+                    "content_type": getattr(r, "content_type", "text"),
+                    "image_url": getattr(r, "image_url", None),
+                    "vlm_description": getattr(r, "vlm_description", None),
+                    "associated_images": getattr(r, "associated_images", []),
                 }
                 for r in results
             ],

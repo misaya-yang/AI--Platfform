@@ -409,11 +409,18 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
         return all_vectors
 
-    async def embed_images(self, images: List[bytes]) -> List[List[float]]:
+    async def embed_images(
+        self,
+        images: List[bytes],
+        max_concurrent: int = 5,
+    ) -> List[List[float]]:
         """Embed images using DashScope multimodal embedding API.
+
+        Supports concurrent processing with configurable parallelism.
 
         Args:
             images: List of image bytes (JPEG, PNG, GIF, BMP, WebP)
+            max_concurrent: Maximum concurrent API calls (default: 5)
 
         Returns:
             List of embedding vectors (1024 dimensions each)
@@ -424,52 +431,62 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         if not images:
             return []
 
-        all_vectors: List[List[float]] = []
-
+        # Validate all image sizes first
         for i, image_bytes in enumerate(images):
-            # Validate image size
             if len(image_bytes) > self.MAX_IMAGE_SIZE_BYTES:
                 raise EmbeddingError(
                     f"Image {i} exceeds max size: {len(image_bytes)} bytes > {self.MAX_IMAGE_SIZE_BYTES} bytes (3MB)"
                 )
 
-            try:
-                # Detect media type and convert to data URI
-                media_type = self._detect_media_type(image_bytes)
-                data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
+        # Use semaphore for concurrent rate limiting
+        semaphore = asyncio.Semaphore(max_concurrent)
 
-                # Call DashScope multimodal embedding API
-                resp = await asyncio.to_thread(
-                    self._MultiModalEmbedding.call,
-                    model=self.model,
-                    input=[{"image": data_uri}],
-                    api_key=self.api_key,
-                )
+        async def embed_single_image(idx: int, image_bytes: bytes) -> List[float]:
+            """Embed a single image with semaphore-based rate limiting."""
+            async with semaphore:
+                try:
+                    # Detect media type and convert to data URI
+                    media_type = self._detect_media_type(image_bytes)
+                    data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
 
-                status_code = int(getattr(resp, "status_code", 0) or 0)
-                if status_code and status_code >= 400:
-                    code = getattr(resp, "code", "") or ""
-                    message = getattr(resp, "message", "") or ""
-                    raise EmbeddingError(
-                        f"DashScope multimodal image embedding failed for image {i}: "
-                        f"{status_code} {code} {message}"
+                    # Call DashScope multimodal embedding API
+                    resp = await asyncio.to_thread(
+                        self._MultiModalEmbedding.call,
+                        model=self.model,
+                        input=[{"image": data_uri}],
+                        api_key=self.api_key,
                     )
 
-                output = getattr(resp, "output", None)
-                vectors = self._parse_multimodal_output(output)
-                all_vectors.extend(vectors)
+                    status_code = int(getattr(resp, "status_code", 0) or 0)
+                    if status_code and status_code >= 400:
+                        code = getattr(resp, "code", "") or ""
+                        message = getattr(resp, "message", "") or ""
+                        raise EmbeddingError(
+                            f"DashScope multimodal image embedding failed for image {idx}: "
+                            f"{status_code} {code} {message}"
+                        )
 
-            except EmbeddingError:
-                raise
-            except Exception as exc:
-                raise EmbeddingError(
-                    f"DashScope multimodal image embedding error for image {i}: {exc}"
-                ) from exc
+                    output = getattr(resp, "output", None)
+                    vectors = self._parse_multimodal_output(output)
+                    if not vectors:
+                        raise EmbeddingError(f"No embedding returned for image {idx}")
+                    return vectors[0]
+
+                except EmbeddingError:
+                    raise
+                except Exception as exc:
+                    raise EmbeddingError(
+                        f"DashScope multimodal image embedding error for image {idx}: {exc}"
+                    ) from exc
+
+        # Launch all embedding tasks concurrently (limited by semaphore)
+        tasks = [embed_single_image(i, img) for i, img in enumerate(images)]
+        all_vectors = await asyncio.gather(*tasks)
 
         if self._dimension is None and all_vectors:
             self._dimension = len(all_vectors[0])
 
-        return all_vectors
+        return list(all_vectors)
 
     async def embed_image_and_text(
         self,

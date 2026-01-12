@@ -83,7 +83,7 @@ class ConfluenceSpaceBindingCreateSchema(BaseModel):
 
 
 class ConfluenceSpaceBindingUpdateSchema(BaseModel):
-    """Update a space binding"""
+    """Update a space binding (including sync mode configuration)"""
     model_config = ConfigDict(extra="allow")
 
     root_page_id: Optional[str] = None
@@ -92,6 +92,10 @@ class ConfluenceSpaceBindingUpdateSchema(BaseModel):
     max_depth: Optional[int] = Field(default=None, ge=1, le=100)
     include_attachments: Optional[bool] = None
     include_comments: Optional[bool] = None
+    # Sync mode configuration (binding-level)
+    sync_mode: Optional[str] = Field(default=None, description="Sync mode: manual | polling")
+    polling_interval_minutes: Optional[int] = Field(default=None, ge=5, le=1440, description="Polling interval in minutes")
+    sync_enabled: Optional[bool] = Field(default=None, description="Enable/disable auto sync")
 
 
 class ConfluenceSpaceBindingResponseSchema(BaseModel):
@@ -120,6 +124,12 @@ class ConfluenceSpaceBindingResponseSchema(BaseModel):
     updated_at: Optional[str] = None
     # 创建绑定时自动触发的首次同步任务 ID
     initial_sync_task_id: Optional[str] = None
+    # Sync mode configuration (binding-level)
+    sync_mode: str = "manual"
+    polling_interval_minutes: int = 60
+    last_incremental_sync_at: Optional[str] = None
+    sync_enabled: bool = True
+    next_sync_at: Optional[str] = None
 
 
 # ============================================================
@@ -267,6 +277,22 @@ class ConfluencePageRecordSchema(BaseModel):
     author: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    # Page-level sync configuration (overrides binding defaults)
+    sync_mode: Optional[str] = None  # NULL=inherit, manual, polling
+    polling_interval_minutes: Optional[int] = None
+    sync_enabled: bool = True
+    next_sync_at: Optional[str] = None
+    sync_priority: int = 0
+
+
+class ConfluencePageSyncConfigUpdateSchema(BaseModel):
+    """Update page-level sync configuration"""
+    model_config = ConfigDict(extra="allow")
+
+    sync_mode: Optional[str] = Field(default=None, description="Sync mode: NULL(inherit) | manual | polling")
+    polling_interval_minutes: Optional[int] = Field(default=None, ge=5, le=1440)
+    sync_enabled: Optional[bool] = None
+    sync_priority: Optional[int] = Field(default=None, ge=0, le=100)
 
 
 class ConfluencePageListResponseSchema(BaseModel):

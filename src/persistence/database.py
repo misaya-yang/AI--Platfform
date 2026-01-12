@@ -5,6 +5,7 @@ PostgreSQL 数据库存储层
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -32,6 +33,8 @@ class DatabaseStorage:
         auto_init: bool = True,
         schema_path: Optional[str] = None,
         permission_cache_ttl_seconds: int = 60,
+        pool_min_size: int = 2,
+        pool_max_size: int = 10,
     ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
@@ -40,34 +43,40 @@ class DatabaseStorage:
             Path(__file__).resolve().parent.parent.parent / "database" / "schema.sql"
         )
         self._pool: Optional[Any] = None
+        self._pool_min_size = max(int(pool_min_size), 1)
+        self._pool_max_size = max(int(pool_max_size), self._pool_min_size)
         self._permission_cache: Dict[str, tuple[List[str], float]] = {}
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
+        self._permission_cache_lock = asyncio.Lock()
 
-    def _get_cached_permissions(self, user_id: str) -> Optional[List[str]]:
+    async def _get_cached_permissions(self, user_id: str) -> Optional[List[str]]:
         if self._permission_cache_ttl_seconds <= 0:
             return None
-        entry = self._permission_cache.get(user_id)
-        if not entry:
-            return None
-        permissions, expires_at = entry
-        if time.time() >= expires_at:
-            self._permission_cache.pop(user_id, None)
-            return None
-        return list(permissions)
+        async with self._permission_cache_lock:
+            entry = self._permission_cache.get(user_id)
+            if not entry:
+                return None
+            permissions, expires_at = entry
+            if time.time() >= expires_at:
+                self._permission_cache.pop(user_id, None)
+                return None
+            return list(permissions)
 
-    def _set_cached_permissions(self, user_id: str, permissions: List[str]) -> None:
+    async def _set_cached_permissions(self, user_id: str, permissions: List[str]) -> None:
         if self._permission_cache_ttl_seconds <= 0:
             return
-        self._permission_cache[user_id] = (
-            list(permissions),
-            time.time() + self._permission_cache_ttl_seconds,
-        )
+        async with self._permission_cache_lock:
+            self._permission_cache[user_id] = (
+                list(permissions),
+                time.time() + self._permission_cache_ttl_seconds,
+            )
 
-    def _invalidate_permission_cache(self, user_id: Optional[str] = None) -> None:
-        if user_id:
-            self._permission_cache.pop(user_id, None)
-        else:
-            self._permission_cache.clear()
+    async def _invalidate_permission_cache(self, user_id: Optional[str] = None) -> None:
+        async with self._permission_cache_lock:
+            if user_id:
+                self._permission_cache.pop(user_id, None)
+            else:
+                self._permission_cache.clear()
 
     async def connect(self) -> None:
         """建立数据库连接池"""
@@ -75,7 +84,12 @@ class DatabaseStorage:
             return
         if not HAS_ASYNCPG:
             raise RuntimeError("asyncpg is not installed. Run: pip install asyncpg")
-        self._pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=10)
+        self._pool = await asyncpg.create_pool(
+            self.dsn,
+            min_size=self._pool_min_size,
+            max_size=self._pool_max_size,
+        )
+        logger.info(f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}")
         if self.auto_init:
             await self._auto_initialize_schema()
             await self._auto_apply_account_permission_migration()
@@ -1142,14 +1156,33 @@ class DatabaseStorage:
                 rows,
             )
 
-    async def delete_segments_by_document(self, document_id: str) -> int:
-        """删除指定文档下的所有 Segment"""
+    async def delete_segments_by_document(
+        self, document_id: str, exclude_ids: Optional[List[str]] = None
+    ) -> int:
+        """
+        删除指定文档下的 Segment
+
+        Args:
+            document_id: 文档 ID
+            exclude_ids: 要排除的 segment ID 列表（用于无感更新：先插入新的，再删除旧的）
+
+        Returns:
+            删除的记录数
+        """
         if not self._pool:
             return 0
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM segments WHERE document_id = $1", document_id
-            )
+            if exclude_ids:
+                # 删除旧的 segments，保留新插入的
+                result = await conn.execute(
+                    "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[])",
+                    document_id,
+                    exclude_ids,
+                )
+            else:
+                result = await conn.execute(
+                    "DELETE FROM segments WHERE document_id = $1", document_id
+                )
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
             return 0
@@ -1456,6 +1489,266 @@ class DatabaseStorage:
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
             return 0
+
+    # =========================================================================
+    # Segment Image Associations (segment_images) - P3 Multimodal RAG
+    # =========================================================================
+
+    async def add_segment_image_association(
+        self,
+        segment_id: str,
+        image_segment_id: str,
+        position: int = 0,
+        proximity_score: float = 1.0,
+        char_offset: int = 0,
+        page_number: Optional[int] = None,
+    ) -> bool:
+        """Associate an image segment with a text segment.
+
+        Args:
+            segment_id: The text segment ID
+            image_segment_id: The image segment ID to associate
+            position: Position of image in the chunk context (0-indexed)
+            proximity_score: Relevance score [0,1] - 1.0 = inline, 0.5 = same page
+            char_offset: Character offset in source document
+            page_number: Page number in multi-page documents
+
+        Returns:
+            True if association was created/updated
+        """
+        if not self._pool:
+            return False
+
+        async with self._pool.acquire() as conn:
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO segment_images (
+                        segment_id, image_segment_id, position,
+                        proximity_score, char_offset, page_number
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (segment_id, image_segment_id) DO UPDATE SET
+                        position = EXCLUDED.position,
+                        proximity_score = EXCLUDED.proximity_score,
+                        char_offset = EXCLUDED.char_offset,
+                        page_number = EXCLUDED.page_number
+                    """,
+                    segment_id,
+                    image_segment_id,
+                    position,
+                    proximity_score,
+                    char_offset,
+                    page_number,
+                )
+                return True
+            except Exception:
+                return False
+
+    async def add_segment_image_associations_batch(
+        self,
+        associations: List[Dict[str, Any]],
+    ) -> int:
+        """Add multiple image associations in batch.
+
+        Args:
+            associations: List of dicts with keys:
+                - segment_id: Text segment ID
+                - image_segment_id: Image segment ID
+                - position: Position (optional, default 0)
+                - proximity_score: Score (optional, default 1.0)
+                - char_offset: Offset (optional, default 0)
+                - page_number: Page (optional)
+
+        Returns:
+            Number of associations created/updated
+        """
+        if not self._pool or not associations:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            count = 0
+            # Use a transaction for batch insert
+            async with conn.transaction():
+                for assoc in associations:
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO segment_images (
+                                segment_id, image_segment_id, position,
+                                proximity_score, char_offset, page_number
+                            ) VALUES ($1, $2, $3, $4, $5, $6)
+                            ON CONFLICT (segment_id, image_segment_id) DO UPDATE SET
+                                position = EXCLUDED.position,
+                                proximity_score = EXCLUDED.proximity_score,
+                                char_offset = EXCLUDED.char_offset,
+                                page_number = EXCLUDED.page_number
+                            """,
+                            assoc.get("segment_id"),
+                            assoc.get("image_segment_id"),
+                            assoc.get("position", 0),
+                            assoc.get("proximity_score", 1.0),
+                            assoc.get("char_offset", 0),
+                            assoc.get("page_number"),
+                        )
+                        count += 1
+                    except Exception:
+                        continue
+            return count
+
+    async def get_segment_associated_images(
+        self, segment_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get all images associated with a text segment.
+
+        Args:
+            segment_id: The text segment ID
+
+        Returns:
+            List of associated image info including image segment details
+        """
+        if not self._pool:
+            return []
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    si.image_segment_id,
+                    si.position,
+                    si.proximity_score,
+                    si.char_offset,
+                    si.page_number,
+                    s.image_url AS storage_url,
+                    s.image_filename AS filename,
+                    s.image_media_type AS media_type,
+                    s.text AS vlm_description
+                FROM segment_images si
+                JOIN segments s ON s.segment_id = si.image_segment_id
+                WHERE si.segment_id = $1
+                ORDER BY si.proximity_score DESC, si.position
+                """,
+                segment_id,
+            )
+            return [dict(row) for row in rows]
+
+    async def get_segment_associations_batch(
+        self, segment_ids: List[str]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Get associated images for multiple segments efficiently.
+
+        Args:
+            segment_ids: List of text segment IDs
+
+        Returns:
+            Dict mapping segment_id -> list of associated image info
+        """
+        if not self._pool or not segment_ids:
+            return {}
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    si.segment_id,
+                    si.image_segment_id,
+                    si.position,
+                    si.proximity_score,
+                    si.char_offset,
+                    si.page_number,
+                    s.image_url AS storage_url,
+                    s.image_filename AS filename,
+                    s.image_media_type AS media_type,
+                    s.text AS vlm_description
+                FROM segment_images si
+                JOIN segments s ON s.segment_id = si.image_segment_id
+                WHERE si.segment_id = ANY($1)
+                ORDER BY si.segment_id, si.proximity_score DESC, si.position
+                """,
+                segment_ids,
+            )
+
+            result: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in segment_ids}
+            for row in rows:
+                seg_id = row["segment_id"]
+                if seg_id in result:
+                    result[seg_id].append(dict(row))
+            return result
+
+    async def delete_segment_image_associations(
+        self, segment_id: str
+    ) -> int:
+        """Delete all image associations for a text segment.
+
+        Args:
+            segment_id: The text segment ID
+
+        Returns:
+            Number of associations deleted
+        """
+        if not self._pool:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM segment_images WHERE segment_id = $1",
+                segment_id,
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1])
+            return 0
+
+    async def delete_image_associations_by_document(
+        self, document_id: str
+    ) -> int:
+        """Delete all image associations for segments in a document.
+
+        Args:
+            document_id: The document ID
+
+        Returns:
+            Number of associations deleted
+        """
+        if not self._pool:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM segment_images
+                WHERE segment_id IN (
+                    SELECT segment_id FROM segments WHERE document_id = $1
+                )
+                """,
+                document_id,
+            )
+            if result.startswith("DELETE "):
+                return int(result.split()[-1])
+            return 0
+
+    async def update_segment_image_flags(
+        self, segment_id: str
+    ) -> None:
+        """Update has_images and image_count flags for a segment.
+
+        This should be called after adding/removing image associations.
+
+        Args:
+            segment_id: The text segment ID
+        """
+        if not self._pool:
+            return
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE segments
+                SET
+                    has_images = (SELECT COUNT(*) > 0 FROM segment_images WHERE segment_id = $1),
+                    image_count = (SELECT COUNT(*) FROM segment_images WHERE segment_id = $1)
+                WHERE segment_id = $1
+                """,
+                segment_id,
+            )
 
     # =========================================================================
     # API Key 表 (api_keys)
@@ -2619,7 +2912,9 @@ class DatabaseStorage:
             "space_id", "space_name", "include_patterns", "exclude_patterns",
             "max_depth", "include_attachments", "include_comments", "status",
             "last_sync_at", "synced_page_count", "total_page_count", "last_error",
-            "root_page_id", "root_page_title"
+            "root_page_id", "root_page_title",
+            "sync_mode", "polling_interval_minutes", "last_incremental_sync_at",  # binding 级别同步配置
+            "sync_enabled", "next_sync_at",  # 调度器相关
         }
 
         # JSON 字段需要序列化
@@ -2782,20 +3077,35 @@ class DatabaseStorage:
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """列出 Confluence 页面记录"""
+        """
+        列出 Confluence 页面记录
+
+        返回结果包含关联文档的处理状态:
+        - document_status: 文档的实际处理状态 (uploaded/parsing/embedding/completed/failed)
+        - document_progress: 文档处理进度 (0-100)
+        """
         if not self._pool:
             return []
 
-        query = "SELECT * FROM confluence_pages WHERE binding_id = $1"
+        # JOIN documents 表获取关联文档的处理状态
+        query = """
+            SELECT
+                cp.*,
+                d.status AS document_status,
+                d.progress AS document_progress
+            FROM confluence_pages cp
+            LEFT JOIN documents d ON cp.document_id = d.document_id
+            WHERE cp.binding_id = $1
+        """
         params: List[Any] = [binding_id]
         param_idx = 2
 
         if status:
-            query += f" AND status = ${param_idx}"
+            query += f" AND cp.status = ${param_idx}"
             params.append(status)
             param_idx += 1
 
-        query += f" ORDER BY title ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        query += f" ORDER BY cp.title ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
@@ -2890,6 +3200,143 @@ class DatabaseStorage:
                 WHERE binding_id = $1 AND page_id = $2
             """, binding_id, page_id)
             return self._row_to_dict(row) if row else None
+
+    async def update_confluence_page_sync_config(
+        self,
+        page_id: str,
+        updates: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """更新页面级同步配置"""
+        if not self._pool:
+            return None
+
+        allowed_fields = {
+            "sync_mode", "polling_interval_minutes", "sync_enabled",
+            "next_sync_at", "sync_priority",
+        }
+
+        set_clauses = ["updated_at = NOW()"]
+        params: List[Any] = []
+        param_idx = 1
+
+        for key, value in updates.items():
+            if key in allowed_fields:
+                set_clauses.append(f"{key} = ${param_idx}")
+                params.append(value)
+                param_idx += 1
+
+        if len(set_clauses) == 1:  # Only updated_at
+            return None
+
+        params.append(page_id)
+        query = f"""
+            UPDATE confluence_pages
+            SET {', '.join(set_clauses)}
+            WHERE id = ${param_idx}
+            RETURNING *
+        """
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+            return self._row_to_dict(row) if row else None
+
+    async def get_bindings_due_for_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """获取需要同步的绑定列表（next_sync_at <= now）"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_space_bindings
+                WHERE sync_enabled = TRUE
+                  AND sync_mode = 'polling'
+                  AND next_sync_at IS NOT NULL
+                  AND next_sync_at <= NOW()
+                ORDER BY next_sync_at ASC
+                LIMIT $1
+            """, limit)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_pages_due_for_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """获取需要同步的页面列表（有独立配置且 next_sync_at <= now）"""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_pages
+                WHERE sync_enabled = TRUE
+                  AND sync_mode = 'polling'
+                  AND next_sync_at IS NOT NULL
+                  AND next_sync_at <= NOW()
+                ORDER BY sync_priority DESC, next_sync_at ASC
+                LIMIT $1
+            """, limit)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_all_polling_pages(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """
+        获取所有启用轮询的页面（用于调度器初始化）
+
+        与 get_pages_due_for_sync 不同，此方法返回所有启用轮询的页面，
+        无论 next_sync_at 是否已到期。调度器会根据 next_sync_at 决定何时执行。
+
+        Returns:
+            所有 sync_enabled=TRUE AND sync_mode='polling' 的页面
+        """
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM confluence_pages
+                WHERE sync_enabled = TRUE
+                  AND sync_mode = 'polling'
+                ORDER BY sync_priority DESC, next_sync_at ASC NULLS FIRST
+                LIMIT $1
+            """, limit)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def schedule_next_sync(
+        self,
+        table: str,
+        id_field: str,
+        id_value: str,
+        interval_minutes: int,
+    ) -> None:
+        """设置下次同步时间
+
+        Args:
+            table: 表名（仅支持白名单中的表）
+            id_field: ID 字段名（仅支持白名单中的字段）
+            id_value: ID 值
+            interval_minutes: 间隔分钟数
+
+        Raises:
+            ValueError: 如果表名或字段名不在白名单中
+        """
+        if not self._pool:
+            return
+
+        # 白名单验证，防止 SQL 注入
+        allowed_tables = {"confluence_space_bindings", "confluence_pages"}
+        allowed_id_fields = {"binding_id", "id"}
+
+        if table not in allowed_tables:
+            raise ValueError(f"Invalid table name: {table}")
+        if id_field not in allowed_id_fields:
+            raise ValueError(f"Invalid id field: {id_field}")
+
+        # 验证 interval_minutes 是有效的整数
+        interval_minutes = int(interval_minutes)
+        if interval_minutes < 0 or interval_minutes > 10080:  # 最大 7 天
+            raise ValueError(f"Invalid interval_minutes: {interval_minutes}")
+
+        async with self._pool.acquire() as conn:
+            # 使用参数化的 interval 值
+            await conn.execute(f"""
+                UPDATE {table}
+                SET next_sync_at = NOW() + $1 * INTERVAL '1 minute',
+                    updated_at = NOW()
+                WHERE {id_field} = $2
+            """, interval_minutes, id_value)
 
     async def upsert_confluence_page(
         self,
@@ -3419,7 +3866,7 @@ class DatabaseStorage:
         """获取用户的所有权限（角色权限 + 额外权限）"""
         if not self._pool:
             return []
-        cached = self._get_cached_permissions(user_id)
+        cached = await self._get_cached_permissions(user_id)
         if cached is not None:
             return cached
         async with self._pool.acquire() as conn:
@@ -3489,7 +3936,7 @@ class DatabaseStorage:
                 pass
 
             permissions = list(permissions_set)
-            self._set_cached_permissions(user_id, permissions)
+            await self._set_cached_permissions(user_id, permissions)
             return permissions
 
     async def list_users_paginated(
@@ -3595,7 +4042,7 @@ class DatabaseStorage:
                     granted_at = NOW(),
                     granted_by = EXCLUDED.granted_by
             """, user_id, role_name, granted_by)
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
 
     async def remove_user_role(self, user_id: str, role_name: str) -> bool:
         """移除用户角色"""
@@ -3606,7 +4053,7 @@ class DatabaseStorage:
                 "DELETE FROM user_roles WHERE user_id = $1 AND role_name = $2",
                 user_id, role_name
             )
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
         return result == "DELETE 1"
 
     async def update_user_roles(
@@ -3629,7 +4076,7 @@ class DatabaseStorage:
                 "UPDATE users SET roles = $1, updated_at = NOW() WHERE user_id = $2",
                 roles, user_id
             )
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
 
     async def get_user_roles(self, user_id: str) -> List[str]:
         """获取用户的所有角色"""
@@ -3687,7 +4134,7 @@ class DatabaseStorage:
                     VALUES ($1, $2)
                     ON CONFLICT DO NOTHING
                 """, role_name, perm)
-        self._invalidate_permission_cache()
+        await self._invalidate_permission_cache()
 
     async def update_role(
         self, role_name: str, description: Optional[str], permissions: Optional[List[str]]
@@ -3730,7 +4177,7 @@ class DatabaseStorage:
                         VALUES ($1, $2)
                         ON CONFLICT DO NOTHING
                     """, role_name, perm)
-        self._invalidate_permission_cache()
+        await self._invalidate_permission_cache()
 
     async def delete_role(self, role_name: str) -> bool:
         """删除角色"""
@@ -3750,7 +4197,7 @@ class DatabaseStorage:
                 "DELETE FROM rbac_roles WHERE role_name = $1 AND is_system = FALSE",
                 role_name
             )
-            self._invalidate_permission_cache()
+            await self._invalidate_permission_cache()
             return result == "DELETE 1"
 
     async def list_permissions(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -3827,7 +4274,7 @@ class DatabaseStorage:
         """给用户添加额外权限"""
         if not self._pool:
             return False
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
         async with self._pool.acquire() as conn:
             try:
                 await conn.execute("""
@@ -3847,7 +4294,7 @@ class DatabaseStorage:
         """移除用户的额外权限"""
         if not self._pool:
             return False
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
         async with self._pool.acquire() as conn:
             try:
                 result = await conn.execute("""
@@ -3867,7 +4314,7 @@ class DatabaseStorage:
         """更新用户的额外权限（替换所有）"""
         if not self._pool:
             return
-        self._invalidate_permission_cache(user_id)
+        await self._invalidate_permission_cache(user_id)
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 # 删除现有的额外权限

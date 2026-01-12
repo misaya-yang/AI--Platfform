@@ -313,6 +313,44 @@
       "polling": "定时轮询",
       "interval": "{{minutes}}分钟"
     },
+    "syncConfig": {
+      "title": "同步配置",
+      "description": "配置 {{spaceName}} 的同步方式",
+      "mode": "同步模式",
+      "manual": "手动同步",
+      "polling": "自动同步",
+      "manualDesc": "需要时手动触发同步，完全控制同步时机",
+      "pollingDesc": "系统定时检测 Confluence 变更并自动同步",
+      "interval": "同步间隔",
+      "intervals": {
+        "30min": "每 30 分钟",
+        "hourly": "每小时",
+        "3hours": "每 3 小时",
+        "6hours": "每 6 小时",
+        "12hours": "每 12 小时",
+        "daily": "每天"
+      },
+      "configure": "配置同步",
+      "updateSuccess": "同步配置已更新",
+      "updateError": "更新失败，请重试"
+    },
+    "pageSyncConfig": {
+      "title": "页面同步配置",
+      "description": "配置 \"{{pageTitle}}\" 的独立同步设置",
+      "configure": "配置页面同步",
+      "enabled": "启用同步",
+      "enabledDesc": "关闭后此页面将不会被自动同步",
+      "mode": "同步模式",
+      "inherit": "继承",
+      "inheritDesc": "使用空间绑定的同步配置",
+      "priority": "同步优先级",
+      "priorityDesc": "优先级高的页面将优先同步",
+      "priorities": {
+        "normal": "普通",
+        "high": "高",
+        "critical": "关键"
+      }
+    },
     "actions": {
       "test": "测试连接",
       "sync": "同步",
@@ -506,6 +544,8 @@
       "status": {
         "synced": "已同步",
         "pending": "待同步",
+        "processing": "处理中",
+        "uploaded": "已上传",
         "error": "错误",
         "deleted": "已删除"
       },

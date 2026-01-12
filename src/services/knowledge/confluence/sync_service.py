@@ -259,6 +259,29 @@ class ConfluenceSyncService:
 
         return page_record
 
+    async def get_page(
+        self,
+        page_record_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        获取页面记录并验证访问权限
+
+        公开方法，封装 _verify_page_access 以供 API 层使用
+
+        Args:
+            page_record_id: 页面记录 ID
+            user: 用户上下文
+
+        Returns:
+            page 数据
+
+        Raises:
+            ConfluenceSyncError: page 不存在
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        return await self._verify_page_access(page_record_id, user)
+
     async def _get_image_processor(
         self, connection_id: str, max_image_size: Optional[int] = None
     ) -> Optional["ConfluenceImageProcessor"]:
@@ -1464,6 +1487,7 @@ class ConfluenceSyncService:
             "root_page_id", "include_patterns", "exclude_patterns", "max_depth",
             "include_attachments", "include_comments", "status",
             "sync_images", "image_max_size_bytes",  # 图片同步配置
+            "sync_mode", "polling_interval_minutes", "sync_enabled",  # 同步模式配置 (binding 级别)
         }
         filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
 
@@ -2626,6 +2650,8 @@ class ConfluenceSyncService:
         """
         获取所有需要轮询同步的绑定
 
+        优先使用绑定级别的 sync_mode 配置，如果没有设置则回退到连接级别的配置。
+
         Returns:
             启用了轮询的绑定列表
         """
@@ -2633,14 +2659,27 @@ class ConfluenceSyncService:
         polling_bindings = []
 
         for binding in all_bindings:
-            # 获取关联的连接配置
-            connection = await self.db.get_confluence_connection(binding["connection_id"])
-            if not connection:
+            # 检查绑定是否禁用同步
+            if binding.get("sync_enabled") is False:
                 continue
 
-            # 检查连接是否启用轮询
-            if connection.get("sync_mode") == "polling" and connection.get("status") == "active":
-                binding["polling_interval_minutes"] = connection.get("polling_interval_minutes", 60)
+            # 优先使用绑定级别的 sync_mode
+            binding_sync_mode = binding.get("sync_mode")
+            binding_interval = binding.get("polling_interval_minutes")
+
+            if binding_sync_mode == "polling":
+                # 绑定级别明确配置为 polling
+                binding["polling_interval_minutes"] = binding_interval or 60
                 polling_bindings.append(binding)
+            elif binding_sync_mode is None:
+                # 绑定级别未配置，回退到连接级别
+                connection = await self.db.get_confluence_connection(binding["connection_id"])
+                if not connection:
+                    continue
+
+                if connection.get("sync_mode") == "polling" and connection.get("status") == "active":
+                    binding["polling_interval_minutes"] = connection.get("polling_interval_minutes", 60)
+                    polling_bindings.append(binding)
+            # 如果 binding_sync_mode == "manual"，则不加入轮询列表
 
         return polling_bindings

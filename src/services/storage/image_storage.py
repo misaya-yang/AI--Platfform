@@ -53,6 +53,18 @@ class StorageBackend(str, Enum):
 
 
 @dataclass
+class ImageUploadParams:
+    """Parameters for batch image upload"""
+    tenant_id: str
+    document_id: str
+    attachment_id: str
+    filename: str
+    content: bytes
+    content_type: str
+    metadata: Optional[Dict[str, str]] = None
+
+
+@dataclass
 class StorageConfig:
     """Storage configuration"""
     backend: StorageBackend = StorageBackend.LOCAL
@@ -167,6 +179,31 @@ class BaseStorageBackend(ABC):
             URL for accessing the content
         """
         pass
+
+    async def generate_presigned_upload_url(
+        self,
+        key: str,
+        content_type: str,
+        expiry_seconds: int = 900,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Generate a presigned URL for direct upload (client-side upload).
+
+        This allows clients to upload directly to storage without going through
+        the backend, reducing server load and enabling larger file uploads.
+
+        Args:
+            key: Storage key (path) where the file will be stored
+            content_type: Expected MIME type of the file
+            expiry_seconds: URL expiry time in seconds (default 15 minutes)
+            metadata: Optional metadata to attach to the object
+
+        Returns:
+            Dictionary with 'url' and optional 'fields' for POST/PUT upload,
+            or None if presigned URLs are not supported by this backend.
+        """
+        return None  # Default: not supported
 
     async def close(self) -> None:
         """
@@ -386,6 +423,104 @@ class S3StorageBackend(BaseStorageBackend):
             return f"{self.endpoint_url}/{self.bucket}/{key}"
         return f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{key}"
 
+    async def generate_presigned_upload_url(
+        self,
+        key: str,
+        content_type: str,
+        expiry_seconds: int = 900,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Generate a presigned URL for direct upload to S3.
+
+        Uses PUT method for simple uploads. For multipart uploads with additional
+        form fields, use generate_presigned_post instead.
+
+        Args:
+            key: Storage key (path) where the file will be stored
+            content_type: Expected MIME type of the file
+            expiry_seconds: URL expiry time in seconds (default 15 minutes)
+            metadata: Optional metadata to attach to the object
+
+        Returns:
+            Dictionary with 'url', 'method', and 'headers' for PUT upload
+        """
+        client = await self._get_client()
+
+        # Build params for presigned URL
+        params = {
+            "Bucket": self.bucket,
+            "Key": key,
+            "ContentType": content_type,
+        }
+
+        # Add metadata if provided
+        if metadata:
+            params["Metadata"] = {
+                _sanitize_for_s3_metadata(k): _sanitize_for_s3_metadata(v)
+                for k, v in metadata.items()
+            }
+
+        try:
+            # Generate presigned PUT URL
+            presigned_url = await client.generate_presigned_url(
+                "put_object",
+                Params=params,
+                ExpiresIn=expiry_seconds,
+            )
+
+            return {
+                "url": presigned_url,
+                "method": "PUT",
+                "headers": {
+                    "Content-Type": content_type,
+                },
+                "key": key,
+                "bucket": self.bucket,
+                "expiry_seconds": expiry_seconds,
+            }
+        except Exception as e:
+            logger.error(f"Failed to generate presigned URL for {key}: {e}")
+            return None
+
+    async def generate_presigned_download_url(
+        self,
+        key: str,
+        expiry_seconds: int = 3600,
+        filename: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Generate a presigned URL for downloading from S3.
+
+        Args:
+            key: Storage key
+            expiry_seconds: URL expiry time in seconds
+            filename: Optional filename for Content-Disposition header
+
+        Returns:
+            Presigned download URL or None if failed
+        """
+        client = await self._get_client()
+
+        params = {
+            "Bucket": self.bucket,
+            "Key": key,
+        }
+
+        if filename:
+            params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+
+        try:
+            presigned_url = await client.generate_presigned_url(
+                "get_object",
+                Params=params,
+                ExpiresIn=expiry_seconds,
+            )
+            return presigned_url
+        except Exception as e:
+            logger.error(f"Failed to generate presigned download URL for {key}: {e}")
+            return None
+
 
 class OSSStorageBackend(BaseStorageBackend):
     """Alibaba Cloud OSS storage backend"""
@@ -560,11 +695,120 @@ class ImageStorageService:
             "content_hash": hashlib.md5(content).hexdigest(),
         }
         if metadata:
-            image_metadata.update(metadata)
+            # Sanitize all incoming metadata values to ensure S3 compatibility
+            sanitized_metadata = {
+                k: _sanitize_for_s3_metadata(str(v)) if isinstance(v, str) else str(v)
+                for k, v in metadata.items()
+            }
+            image_metadata.update(sanitized_metadata)
 
         url = await self._backend.upload(key, content, content_type, image_metadata)
         logger.info(f"Uploaded image {filename} ({len(content)} bytes) -> {key}")
         return url
+
+    async def upload_images_batch(
+        self,
+        images: List[ImageUploadParams],
+        max_concurrent: int = 10,
+    ) -> List[str]:
+        """
+        Upload multiple images concurrently with rate limiting.
+
+        Args:
+            images: List of ImageUploadParams for batch upload
+            max_concurrent: Maximum concurrent uploads (default: 10)
+
+        Returns:
+            List of storage URLs for each uploaded image
+        """
+        if not images:
+            return []
+
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def upload_with_limit(params: ImageUploadParams) -> str:
+            """Upload a single image with semaphore-based rate limiting."""
+            async with semaphore:
+                return await self.upload_image(
+                    tenant_id=params.tenant_id,
+                    document_id=params.document_id,
+                    attachment_id=params.attachment_id,
+                    filename=params.filename,
+                    content=params.content,
+                    content_type=params.content_type,
+                    metadata=params.metadata,
+                )
+
+        # Launch all uploads concurrently (limited by semaphore)
+        tasks = [upload_with_limit(params) for params in images]
+        urls = await asyncio.gather(*tasks)
+
+        logger.info(f"Batch uploaded {len(urls)} images (max_concurrent={max_concurrent})")
+        return list(urls)
+
+    async def generate_presigned_upload_url(
+        self,
+        tenant_id: str,
+        document_id: str,
+        attachment_id: str,
+        filename: str,
+        content_type: str,
+        expiry_seconds: int = 900,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Generate a presigned URL for direct upload to storage.
+
+        This allows frontend to upload directly to S3/OSS without going through
+        the backend, reducing server load and enabling larger file uploads.
+
+        Args:
+            tenant_id: Tenant ID
+            document_id: Document ID
+            attachment_id: Attachment ID
+            filename: Original filename
+            content_type: MIME type of the file
+            expiry_seconds: URL expiry time (default 15 minutes)
+            metadata: Optional metadata to attach
+
+        Returns:
+            Dictionary with upload URL and instructions, or None if not supported
+        """
+        key = self._generate_key(tenant_id, document_id, attachment_id, filename)
+
+        # Add standard metadata
+        full_metadata = {
+            "tenant-id": tenant_id,
+            "document-id": document_id,
+            "attachment-id": attachment_id,
+            "original-filename": filename,
+        }
+        if metadata:
+            full_metadata.update(metadata)
+
+        result = await self._backend.generate_presigned_upload_url(
+            key=key,
+            content_type=content_type,
+            expiry_seconds=expiry_seconds,
+            metadata=full_metadata,
+        )
+
+        if result:
+            result["storage_key"] = key
+            result["filename"] = filename
+            logger.info(f"Generated presigned upload URL for {key} (expires in {expiry_seconds}s)")
+
+        return result
+
+    def supports_presigned_urls(self) -> bool:
+        """Check if the current backend supports presigned URLs.
+
+        Note: OSS presigned URLs are not implemented yet.
+        Only S3 backend supports presigned uploads currently.
+        """
+        # Only S3 has presigned upload implemented
+        # OSS support can be added by implementing generate_presigned_upload_url in OSSBackend
+        return self.config.backend == StorageBackend.S3
 
     async def download_image(
         self,
@@ -675,6 +919,37 @@ class ImageStorageService:
         """
         key = self._generate_key(tenant_id, document_id, attachment_id, filename)
         return self._backend.get_url(key, expiry_seconds)
+
+    async def exists_by_key(self, storage_key: str) -> bool:
+        """
+        Check if a file exists by its storage key.
+
+        This is useful for verifying presigned URL uploads where
+        we have the full storage key but not the individual components.
+
+        Args:
+            storage_key: Full storage key (path)
+
+        Returns:
+            True if file exists
+        """
+        return await self._backend.exists(storage_key)
+
+    def get_url_by_key(self, storage_key: str, expiry_seconds: int = 3600) -> str:
+        """
+        Get URL for a file by its storage key.
+
+        This is useful for presigned URL uploads where we have
+        the full storage key but not the individual components.
+
+        Args:
+            storage_key: Full storage key (path)
+            expiry_seconds: URL expiry time
+
+        Returns:
+            File URL
+        """
+        return self._backend.get_url(storage_key, expiry_seconds)
 
     async def close(self) -> None:
         """Close the storage service and release resources"""

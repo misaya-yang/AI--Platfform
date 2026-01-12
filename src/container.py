@@ -230,6 +230,8 @@ class Container:
             permission_cache_ttl_seconds=getattr(
                 self.settings.database, "permission_cache_ttl_seconds", 60
             ),
+            pool_min_size=getattr(self.settings.database, "pool_min_size", 2),
+            pool_max_size=getattr(self.settings.database, "pool_max_size", 10),
         )
     
     def _create_redis(self):

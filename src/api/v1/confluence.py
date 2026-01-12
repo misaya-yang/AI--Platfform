@@ -27,6 +27,7 @@ from ..schemas.confluence import (
     ConfluenceImportResultSchema,
     ConfluencePageListResponseSchema,
     ConfluencePageRecordSchema,
+    ConfluencePageSyncConfigUpdateSchema,
     ConfluencePageTreeNodeSchema,
     ConfluencePageTreeResponseSchema,
     ConfluenceSchedulerStatusSchema,
@@ -487,6 +488,17 @@ async def update_space_binding(
             binding_id=binding_id,
             **payload.model_dump(exclude_none=True),
         )
+
+        # 如果更新了同步配置，通知调度器
+        scheduler = getattr(request.app.state, "confluence_scheduler", None)
+        sync_config_changed = (
+            payload.sync_mode is not None
+            or payload.polling_interval_minutes is not None
+            or payload.sync_enabled is not None
+        )
+        if scheduler and sync_config_changed:
+            await scheduler.reload_bindings()
+
         return binding
     except ConfluenceAccessDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -703,6 +715,50 @@ async def trigger_sync(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.post("/bindings/{binding_id}/incremental-sync")
+async def trigger_incremental_sync(
+    request: Request,
+    binding_id: str,
+    force: bool = False,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Trigger an incremental sync for a binding.
+
+    This endpoint is useful for testing the incremental sync functionality.
+    It only syncs pages that have been modified since the last sync.
+
+    Args:
+        binding_id: The binding ID
+        force: Force sync even if another sync is in progress
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:sync")
+        svc = get_confluence_sync_service(request)
+
+        # 验证用户对 binding 的访问权限
+        await svc.get_binding(binding_id, user=user)
+
+        task_id = await svc.incremental_sync(
+            binding_id=binding_id,
+            force=force,
+        )
+        return {
+            "status": "triggered",
+            "task_id": task_id,
+            "binding_id": binding_id,
+            "sync_type": "incremental",
+        }
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/bindings/{binding_id}/status", response_model=ConfluenceSyncStatusSchema)
 async def get_sync_status(
     request: Request,
@@ -787,6 +843,91 @@ async def sync_single_page(
     except Exception as exc:
         logger.error(f"Page sync failed: {exc}")
         return {"status": "failed", "message": str(exc)}
+
+
+@router.put("/pages/{page_record_id}/sync-config", response_model=ConfluencePageRecordSchema)
+async def update_page_sync_config(
+    request: Request,
+    page_record_id: str,
+    payload: ConfluencePageSyncConfigUpdateSchema = Body(...),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Update sync configuration for a specific page.
+
+    Allows setting page-level sync mode to override binding defaults:
+    - sync_mode: NULL (inherit from binding), "manual", or "polling"
+    - polling_interval_minutes: 5-1440 minutes (only for polling mode)
+    - sync_enabled: Enable/disable sync for this page
+    - sync_priority: 0-100, higher priority pages sync first
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
+        svc = get_confluence_sync_service(request)
+
+        # 获取页面信息并验证权限
+        page = await svc.get_page(page_record_id, user=user)
+        if not page:
+            raise HTTPException(status_code=404, detail="Page not found")
+
+        # 更新同步配置
+        # 使用 exclude_unset=True 而不是 exclude_none=True
+        # 这样可以保留显式设置为 null 的字段（用于"继承"选项）
+        updates = payload.model_dump(exclude_unset=True)
+
+        # 如果设置为 polling 模式，计算下次同步时间并确保 interval 有值
+        if updates.get("sync_mode") == "polling":
+            from datetime import datetime, timedelta
+            # 确保 polling_interval_minutes 有默认值（防止 NULL 导致调度器崩溃）
+            interval = updates.get("polling_interval_minutes")
+            if interval is None:
+                interval = 60  # 默认 60 分钟
+                updates["polling_interval_minutes"] = interval
+            updates["next_sync_at"] = datetime.utcnow() + timedelta(minutes=interval)
+        elif updates.get("sync_mode") is None and "sync_mode" in updates:
+            # 如果显式设置 sync_mode 为 null（继承），清除 next_sync_at
+            updates["next_sync_at"] = None
+
+        updated_page = await svc.db.update_confluence_page_sync_config(
+            page_id=page_record_id,
+            updates=updates,
+        )
+
+        if not updated_page:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+
+        # 通知调度器配置已更新
+        scheduler = getattr(request.app.state, "confluence_scheduler", None)
+        if scheduler:
+            new_sync_mode = updated_page.get("sync_mode")
+            new_sync_enabled = updated_page.get("sync_enabled", True)
+            new_interval = updated_page.get("polling_interval_minutes", 60)
+            new_priority = updated_page.get("sync_priority", 0)
+
+            if new_sync_mode == "polling" and new_sync_enabled:
+                # 添加或更新页面轮询任务
+                await scheduler.reschedule_page(
+                    page_record_id=page_record_id,
+                    interval_minutes=new_interval,
+                    priority=new_priority,
+                )
+            else:
+                # 移除页面轮询任务（如果存在）
+                await scheduler.disable_page(page_record_id)
+
+        return updated_page
+
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ConfluenceSyncError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Update page sync config failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/pages/batch-sync")

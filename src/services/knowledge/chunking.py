@@ -44,6 +44,71 @@ class ChunkingMode(str, Enum):
     QA = "qa"                   # QA对切分
 
 
+class ContentType(str, Enum):
+    """Content type for segments (multimodal support)"""
+    TEXT = "text"
+    IMAGE = "image"
+    MIXED = "mixed"  # Text chunk with associated images
+
+
+@dataclass
+class AssociatedImage:
+    """
+    Image associated with a text chunk (Dify-style Smart Attachment Handling).
+
+    In multimodal RAG, text chunks can have up to 10 associated images.
+    Images are associated based on proximity in the source document.
+
+    Attributes:
+        image_segment_id: ID of the image segment in the database
+        storage_url: URL to the image in storage (S3/OSS)
+        filename: Original filename of the image
+        vlm_description: VLM-generated description of the image
+        proximity_score: How closely related the image is to the text [0,1]
+            - 1.0 = directly embedded inline
+            - 0.7 = adjacent paragraph
+            - 0.5 = same page/section
+            - 0.3 = related but distant
+        char_offset: Character offset in source document where image was found
+        page_number: Page number in PDF/multi-page documents
+    """
+    image_segment_id: str
+    storage_url: str
+    filename: str = ""
+    vlm_description: Optional[str] = None
+    proximity_score: float = 1.0
+    char_offset: int = 0
+    page_number: Optional[int] = None
+    media_type: str = "image/png"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization"""
+        return {
+            "image_segment_id": self.image_segment_id,
+            "storage_url": self.storage_url,
+            "filename": self.filename,
+            "vlm_description": self.vlm_description,
+            "proximity_score": self.proximity_score,
+            "char_offset": self.char_offset,
+            "page_number": self.page_number,
+            "media_type": self.media_type,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AssociatedImage":
+        """Create from dictionary"""
+        return cls(
+            image_segment_id=data.get("image_segment_id", ""),
+            storage_url=data.get("storage_url", ""),
+            filename=data.get("filename", ""),
+            vlm_description=data.get("vlm_description"),
+            proximity_score=float(data.get("proximity_score", 1.0)),
+            char_offset=int(data.get("char_offset", 0)),
+            page_number=data.get("page_number"),
+            media_type=data.get("media_type", "image/png"),
+        )
+
+
 @dataclass
 class ChunkingConfig:
     """Comprehensive chunking configuration
@@ -205,7 +270,19 @@ class ChunkingConfig:
 
 @dataclass
 class Chunk:
-    """Represents a single text chunk"""
+    """
+    Represents a single text chunk with multimodal support.
+
+    Multimodal RAG Extension (P3):
+    - Chunks can have associated images (up to 10 per Dify pattern)
+    - content_type indicates if this is a text, image, or mixed chunk
+    - associated_images holds references to related image segments
+
+    For image segments:
+    - content_type = "image"
+    - image_url, image_filename etc. are populated
+    - vlm_description contains the VLM-generated description
+    """
     text: str
     index: int = 0
     token_count: int = 0
@@ -215,7 +292,20 @@ class Chunk:
     parent_id: Optional[str] = None
     children: List["Chunk"] = field(default_factory=list)
     hash_id: str = ""
-    
+
+    # Multimodal fields (P3 extension)
+    content_type: ContentType = ContentType.TEXT
+    associated_images: List[AssociatedImage] = field(default_factory=list)
+
+    # Image-specific fields (for image segments)
+    image_url: Optional[str] = None
+    image_filename: Optional[str] = None
+    image_media_type: Optional[str] = None
+    vlm_description: Optional[str] = None
+
+    # Maximum images per chunk (Dify pattern)
+    MAX_ASSOCIATED_IMAGES: int = field(default=10, repr=False)
+
     def __post_init__(self):
         if not self.hash_id and self.text:
             self.hash_id = hashlib.md5(self.text.encode()).hexdigest()[:12]
@@ -226,7 +316,48 @@ class Chunk:
         if not self.token_count:
             # Rough estimate: ~4 chars per token for English, ~2 for Chinese
             self.token_count = self._estimate_tokens(self.text)
-    
+
+    @property
+    def has_images(self) -> bool:
+        """Check if this chunk has associated images"""
+        return len(self.associated_images) > 0
+
+    @property
+    def image_count(self) -> int:
+        """Number of associated images"""
+        return len(self.associated_images)
+
+    @property
+    def is_image_segment(self) -> bool:
+        """Check if this is an image segment (not text)"""
+        return self.content_type == ContentType.IMAGE
+
+    def add_associated_image(self, image: AssociatedImage) -> bool:
+        """
+        Add an associated image to this chunk.
+
+        Args:
+            image: The AssociatedImage to add
+
+        Returns:
+            True if added, False if max limit reached
+        """
+        if len(self.associated_images) >= self.MAX_ASSOCIATED_IMAGES:
+            return False
+        self.associated_images.append(image)
+        # Update content type to mixed if this was pure text
+        if self.content_type == ContentType.TEXT:
+            self.content_type = ContentType.MIXED
+        return True
+
+    def get_images_sorted_by_proximity(self) -> List[AssociatedImage]:
+        """Get associated images sorted by proximity score (highest first)"""
+        return sorted(
+            self.associated_images,
+            key=lambda x: x.proximity_score,
+            reverse=True
+        )
+
     @staticmethod
     def _estimate_tokens(text: str) -> int:
         """Estimate token count (rough approximation)"""
@@ -239,6 +370,24 @@ class Chunk:
         word_count = len(non_cjk.split())
         # CJK: ~1.5 tokens per char, English: ~1 token per word
         return int(cjk_count * 0.7 + word_count * 1.3)
+
+    def to_multimodal_dict(self) -> Dict[str, Any]:
+        """Convert chunk to dictionary including multimodal fields"""
+        return {
+            "text": self.text,
+            "index": self.index,
+            "token_count": self.token_count,
+            "char_count": self.char_count,
+            "hash_id": self.hash_id,
+            "content_type": self.content_type.value,
+            "has_images": self.has_images,
+            "image_count": self.image_count,
+            "associated_images": [img.to_dict() for img in self.associated_images],
+            "image_url": self.image_url,
+            "image_filename": self.image_filename,
+            "vlm_description": self.vlm_description,
+            "metadata": self.metadata,
+        }
 
 
 class TextPreprocessor:

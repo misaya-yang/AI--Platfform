@@ -86,6 +86,17 @@ def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     return proxy
 
 
+def get_image_storage_service(request: Request):
+    """Get ImageStorageService for image storage operations."""
+    svc = getattr(request.app.state, "image_storage_service", None)
+    if svc is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Image storage service is not initialized.",
+        )
+    return svc
+
+
 def get_rate_limiter(request: Request) -> Optional[MultiDimensionRateLimiter]:
     """获取多维度限流器"""
     return getattr(request.app.state, "multi_rate_limiter", None)
@@ -211,8 +222,8 @@ async def get_user_context(
                 for perm in db_permissions:
                     if perm not in roles:
                         roles.append(perm)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[AUTH] Failed to fetch DB permissions for user {user_id}: {e}")
         t_db_done = time.perf_counter()
 
         logger.info(
@@ -255,8 +266,8 @@ async def get_user_context(
                         for perm in db_permissions:
                             if perm not in roles:
                                 roles.append(perm)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[AUTH] Failed to fetch DB permissions for API key user {user_id}: {e}")
 
                     logger.info(f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms")
                     return _cache_and_return(UserContext(
@@ -364,8 +375,8 @@ async def get_auth_context(
                 for perm in db_permissions:
                     if perm not in permissions:
                         permissions.append(perm)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[AUTH] Failed to fetch DB permissions in auth_context for user {user_id}: {e}")
 
         # Merge permissions into roles so RBAC can honor them directly.
         for perm in permissions:

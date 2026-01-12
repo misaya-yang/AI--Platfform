@@ -14,6 +14,9 @@ class DatabaseSettings(BaseModel):
     auto_init: bool = True
     # Permission cache TTL in seconds (0 to disable).
     permission_cache_ttl_seconds: int = 60
+    # Connection pool settings
+    pool_min_size: int = 2
+    pool_max_size: int = 10
 
 
 class RedisSettings(BaseModel):
@@ -156,6 +159,12 @@ class ConfluenceSettings(BaseModel):
     # 定时轮询配置
     polling_enabled: bool = False  # 是否启用定时轮询
     polling_default_interval_minutes: int = 60  # 默认轮询间隔（分钟）
+    polling_min_interval_minutes: int = 1  # 最小轮询间隔（分钟），用于测试
+    polling_check_interval_seconds: int = 30  # 调度器检查间隔（秒）
+
+    # 测试模式配置
+    test_mode: bool = False  # 启用测试模式（允许更短的轮询间隔）
+    test_polling_interval_seconds: int = 10  # 测试模式下的轮询间隔（秒）
 
     # API 客户端配置
     request_timeout: float = 30.0  # 请求超时（秒）

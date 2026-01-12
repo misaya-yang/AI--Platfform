@@ -2,6 +2,7 @@
   "enabledPlugins": {
     "code-review@claude-plugins-official": true,
     "frontend-design@claude-code-plugins": true,
-    "github@claude-plugins-official": true
+    "github@claude-plugins-official": true,
+    "code-review@claude-code-plugins": true
   }
 }
