@@ -1,0 +1,209 @@
+# =============================================================================
+# AI Gateway - Production Docker Compose
+# =============================================================================
+# Usage:
+#   启动所有服务:  docker-compose up -d
+#   仅启动基础设施: docker-compose up -d postgres redis qdrant
+#   查看日志:       docker-compose logs -f gateway
+#   停止所有服务:   docker-compose down
+#   清理数据卷:     docker-compose down -v
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Infrastructure Services
+  # ===========================================================================
+
+  # PostgreSQL - Primary Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-gateway-pg
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-111111}
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - ai-gateway-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-gateway}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Redis - Cache & Session Store
+  redis:
+    image: redis:7-alpine
+    container_name: ai-gateway-redis
+    environment:
+      # Pass password to container for healthcheck access
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-111111}
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-111111}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-gateway-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Qdrant - Vector Database for Knowledge Base
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ai-gateway-qdrant
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - ai-gateway-net
+    # Note: Qdrant uses distroless image, healthcheck via depends_on condition not reliable
+    # Container health is verified by gateway's startup dependency
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Application Services
+  # ===========================================================================
+
+  # AI Gateway Backend
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-gateway:${TAG:-latest}
+    container_name: ai-gateway-backend
+    environment:
+      # Server
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_PORT: "8080"
+      GATEWAY_TASK_WORKER_CONCURRENCY: "${TASK_WORKER_CONCURRENCY:-2}"
+
+      # Database
+      GATEWAY_DATABASE__ENABLED: "true"
+      GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-111111}@postgres:5432/${POSTGRES_DB:-gateway}"
+      GATEWAY_DATABASE__AUTO_INIT: "true"
+
+      # Redis
+      GATEWAY_REDIS__ENABLED: "true"
+      GATEWAY_REDIS__URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/0"
+
+      # Authentication
+      GATEWAY_AUTHENTICATION__JWT__ENABLED: "true"
+      GATEWAY_AUTHENTICATION__JWT__SECRET: "${JWT_SECRET:-change-me-in-production-use-strong-secret}"
+      GATEWAY_AUTHENTICATION__JWT__ALGORITHMS: '["HS256"]'
+
+      # LangGraph (optional)
+      GATEWAY_LANGGRAPH__ENABLED: "${LANGGRAPH_ENABLED:-false}"
+      GATEWAY_LANGGRAPH__INSTANCE_URLS: "${LANGGRAPH_INSTANCE_URLS:-}"
+      GATEWAY_LANGGRAPH__AUTH_TOKEN: "${LANGGRAPH_AUTH_TOKEN:-}"
+
+      # Knowledge Base
+      GATEWAY_KNOWLEDGE__ENABLED: "true"
+      GATEWAY_KNOWLEDGE__WORKER_CONCURRENCY: "${KNOWLEDGE_WORKER_CONCURRENCY:-2}"
+      GATEWAY_KNOWLEDGE__QDRANT__ENABLED: "true"
+      GATEWAY_KNOWLEDGE__QDRANT__URL: "http://qdrant:6333"
+
+      # Embeddings API (optional)
+      GATEWAY_KNOWLEDGE__OPENAI__API_KEY: "${OPENAI_API_KEY:-}"
+      GATEWAY_KNOWLEDGE__OPENAI__BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      GATEWAY_KNOWLEDGE__DASHSCOPE__API_KEY: "${DASHSCOPE_API_KEY:-}"
+
+      # Proxy
+      GATEWAY_PROXY__ENABLED: "true"
+      GATEWAY_PROXY__BILLING_ENABLED: "${PROXY_BILLING_ENABLED:-false}"
+
+      # File Upload
+      FILE_STORAGE_PATH: "/app/uploads"
+      MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
+      FILE_CLEANUP_ENABLED: "true"
+      FILE_TTL_DAYS: "${FILE_TTL_DAYS:-7}"
+      FILE_USER_QUOTA_MB: "${FILE_USER_QUOTA_MB:-500}"
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - gateway-uploads:/app/uploads
+      - gateway-logs:/app/logs
+      - gateway-images:/app/data/images
+    networks:
+      - ai-gateway-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # AI Gateway Frontend (Web Console)
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""
+        VITE_API_BASE_URL: ""
+    image: ai-gateway-web:${TAG:-latest}
+    container_name: ai-gateway-frontend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - ai-gateway-net
+    depends_on:
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  ai-gateway-net:
+    driver: bridge
+    name: ai-gateway-network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  pg-data:
+    name: ai-gateway-pg-data
+  redis-data:
+    name: ai-gateway-redis-data
+  qdrant-data:
+    name: ai-gateway-qdrant-data
+  gateway-uploads:
+    name: ai-gateway-uploads
+  gateway-logs:
+    name: ai-gateway-logs
+  gateway-images:
+    name: ai-gateway-images
