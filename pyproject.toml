@@ -65,6 +65,9 @@ dependencies = [
 
     # LangGraph SDK
     "langgraph-sdk>=0.2.15",
+
+    # Token Counting (for LLM context management)
+    "tiktoken>=0.7.0",
 ]
 
 [project.optional-dependencies]
