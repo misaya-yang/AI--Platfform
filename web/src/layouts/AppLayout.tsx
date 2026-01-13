@@ -67,6 +67,12 @@ const navItems = [
     permission: "conversation:playground:access",
   },
   {
+    key: "/assistant",
+    labelKey: "nav.assistant",
+    icon: <ThunderboltOutlined />,
+    permission: "conversation:playground:access",
+  },
+  {
     key: "/tasks",
     labelKey: "nav.tasks",
     icon: <UnorderedListOutlined />,

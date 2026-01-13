@@ -57,9 +57,11 @@ dmypy.json
 .project
 .pydevproject
 .settings/
+.csv
 
 # ======================== Claude Code ========================
 .claude/settings.local.json
+.claude/skills/
 
 # ======================== Logs & Temp Files ========================
 *.log
@@ -68,6 +70,7 @@ dmypy.json
 logs/
 tmp/
 temp/
+claude/
 
 # ======================== OS Generated ========================
 .DS_Store

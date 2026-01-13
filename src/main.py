@@ -417,6 +417,9 @@ def create_app() -> FastAPI:
         await file_cleanup_service.start()
         app.state.file_cleanup_service = file_cleanup_service
 
+        # 初始化 Assistant Service (GPT-like 体验)
+        await _init_assistant_service(app, settings)
+
         # 打印启动信息
         _print_startup_info(settings)
     
@@ -442,6 +445,11 @@ def create_app() -> FastAPI:
         file_cleanup_service = getattr(app.state, "file_cleanup_service", None)
         if file_cleanup_service is not None:
             await file_cleanup_service.stop()
+
+        # Stop Assistant Service
+        assistant_service = getattr(app.state, "assistant_service", None)
+        if assistant_service is not None:
+            await assistant_service.close()
 
         await container.shutdown()
         logger.info("AI Gateway 已关闭")
@@ -554,6 +562,120 @@ async def _load_services_from_database(container: Container, settings: Settings)
             logger.info(f"从数据库加载了 {loaded_count} 个服务")
     except Exception as e:
         logger.warning(f"从数据库加载服务失败: {e}")
+
+
+async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
+    """
+    初始化 Assistant Service (GPT-like 体验)
+
+    从环境变量读取各 LLM 提供商的 API Key：
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+    - DEEPSEEK_API_KEY
+    - DASHSCOPE_API_KEY (或复用 knowledge.dashscope.api_key)
+    """
+    import os
+    from .services.assistant import AssistantService, ModelRegistry, ModelProvider
+
+    model_registry = ModelRegistry()
+    configured_providers = []
+
+    # OpenAI
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if openai_key:
+        model_registry.configure_provider(
+            ModelProvider.OPENAI,
+            api_key=openai_key,
+            base_url=openai_base_url,
+        )
+        configured_providers.append("openai")
+
+    # Anthropic
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    anthropic_base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    if anthropic_key:
+        model_registry.configure_provider(
+            ModelProvider.ANTHROPIC,
+            api_key=anthropic_key,
+            base_url=anthropic_base_url,
+        )
+        configured_providers.append("anthropic")
+
+    # DeepSeek
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL")
+    if deepseek_key:
+        model_registry.configure_provider(
+            ModelProvider.DEEPSEEK,
+            api_key=deepseek_key,
+            base_url=deepseek_base_url,
+        )
+        configured_providers.append("deepseek")
+
+    # DashScope (Qwen)
+    dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    # Fallback to knowledge.dashscope.api_key if not set
+    if not dashscope_key:
+        knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
+        if knowledge_dashscope:
+            dashscope_key = getattr(knowledge_dashscope, "api_key", "")
+    if dashscope_key:
+        model_registry.configure_provider(
+            ModelProvider.DASHSCOPE,
+            api_key=dashscope_key,
+        )
+        configured_providers.append("dashscope")
+
+    # Get KB service if available
+    kb_service = getattr(app.state, "knowledge_service", None)
+
+    # Get session manager for conversation persistence
+    session_manager = getattr(app.state, "session_manager", None)
+
+    # Get Tavily API key for web search
+    tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+
+    # Create Tavily tool instance
+    from .services.assistant.tools import TavilySearchTool
+    tavily_tool = TavilySearchTool(api_key=tavily_api_key or None)
+
+    # Create assistant service with session persistence
+    assistant_service = AssistantService(
+        model_registry=model_registry,
+        kb_service=kb_service,
+        tavily_api_key=tavily_api_key or None,
+        session_manager=session_manager,
+    )
+
+    # Initialize Tool Registry (Phase 2)
+    from .services.assistant.tools import get_tool_registry, register_builtin_tools
+    tool_registry = get_tool_registry()
+    register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool)
+
+    # Store in app.state
+    app.state.model_registry = model_registry
+    app.state.assistant_service = assistant_service
+    app.state.tool_registry = tool_registry
+
+    features = []
+    if configured_providers:
+        features.append(f"providers: {', '.join(configured_providers)}")
+    if session_manager:
+        features.append("session persistence")
+    if tavily_api_key:
+        features.append("web search")
+    if kb_service:
+        features.append("KB tools")
+
+    registered_tools = len(tool_registry.list_tools())
+    if registered_tools > 0:
+        features.append(f"{registered_tools} tools")
+
+    if features:
+        logger.info(f"Assistant Service 已初始化 ({', '.join(features)})")
+    else:
+        logger.warning("Assistant Service 已初始化，但没有配置任何 LLM 提供商 API Key")
 
 
 def _print_startup_info(settings: Settings) -> None:

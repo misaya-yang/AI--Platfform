@@ -1,0 +1,172 @@
+import * as React from "react";
+import { createPortal } from "react-dom";
+
+import { cn } from "@/lib/utils";
+
+interface PopoverContextValue {
+  open: boolean;
+  setOpen: (open: boolean) => void;
+  triggerRef: React.RefObject<HTMLButtonElement>;
+}
+
+const PopoverContext = React.createContext<PopoverContextValue | null>(null);
+
+function usePopoverContext() {
+  const context = React.useContext(PopoverContext);
+  if (!context) {
+    throw new Error("Popover components must be used within a Popover");
+  }
+  return context;
+}
+
+interface PopoverProps {
+  children: React.ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+const Popover = ({ children, open: controlledOpen, onOpenChange }: PopoverProps) => {
+  const [internalOpen, setInternalOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+
+  const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
+  const setOpen = React.useCallback(
+    (value: boolean) => {
+      if (controlledOpen === undefined) {
+        setInternalOpen(value);
+      }
+      onOpenChange?.(value);
+    },
+    [controlledOpen, onOpenChange]
+  );
+
+  // Close on click outside
+  React.useEffect(() => {
+    if (!open) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (triggerRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open, setOpen]);
+
+  return (
+    <PopoverContext.Provider value={{ open, setOpen, triggerRef }}>
+      {children}
+    </PopoverContext.Provider>
+  );
+};
+
+interface PopoverTriggerProps {
+  children: React.ReactElement;
+  asChild?: boolean;
+}
+
+const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
+  ({ children, asChild }, _ref) => {
+    const { open, setOpen, triggerRef } = usePopoverContext();
+
+    if (asChild && React.isValidElement(children)) {
+      return React.cloneElement(children as React.ReactElement<any>, {
+        ref: triggerRef,
+        onClick: (e: React.MouseEvent) => {
+          (children.props as any).onClick?.(e);
+          setOpen(!open);
+        },
+      });
+    }
+
+    return (
+      <button ref={triggerRef} onClick={() => setOpen(!open)}>
+        {children}
+      </button>
+    );
+  }
+);
+PopoverTrigger.displayName = "PopoverTrigger";
+
+interface PopoverContentProps extends React.HTMLAttributes<HTMLDivElement> {
+  align?: "start" | "center" | "end";
+  side?: "top" | "bottom" | "left" | "right";
+  sideOffset?: number;
+}
+
+const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
+  ({ className, align = "center", side = "bottom", sideOffset = 8, children, ...props }, ref) => {
+    const { open, triggerRef } = usePopoverContext();
+    const contentRef = React.useRef<HTMLDivElement>(null);
+    const [position, setPosition] = React.useState({ top: 0, left: 0 });
+
+    React.useEffect(() => {
+      if (!open || !triggerRef.current) return;
+
+      const trigger = triggerRef.current.getBoundingClientRect();
+      const content = contentRef.current;
+
+      let top = 0;
+      let left = 0;
+
+      if (side === "bottom") {
+        top = trigger.bottom + sideOffset;
+      } else if (side === "top") {
+        top = trigger.top - sideOffset - (content?.offsetHeight || 0);
+      }
+
+      if (align === "start") {
+        left = trigger.left;
+      } else if (align === "center") {
+        left = trigger.left + trigger.width / 2 - (content?.offsetWidth || 0) / 2;
+      } else if (align === "end") {
+        left = trigger.right - (content?.offsetWidth || 0);
+      }
+
+      // Clamp to viewport
+      left = Math.max(8, Math.min(left, window.innerWidth - (content?.offsetWidth || 0) - 8));
+      top = Math.max(8, Math.min(top, window.innerHeight - (content?.offsetHeight || 0) - 8));
+
+      setPosition({ top, left });
+    }, [open, align, side, sideOffset, triggerRef]);
+
+    if (!open) return null;
+
+    return createPortal(
+      <div
+        ref={(node) => {
+          (contentRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
+          if (typeof ref === "function") ref(node);
+          else if (ref) ref.current = node;
+        }}
+        className={cn(
+          "z-50 min-w-[8rem] overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-2 text-popover-foreground shadow-xl",
+          "animate-in fade-in-0 zoom-in-95",
+          className
+        )}
+        style={{
+          position: "fixed",
+          top: position.top,
+          left: position.left,
+        }}
+        {...props}
+      >
+        {children}
+      </div>,
+      document.body
+    );
+  }
+);
+PopoverContent.displayName = "PopoverContent";
+
+export { Popover, PopoverTrigger, PopoverContent };

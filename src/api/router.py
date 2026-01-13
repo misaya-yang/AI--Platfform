@@ -21,6 +21,7 @@ from .v1.submit import router as submit_router
 from .v1.tasks import router as tasks_router
 from .v1.users import router as users_router
 from .v1.presign import router as presign_router
+from .v1.assistant import router as assistant_router
 
 api_router = APIRouter()
 
@@ -48,3 +49,4 @@ api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
+api_router.include_router(assistant_router)  # GPT-like Assistant API

@@ -11,6 +11,7 @@ import { UserManagementPage } from "@/pages/UserManagement";
 import { UserEditPage } from "@/pages/UserEdit";
 import { KnowledgeDatasetsPage, KnowledgeDatasetDetailPage } from "@/pages/knowledge";
 import DatasetCreatePage from "@/pages/knowledge/DatasetCreate";
+import { AssistantPage } from "@/pages/assistant";
 import {
   ConnectionListPage,
   ConnectionCreatePage,
@@ -114,6 +115,14 @@ export function AppRouter() {
           element={
             <ProtectedRoute requiredPermission="conversation:playground:access">
               <PlaygroundPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/assistant"
+          element={
+            <ProtectedRoute requiredPermission="conversation:playground:access">
+              <AssistantPage />
             </ProtectedRoute>
           }
         />

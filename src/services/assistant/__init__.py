@@ -1,0 +1,68 @@
+"""
+Assistant service module.
+
+Provides a GPT-like assistant experience with:
+- Multi-model support (OpenAI, Claude, DeepSeek, Qwen)
+- Knowledge base integration
+- Streaming responses
+- RAG evaluation and citation tracking (Phase 3)
+- Structured output and validation (Phase 4)
+"""
+
+from .assistant_service import AssistantService, AssistantConfig, RAGEvaluation
+from .model_registry import ModelRegistry, ModelProvider, ModelInfo
+from .rag_metrics import (
+    RAGEvaluator,
+    RAGMetrics,
+    Citation,
+    CitationStatus,
+    ContextChunkMetrics,
+    get_rag_evaluator,
+    evaluate_rag,
+    extract_citations,
+)
+from .structured_output import (
+    OutputFormat,
+    OutputGuardrail,
+    StructuredOutputParser,
+    StructuredOutputResult,
+    AnswerWithCitations,
+    StepByStepAnswer,
+    FactCheckResult,
+    ExtractedEntities,
+    ClassificationResult,
+    parse_structured_output,
+    validate_output,
+    create_json_prompt,
+)
+
+__all__ = [
+    "AssistantService",
+    "AssistantConfig",
+    "RAGEvaluation",
+    "ModelRegistry",
+    "ModelProvider",
+    "ModelInfo",
+    # Phase 3: RAG Metrics
+    "RAGEvaluator",
+    "RAGMetrics",
+    "Citation",
+    "CitationStatus",
+    "ContextChunkMetrics",
+    "get_rag_evaluator",
+    "evaluate_rag",
+    "extract_citations",
+    # Phase 4: Structured Output
+    "OutputFormat",
+    "OutputGuardrail",
+    "StructuredOutputParser",
+    "StructuredOutputResult",
+    "AnswerWithCitations",
+    "StepByStepAnswer",
+    "FactCheckResult",
+    "ExtractedEntities",
+    "ClassificationResult",
+    "parse_structured_output",
+    "validate_output",
+    "create_json_prompt",
+]

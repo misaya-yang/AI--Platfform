@@ -1,0 +1,435 @@
+"""
+Tool Registry - Agentic Tool Management System
+
+Phase 2: Provides a centralized registry for tools with:
+- Tool metadata and JSON Schema definitions
+- Usage examples and risk labels
+- Tool execution lifecycle management
+- Observability and logging
+
+References:
+- https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+- https://platform.openai.com/docs/guides/function-calling
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
+
+from ....core.observability.logging import get_logger
+
+if TYPE_CHECKING:
+    from ....core.auth.user_resolver import UserContext
+
+logger = get_logger(__name__)
+
+
+class ToolRiskLevel(str, Enum):
+    """Risk level for tool operations."""
+    LOW = "low"         # Read-only operations, no side effects
+    MEDIUM = "medium"   # May modify data but reversible
+    HIGH = "high"       # Irreversible operations, requires confirmation
+
+
+class ToolCategory(str, Enum):
+    """Tool categories for organization."""
+    RETRIEVAL = "retrieval"     # KB search, web search
+    GENERATION = "generation"   # Content creation
+    ANALYSIS = "analysis"       # Data analysis
+    INTEGRATION = "integration" # External system calls
+    UTILITY = "utility"         # Helper functions
+
+
+@dataclass
+class ToolParameter:
+    """Definition of a tool parameter."""
+    name: str
+    type: str  # string, number, boolean, array, object
+    description: str
+    required: bool = True
+    default: Any = None
+    enum: Optional[List[str]] = None
+    items: Optional[Dict[str, Any]] = None  # For array types
+    properties: Optional[Dict[str, Any]] = None  # For object types
+
+
+@dataclass
+class ToolExample:
+    """Example usage of a tool."""
+    description: str
+    input: Dict[str, Any]
+    expected_output: Optional[str] = None
+
+
+@dataclass
+class ToolDefinition:
+    """Complete tool definition for the registry."""
+    name: str
+    description: str
+    parameters: List[ToolParameter]
+
+    # Metadata
+    category: ToolCategory = ToolCategory.UTILITY
+    risk_level: ToolRiskLevel = ToolRiskLevel.LOW
+    requires_confirmation: bool = False
+
+    # Usage guidance
+    when_to_use: Optional[str] = None
+    when_not_to_use: Optional[str] = None
+    examples: List[ToolExample] = field(default_factory=list)
+
+    # Execution hints
+    timeout_seconds: int = 30
+    max_retries: int = 2
+    is_async: bool = True
+
+    # Access control
+    required_permissions: List[str] = field(default_factory=list)
+
+    def to_openai_schema(self) -> Dict[str, Any]:
+        """Convert to OpenAI function calling schema."""
+        properties = {}
+        required = []
+
+        for param in self.parameters:
+            prop = {
+                "type": param.type,
+                "description": param.description,
+            }
+            if param.enum:
+                prop["enum"] = param.enum
+            if param.items:
+                prop["items"] = param.items
+            if param.properties:
+                prop["properties"] = param.properties
+
+            properties[param.name] = prop
+
+            if param.required:
+                required.append(param.name)
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self._build_full_description(),
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        }
+
+    def to_anthropic_schema(self) -> Dict[str, Any]:
+        """Convert to Anthropic tool use schema."""
+        properties = {}
+        required = []
+
+        for param in self.parameters:
+            prop = {
+                "type": param.type,
+                "description": param.description,
+            }
+            if param.enum:
+                prop["enum"] = param.enum
+            if param.items:
+                prop["items"] = param.items
+            if param.properties:
+                prop["properties"] = param.properties
+
+            properties[param.name] = prop
+
+            if param.required:
+                required.append(param.name)
+
+        return {
+            "name": self.name,
+            "description": self._build_full_description(),
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        }
+
+    def _build_full_description(self) -> str:
+        """Build comprehensive description including usage guidance."""
+        parts = [self.description]
+
+        if self.when_to_use:
+            parts.append(f"\n\nWhen to use: {self.when_to_use}")
+
+        if self.when_not_to_use:
+            parts.append(f"\n\nWhen NOT to use: {self.when_not_to_use}")
+
+        if self.examples:
+            parts.append("\n\nExamples:")
+            for ex in self.examples[:2]:  # Limit examples in description
+                parts.append(f"\n- {ex.description}: {json.dumps(ex.input)}")
+
+        return "".join(parts)
+
+
+@dataclass
+class ToolCallRequest:
+    """A request to execute a tool."""
+    call_id: str
+    tool_name: str
+    arguments: Dict[str, Any]
+    user: Optional["UserContext"] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolCallResult:
+    """Result of a tool execution."""
+    call_id: str
+    tool_name: str
+    success: bool
+    result: Any = None
+    error: Optional[str] = None
+    duration_ms: float = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "call_id": self.call_id,
+            "tool_name": self.tool_name,
+            "success": self.success,
+            "result": self.result,
+            "error": self.error,
+            "duration_ms": self.duration_ms,
+            "metadata": self.metadata,
+        }
+
+
+class ToolExecutor:
+    """Base class for tool executors."""
+
+    async def execute(
+        self,
+        request: ToolCallRequest,
+    ) -> ToolCallResult:
+        """Execute the tool and return result."""
+        raise NotImplementedError
+
+    def validate_arguments(
+        self,
+        definition: ToolDefinition,
+        arguments: Dict[str, Any],
+    ) -> List[str]:
+        """Validate arguments against schema. Returns list of errors."""
+        errors = []
+
+        # Check required parameters
+        for param in definition.parameters:
+            if param.required and param.name not in arguments:
+                errors.append(f"Missing required parameter: {param.name}")
+            elif param.name in arguments:
+                value = arguments[param.name]
+                # Type checking
+                if param.type == "string" and not isinstance(value, str):
+                    errors.append(f"Parameter {param.name} must be a string")
+                elif param.type == "number" and not isinstance(value, (int, float)):
+                    errors.append(f"Parameter {param.name} must be a number")
+                elif param.type == "boolean" and not isinstance(value, bool):
+                    errors.append(f"Parameter {param.name} must be a boolean")
+                elif param.type == "array" and not isinstance(value, list):
+                    errors.append(f"Parameter {param.name} must be an array")
+                elif param.type == "object" and not isinstance(value, dict):
+                    errors.append(f"Parameter {param.name} must be an object")
+
+                # Enum validation
+                if param.enum and value not in param.enum:
+                    errors.append(f"Parameter {param.name} must be one of: {param.enum}")
+
+        return errors
+
+
+class ToolRegistry:
+    """
+    Central registry for all available tools.
+
+    Provides:
+    - Tool registration and lookup
+    - Schema generation for different providers
+    - Tool execution with lifecycle management
+    - Access control based on user permissions
+    """
+
+    def __init__(self):
+        self._tools: Dict[str, ToolDefinition] = {}
+        self._executors: Dict[str, ToolExecutor] = {}
+
+    def register(
+        self,
+        definition: ToolDefinition,
+        executor: ToolExecutor,
+    ) -> None:
+        """Register a tool with its executor."""
+        if definition.name in self._tools:
+            logger.warning(f"Overwriting existing tool: {definition.name}")
+
+        self._tools[definition.name] = definition
+        self._executors[definition.name] = executor
+
+        logger.info(
+            f"Registered tool: {definition.name} "
+            f"(category={definition.category.value}, risk={definition.risk_level.value})"
+        )
+
+    def unregister(self, name: str) -> bool:
+        """Unregister a tool."""
+        if name in self._tools:
+            del self._tools[name]
+            del self._executors[name]
+            logger.info(f"Unregistered tool: {name}")
+            return True
+        return False
+
+    def get_tool(self, name: str) -> Optional[ToolDefinition]:
+        """Get tool definition by name."""
+        return self._tools.get(name)
+
+    def list_tools(
+        self,
+        category: Optional[ToolCategory] = None,
+        user: Optional["UserContext"] = None,
+    ) -> List[ToolDefinition]:
+        """List available tools, optionally filtered by category and user permissions."""
+        tools = list(self._tools.values())
+
+        if category:
+            tools = [t for t in tools if t.category == category]
+
+        # Filter by user permissions if provided
+        if user:
+            # For now, return all tools. Permission filtering can be added later.
+            pass
+
+        return tools
+
+    def get_openai_schemas(
+        self,
+        tool_names: Optional[List[str]] = None,
+        user: Optional["UserContext"] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get OpenAI-compatible schemas for specified tools."""
+        tools = self.list_tools(user=user)
+
+        if tool_names:
+            tools = [t for t in tools if t.name in tool_names]
+
+        return [t.to_openai_schema() for t in tools]
+
+    def get_anthropic_schemas(
+        self,
+        tool_names: Optional[List[str]] = None,
+        user: Optional["UserContext"] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get Anthropic-compatible schemas for specified tools."""
+        tools = self.list_tools(user=user)
+
+        if tool_names:
+            tools = [t for t in tools if t.name in tool_names]
+
+        return [t.to_anthropic_schema() for t in tools]
+
+    async def execute(
+        self,
+        request: ToolCallRequest,
+    ) -> ToolCallResult:
+        """Execute a tool call."""
+        start_time = time.time()
+
+        # Get tool definition
+        definition = self._tools.get(request.tool_name)
+        if not definition:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Unknown tool: {request.tool_name}",
+            )
+
+        # Get executor
+        executor = self._executors.get(request.tool_name)
+        if not executor:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"No executor for tool: {request.tool_name}",
+            )
+
+        # Validate arguments
+        errors = executor.validate_arguments(definition, request.arguments)
+        if errors:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Validation errors: {'; '.join(errors)}",
+            )
+
+        # Check if confirmation is required
+        if definition.requires_confirmation:
+            logger.warning(
+                f"Tool {request.tool_name} requires confirmation but was executed directly"
+            )
+
+        # Execute tool
+        try:
+            logger.info(
+                f"Executing tool: {request.tool_name} "
+                f"(call_id={request.call_id})"
+            )
+
+            result = await executor.execute(request)
+            result.duration_ms = (time.time() - start_time) * 1000
+
+            logger.info(
+                f"Tool {request.tool_name} completed in {result.duration_ms:.1f}ms "
+                f"(success={result.success})"
+            )
+
+            return result
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(f"Tool {request.tool_name} failed: {e}")
+
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=str(e),
+                duration_ms=duration_ms,
+            )
+
+
+# Global registry instance
+_registry: Optional[ToolRegistry] = None
+
+
+def get_tool_registry() -> ToolRegistry:
+    """Get the global tool registry instance."""
+    global _registry
+    if _registry is None:
+        _registry = ToolRegistry()
+    return _registry
+
+
+def register_tool(
+    definition: ToolDefinition,
+    executor: ToolExecutor,
+) -> None:
+    """Register a tool with the global registry."""
+    get_tool_registry().register(definition, executor)
