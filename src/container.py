@@ -232,7 +232,6 @@ class Container:
             ),
             pool_min_size=getattr(self.settings.database, "pool_min_size", 2),
             pool_max_size=getattr(self.settings.database, "pool_max_size", 10),
-            encryption_key=getattr(self.settings.confluence, "encryption_key", ""),
         )
     
     def _create_redis(self):
