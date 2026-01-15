@@ -41,6 +41,14 @@ from .cache_optimizer import (
     CacheBreakpoint,
     ContextCacheOptimizer,
 )
+from .document_parser import DocumentParser, DocumentParseError, parse_document
+from .file_processor import (
+    FileProcessor,
+    ProcessedFiles,
+    ImageContent,
+    FileProcessError,
+    create_file_processor,
+)
 
 __all__ = [
     "AssistantService",
@@ -76,4 +84,14 @@ __all__ = [
     "CacheMetrics",
     "CacheBreakpoint",
     "ContextCacheOptimizer",
+    # Document Parser
+    "DocumentParser",
+    "DocumentParseError",
+    "parse_document",
+    # File Processor
+    "FileProcessor",
+    "ProcessedFiles",
+    "ImageContent",
+    "FileProcessError",
+    "create_file_processor",
 ]
