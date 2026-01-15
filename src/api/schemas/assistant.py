@@ -150,6 +150,9 @@ class ModelInfoResponse(BaseModel):
     max_output_tokens: int = Field(..., description="Maximum output tokens")
     supports_vision: bool = Field(..., description="Whether model supports vision")
     supports_tools: bool = Field(..., description="Whether model supports tool calling")
+    access_level: str = Field(default="public", description="Access level: public, premium, admin")
+    input_price_per_1k: float = Field(default=0.0, description="Price per 1K input tokens (USD)")
+    output_price_per_1k: float = Field(default=0.0, description="Price per 1K output tokens (USD)")
 
 
 class ModelsListResponse(BaseModel):
@@ -193,6 +196,9 @@ class SSEEventType:
 
     # Phase 3: RAG evaluation
     RAG_EVALUATION = "rag_evaluation"   # RAG quality metrics and citations
+
+    # KV-Cache metrics
+    CACHE_METRICS = "cache_metrics"       # Cache performance metrics
 
     # Session/state
     SESSION_CREATED = "session_created"  # New session created
@@ -297,6 +303,21 @@ class RAGEvaluationEvent(BaseModel):
     evaluation_time_ms: float = Field(..., description="Time taken for evaluation")
 
 
+# =============================================================================
+# KV-Cache Metrics Event
+# =============================================================================
+
+class CacheMetricsEvent(BaseModel):
+    """Cache performance metrics for KV-cache optimization monitoring."""
+    layer1_hit: bool = Field(default=False, description="Whether Layer 1 (system prefix) cache was hit")
+    layer2_hit: bool = Field(default=False, description="Whether Layer 2 (session context) cache was hit")
+    total_input_tokens: int = Field(default=0, description="Total input tokens")
+    cached_tokens: int = Field(default=0, description="Number of tokens served from cache")
+    cache_hit_rate: float = Field(default=0.0, description="Cache hit rate (0-1)")
+    estimated_savings_usd: float = Field(default=0.0, description="Estimated cost savings in USD")
+    system_prefix_hash: str = Field(default="", description="Hash of Layer 1 cache key for debugging")
+
+
 class ErrorEvent(BaseModel):
     """Data for error event."""
     message: str
@@ -360,3 +381,32 @@ class EnhancedSessionMessage(BaseModel):
     model_id: Optional[str] = None
     usage: Optional[UsageEvent] = None
     metadata: Optional[Dict[str, Any]] = None
+
+
+# =============================================================================
+# Image Generation (Smart Routing)
+# =============================================================================
+
+class ImageGenerationRequest(BaseModel):
+    """Request for image generation with smart routing."""
+    prompt: str = Field(..., description="Text description of the image to generate", min_length=1)
+    model_id: str = Field(..., description="Current model ID to determine provider routing")
+    style: Optional[str] = Field(default="default", description="Image style (DashScope only)")
+    size: Optional[str] = Field(default="1024*1024", description="Image size")
+    n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
+
+
+class GeneratedImage(BaseModel):
+    """A generated image result."""
+    url: str = Field(..., description="Image URL (data:image/png;base64,... or http)")
+    width: Optional[int] = Field(default=None, description="Image width")
+    height: Optional[int] = Field(default=None, description="Image height")
+
+
+class ImageGenerationResponse(BaseModel):
+    """Response for image generation."""
+    success: bool = Field(..., description="Whether generation succeeded")
+    images: List[GeneratedImage] = Field(default_factory=list, description="Generated images")
+    provider: str = Field(..., description="Provider used for generation (dashscope/google)")
+    duration_ms: float = Field(..., description="Generation time in milliseconds")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
