@@ -1158,7 +1158,7 @@ export function KnowledgeDatasetDetailPage() {
               { key: "documents", label: "文档管理", icon: FileText },
               { key: "retrieval", label: "召回测试", icon: Search },
               { key: "qa", label: "QA 测试", icon: MessageSquare },
-              { key: "sync", label: "同步源", icon: Cloud },
+              { key: "sources", label: "数据来源", icon: Cloud },
               { key: "settings", label: "配置", icon: Sliders },
               { key: "permissions", label: "权限", icon: Lock },
             ].map((tab) => (
@@ -2992,9 +2992,26 @@ for chunk in results.get("chunks", []):
           </div>
         )}
 
-        {/* 同步源 Tab */}
-        {mainTab === "sync" && datasetId && (
-          <SyncSourcesTab datasetId={datasetId} />
+        {/* 数据来源 Tab */}
+        {mainTab === "sources" && datasetId && (
+          <div className="space-y-6">
+            {/* Source cards */}
+            <SourcesTab
+              datasetId={datasetId}
+              onUploadClick={() => fileRef.current?.click()}
+              onUrlClick={() => setUrlDialogOpen(true)}
+              documentStats={{
+                total: docs.length,
+                uploaded: docs.filter(d => !d.source_type || d.source_type === 'upload').length,
+                fromUrl: docs.filter(d => d.source_type === 'url').length,
+                fromConfluence: docs.filter(d => d.source_type === 'confluence').length,
+              }}
+            />
+            {/* Full Confluence management section */}
+            <div id="confluence-section">
+              <SyncSourcesTab datasetId={datasetId} />
+            </div>
+          </div>
         )}
 
         {/* 权限 Tab */}
