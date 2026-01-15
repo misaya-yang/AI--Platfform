@@ -8,119 +8,70 @@
 
 @layer base {
   :root {
-    /* 主色系 - 科技蓝 (HSL 格式，与 Tailwind 兼容) */
-    --color-primary-h: 213;
-    --color-primary-s: 100%;
-    --color-primary-l: 54%;
-
-    /* 青色系 - 科技辅助色 */
-    --color-cyan-h: 180;
-    --color-cyan-s: 82%;
-    --color-cyan-l: 42%;
-
-    /* 紫色系 - AI/创意色 */
-    --color-purple-h: 262;
-    --color-purple-s: 66%;
-    --color-purple-l: 50%;
-
-    /* 语义色变量 (HSL 值，无 hsl() 包裹) */
-    --background: 210 20% 98%;
-    --foreground: 215 25% 20%;
+    /* New Indigo-based primary */
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
 
     --card: 0 0% 100%;
-    --card-foreground: 215 25% 20%;
+    --card-foreground: 222 47% 11%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 215 25% 20%;
+    --popover-foreground: 222 47% 11%;
 
-    --primary: 213 100% 54%;
+    --primary: 239 84% 67%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 20% 96%;
-    --secondary-foreground: 215 20% 35%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
 
-    --muted: 210 20% 96%;
-    --muted-foreground: 215 15% 50%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
 
-    --accent: 180 82% 42%;
-    --accent-foreground: 0 0% 100%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
 
-    --destructive: 0 72% 51%;
+    --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 214 20% 90%;
-    --input: 214 20% 90%;
-    --ring: 213 100% 54%;
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 239 84% 67%;
 
-    --radius: 0.75rem;
+    --radius: 0.5rem;
 
-    /* Z-index 分层系统 */
-    --z-base: 0;
-    --z-dropdown: 50;
-    --z-sticky: 100;
-    --z-fixed: 200;
-    --z-modal-backdrop: 400;
-    --z-modal: 500;
-    --z-popover: 600;
-    --z-tooltip: 700;
-    --z-toast: 800;
-    --z-max: 9999;
-
-    /* 动画时长 */
-    --transition-fast: 0.15s;
-    --transition-normal: 0.25s;
-    --transition-slow: 0.35s;
-
-    /* 阴影层级系统 */
-    --shadow-elevation-low: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
-    --shadow-elevation-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    --shadow-elevation-high: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-
-    /* 渐变定义 */
-    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)) 0%, #0ea5e9 100%);
-    --gradient-accent: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
-    --gradient-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
-    --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
-    --gradient-danger: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
-
-    /* 交互变量 */
-    --card-hover-transform: translateY(-2px);
-    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    /* Simplified transitions */
+    --transition-fast: 150ms;
+    --transition-normal: 200ms;
   }
 
   .dark {
-    --background: 215 28% 10%;
-    --foreground: 210 20% 92%;
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
 
-    --card: 215 25% 14%;
-    --card-foreground: 210 20% 92%;
+    --card: 222 47% 14%;
+    --card-foreground: 210 40% 98%;
 
-    --popover: 215 25% 14%;
-    --popover-foreground: 210 20% 92%;
+    --popover: 222 47% 14%;
+    --popover-foreground: 210 40% 98%;
 
-    --primary: 213 94% 58%;
-    --primary-foreground: 215 28% 10%;
+    --primary: 239 84% 67%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 215 22% 20%;
-    --secondary-foreground: 210 20% 92%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
 
-    --muted: 215 22% 20%;
-    --muted-foreground: 215 15% 60%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
 
-    --accent: 180 70% 45%;
-    --accent-foreground: 215 28% 10%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
 
-    --destructive: 0 62% 45%;
+    --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 215 20% 22%;
-    --input: 215 20% 22%;
-    --ring: 213 94% 58%;
-
-    /* 深色模式阴影层级 */
-    --shadow-elevation-low: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25);
-    --shadow-elevation-medium: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.25);
-    --shadow-elevation-high: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+    --border: 217 33% 22%;
+    --input: 217 33% 22%;
+    --ring: 239 84% 67%;
   }
 
   * {
@@ -144,174 +95,6 @@
 }
 
 @layer components {
-  /* 渐变背景效果 */
-  .aurora-bg {
-    position: relative;
-    background: hsl(var(--background));
-  }
-
-  .aurora-bg::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    background:
-      radial-gradient(ellipse 80% 50% at 20% -20%, hsl(var(--primary) / 0.08), transparent),
-      radial-gradient(ellipse 60% 40% at 80% 120%, hsl(var(--accent) / 0.06), transparent);
-    pointer-events: none;
-    z-index: -1;
-  }
-
-  .dark .aurora-bg::before {
-    background:
-      radial-gradient(ellipse 80% 50% at 20% -20%, hsl(var(--primary) / 0.12), transparent),
-      radial-gradient(ellipse 60% 40% at 80% 120%, hsl(262 66% 50% / 0.08), transparent);
-  }
-
-  /* 玻璃拟态效果 */
-  .glass {
-    background: hsl(var(--card) / 0.8);
-    backdrop-filter: blur(12px);
-    border: 1px solid hsl(var(--border) / 0.5);
-    box-shadow:
-      0 4px 6px -1px hsl(0 0% 0% / 0.05),
-      0 2px 4px -2px hsl(0 0% 0% / 0.05);
-  }
-
-  .dark .glass {
-    background: hsl(var(--card) / 0.6);
-    border-color: hsl(var(--border) / 0.3);
-  }
-
-  /* 渐变边框效果 */
-  .gradient-border {
-    position: relative;
-    background: hsl(var(--card));
-    border-radius: var(--radius);
-  }
-
-  .gradient-border::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    padding: 1px;
-    border-radius: inherit;
-    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--accent)));
-    -webkit-mask:
-      linear-gradient(#fff 0 0) content-box,
-      linear-gradient(#fff 0 0);
-    mask:
-      linear-gradient(#fff 0 0) content-box,
-      linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-  }
-
-  /* 科技感按钮 */
-  .tech-btn {
-    position: relative;
-    overflow: hidden;
-    background: linear-gradient(135deg, hsl(var(--primary)), hsl(213 100% 45%));
-    transition: all var(--transition-normal) ease;
-  }
-
-  .tech-btn::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.2), transparent);
-    transition: left 0.5s ease;
-  }
-
-  .tech-btn:hover::before {
-    left: 100%;
-  }
-
-  .tech-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 25px hsl(var(--primary) / 0.3);
-  }
-
-  /* 科技感卡片 - 更圆润现代 */
-  .tech-card {
-    background: hsl(var(--card));
-    border: 1px solid hsl(var(--border));
-    border-radius: 16px;
-    transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  .tech-card:hover {
-    border-color: hsl(var(--primary) / 0.3);
-    box-shadow:
-      0 12px 40px hsl(var(--primary) / 0.12),
-      0 0 0 1px hsl(var(--primary) / 0.08);
-    transform: translateY(-3px);
-  }
-
-  /* 发光效果 */
-  .glow {
-    box-shadow:
-      0 0 20px hsl(var(--primary) / 0.15),
-      0 0 40px hsl(var(--primary) / 0.1);
-  }
-
-  .glow-cyan {
-    box-shadow:
-      0 0 20px hsl(var(--accent) / 0.15),
-      0 0 40px hsl(var(--accent) / 0.1);
-  }
-
-  .glow-purple {
-    box-shadow:
-      0 0 20px hsl(262 66% 50% / 0.15),
-      0 0 40px hsl(262 66% 50% / 0.1);
-  }
-
-  /* ========================================
-     悬浮卡片效果
-     ======================================== */
-  .hover-card {
-    transition: var(--transition-smooth);
-  }
-
-  .hover-card:hover {
-    transform: var(--card-hover-transform);
-    box-shadow: var(--shadow-elevation-medium);
-  }
-
-  /* ========================================
-     渐变按钮系统
-     ======================================== */
-  .btn-gradient-primary {
-    background: var(--gradient-primary);
-    color: white;
-    box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.3);
-    transition: var(--transition-smooth);
-  }
-
-  .btn-gradient-primary:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 20px 0 rgba(59, 130, 246, 0.4);
-  }
-
-  .btn-gradient-primary:active {
-    transform: translateY(0);
-  }
-
-  .btn-gradient-danger {
-    background: var(--gradient-danger);
-    color: white;
-    box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3);
-    transition: var(--transition-smooth);
-  }
-
-  .btn-gradient-danger:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 20px 0 rgba(239, 68, 68, 0.4);
-  }
-
   /* ========================================
      状态指示器
      ======================================== */
@@ -324,87 +107,16 @@
     box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
     animation: pulse-status 2s ease-in-out infinite;
   }
-
-  /* ========================================
-     渐变图标背景
-     ======================================== */
-  .icon-gradient-blue {
-    background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%);
-    color: white;
-  }
-
-  .icon-gradient-green {
-    background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
-    color: white;
-  }
-
-  .icon-gradient-amber {
-    background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
-    color: white;
-  }
-
-  .icon-gradient-purple {
-    background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%);
-    color: white;
-  }
-
-  .icon-gradient-cyan {
-    background: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%);
-    color: white;
-  }
-
-  .icon-gradient-rose {
-    background: linear-gradient(135deg, #f43f5e 0%, #fb7185 100%);
-    color: white;
-  }
-
-  /* ========================================
-     左侧渐变边框（用于配置卡片）
-     ======================================== */
-  .border-gradient-left {
-    border-left: 4px solid transparent;
-    border-image: var(--gradient-primary) 1;
-  }
 }
 
 @layer utilities {
-  /* Z-index 工具类 */
-  .z-dropdown { z-index: var(--z-dropdown); }
-  .z-sticky { z-index: var(--z-sticky); }
-  .z-fixed { z-index: var(--z-fixed); }
-  .z-modal-backdrop { z-index: var(--z-modal-backdrop); }
-  .z-modal { z-index: var(--z-modal); }
-  .z-popover { z-index: var(--z-popover); }
-  .z-tooltip { z-index: var(--z-tooltip); }
-  .z-toast { z-index: var(--z-toast); }
-  .z-max { z-index: var(--z-max); }
-
-  /* 渐变文字 */
-  .text-gradient {
-    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--accent)));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
+  /* Essential animation utilities */
+  .animate-fade-in {
+    animation: fadeIn 0.2s ease-out;
   }
 
-  .text-gradient-purple {
-    background: linear-gradient(135deg, hsl(var(--primary)), hsl(262 66% 50%));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
-  /* 动画工具类 */
-  .animate-float {
-    animation: float 3s ease-in-out infinite;
-  }
-
-  .animate-pulse-glow {
-    animation: pulse-glow 2s ease-in-out infinite;
-  }
-
-  .animate-shimmer {
-    animation: shimmer 2s linear infinite;
+  .animate-slide-up {
+    animation: slideUp 0.2s ease-out;
   }
 }
 
@@ -540,9 +252,9 @@
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
-/* Ant Design 分页器当前页渐变 */
+/* Ant Design 分页器当前页 - 纯色 */
 .ant-pagination-item-active {
-  background: linear-gradient(135deg, #3b82f6 0%, #0ea5e9 100%) !important;
+  background: hsl(var(--primary)) !important;
   border-color: transparent !important;
 }
 
@@ -550,28 +262,28 @@
   color: white !important;
 }
 
-/* Ant Design 主按钮渐变 */
+/* Ant Design 主按钮 - 纯色 */
 .ant-btn-primary:not(.ant-btn-dangerous) {
-  background: linear-gradient(135deg, hsl(213 100% 54%) 0%, #0ea5e9 100%) !important;
+  background: hsl(var(--primary)) !important;
   border: none !important;
-  box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.3) !important;
+  box-shadow: none !important;
 }
 
 .ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
-  background: linear-gradient(135deg, hsl(213 100% 50%) 0%, #0284c7 100%) !important;
-  box-shadow: 0 6px 20px 0 rgba(59, 130, 246, 0.4) !important;
+  background: hsl(239 84% 60%) !important;
+  box-shadow: none !important;
 }
 
-/* Ant Design 危险按钮渐变 */
+/* Ant Design 危险按钮 - 纯色 */
 .ant-btn-dangerous.ant-btn-primary {
-  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%) !important;
+  background: hsl(var(--destructive)) !important;
   border: none !important;
-  box-shadow: 0 4px 14px 0 rgba(239, 68, 68, 0.3) !important;
+  box-shadow: none !important;
 }
 
 .ant-btn-dangerous.ant-btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%) !important;
-  box-shadow: 0 6px 20px 0 rgba(239, 68, 68, 0.4) !important;
+  background: hsl(0 84% 55%) !important;
+  box-shadow: none !important;
 }
 
 /* ========================================
@@ -607,33 +319,6 @@
    动画关键帧
    ======================================== */
 
-@keyframes float {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-10px);
-  }
-}
-
-@keyframes pulse-glow {
-  0%, 100% {
-    box-shadow: 0 0 0 0 hsl(var(--primary) / 0.4);
-  }
-  50% {
-    box-shadow: 0 0 20px 5px hsl(var(--primary) / 0.2);
-  }
-}
-
-@keyframes shimmer {
-  0% {
-    background-position: -200% 0;
-  }
-  100% {
-    background-position: 200% 0;
-  }
-}
-
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -654,17 +339,6 @@
   }
 }
 
-@keyframes scaleIn {
-  from {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
 /* 状态脉动动画 - 用于在线状态指示 */
 @keyframes pulse-status {
   0%, 100% {
@@ -677,46 +351,34 @@
   }
 }
 
-/* 数字计数入场动画 */
-@keyframes countUp {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 /* ========================================
    Radix UI 兼容层（保留以支持现有组件）
    ======================================== */
 
 [data-radix-popper-content-wrapper] {
-  z-index: var(--z-popover) !important;
+  z-index: 50 !important;
 }
 
 [data-radix-select-content] {
-  z-index: var(--z-popover) !important;
+  z-index: 50 !important;
 }
 
 [data-radix-dialog-overlay] {
-  z-index: var(--z-modal-backdrop) !important;
+  z-index: 40 !important;
 }
 
 [data-radix-dialog-content] {
-  z-index: var(--z-modal) !important;
+  z-index: 50 !important;
 }
 
 [data-radix-tooltip-content] {
-  z-index: var(--z-tooltip) !important;
+  z-index: 50 !important;
 }
 
 [data-radix-dropdown-menu-content] {
-  z-index: var(--z-popover) !important;
+  z-index: 50 !important;
 }
 
 [data-radix-toast-viewport] {
-  z-index: var(--z-toast) !important;
+  z-index: 100 !important;
 }
