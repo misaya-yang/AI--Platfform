@@ -2636,6 +2636,7 @@ class KnowledgeService:
                 # find_image: Higher image weight (0.5) for aggressive image prioritization
                 # general: Balanced weight (0.4)
                 image_weight = 0.5 if intent == "find_image" else 0.4
+                assert 0.0 <= image_weight <= 1.0, f"image_weight must be in [0.0, 1.0], got {image_weight}"
 
                 reranker = MultimodalReranker(
                     vlm_service=self.vlm_service,
@@ -2672,7 +2673,6 @@ class KnowledgeService:
                         if r.image_url and self.image_storage_service:
                             try:
                                 # Try to load image bytes for VLM analysis
-                                import httpx
                                 async with httpx.AsyncClient(timeout=10.0) as client:
                                     response = await client.get(r.image_url)
                                     response.raise_for_status()
