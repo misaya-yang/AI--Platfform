@@ -1,0 +1,361 @@
+"""
+Model Pricing Service - Manage model pricing configurations.
+
+This service handles:
+- Fetching model pricing from database
+- Caching pricing for performance
+- Calculating costs for token usage
+- Managing model pricing updates
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...persistence.database import DatabaseStorage
+
+logger = logging.getLogger(__name__)
+
+# Global singleton instance
+_pricing_service: Optional["ModelPricingService"] = None
+
+
+# Default pricing when database is not available
+DEFAULT_PRICING: Dict[str, Dict[str, Any]] = {
+    # OpenAI Models
+    "gpt-4o": {"input": 0.0025, "output": 0.01, "provider": "openai"},
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006, "provider": "openai"},
+    "gpt-4-turbo": {"input": 0.01, "output": 0.03, "provider": "openai"},
+    "gpt-4": {"input": 0.03, "output": 0.06, "provider": "openai"},
+    "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015, "provider": "openai"},
+    # Anthropic Models
+    "claude-3-opus": {"input": 0.015, "output": 0.075, "provider": "anthropic"},
+    "claude-3-sonnet": {"input": 0.003, "output": 0.015, "provider": "anthropic"},
+    "claude-3-5-sonnet": {"input": 0.003, "output": 0.015, "provider": "anthropic"},
+    "claude-3-haiku": {"input": 0.00025, "output": 0.00125, "provider": "anthropic"},
+    # DeepSeek Models
+    "deepseek-chat": {"input": 0.00014, "output": 0.00028, "provider": "deepseek"},
+    "deepseek-coder": {"input": 0.00014, "output": 0.00028, "provider": "deepseek"},
+    # DashScope Models
+    "qwen-turbo": {"input": 0.0008, "output": 0.002, "provider": "dashscope"},
+    "qwen-plus": {"input": 0.004, "output": 0.012, "provider": "dashscope"},
+    "qwen-max": {"input": 0.02, "output": 0.06, "provider": "dashscope"},
+    "qwen-vl-plus": {"input": 0.008, "output": 0.008, "provider": "dashscope"},
+    # Default
+    "default": {"input": 0.001, "output": 0.002, "provider": "unknown"},
+}
+
+
+@dataclass
+class ModelPrice:
+    """Model pricing information."""
+    model: str
+    provider: str
+    input_price_per_1k: Decimal
+    output_price_per_1k: Decimal
+    display_name: str = ""
+    context_window: int = 0
+    max_output_tokens: int = 0
+    supports_vision: bool = False
+    supports_tools: bool = True
+    is_active: bool = True
+
+    def calculate_cost(self, input_tokens: int, output_tokens: int) -> Dict[str, Any]:
+        """
+        Calculate cost for given token usage.
+
+        Returns:
+            Dictionary with cost breakdown in USD and cents
+        """
+        input_cost = (Decimal(input_tokens) / 1000) * self.input_price_per_1k
+        output_cost = (Decimal(output_tokens) / 1000) * self.output_price_per_1k
+        total_cost = input_cost + output_cost
+
+        return {
+            "input_cost_usd": float(input_cost),
+            "output_cost_usd": float(output_cost),
+            "total_cost_usd": float(total_cost),
+            "input_cost_cents": int(input_cost * 100),
+            "output_cost_cents": int(output_cost * 100),
+            "total_cost_cents": int(total_cost * 100),
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "display_name": self.display_name or self.model,
+            "pricing": {
+                "input_per_1k_usd": float(self.input_price_per_1k),
+                "output_per_1k_usd": float(self.output_price_per_1k),
+            },
+            "capabilities": {
+                "context_window": self.context_window,
+                "max_output_tokens": self.max_output_tokens,
+                "supports_vision": self.supports_vision,
+                "supports_tools": self.supports_tools,
+            },
+            "is_active": self.is_active,
+        }
+
+
+class ModelPricingService:
+    """
+    Service for managing model pricing.
+
+    Features:
+    - Database-backed pricing with caching
+    - Cost calculation utilities
+    - Model capability queries
+    """
+
+    def __init__(
+        self,
+        database: Optional["DatabaseStorage"] = None,
+        cache_ttl_seconds: float = 300,  # 5 minutes
+    ):
+        self.database = database
+        self.cache_ttl = cache_ttl_seconds
+        self._cache: Dict[str, ModelPrice] = {}
+        self._cache_time: float = 0
+        self._all_models_cache: List[ModelPrice] = []
+
+    def set_database(self, database: "DatabaseStorage") -> None:
+        """Set or update the database storage instance."""
+        self.database = database
+
+    async def get_model_pricing(self, model: str) -> ModelPrice:
+        """
+        Get pricing for a specific model.
+
+        Args:
+            model: Model name/ID
+
+        Returns:
+            ModelPrice instance
+        """
+        await self._ensure_cache()
+
+        # Direct match
+        if model in self._cache:
+            return self._cache[model]
+
+        # Partial match (for model variants)
+        for cached_model, price in self._cache.items():
+            if model.startswith(cached_model) or cached_model.startswith(model):
+                return price
+
+        # Return default
+        return self._cache.get("default", self._get_default_price(model))
+
+    async def get_all_pricing(self, active_only: bool = True) -> List[ModelPrice]:
+        """Get all model pricing."""
+        await self._ensure_cache()
+
+        if active_only:
+            return [p for p in self._all_models_cache if p.is_active]
+        return self._all_models_cache.copy()
+
+    async def calculate_cost(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> Dict[str, Any]:
+        """
+        Calculate cost for token usage.
+
+        Returns:
+            Cost breakdown dictionary
+        """
+        price = await self.get_model_pricing(model)
+        cost = price.calculate_cost(input_tokens, output_tokens)
+        cost["model"] = price.model
+        cost["provider"] = price.provider
+        return cost
+
+    async def update_pricing(
+        self,
+        model: str,
+        input_price_per_1k: float,
+        output_price_per_1k: float,
+        provider: Optional[str] = None,
+        display_name: Optional[str] = None,
+        context_window: Optional[int] = None,
+        max_output_tokens: Optional[int] = None,
+        supports_vision: Optional[bool] = None,
+        supports_tools: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update or create model pricing."""
+        if not self.database or not self.database._pool:
+            return {"error": "Database not available"}
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO model_pricing (
+                        model, provider, display_name,
+                        input_price_per_1k, output_price_per_1k,
+                        context_window, max_output_tokens,
+                        supports_vision, supports_tools
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (model) DO UPDATE SET
+                        input_price_per_1k = EXCLUDED.input_price_per_1k,
+                        output_price_per_1k = EXCLUDED.output_price_per_1k,
+                        provider = COALESCE(EXCLUDED.provider, model_pricing.provider),
+                        display_name = COALESCE(EXCLUDED.display_name, model_pricing.display_name),
+                        context_window = COALESCE(EXCLUDED.context_window, model_pricing.context_window),
+                        max_output_tokens = COALESCE(EXCLUDED.max_output_tokens, model_pricing.max_output_tokens),
+                        supports_vision = COALESCE(EXCLUDED.supports_vision, model_pricing.supports_vision),
+                        supports_tools = COALESCE(EXCLUDED.supports_tools, model_pricing.supports_tools),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    model,
+                    provider,
+                    display_name,
+                    input_price_per_1k,
+                    output_price_per_1k,
+                    context_window,
+                    max_output_tokens,
+                    supports_vision,
+                    supports_tools,
+                )
+
+            # Invalidate cache
+            self._cache_time = 0
+
+            return {"success": True, "model": model}
+
+        except Exception as e:
+            logger.error(f"Failed to update model pricing: {e}")
+            return {"error": str(e)}
+
+    async def set_model_active(self, model: str, is_active: bool) -> bool:
+        """Set model active status."""
+        if not self.database or not self.database._pool:
+            return False
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE model_pricing
+                    SET is_active = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE model = $1
+                    """,
+                    model,
+                    is_active,
+                )
+
+            # Invalidate cache
+            self._cache_time = 0
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to set model active status: {e}")
+            return False
+
+    async def _ensure_cache(self) -> None:
+        """Ensure cache is populated and fresh."""
+        now = time.time()
+        if now - self._cache_time < self.cache_ttl and self._cache:
+            return
+
+        await self._refresh_cache()
+
+    async def _refresh_cache(self) -> None:
+        """Refresh pricing cache from database."""
+        if not self.database or not self.database._pool:
+            # Use default pricing
+            self._load_default_pricing()
+            return
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        model, provider, display_name,
+                        input_price_per_1k, output_price_per_1k,
+                        context_window, max_output_tokens,
+                        supports_vision, supports_tools, is_active
+                    FROM model_pricing
+                    """
+                )
+
+                self._cache.clear()
+                self._all_models_cache.clear()
+
+                for row in rows:
+                    price = ModelPrice(
+                        model=row["model"],
+                        provider=row["provider"] or "unknown",
+                        display_name=row["display_name"] or row["model"],
+                        input_price_per_1k=Decimal(str(row["input_price_per_1k"])),
+                        output_price_per_1k=Decimal(str(row["output_price_per_1k"])),
+                        context_window=row["context_window"] or 0,
+                        max_output_tokens=row["max_output_tokens"] or 0,
+                        supports_vision=row["supports_vision"] or False,
+                        supports_tools=row["supports_tools"] if row["supports_tools"] is not None else True,
+                        is_active=row["is_active"] if row["is_active"] is not None else True,
+                    )
+                    self._cache[price.model] = price
+                    self._all_models_cache.append(price)
+
+                self._cache_time = time.time()
+                logger.debug(f"Refreshed pricing cache with {len(rows)} models")
+
+        except Exception as e:
+            logger.warning(f"Failed to refresh pricing cache from database: {e}")
+            self._load_default_pricing()
+
+    def _load_default_pricing(self) -> None:
+        """Load default pricing into cache."""
+        self._cache.clear()
+        self._all_models_cache.clear()
+
+        for model, pricing in DEFAULT_PRICING.items():
+            price = ModelPrice(
+                model=model,
+                provider=pricing.get("provider", "unknown"),
+                input_price_per_1k=Decimal(str(pricing["input"])),
+                output_price_per_1k=Decimal(str(pricing["output"])),
+            )
+            self._cache[model] = price
+            self._all_models_cache.append(price)
+
+        self._cache_time = time.time()
+
+    def _get_default_price(self, model: str) -> ModelPrice:
+        """Get default price for unknown model."""
+        return ModelPrice(
+            model=model,
+            provider="unknown",
+            input_price_per_1k=Decimal("0.001"),
+            output_price_per_1k=Decimal("0.002"),
+        )
+
+
+def get_pricing_service() -> ModelPricingService:
+    """Get the global ModelPricingService singleton."""
+    global _pricing_service
+    if _pricing_service is None:
+        _pricing_service = ModelPricingService()
+    return _pricing_service
+
+
+def init_pricing_service(database: "DatabaseStorage") -> ModelPricingService:
+    """Initialize the global ModelPricingService with database storage."""
+    global _pricing_service
+    if _pricing_service is None:
+        _pricing_service = ModelPricingService(database)
+    else:
+        _pricing_service.set_database(database)
+    return _pricing_service

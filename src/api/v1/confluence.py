@@ -370,17 +370,26 @@ async def create_space_binding(
         await knowledge_svc.require_dataset_access(user, payload.dataset_id, required="editor")
 
         svc = get_confluence_sync_service(request)
+
+        # Build root_page_ids list, supporting both old single ID and new list format
+        root_page_ids = list(payload.root_page_ids) if payload.root_page_ids else []
+        # Backward compatibility: if root_page_id is set but not in root_page_ids, add it
+        if payload.root_page_id and payload.root_page_id not in root_page_ids:
+            root_page_ids.append(payload.root_page_id)
+
         binding = await svc.create_space_binding(
             connection_id=connection_id,
             tenant_id=user.tenant_id,
             dataset_id=payload.dataset_id,
             space_key=payload.space_key,
-            root_page_id=payload.root_page_id,
+            root_page_ids=root_page_ids,
             include_patterns=payload.include_patterns,
             exclude_patterns=payload.exclude_patterns,
             max_depth=payload.max_depth,
             include_attachments=payload.include_attachments,
             include_comments=payload.include_comments,
+            sync_images=payload.sync_images,
+            image_max_size_bytes=payload.image_max_size_bytes,
             created_by=user.user_id,
         )
         return binding

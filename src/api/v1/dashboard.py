@@ -9,6 +9,8 @@ Provides:
 - Alert status
 """
 
+import hashlib
+import logging
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -16,8 +18,12 @@ from fastapi import APIRouter, Request, Depends, Query, WebSocket, WebSocketDisc
 from pydantic import BaseModel
 
 from ...api.deps import get_auth_context, AuthContext
+from ...core.auth.jwt import decode_jwt_token
+from ...core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
 from ...services.metrics import get_metrics_recorder
 from ...services.metrics.realtime_metrics import get_realtime_metrics, RealtimeSnapshot
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -178,6 +184,120 @@ class DashboardConnectionManager:
 manager = DashboardConnectionManager()
 
 
+# ============ WebSocket Authentication Helper ============
+
+
+async def authenticate_websocket(
+    websocket: WebSocket,
+    token: Optional[str] = None,
+) -> Optional[AuthContext]:
+    """
+    Authenticate WebSocket connection using token from query parameter or header.
+
+    WebSocket connections don't support standard FastAPI Depends for auth,
+    so we need to manually extract and verify the token.
+
+    Args:
+        websocket: The WebSocket connection
+        token: Optional token from query parameter
+
+    Returns:
+        AuthContext if authenticated, None if auth fails
+    """
+    app = websocket.app
+    settings = getattr(app.state, "settings", None)
+    if not settings:
+        return None
+
+    auth_cfg = settings.authentication
+
+    # If auth is disabled, allow guest access
+    if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
+        return AuthContext(user_id="guest", tenant_id="public", roles=["guest"])
+
+    # Try to get token from query param first, then from header
+    if not token:
+        token = websocket.query_params.get("token")
+
+    if not token:
+        # Try Authorization header (websocket headers are available)
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+
+    # Also check for API key
+    api_key = websocket.query_params.get("api_key") or websocket.headers.get(
+        auth_cfg.api_key.header_name
+    )
+
+    # JWT authentication
+    if token and auth_cfg.jwt.enabled:
+        try:
+            jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
+            jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
+
+            payload = decode_jwt_token(
+                token,
+                secret=jwt_secret,
+                algorithms=jwt_algorithms,
+                audience=auth_cfg.jwt.audience,
+                issuer=auth_cfg.jwt.issuer,
+            )
+
+            user_id = str(payload.get("sub") or payload.get("user_id") or "")
+            if not user_id:
+                return None
+
+            tenant_id = str(payload.get("tenant_id") or "")
+            raw_roles = payload.get("roles") or payload.get("role") or ["user"]
+            if isinstance(raw_roles, str):
+                roles = [raw_roles]
+            else:
+                roles = [str(r) for r in raw_roles] if raw_roles else ["user"]
+
+            return AuthContext(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                roles=roles,
+                permissions=[],
+            )
+
+        except Exception as e:
+            logger.warning(f"WebSocket JWT auth failed: {e}")
+            return None
+
+    # API key authentication
+    if api_key and auth_cfg.api_key.enabled:
+        try:
+            db = getattr(app.state, "database", None)
+            key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+            if db and getattr(db, "enabled", False):
+                key_info = await db.get_api_key(key_hash)
+                if key_info:
+                    return AuthContext(
+                        user_id=str(key_info.get("user_id") or f"apikey:{key_hash[:16]}"),
+                        tenant_id=str(key_info.get("tenant_id") or ""),
+                        roles=key_info.get("roles") or ["user"],
+                        permissions=[],
+                    )
+
+            # Static API key check
+            if api_key in auth_cfg.api_key.keys:
+                return AuthContext(
+                    user_id=f"apikey:{key_hash[:16]}",
+                    tenant_id="",
+                    roles=["user"],
+                    permissions=[],
+                )
+
+        except Exception as e:
+            logger.warning(f"WebSocket API key auth failed: {e}")
+            return None
+
+    return None
+
+
 # ============ API Endpoints ============
 
 
@@ -247,13 +367,37 @@ async def get_realtime_dashboard(
 
 
 @router.websocket("/ws")
-async def websocket_dashboard(websocket: WebSocket):
+async def websocket_dashboard(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None, description="JWT token for authentication"),
+):
     """
     WebSocket endpoint for real-time dashboard updates
 
     Sends metrics snapshot every 5 seconds.
+
+    Authentication: Pass JWT token via query parameter `token` or `Authorization` header.
+    For tenant isolation, metrics are filtered by tenant_id from the authenticated user.
     """
+    # Authenticate the WebSocket connection
+    auth = await authenticate_websocket(websocket, token)
+
+    # Check if authentication is required
+    settings = getattr(websocket.app.state, "settings", None)
+    auth_required = False
+    if settings:
+        auth_cfg = settings.authentication
+        auth_required = auth_cfg.jwt.enabled or auth_cfg.api_key.enabled
+
+    if auth_required and not auth:
+        await websocket.close(code=4001, reason="Authentication required")
+        return
+
+    # Accept the connection after authentication
     await manager.connect(websocket)
+
+    # Get tenant_id for filtering (if multi-tenant)
+    tenant_id = auth.tenant_id if auth else ""
 
     realtime = get_realtime_metrics()
 
@@ -263,6 +407,10 @@ async def websocket_dashboard(websocket: WebSocket):
             snapshot = await realtime.get_realtime_snapshot()
             data = snapshot.to_dict()
             data["type"] = "metrics"
+
+            # Add tenant context to response
+            if tenant_id:
+                data["tenant_id"] = tenant_id
 
             # Check alerts
             alerts = _check_alerts(snapshot)

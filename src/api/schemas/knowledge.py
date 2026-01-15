@@ -177,11 +177,18 @@ class RetrieveRequestSchema(BaseModel):
     mmr_lambda: Optional[float] = None
     mmr_threshold: Optional[float] = None
 
-    # P3: Multimodal retrieval options
+    # Multimodal retrieval options
     include_images: bool = True  # Include image segments in results
     include_associated_images: bool = True  # Attach associated images to text segments
     multimodal_rerank: bool = False  # Use VLM for multimodal reranking
     content_type_filter: Optional[str] = None  # Filter by content type: text|image|None (all)
+
+    # Advanced multimodal parameters (Phase 2 optimization)
+    image_search_enabled: bool = True  # Directly search image segments (not just associated)
+    vlm_rerank_weight: Optional[float] = None  # Weight of VLM score (0.0-1.0), default 0.4
+    image_boost: Optional[float] = None  # Boost factor for image results (>1 = prefer images)
+    image_score_threshold: Optional[float] = None  # Score threshold for images (lower than text)
+    use_separate_thresholds: bool = False  # Use different thresholds for text vs image
 
 
 class AssociatedImageSchema(BaseModel):

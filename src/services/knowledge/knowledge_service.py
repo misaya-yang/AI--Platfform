@@ -15,10 +15,14 @@ import httpx
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...core.observability.logging import get_logger
+
+logger = get_logger(__name__)
 from ...persistence.database import DatabaseStorage
 from .chunking import ChunkingConfig, process_document, flatten_chunks, ContentType, AssociatedImage
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, DashScopeMultimodalEmbedding
 from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
+from .ingestion import DocumentImageExtractor, ExtractedImage as IngestionExtractedImage
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
 from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
@@ -27,6 +31,8 @@ from .vector_store import VectorStore
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..storage.image_storage import ImageStorageService
+    from .worker import KnowledgeWorker
+    from .vlm_service import DashScopeVLMService
 
 
 def _ensure_dict(value: Any) -> Dict[str, Any]:
@@ -76,12 +82,15 @@ class KnowledgeService:
         database: DatabaseStorage,
         multimodal_embedding: Optional[DashScopeMultimodalEmbedding] = None,
         image_storage_service: Optional["ImageStorageService"] = None,
+        vlm_service: Optional[Any] = None,
     ):
         self.settings = settings
         self.db = database
         self.multimodal_embedding = multimodal_embedding
         self.image_storage_service = image_storage_service
+        self.vlm_service = vlm_service
         self.pdf_image_processor = PDFImageProcessor()
+        self.document_image_extractor = DocumentImageExtractor()
 
         if not getattr(settings, "knowledge", None) or not settings.knowledge.enabled:
             raise RuntimeError("Knowledge service is disabled (GATEWAY_KNOWLEDGE__ENABLED=false)")
@@ -98,6 +107,72 @@ class KnowledgeService:
 
     async def close(self) -> None:
         await self.vector_store.close()
+
+    def _is_multimodal_dataset(self, dataset: Dict[str, Any]) -> bool:
+        """Check if dataset is configured for multimodal (unified embedding space).
+
+        A dataset is considered multimodal if:
+        1. embedding_provider is 'unified_multimodal', 'unified', or 'cross_modal'
+        2. OR embedding_model is a known multimodal model
+        3. OR index_config explicitly enables multimodal mode
+
+        Returns:
+            True if the dataset should use unified multimodal embedding
+        """
+        provider = str(dataset.get("embedding_provider") or "").lower()
+        model = str(dataset.get("embedding_model") or "")
+
+        # Check provider
+        multimodal_providers = {"unified_multimodal", "unified", "cross_modal", "dashscope_multimodal", "multimodal"}
+        if provider in multimodal_providers:
+            return True
+
+        # Check model
+        from .embedding import MULTIMODAL_EMBEDDING_MODELS
+        if model in MULTIMODAL_EMBEDDING_MODELS:
+            return True
+
+        # Check index_config
+        index_config = _ensure_dict(dataset.get("index_config"))
+        if index_config.get("multimodal_enabled") or index_config.get("enable_multimodal"):
+            return True
+
+        return False
+
+    def _get_unified_multimodal_embedder(
+        self,
+        dataset: Dict[str, Any],
+        embedding_config: Optional[Dict[str, Any]] = None,
+    ) -> "UnifiedMultimodalEmbedding":
+        """Create UnifiedMultimodalEmbedding for multimodal datasets.
+
+        This ensures text and images are embedded in the same vector space,
+        enabling true cross-modal retrieval.
+        """
+        from .embedding import UnifiedMultimodalEmbedding
+
+        # Resolve API key from dataset config or gateway settings
+        ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
+        api_key = ec.get("api_key") or ""
+
+        if not api_key and hasattr(settings, "knowledge") and settings.knowledge.embedding:
+            api_key = settings.knowledge.embedding.api_key or ""
+
+        if not api_key and hasattr(settings, "dashscope"):
+            api_key = getattr(settings.dashscope, "api_key", "") or ""
+
+        if not api_key:
+            raise ValidationFailedError("API key required for multimodal embedding")
+
+        # Use the recommended unified model
+        model = dataset.get("embedding_model") or "tongyi-embedding-vision-plus"
+
+        return UnifiedMultimodalEmbedding(
+            api_key=api_key,
+            model=model,
+            base_url=ec.get("base_url"),
+            max_concurrent=ec.get("max_concurrent", 5),
+        )
 
     async def _get_dataset_or_404(self, dataset_id: str) -> Dict[str, Any]:
         dataset = await self.db.get_dataset(dataset_id)
@@ -425,53 +500,109 @@ class KnowledgeService:
 
         name = (filename or "").strip().lower()
         mime = (mime_type or "").strip().lower()
-        is_pdf = (
-            content_bytes.startswith(b"%PDF")
-            or name.endswith(".pdf")
-            or "application/pdf" in mime
-        )
 
-        extracted_images: List[ExtractedImage] = []
+        extracted_images: List[IngestionExtractedImage] = []
         text: str = ""
         detected_mime: str = ""
 
-        if is_pdf and self.multimodal_embedding:
-            # Use PDF image processor for PDFs when multimodal is available
-            logger.info(f"Processing PDF with image extraction: {filename}")
-            result = await asyncio.to_thread(
-                self.pdf_image_processor.process_pdf_bytes, content_bytes
-            )
-            text = result.text
-            extracted_images = result.embeddable_images
-            detected_mime = "application/pdf"
-            logger.info(
-                f"PDF extraction complete: {len(text)} chars, "
-                f"{result.total_images} images ({len(extracted_images)} embeddable)"
-            )
+        # Use unified DocumentImageExtractor for all file types when multimodal is available
+        if self.multimodal_embedding and self.image_storage_service:
+            try:
+                logger.info(f"Processing document with unified image extraction: {filename}")
+                extraction_result = await self.document_image_extractor.extract(
+                    filename=filename,
+                    content=content_bytes,
+                    document_type=None,  # Auto-detect
+                )
+                text = extraction_result.text
+                extracted_images = extraction_result.embeddable_images
+                detected_mime = extraction_result.document_type
+                logger.info(
+                    f"Extraction complete: {len(text)} chars, "
+                    f"{extraction_result.total_images} images ({len(extracted_images)} embeddable)"
+                )
+            except Exception as extract_err:
+                logger.warning(f"Image extraction failed, falling back to text-only: {extract_err}")
+                # Fallback to text-only extraction
+                text, detected_mime = await asyncio.to_thread(
+                    self._extract_text_from_bytes, content_bytes, filename, mime_type
+                )
         else:
-            # Standard text extraction
+            # Standard text extraction when multimodal is not available
             text, detected_mime = await asyncio.to_thread(
                 self._extract_text_from_bytes, content_bytes, filename, mime_type
             )
 
         # Prepare document metadata
         doc_metadata = metadata or {}
-        if extracted_images:
-            # Store image metadata (not content) in document
-            doc_metadata["extracted_images"] = [
-                {
-                    "image_id": img.image_id,
-                    "mime_type": img.mime_type,
-                    "width": img.width,
-                    "height": img.height,
-                    "page_number": img.page_number,
-                    "size_bytes": img.size_bytes,
-                    "context_text": img.context_text[:200] if img.context_text else "",
-                }
-                for img in extracted_images
-            ]
-            doc_metadata["image_count"] = len(extracted_images)
-            logger.info(f"Document {doc_id} has {len(extracted_images)} embeddable images")
+        stored_image_metadata = []
+
+        # Persist images to storage immediately if available
+        if extracted_images and self.image_storage_service:
+            dataset = await self._get_dataset_or_404(dataset_id)
+            tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
+            
+            for idx, img in enumerate(extracted_images):
+                try:
+                    # Extract page_number from metadata or attributes
+                    page_number = (
+                        getattr(img, "page_number", None) or
+                        img.metadata.get("page_number") if hasattr(img, "metadata") else None
+                    )
+                    
+                    # Generate storage key
+                    attachment_id = f"upload_{img.image_id}"
+                    storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
+                    
+                    # Upload to persistent storage
+                    storage_url = await self.image_storage_service.upload_image(
+                        tenant_id=tenant_id,
+                        document_id=doc_id,
+                        attachment_id=attachment_id,
+                        filename=storage_filename,
+                        content=img.content,
+                        content_type=img.mime_type,
+                        metadata={
+                            "width": str(img.width),
+                            "height": str(img.height),
+                            "source_location": img.source_location,
+                            "page_number": str(page_number) if page_number else str(idx),
+                        },
+                    )
+                    
+                    # Store metadata with storage URL
+                    stored_image_metadata.append({
+                        "image_id": img.image_id,
+                        "storage_url": storage_url,
+                        "storage_key": f"{tenant_id}/{doc_id}/images/{attachment_id}_{storage_filename}",
+                        "mime_type": img.mime_type,
+                        "width": img.width,
+                        "height": img.height,
+                        "page_number": page_number,
+                        "size_bytes": img.size_bytes,
+                        "context_text": img.context_text[:200] if img.context_text else "",
+                        "source_location": img.source_location,
+                    })
+                    logger.debug(f"Persisted image {img.image_id} to storage: {storage_url}")
+                except Exception as store_err:
+                    logger.warning(f"Failed to persist image {img.image_id}: {store_err}")
+                    # Still include in metadata but without storage URL
+                    stored_image_metadata.append({
+                        "image_id": img.image_id,
+                        "storage_url": None,
+                        "mime_type": img.mime_type,
+                        "width": img.width,
+                        "height": img.height,
+                        "page_number": None,
+                        "size_bytes": img.size_bytes,
+                        "context_text": img.context_text[:200] if img.context_text else "",
+                        "error": str(store_err),
+                    })
+
+        if stored_image_metadata:
+            doc_metadata["extracted_images"] = stored_image_metadata
+            doc_metadata["image_count"] = len(stored_image_metadata)
+            logger.info(f"Document {doc_id} has {len(stored_image_metadata)} images persisted to storage")
 
         doc = {
             "document_id": doc_id,
@@ -485,13 +616,6 @@ class KnowledgeService:
             "content": text,
             "metadata": doc_metadata,
         }
-
-        # Store extracted images temporarily for ingestion
-        # Using a simple cache keyed by document_id
-        if extracted_images:
-            if not hasattr(self, "_pending_images"):
-                self._pending_images: Dict[str, List[ExtractedImage]] = {}
-            self._pending_images[doc_id] = extracted_images
 
         await self.db.save_document(doc)
         return await self.db.get_document(doc_id) or doc
@@ -751,31 +875,46 @@ class KnowledgeService:
             old_segments = await self.db.list_segments(
                 dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
             )
+            old_text_segments = [
+                s for s in old_segments
+                if str(s.get("content_type", "text")).lower() == "text"
+            ]
             old_point_ids = [
-                str(s.get("vector_id") or s.get("segment_id") or "") for s in old_segments
+                str(s.get("vector_id") or s.get("segment_id") or "") for s in old_text_segments
             ]
 
             embedding_provider = str(dataset.get("embedding_provider") or "local")
             embedding_model = str(dataset.get("embedding_model") or "hash-384")
             embedding_config = _ensure_dict(dataset.get("embedding_config"))
 
-            econf = self._resolve_embedding_config(
-                provider=embedding_provider,
-                model=embedding_model,
-                embedding_config=embedding_config,
-            )
+            # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
+            is_multimodal = self._is_multimodal_dataset(dataset)
 
             embedder: Optional[BaseEmbedding] = None
             try:
-                embedder = create_embedding(
-                    econf, dimension=int(dataset.get("embedding_dimension") or 0) or None
-                )
+                if is_multimodal:
+                    # Use UnifiedMultimodalEmbedding for consistent text-image vector space
+                    logger.info(f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}")
+                    embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+                else:
+                    econf = self._resolve_embedding_config(
+                        provider=embedding_provider,
+                        model=embedding_model,
+                        embedding_config=embedding_config,
+                    )
+                    embedder = create_embedding(
+                        econf, dimension=int(dataset.get("embedding_dimension") or 0) or None
+                    )
 
                 # If dimension is unknown, dry-run to fetch it.
                 if embedder._dimension is None:
+                    # Default timeout for multimodal (no econf available)
+                    timeout_val = 35.0
+                    if not is_multimodal and 'econf' in dir():
+                        timeout_val = float(econf.timeout_seconds) + 5.0
                     await asyncio.wait_for(
                         embedder.embed_query("test"),
-                        timeout=float(econf.timeout_seconds) + 5.0,
+                        timeout=timeout_val,
                     )
 
                 dim = embedder._dimension or 1024  # fallback
@@ -867,11 +1006,31 @@ class KnowledgeService:
                         document_id, status="embedding", progress=min(progress, 95)
                     )
 
+                # Zero-downtime update strategy:
+                # 1. Upsert new vectors to vector store
+                # 2. Upsert new segments to DB (ON CONFLICT on document_id+position updates in-place)
+                # 3. Delete excess old segments (if document shrunk)
+                # 4. Cleanup old vectors from vector store
+
+                # Upsert new vectors and segments first (keeps data available)
                 await self.vector_store.upsert(collection_name=collection, points=points)
                 await self.db.insert_segments(segment_rows)
 
-                # Zero-downtime cleanup: Delete old vectors AFTER new ones are searchable
-                # This ensures the document remains searchable throughout the update process
+                # Get new segment IDs for exclusion when deleting old segments
+                new_segment_ids = [s["segment_id"] for s in segment_rows]
+
+                # Delete old segments that are no longer needed
+                # The insert_segments already updated existing positions via ON CONFLICT (document_id, position)
+                if old_text_segments:
+                    deleted_count = await self.db.delete_segments_by_document(
+                        document_id, exclude_ids=new_segment_ids, content_type="text"
+                    )
+                    if deleted_count > 0:
+                        logger.debug(
+                            f"Deleted {deleted_count} excess old segments for document {document_id}"
+                        )
+
+                # Cleanup old vectors from vector store
                 if old_point_ids and collection:
                     try:
                         await self.vector_store.delete_points(collection, old_point_ids)
@@ -883,8 +1042,6 @@ class KnowledgeService:
                         logger.warning(
                             f"Failed to cleanup old vectors for document {document_id}: {cleanup_err}"
                         )
-                # Delete old segments from DB (after vectors are cleaned up)
-                await self.db.delete_segments_by_document(document_id, exclude_ids=[s["segment_id"] for s in segment_rows])
 
                 # Persist dataset dimension/collection if missing.
                 if int(dataset.get("embedding_dimension") or 0) != dim or not dataset.get(
@@ -897,17 +1054,18 @@ class KnowledgeService:
 
                 # Process images if multimodal embedding is available
                 image_count = 0
-                if self.multimodal_embedding and hasattr(self, "_pending_images"):
-                    pending_images = self._pending_images.pop(document_id, [])
-                    if pending_images:
+                if self.multimodal_embedding and self.image_storage_service:
+                    # Load image metadata from document (for file uploads)
+                    image_metadata_list = doc.get("metadata", {}).get("extracted_images", [])
+                    if image_metadata_list:
                         await self.db.update_document_status(
-                            document_id, status="embedding_images", progress=96
+                            document_id, status="embedding_images", progress=85
                         )
                         try:
-                            image_count = await self._process_document_images(
+                            image_count = await self._process_document_images_from_storage(
                                 dataset_id=dataset_id,
                                 document_id=document_id,
-                                images=pending_images,
+                                image_metadata_list=image_metadata_list,
                                 collection=collection,
                                 base_position=len(segment_rows),
                                 tenant_id=str(dataset.get("tenant_id") or "default"),
@@ -921,8 +1079,39 @@ class KnowledgeService:
                             )
                             # Continue even if image embedding fails
 
+                # Auto-associate images to text chunks
+                # This handles both:
+                # 1. Images from file uploads (processed above)
+                # 2. Images from Confluence sync (already in DB via _save_image_segment)
+                await self.db.update_document_status(
+                    document_id, status="associating_images", progress=95
+                )
+                try:
+                    # Check if there are any image segments for this document
+                    existing_image_segments = await self.db.get_image_segments_by_document(document_id)
+                    if existing_image_segments:
+                        association_result = await self.associate_images_to_chunks(
+                            document_id=document_id,
+                            max_images_per_chunk=10,
+                            proximity_threshold=0.3,
+                        )
+                        logger.info(
+                            f"Associated {association_result.get('associations_created', 0)} "
+                            f"images to {association_result.get('segments_with_images', 0)} text chunks "
+                            f"(total image segments: {len(existing_image_segments)})"
+                        )
+                except Exception as assoc_err:
+                    logger.warning(
+                        f"Image association failed for document {document_id}: {assoc_err}"
+                    )
+                    # Continue even if association fails
+
                 await self.db.update_document_status(document_id, status="completed", progress=100)
             except Exception as exc:
+                logger.error(
+                    f"Embedding/vector store failed for document {document_id}: {exc}",
+                    exc_info=True,
+                )
                 await self.db.update_document_status(
                     document_id, status="failed", progress=100, error=str(exc)
                 )
@@ -931,6 +1120,10 @@ class KnowledgeService:
                     await embedder.close()
         except Exception as exc:
             # Best-effort: keep document status in a terminal state.
+            logger.error(
+                f"Ingest failed for document {document_id}: {exc}",
+                exc_info=True,
+            )
             try:
                 await self.db.update_document_status(
                     document_id, status="failed", progress=100, error=str(exc)
@@ -938,6 +1131,173 @@ class KnowledgeService:
             except Exception:
                 pass
             return
+
+    async def _process_document_images_from_storage(
+        self,
+        dataset_id: str,
+        document_id: str,
+        image_metadata_list: List[Dict[str, Any]],
+        collection: str,
+        base_position: int = 0,
+        tenant_id: str = "default",
+    ) -> int:
+        """
+        Process and embed images loaded from persistent storage with VLM enrichment.
+
+        Args:
+            dataset_id: Dataset ID
+            document_id: Document ID
+            image_metadata_list: List of image metadata dicts from document.metadata
+            collection: Qdrant collection name
+            base_position: Starting position for image segments
+            tenant_id: Tenant ID for storage path
+
+        Returns:
+            Number of successfully processed images
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not self.multimodal_embedding or not self.image_storage_service or not image_metadata_list:
+            return 0
+
+        from qdrant_client.http import models as qmodels
+
+        processed = 0
+        image_points = []
+        image_segments = []
+
+        for idx, img_meta in enumerate(image_metadata_list):
+            try:
+                storage_url = img_meta.get("storage_url")
+                if not storage_url:
+                    logger.debug(f"Skipping image {img_meta.get('image_id')} - no storage URL")
+                    continue
+
+                # Load image from storage
+                try:
+                    # Extract storage key from metadata or reconstruct from URL
+                    storage_key = img_meta.get("storage_key")
+                    if storage_key:
+                        image_bytes = await self.image_storage_service._backend.download(storage_key)
+                    else:
+                        # Fallback: try to download from URL
+                        import httpx
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            response = await client.get(storage_url)
+                            response.raise_for_status()
+                            image_bytes = response.content
+                    logger.debug(f"Loaded image {img_meta.get('image_id')} from storage ({len(image_bytes)} bytes)")
+                except Exception as load_err:
+                    logger.warning(f"Failed to load image {img_meta.get('image_id')} from storage: {load_err}")
+                    continue
+
+                # Generate VLM description if VLM service is available
+                vlm_description = None
+                if self.vlm_service:
+                    try:
+                        # Determine image type for better prompts
+                        context_text = img_meta.get("context_text", "")
+                        image_type = "table" if "table" in context_text.lower() or "chart" in context_text.lower() else "general"
+                        
+                        vlm_result = await self.vlm_service.describe_image(
+                            image_bytes=image_bytes,
+                            image_type=image_type,
+                            context=context_text[:200] if context_text else None,
+                            max_tokens=1500,
+                        )
+                        vlm_description = vlm_result.description
+                        logger.debug(f"Generated VLM description for image {img_meta.get('image_id')}: {len(vlm_description)} chars")
+                    except Exception as vlm_err:
+                        logger.warning(f"VLM description failed for image {img_meta.get('image_id')}: {vlm_err}")
+                        # Continue without VLM description
+
+                # Embed the image (with context if available)
+                logger.debug(f"Embedding image {img_meta.get('image_id')} ({img_meta.get('width')}x{img_meta.get('height')})")
+                embeddings = await self.multimodal_embedding.embed_images([image_bytes])
+
+                if not embeddings or not embeddings[0]:
+                    logger.warning(f"No embedding returned for image {img_meta.get('image_id')}")
+                    continue
+
+                vector = embeddings[0]
+                seg_id = str(uuid.uuid4())
+                position = base_position + idx
+
+                # Prepare text for embedding context (use VLM description if available, otherwise context text)
+                image_text = vlm_description or img_meta.get("context_text", "") or f"[Image: {img_meta.get('source_location', 'unknown')}]"
+
+                # Prepare payload for Qdrant
+                payload = {
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "segment_id": seg_id,
+                    "position": position,
+                    "text": image_text,
+                    "content_type": "image",
+                    "image_id": img_meta.get("image_id"),
+                    "image_mime_type": img_meta.get("mime_type"),
+                    "image_width": img_meta.get("width"),
+                    "image_height": img_meta.get("height"),
+                    "image_page": img_meta.get("page_number"),
+                    "vlm_description": vlm_description,  # Store VLM description in payload
+                }
+
+                image_points.append(
+                    qmodels.PointStruct(
+                        id=seg_id,
+                        vector=vector,
+                        payload=payload,
+                    )
+                )
+
+                # Prepare segment for database
+                image_segments.append({
+                    "segment_id": seg_id,
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "position": position,
+                    "text": image_text,
+                    "token_count": 0,
+                    "vector_id": seg_id,
+                    "content_type": "image",
+                    "image_url": storage_url,
+                    "image_attachment_id": img_meta.get("image_id"),
+                    "image_filename": img_meta.get("storage_key", "").split("/")[-1] if img_meta.get("storage_key") else f"image_{idx}",
+                    "image_media_type": img_meta.get("mime_type"),
+                    "image_file_size": img_meta.get("size_bytes", 0),
+                    "vlm_description": vlm_description,  # Store in DB
+                    "metadata": {
+                        "width": img_meta.get("width"),
+                        "height": img_meta.get("height"),
+                        "page_number": img_meta.get("page_number"),
+                        "source_location": img_meta.get("source_location"),
+                    },
+                })
+
+                processed += 1
+
+            except Exception as e:
+                logger.warning(f"Failed to process image {img_meta.get('image_id', idx)}: {e}")
+                continue
+
+        # Upsert image vectors to Qdrant
+        if image_points:
+            try:
+                await self.vector_store.upsert(collection_name=collection, points=image_points)
+                logger.info(f"Upserted {len(image_points)} image vectors to collection {collection}")
+            except Exception as e:
+                logger.error(f"Failed to upsert image vectors: {e}")
+                raise
+
+        # Save image segments to database
+        for seg in image_segments:
+            try:
+                await self.db.save_image_segment(seg)
+            except Exception as e:
+                logger.warning(f"Failed to save image segment {seg['segment_id']}: {e}")
+
+        return processed
 
     async def _process_document_images(
         self,
@@ -1243,17 +1603,29 @@ class KnowledgeService:
         dim = int(dataset.get("embedding_dimension") or 0) or None
         collection = str(dataset.get("collection_name") or "")
 
+        # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
+        is_multimodal = self._is_multimodal_dataset(dataset)
+
         # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
         need_query_vector = effective_mode in {"dense", "hybrid"} or (mmr_enabled and not rerank_enabled)
 
         qvec: Optional[List[float]] = None
         if need_query_vector:
-            econf = self._resolve_embedding_config(
-                provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
-            )
             embedder: Optional[BaseEmbedding] = None
             try:
-                embedder = create_embedding(econf, dimension=dim)
+                if is_multimodal:
+                    # Use UnifiedMultimodalEmbedding for cross-modal retrieval
+                    import logging
+                    logging.getLogger(__name__).debug(
+                        f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
+                    )
+                    embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+                else:
+                    econf = self._resolve_embedding_config(
+                        provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
+                    )
+                    embedder = create_embedding(econf, dimension=dim)
+
                 qvec = await embedder.embed_query(q)
                 # Ensure collection exists and matches dimension (when we need vector ops).
                 collection = await self.vector_store.ensure_collection(
@@ -1347,12 +1719,24 @@ class KnowledgeService:
                 if score <= 0.0:
                     continue
                     
+                # Build metadata including multimodal fields from separate columns
+                seg_metadata = _ensure_dict(row.get("metadata"))
+                # Include multimodal fields from database columns
+                if row.get("content_type"):
+                    seg_metadata["content_type"] = row.get("content_type")
+                if row.get("image_url"):
+                    seg_metadata["image_url"] = row.get("image_url")
+                if row.get("vlm_description"):
+                    seg_metadata["vlm_description"] = row.get("vlm_description")
+                if row.get("image_filename"):
+                    seg_metadata["image_filename"] = row.get("image_filename")
+
                 bm25_hits.append(
                     {
                         "segment_id": seg_id,
                         "document_id": str(row.get("document_id") or ""),
                         "text": text,
-                        "metadata": _ensure_dict(row.get("metadata")),
+                        "metadata": seg_metadata,
                         "bm25_score": float(score),
                     }
                 )
@@ -1795,6 +2179,13 @@ class KnowledgeService:
             # Final score for display
             score = float(c.get("_final_score") or 0.0)
 
+            # Extract multimodal fields from payload/metadata
+            content_type = payload.get("content_type", "text")
+            image_url = self._normalize_local_image_url(payload.get("image_url"), seg_id)
+            if image_url != payload.get("image_url"):
+                payload["image_url"] = image_url
+            vlm_description = payload.get("vlm_description")
+
             results.append(
                 RetrieveResult(
                     segment_id=seg_id,
@@ -1802,6 +2193,9 @@ class KnowledgeService:
                     score=score,
                     text=str(c.get("text") or ""),
                     metadata=payload,
+                    content_type=content_type,
+                    image_url=image_url,
+                    vlm_description=vlm_description,
                 )
             )
 
@@ -1816,16 +2210,23 @@ class KnowledgeService:
         include_images: bool = True,
         content_type_filter: Optional[str] = None,
         multimodal_rerank: bool = False,
+        # Advanced multimodal parameters
+        image_search_enabled: bool = True,
+        vlm_rerank_weight: Optional[float] = None,
+        image_boost: Optional[float] = None,
+        image_score_threshold: Optional[float] = None,
+        use_separate_thresholds: bool = False,
         **kwargs: Any,
     ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
         """
         Retrieve with associated images attached to results.
 
         This is the multimodal-aware retrieval method that:
-        1. Performs standard retrieval (dense/bm25/hybrid)
-        2. Optionally filters by content type (text/image)
-        3. Attaches associated images to text segments
-        4. Optionally performs multimodal reranking via VLM
+        1. Performs standard retrieval (dense/bm25/hybrid) with unified embedding
+        2. Applies separate score thresholds for text vs image content
+        3. Optionally boosts image results
+        4. Attaches associated images to text segments
+        5. Optionally performs multimodal reranking via VLM
 
         Args:
             user: User context
@@ -1835,15 +2236,21 @@ class KnowledgeService:
             include_images: Whether to attach associated images
             content_type_filter: Filter by content type ("text", "image", or None for all)
             multimodal_rerank: Use VLM for multimodal reranking (requires VLM service)
+            image_search_enabled: Enable direct image segment retrieval
+            vlm_rerank_weight: Weight for VLM reranking (0.0-1.0)
+            image_boost: Boost factor for image results (>1 prefers images)
+            image_score_threshold: Score threshold for images (lower than text)
+            use_separate_thresholds: Use different thresholds for text vs image
             **kwargs: Additional arguments passed to retrieve()
 
         Returns:
             Tuple of (results with images, metadata)
         """
         # Fetch more results if filtering to ensure we get enough after filter
-        effective_top_k = top_k * 2 if content_type_filter else top_k
+        # Also fetch more if we're applying separate thresholds or boosting
+        effective_top_k = top_k * 3 if (content_type_filter or use_separate_thresholds) else top_k * 2
 
-        # Perform standard retrieval
+        # Perform standard retrieval (now with unified multimodal embedding)
         results, meta = await self.retrieve(
             user=user,
             dataset_id=dataset_id,
@@ -1851,6 +2258,46 @@ class KnowledgeService:
             top_k=effective_top_k,
             **kwargs,
         )
+
+        # Apply separate thresholds for text vs image content if requested
+        if use_separate_thresholds and results:
+            # Handle None values explicitly - kwargs.get returns None if key exists with None value
+            raw_text_threshold = kwargs.get("score_threshold")
+            text_threshold = raw_text_threshold if raw_text_threshold is not None else 0.3
+            img_threshold = image_score_threshold if image_score_threshold is not None else 0.2
+
+            filtered_results = []
+            for r in results:
+                content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                threshold = img_threshold if content_type == "image" else text_threshold
+                if r.score >= threshold:
+                    filtered_results.append(r)
+            results = filtered_results
+            meta["separate_thresholds"] = True
+            meta["text_threshold"] = text_threshold
+            meta["image_threshold"] = img_threshold
+
+        # Apply image boost if specified
+        if image_boost and image_boost != 1.0 and results:
+            for r in results:
+                content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                if content_type == "image":
+                    # Create new result with boosted score
+                    boosted_score = min(r.score * image_boost, 1.0)
+                    # Update the result's score (RetrieveResult is mutable via metadata)
+                    r.metadata["_original_score"] = r.score
+                    r.metadata["_boosted"] = True
+                    # Note: RetrieveResult score is set at creation, so we track in metadata
+            # Re-sort by effective score (original for text, boosted for images)
+            results.sort(
+                key=lambda r: (
+                    min(r.score * image_boost, 1.0)
+                    if r.metadata.get("content_type", getattr(r, "content_type", "text")) == "image"
+                    else r.score
+                ),
+                reverse=True
+            )
+            meta["image_boost"] = image_boost
 
         # Apply content_type_filter if specified
         if content_type_filter and content_type_filter in ("text", "image"):
@@ -1884,7 +2331,10 @@ class KnowledgeService:
                 associated_imgs = [
                     {
                         "image_segment_id": img["image_segment_id"],
-                        "storage_url": img.get("storage_url", ""),
+                        "storage_url": self._normalize_local_image_url(
+                            img.get("storage_url", ""),
+                            img.get("image_segment_id"),
+                        ),
                         "filename": img.get("filename", ""),
                         "vlm_description": img.get("vlm_description"),
                         "proximity_score": float(img.get("proximity_score", 1.0)),
@@ -1900,7 +2350,10 @@ class KnowledgeService:
 
             # Get content_type from metadata or original result
             content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
-            image_url = r.metadata.get("image_url", getattr(r, "image_url", None))
+            image_url = self._normalize_local_image_url(
+                r.metadata.get("image_url", getattr(r, "image_url", None)),
+                r.segment_id,
+            )
             vlm_description = r.metadata.get("vlm_description", getattr(r, "vlm_description", None))
 
             enhanced_results.append(
@@ -1930,15 +2383,103 @@ class KnowledgeService:
         meta["segments_with_images"] = segments_with_images
 
         # Apply multimodal reranking if requested
-        if multimodal_rerank:
-            # Note: Full VLM-based reranking requires MultimodalReranker service
-            # This is a placeholder that logs the request; implement with VLM when available
-            logger.info(
-                f"Multimodal rerank requested for {len(enhanced_results)} results. "
-                "VLM reranking not yet implemented - using standard scores."
-            )
-            meta["multimodal_rerank"] = False  # Indicate feature was requested but not applied
-            meta["multimodal_rerank_message"] = "VLM reranking not yet implemented"
+        if multimodal_rerank and self.vlm_service:
+            try:
+                from .multimodal_reranker import MultimodalReranker, RerankCandidate
+
+                # Use configurable VLM rerank weight (default 0.4)
+                effective_vlm_weight = vlm_rerank_weight if vlm_rerank_weight is not None else 0.4
+
+                # Create reranker instance with configurable weight
+                reranker = MultimodalReranker(
+                    vlm_service=self.vlm_service,
+                    max_concurrent=3,
+                    timeout_seconds=30.0,
+                    image_weight=effective_vlm_weight,
+                )
+                meta["vlm_rerank_weight"] = effective_vlm_weight
+                
+                # Convert results to rerank candidates
+                rerank_candidates: List[RerankCandidate] = []
+                for r in enhanced_results:
+                    # Determine media type
+                    media_type = "image" if r.content_type == "image" else "text"
+                    
+                    # For image segments, we need to load image bytes
+                    image_bytes = None
+                    if media_type == "image" and r.image_url:
+                        try:
+                            # Try to load from storage service if available
+                            if self.image_storage_service:
+                                # Extract storage key from URL or use image_url directly
+                                # For now, try downloading from URL
+                                import httpx
+                                async with httpx.AsyncClient(timeout=10.0) as client:
+                                    response = await client.get(r.image_url)
+                                    response.raise_for_status()
+                                    image_bytes = response.content
+                        except Exception as load_err:
+                            logger.debug(f"Could not load image for reranking: {load_err}")
+                    
+                    candidate = RerankCandidate(
+                        segment_id=r.segment_id,
+                        text=r.text if media_type == "text" else None,
+                        image_url=r.image_url,
+                        image_bytes=image_bytes,
+                        media_type=media_type,
+                        original_score=r.score,
+                        metadata=r.metadata,
+                    )
+                    rerank_candidates.append(candidate)
+                
+                # Perform reranking
+                logger.info(f"Applying multimodal reranking to {len(rerank_candidates)} candidates")
+                reranked = await reranker.rerank(
+                    query=query,
+                    candidates=rerank_candidates,
+                    top_k=top_k,
+                    rerank_images_only=False,
+                    score_threshold=0.0,
+                )
+                
+                # Map reranked results back to RetrieveResult format
+                reranked_map = {c.segment_id: c for c in reranked}
+                reranked_results: List[RetrieveResult] = []
+                
+                for candidate in reranked:
+                    # Find original result
+                    original = next((r for r in enhanced_results if r.segment_id == candidate.segment_id), None)
+                    if not original:
+                        continue
+                    
+                    # Update score with rerank score
+                    reranked_results.append(
+                        RetrieveResult(
+                            segment_id=original.segment_id,
+                            document_id=original.document_id,
+                            score=candidate.rerank_score,  # Use reranked score
+                            text=original.text,
+                            metadata=original.metadata,
+                            content_type=original.content_type,
+                            image_url=original.image_url,
+                            vlm_description=original.vlm_description,
+                            associated_images=original.associated_images,
+                        )
+                    )
+                
+                enhanced_results = reranked_results
+                meta["multimodal_rerank"] = True
+                meta["multimodal_rerank_count"] = len(reranked_results)
+                logger.info(f"Multimodal reranking completed: {len(reranked_results)} results")
+                
+            except Exception as rerank_err:
+                logger.warning(f"Multimodal reranking failed: {rerank_err}")
+                meta["multimodal_rerank"] = False
+                meta["multimodal_rerank_error"] = str(rerank_err)
+        elif multimodal_rerank and not self.vlm_service:
+            logger.warning("Multimodal reranking requested but VLM service not available")
+            meta["multimodal_rerank"] = False
+            meta["multimodal_rerank_message"] = "VLM service not configured"
 
         return enhanced_results, meta
 
@@ -2787,6 +3328,17 @@ class KnowledgeService:
             "archived": doc.get("archived", False),
         }
 
+    def _normalize_local_image_url(
+        self,
+        image_url: Optional[str],
+        segment_id: Optional[str],
+    ) -> Optional[str]:
+        if not image_url or not segment_id:
+            return image_url
+        if isinstance(image_url, str) and image_url.startswith("file://"):
+            return f"/api/v1/knowledge/images/{segment_id}"
+        return image_url
+
     # ========================= P3: Multimodal Image-Chunk Association =========================
 
     async def associate_images_to_chunks(
@@ -2853,23 +3405,80 @@ class KnowledgeService:
 
         logger.info(f"Associating images for document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments")
 
+        def _normalize_for_match(value: str) -> str:
+            return re.sub(r"\s+", " ", (value or "").strip()).lower()
+
+        placeholder_pattern = re.compile(r"\[Image\]|\[图片\]")
+        placeholder_map: Dict[int, Dict[str, Any]] = {}
+        text_norm_cache: Dict[str, str] = {}
+
+        text_segments_sorted = sorted(
+            text_segments,
+            key=lambda s: int(s.get("position", 0) or 0),
+        )
+        placeholder_index = 0
+        for seg in text_segments_sorted:
+            seg_id = str(seg.get("segment_id"))
+            text_value = str(seg.get("text") or "")
+            text_norm_cache[seg_id] = _normalize_for_match(text_value)
+            matches = placeholder_pattern.findall(text_value)
+            if matches:
+                for _ in range(len(matches)):
+                    if placeholder_index not in placeholder_map:
+                        placeholder_map[placeholder_index] = seg
+                    placeholder_index += 1
+
+        image_infos: List[Dict[str, Any]] = []
+        for img_seg in image_segments:
+            img_metadata = _ensure_dict(img_seg.get("metadata"))
+            context_index = img_metadata.get("context_index")
+            if context_index is None:
+                context_index = img_metadata.get("source_position")
+            if context_index is not None:
+                try:
+                    context_index = int(context_index)
+                except (TypeError, ValueError):
+                    context_index = None
+
+            image_position = int(img_seg.get("position", 0) or 0)
+            image_page = img_metadata.get("page") or img_metadata.get("page_number")
+            if context_index is not None and context_index in placeholder_map:
+                mapped_seg = placeholder_map[context_index]
+                image_position = int(mapped_seg.get("position", image_position) or image_position)
+                if image_page is None:
+                    mapped_meta = _ensure_dict(mapped_seg.get("metadata"))
+                    image_page = mapped_meta.get("page") or mapped_meta.get("page_number")
+
+            context_text = str(img_metadata.get("context_text") or "")
+            context_norm = _normalize_for_match(context_text)
+            if len(context_norm) < 12:
+                context_norm = ""
+
+            image_infos.append({
+                "segment": img_seg,
+                "position": image_position,
+                "page": image_page,
+                "context_norm": context_norm,
+            })
+
         # Build associations
         associations: List[Dict[str, Any]] = []
         segments_with_images = 0
 
-        for text_seg in text_segments:
+        for text_seg in text_segments_sorted:
             text_seg_id = str(text_seg.get("segment_id"))
             text_position = int(text_seg.get("position", 0))
             text_metadata = _ensure_dict(text_seg.get("metadata"))
             text_page = text_metadata.get("page") or text_metadata.get("page_number")
+            text_norm = text_norm_cache.get(text_seg_id, "")
 
             # Find candidate images and compute proximity scores
             candidates: List[Tuple[Dict[str, Any], float]] = []
 
-            for img_seg in image_segments:
-                img_position = int(img_seg.get("position", 0))
-                img_metadata = _ensure_dict(img_seg.get("metadata"))
-                img_page = img_metadata.get("page") or img_metadata.get("page_number")
+            for img_info in image_infos:
+                img_seg = img_info["segment"]
+                img_position = int(img_info["position"])
+                img_page = img_info["page"]
 
                 # Compute proximity score
                 score = self._compute_image_proximity_score(
@@ -2879,6 +3488,9 @@ class KnowledgeService:
                     image_page=img_page,
                     total_segments=len(all_segments),
                 )
+
+                if img_info["context_norm"] and img_info["context_norm"] in text_norm:
+                    score = max(score, 0.95)
 
                 if score >= proximity_threshold:
                     candidates.append((img_seg, score))
@@ -3038,12 +3650,20 @@ class KnowledgeService:
         for seg in segments:
             seg_dict = dict(seg)
             seg_id = seg_dict.get("segment_id")
+            if seg_dict.get("image_url"):
+                seg_dict["image_url"] = self._normalize_local_image_url(
+                    seg_dict.get("image_url"),
+                    seg_id,
+                )
 
             if seg_id in associations:
                 seg_dict["associated_images"] = [
                     AssociatedImage(
                         image_segment_id=img["image_segment_id"],
-                        storage_url=img.get("storage_url", ""),
+                        storage_url=self._normalize_local_image_url(
+                            img.get("storage_url", ""),
+                            img.get("image_segment_id"),
+                        ),
                         filename=img.get("filename", ""),
                         vlm_description=img.get("vlm_description"),
                         proximity_score=float(img.get("proximity_score", 1.0)),
@@ -3077,3 +3697,79 @@ class KnowledgeService:
             Number of associations deleted
         """
         return await self.db.delete_image_associations_by_document(document_id)
+
+    async def recover_stuck_documents(
+        self,
+        stuck_threshold_minutes: int = 15,
+        worker: Optional["KnowledgeWorker"] = None,
+    ) -> Dict[str, Any]:
+        """
+        Recover documents stuck in processing state.
+
+        This method detects documents that have been stuck in 'parsing', 'segmenting',
+        or 'embedding' status for longer than the threshold and resets them to 'uploaded'
+        status so they can be re-queued for processing.
+
+        Args:
+            stuck_threshold_minutes: Minutes after which a document is considered stuck
+            worker: Optional KnowledgeWorker to re-enqueue recovered documents
+
+        Returns:
+            Dict with recovery statistics:
+            - recovered_count: Number of documents recovered
+            - recovered_documents: List of recovered document IDs and titles
+            - requeued_count: Number of documents re-added to processing queue
+        """
+        result = {
+            "recovered_count": 0,
+            "recovered_documents": [],
+            "requeued_count": 0,
+        }
+
+        try:
+            # Query for stuck documents
+            stuck_documents = await self.db.find_stuck_documents(stuck_threshold_minutes)
+
+            if not stuck_documents:
+                logger.info("No stuck documents found")
+                return result
+
+            logger.warning(f"Found {len(stuck_documents)} stuck documents, recovering...")
+
+            for doc in stuck_documents:
+                doc_id = doc.get("document_id")
+                dataset_id = doc.get("dataset_id")
+                title = doc.get("title", "Unknown")
+                old_status = doc.get("status")
+
+                try:
+                    # Reset document status
+                    await self.db.update_document_status(
+                        doc_id,
+                        status="uploaded",
+                        progress=0,
+                        error=None,
+                    )
+
+                    result["recovered_count"] += 1
+                    result["recovered_documents"].append({
+                        "document_id": doc_id,
+                        "title": title,
+                        "old_status": old_status,
+                    })
+
+                    logger.info(f"Recovered stuck document: {title} ({doc_id}) from {old_status}")
+
+                    # Re-enqueue for processing if worker is available
+                    if worker and dataset_id:
+                        await worker.enqueue(dataset_id, doc_id)
+                        result["requeued_count"] += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to recover document {doc_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error during stuck document recovery: {e}")
+            raise
+
+        return result

@@ -11,7 +11,7 @@ Provides dashboard metrics including:
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Request, Depends, Query
+from fastapi import APIRouter, Request, Depends, Query, HTTPException
 from pydantic import BaseModel
 
 from ...api.deps import get_auth_context, AuthContext
@@ -110,6 +110,41 @@ class BreakdownResponse(BaseModel):
 
     dimension: str
     items: List[BreakdownItem]
+
+
+class SecurityEventBreakdownItem(BaseModel):
+    """Security event breakdown item."""
+
+    name: str
+    count: int
+    percentage: float
+
+
+class SecurityEventBreakdownResponse(BaseModel):
+    """Security event breakdown response."""
+
+    dimension: str
+    event_type: str
+    items: List[SecurityEventBreakdownItem]
+    start_date: str
+    end_date: str
+
+
+class SecurityEventTimeSeriesPoint(BaseModel):
+    """Security event time series point."""
+
+    date: str
+    count: int
+
+
+class SecurityEventTimeSeriesResponse(BaseModel):
+    """Security event time series response."""
+
+    dimension: str
+    event_type: str
+    data: List[SecurityEventTimeSeriesPoint]
+    start_date: str
+    end_date: str
 
 
 # ============ API Endpoints ============
@@ -419,3 +454,118 @@ async def get_metrics_breakdown(
             pass
 
     return BreakdownResponse(dimension=dimension, items=items)
+
+
+@router.get("/security/breakdown", response_model=SecurityEventBreakdownResponse)
+async def get_security_event_breakdown(
+    request: Request,
+    dimension: str = Query("user", description="Dimension: user, service"),
+    event_type: str = Query("auth_failed", description="Event type: auth_failed, rate_limited"),
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(20, ge=1, le=100, description="Max items to return"),
+    auth: AuthContext = Depends(get_auth_context),
+) -> SecurityEventBreakdownResponse:
+    """Get security event breakdown by user or service."""
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
+    valid_dimensions = {"user", "service"}
+    if dimension not in valid_dimensions:
+        raise HTTPException(status_code=400, detail=f"Invalid dimension: {dimension}")
+
+    valid_event_types = {"auth_failed", "rate_limited"}
+    if event_type not in valid_event_types:
+        raise HTTPException(status_code=400, detail=f"Invalid event_type: {event_type}")
+
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=30)
+
+    db = getattr(request.app.state, "database", None)
+    items: List[SecurityEventBreakdownItem] = []
+
+    tenant_id = auth.tenant_id or "public"
+    if db and getattr(db, "enabled", False):
+        rows = await db.get_security_event_breakdown(
+            tenant_id=tenant_id,
+            dimension=dimension,
+            event_type=event_type,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+        total = sum(int(r.get("total_events") or 0) for r in rows) or 1
+        items = [
+            SecurityEventBreakdownItem(
+                name=str(r.get("dimension_value") or "unknown"),
+                count=int(r.get("total_events") or 0),
+                percentage=round(int(r.get("total_events") or 0) / total * 100, 1),
+            )
+            for r in rows
+        ]
+
+    return SecurityEventBreakdownResponse(
+        dimension=dimension,
+        event_type=event_type,
+        items=items,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+
+
+@router.get("/security/timeseries", response_model=SecurityEventTimeSeriesResponse)
+async def get_security_event_timeseries(
+    request: Request,
+    dimension: str = Query("user", description="Dimension: user, service"),
+    event_type: str = Query("auth_failed", description="Event type: auth_failed, rate_limited"),
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    auth: AuthContext = Depends(get_auth_context),
+) -> SecurityEventTimeSeriesResponse:
+    """Get security event time series."""
+    request.app.state.dispatcher.rbac.require(auth.roles, "metrics:view")
+
+    valid_dimensions = {"user", "service"}
+    if dimension not in valid_dimensions:
+        raise HTTPException(status_code=400, detail=f"Invalid dimension: {dimension}")
+
+    valid_event_types = {"auth_failed", "rate_limited"}
+    if event_type not in valid_event_types:
+        raise HTTPException(status_code=400, detail=f"Invalid event_type: {event_type}")
+
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=30)
+
+    db = getattr(request.app.state, "database", None)
+    data: List[SecurityEventTimeSeriesPoint] = []
+
+    tenant_id = auth.tenant_id or "public"
+    if db and getattr(db, "enabled", False):
+        rows = await db.get_security_event_timeseries(
+            tenant_id=tenant_id,
+            event_type=event_type,
+            start_date=start_date,
+            end_date=end_date,
+            user_id=user_id if dimension == "user" else None,
+            service_id=service_id if dimension == "service" else None,
+        )
+        data = [
+            SecurityEventTimeSeriesPoint(
+                date=str(r.get("date")),
+                count=int(r.get("total_events") or 0),
+            )
+            for r in rows
+        ]
+
+    return SecurityEventTimeSeriesResponse(
+        dimension=dimension,
+        event_type=event_type,
+        data=data,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )

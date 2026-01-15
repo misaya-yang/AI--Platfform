@@ -23,6 +23,9 @@ import {
   AlertCircle,
   Trash2,
   Eye,
+  Lock,
+  Users,
+  Globe,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -91,6 +94,34 @@ const RERANK_MODELS = [
   { id: "default", name: "官方排序" },
   { id: "gte-rerank", name: "GTE-ReRank" },
   { id: "gte-rerank-v2", name: "GTE-ReRank v2" },
+];
+
+// 可见性选项
+type VisibilityType = "private" | "tenant" | "public";
+const VISIBILITY_OPTIONS: Array<{
+  id: VisibilityType;
+  name: string;
+  desc: string;
+  icon: typeof Lock;
+}> = [
+  {
+    id: "private",
+    name: "私有",
+    desc: "仅创建者可访问",
+    icon: Lock,
+  },
+  {
+    id: "tenant",
+    name: "团队",
+    desc: "同租户所有成员可查看",
+    icon: Users,
+  },
+  {
+    id: "public",
+    name: "公开",
+    desc: "所有人可查看",
+    icon: Globe,
+  },
 ];
 
 // 验证常量
@@ -257,6 +288,7 @@ export default function DatasetCreatePage() {
   // Step 1: Basic Info
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState<VisibilityType>("private");
   const [embeddingModel, setEmbeddingModel] = useState("dashscope:text-embedding-v4");
 
   // Step 2: Data Source
@@ -366,7 +398,7 @@ export default function DatasetCreatePage() {
       const dataset = await createDataset({
         name: name.trim(),
         description: description.trim(),
-        visibility: "private",
+        visibility,
         embedding_provider: provider,
         embedding_model: model,
         embedding_dimension: embModel?.dimension || 1024,
@@ -598,6 +630,45 @@ export default function DatasetCreatePage() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            {/* 可见性设置 */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Label className="text-sm font-medium">访问权限</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="max-w-xs">设置知识库的访问权限，决定谁可以查看和使用此知识库</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                {VISIBILITY_OPTIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  return (
+                    <Card
+                      key={opt.id}
+                      className={`p-4 cursor-pointer transition-all ${
+                        visibility === opt.id
+                          ? "border-2 border-primary bg-primary/5"
+                          : "border hover:border-primary/30"
+                      }`}
+                      onClick={() => setVisibility(opt.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Icon className={`h-4 w-4 ${visibility === opt.id ? "text-primary" : "text-muted-foreground"}`} />
+                        <span className="text-sm font-medium">{opt.name}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                    </Card>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}

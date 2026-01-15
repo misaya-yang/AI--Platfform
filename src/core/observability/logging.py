@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 # 上下文变量，用于在请求生命周期内传递日志上下文
@@ -310,42 +313,88 @@ def configure_structured_logging(
     format_type: str = "json",
     module_levels: Optional[Dict[str, str]] = None,
     mask_sensitive: bool = True,
+    log_to_file: bool = True,
+    log_dir: Optional[str] = None,
+    log_file_max_bytes: int = 10 * 1024 * 1024,  # 10MB
+    log_file_backup_count: int = 5,
 ) -> None:
     """
     配置结构化日志
-    
+
     Args:
         level: 默认日志级别
         format_type: 格式类型 ("json" 或 "simple")
         module_levels: 模块级别的日志级别配置
         mask_sensitive: 是否脱敏敏感信息
+        log_to_file: 是否同时写入文件
+        log_dir: 日志目录（默认为项目根目录下的 logs/）
+        log_file_max_bytes: 单个日志文件最大大小
+        log_file_backup_count: 保留的日志文件数量
     """
     # 设置自定义 Logger 类
     logging.setLoggerClass(ContextLogger)
-    
-    # 创建根处理器
-    handler = logging.StreamHandler(sys.stdout)
-    
-    if format_type == "json":
-        formatter = StructuredFormatter(mask_sensitive=mask_sensitive)
-    else:
-        formatter = SimpleFormatter(use_colors=sys.stdout.isatty())
-    
-    handler.setFormatter(formatter)
-    
+
     # 配置根 Logger
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
-    root_logger.addHandler(handler)
     root_logger.setLevel(getattr(logging, level.upper()))
-    
+
+    # 创建控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    if format_type == "json":
+        console_formatter = StructuredFormatter(mask_sensitive=mask_sensitive)
+    else:
+        console_formatter = SimpleFormatter(use_colors=sys.stdout.isatty())
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # 创建文件处理器
+    if log_to_file:
+        if log_dir is None:
+            # 默认日志目录：项目根目录/logs
+            project_root = Path(__file__).parent.parent.parent.parent
+            log_dir = str(project_root / "logs")
+
+        # 确保日志目录存在
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+        # 主日志文件（所有级别）
+        log_file = os.path.join(log_dir, "app.log")
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=log_file_max_bytes,
+            backupCount=log_file_backup_count,
+            encoding="utf-8",
+        )
+        # 文件使用简单格式，不带颜色
+        file_formatter = SimpleFormatter(use_colors=False)
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(logging.DEBUG)  # 文件记录所有级别
+        root_logger.addHandler(file_handler)
+
+        # 错误日志文件（仅 ERROR 及以上）
+        error_log_file = os.path.join(log_dir, "error.log")
+        error_handler = RotatingFileHandler(
+            error_log_file,
+            maxBytes=log_file_max_bytes,
+            backupCount=log_file_backup_count,
+            encoding="utf-8",
+        )
+        error_handler.setFormatter(file_formatter)
+        error_handler.setLevel(logging.ERROR)
+        root_logger.addHandler(error_handler)
+
+        # 打印日志文件位置
+        print(f"📝 Logging to: {log_file}")
+        print(f"📝 Error log: {error_log_file}")
+
     # 配置模块级别
     if module_levels:
         for module_name, module_level in module_levels.items():
             logging.getLogger(module_name).setLevel(
                 getattr(logging, module_level.upper())
             )
-    
+
     # 降低第三方库的日志级别
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

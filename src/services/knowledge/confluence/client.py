@@ -23,6 +23,34 @@ from .models import ConfluenceAttachment, ConfluenceCredentials, ConfluencePage,
 logger = logging.getLogger(__name__)
 
 
+def _escape_cql_value(value: str) -> str:
+    """
+    Escape special characters in CQL query values to prevent injection.
+
+    CQL special characters: + - && || ! ( ) { } [ ] ^ " ~ * ? : \\ /
+    For string values used in space keys and other identifiers.
+    """
+    if not value:
+        return value
+    # Only allow alphanumeric, hyphens, and underscores for identifiers
+    # This is stricter than full CQL escaping but safer for space keys
+    if not re.match(r'^[A-Za-z0-9_-]+$', value):
+        raise ValueError(f"Invalid CQL identifier: {value}")
+    return value
+
+
+def _escape_cql_string(value: str) -> str:
+    """
+    Escape special characters for CQL string literals (used in quotes).
+
+    Escapes backslashes and double quotes.
+    """
+    if not value:
+        return value
+    # Escape backslashes first, then quotes
+    return value.replace('\\', '\\\\').replace('"', '\\"')
+
+
 class ConfluenceAPIError(Exception):
     """Confluence API 错误"""
 
@@ -202,17 +230,17 @@ class ConfluenceClient:
         data = await self._request("GET", f"/pages/{page_id}", params=params)
 
         # 调试日志：检查 API 返回的数据结构
-        logger.info(f"Confluence API response for page {page_id}:")
-        logger.info(f"  - title: {data.get('title')}")
-        logger.info(f"  - body keys: {list(data.get('body', {}).keys()) if data.get('body') else 'NO BODY'}")
+        logger.debug(f"Confluence API response for page {page_id}:")
+        logger.debug(f"  - title: {data.get('title')}")
+        logger.debug(f"  - body keys: {list(data.get('body', {}).keys()) if data.get('body') else 'NO BODY'}")
         if data.get("body"):
             for key, val in data["body"].items():
                 if isinstance(val, dict):
-                    logger.info(f"  - body.{key} keys: {list(val.keys())}")
+                    logger.debug(f"  - body.{key} keys: {list(val.keys())}")
                     if "value" in val:
-                        logger.info(f"  - body.{key}.value length: {len(val.get('value', ''))}")
+                        logger.debug(f"  - body.{key}.value length: {len(val.get('value', ''))}")
                 else:
-                    logger.info(f"  - body.{key} = {type(val)}")
+                    logger.debug(f"  - body.{key} = {type(val)}")
 
         labels = []
         if include_labels:
@@ -647,7 +675,9 @@ class ConfluenceClient:
         """
         # 格式化时间为 CQL 支持的格式
         since_str = since.strftime("%Y-%m-%d %H:%M")
-        cql = f'space={space_key} AND type=page AND lastModified > "{since_str}"'
+        # Escape space_key to prevent CQL injection
+        safe_space_key = _escape_cql_value(space_key)
+        cql = f'space={safe_space_key} AND type=page AND lastModified > "{since_str}"'
 
         logger.info(f"Searching pages modified since {since_str} in space {space_key}")
 
@@ -710,7 +740,9 @@ class ConfluenceClient:
         Returns:
             已删除页面的 ID 列表
         """
-        cql = f'space={space_key} AND type=page'
+        # Escape space_key to prevent CQL injection
+        safe_space_key = _escape_cql_value(space_key)
+        cql = f'space={safe_space_key} AND type=page'
 
         data = await self._request(
             "GET",

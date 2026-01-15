@@ -174,6 +174,12 @@ class ConfluenceSettings(BaseModel):
     webhook_enabled: bool = False
     webhook_callback_base_url: str = ""  # Webhook 回调基础 URL
 
+    # 安全配置
+    encryption_key: str = ""  # 用于加密 API Token 的密钥（推荐设置为 32 字符随机字符串）
+
+    # 客户端缓存配置
+    client_cache_ttl_seconds: int = 300  # 客户端缓存 TTL（秒），默认 5 分钟
+
 
 class ProxySettings(BaseModel):
     """透明代理配置"""

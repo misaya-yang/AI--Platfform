@@ -19,7 +19,8 @@ CREATE INDEX IF NOT EXISTS idx_segments_content_type ON segments(content_type);
 CREATE INDEX IF NOT EXISTS idx_segments_image_attachment ON segments(image_attachment_id) WHERE image_attachment_id IS NOT NULL;
 
 -- Add image sync settings to confluence_space_bindings
-ALTER TABLE confluence_space_bindings ADD COLUMN IF NOT EXISTS sync_images BOOLEAN DEFAULT false;
+-- Default to true to enable multimodal RAG by default
+ALTER TABLE confluence_space_bindings ADD COLUMN IF NOT EXISTS sync_images BOOLEAN DEFAULT true;
 ALTER TABLE confluence_space_bindings ADD COLUMN IF NOT EXISTS image_max_size_bytes INTEGER DEFAULT 3145728;  -- 3 MB
 
 -- Add image tracking to confluence_pages

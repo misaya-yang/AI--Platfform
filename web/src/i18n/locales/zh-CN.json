@@ -31,7 +31,8 @@
     "never": "从未",
     "notSet": "未设置",
     "retry": "重试",
-    "clear": "清空"
+    "clear": "清空",
+    "user": "用户"
   },
   "metrics": {
     "title": "监控面板",
@@ -68,6 +69,7 @@
   },
   "nav": {
     "dashboard": "仪表盘",
+    "analytics": "数据分析",
     "services": "服务管理",
     "knowledge": "知识库",
     "knowledgeSync": "知识同步",
@@ -75,7 +77,65 @@
     "assistant": "AI 助手",
     "tasks": "任务管理",
     "users": "用户管理",
-    "settings": "系统设置"
+    "settings": "系统设置",
+    "collapseSidebar": "收起侧栏",
+    "expandSidebar": "展开侧栏"
+  },
+  "analytics": {
+    "title": "使用量分析",
+    "subtitle": "追踪 Token 使用量、成本和性能",
+    "totalRequests": "总请求数",
+    "totalTokens": "Token 总量",
+    "totalCost": "总成本",
+    "avgLatency": "平均延迟",
+    "successRate": "成功率",
+    "inputOutput": "输入/输出",
+    "costTrend": "成本趋势",
+    "costBreakdown": "成本分布",
+    "tokenUsage": "每日 Token 使用量",
+    "usageDetails": "使用详情",
+    "noData": "暂无数据",
+    "byModel": "按模型",
+    "byUser": "按用户",
+    "byAssistant": "按助手",
+    "byService": "按服务",
+    "requests": "请求数",
+    "inputTokens": "输入 Token",
+    "outputTokens": "输出 Token",
+    "cost": "成本",
+    "percentage": "占比",
+    "dateRange": "日期范围",
+    "export": "导出",
+    "exportCsv": "导出 CSV",
+    "exportJson": "导出 JSON"
+  },
+  "monitoring": {
+    "title": "监控面板",
+    "realtime": "实时监控",
+    "analytics": "使用量分析",
+    "realtimeSubtitle": "实时网关指标和告警",
+    "analyticsSubtitle": "历史使用量和成本分析"
+  },
+  "cost": {
+    "title": "服务成本分析",
+    "subtitle": "按服务类型独立统计用量和成本",
+    "service": {
+      "assistant": "AI 助手",
+      "agent": "Agent 服务",
+      "proxy": "代理服务",
+      "unknown": "未知服务"
+    },
+    "totalCost": "总成本",
+    "totalCostAll": "总成本",
+    "totalTokens": "Token 用量",
+    "totalTokensAll": "总 Token",
+    "totalRequests": "总请求数",
+    "inputTokens": "输入",
+    "outputTokens": "输出",
+    "requests": "次请求",
+    "successRate": "成功率",
+    "ofTotal": "占总成本",
+    "noData": "暂无用量数据"
   },
   "theme": {
     "light": "浅色模式",
@@ -106,6 +166,25 @@
       "successRate": "成功率",
       "avgLatency": "平均延迟",
       "activeServices": "活跃服务"
+    },
+    "usageAnalytics": {
+      "title": "按用户/服务用量统计",
+      "byUser": "按用户",
+      "byService": "按服务",
+      "selectUser": "选择用户",
+      "selectService": "选择服务",
+      "requests": "请求数",
+      "cost": "成本",
+      "avgLatency": "平均延迟",
+      "noData": "暂无用量数据"
+    },
+    "securityEvents": {
+      "title": "鉴权失败/限流触发",
+      "byUser": "按用户",
+      "byService": "按服务",
+      "authFailed": "鉴权失败",
+      "rateLimited": "限流触发",
+      "noData": "暂无事件数据"
     }
   },
   "users": {
@@ -483,7 +562,7 @@
       "entireSpaceDesc": "同步该空间中的所有页面",
       "selectPages": "选择页面",
       "selectPagesDesc": "选择要同步的特定页面或文件夹。选中文件夹将同步其所有子页面。",
-      "singlePageHint": "选择一个页面作为同步的根节点，将同步该页面及其所有子页面。",
+      "singlePageHint": "可多选页面进行同步。每个选中的页面及其所有子页面都将被同步。",
       "selectAllRoots": "全选顶级",
       "clearSelection": "清除选择",
       "selectedCount": "已选 {{count}} 项",
@@ -665,5 +744,58 @@
     "ragCitations": "引用",
     "ragGrounding": "{{percent}}% 有据可依",
     "ragChunksUsed": "使用了 {{used}}/{{total}} 个片段"
+  },
+  "analytics": {
+    "title": "使用量分析",
+    "subtitle": "追踪 Token 使用量、成本和性能",
+    "totalRequests": "总请求数",
+    "totalTokens": "总 Token 数",
+    "totalCost": "总成本",
+    "avgLatency": "平均延迟",
+    "successRate": "成功率",
+    "inputOutput": "输入/输出",
+    "costTrend": "成本趋势",
+    "costBreakdown": "成本分布",
+    "tokenUsage": "每日 Token 使用量",
+    "usageDetails": "使用详情",
+    "byModel": "模型",
+    "byUser": "用户",
+    "byAssistant": "助手",
+    "byService": "服务",
+    "requests": "请求数",
+    "inputTokens": "输入 Token",
+    "outputTokens": "输出 Token",
+    "cost": "成本",
+    "percentage": "占比",
+    "noData": "暂无数据",
+    "export": "导出",
+    "dateRange": "日期范围"
+  },
+  "quota": {
+    "title": "配额管理",
+    "subtitle": "管理用户配额和限制",
+    "userQuota": "用户配额",
+    "limits": "限制",
+    "currentUsage": "当前使用量",
+    "dailyTokens": "每日 Token",
+    "monthlyTokens": "每月 Token",
+    "monthlyCost": "每月成本",
+    "requestsPerDay": "每日请求数",
+    "requestsPerMinute": "每分钟请求数",
+    "warningThreshold": "警告阈值",
+    "blocked": "已封禁",
+    "blockedReason": "封禁原因",
+    "resetDaily": "重置每日配额",
+    "resetMonthly": "重置每月配额",
+    "block": "封禁用户",
+    "unblock": "解封用户",
+    "alerts": "配额告警",
+    "noAlerts": "暂无告警",
+    "acknowledge": "确认",
+    "summary": "配额概览",
+    "totalUsers": "总用户数",
+    "blockedUsers": "已封禁",
+    "warningUsers": "警告中",
+    "exceededUsers": "已超限"
   }
 }

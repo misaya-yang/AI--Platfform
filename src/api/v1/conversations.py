@@ -44,6 +44,26 @@ from ...core.gateway.multi_dimension_rate_limiter import (
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
 
+async def _record_security_event(
+    event_type: str,
+    tenant_id: str,
+    user_id: str,
+    service_id: Optional[str],
+) -> None:
+    try:
+        from ...services.metrics import get_security_event_recorder
+
+        recorder = get_security_event_recorder()
+        await recorder.record_event(
+            tenant_id=tenant_id or "public",
+            user_id=user_id or None,
+            service_id=service_id,
+            event_type=event_type,
+        )
+    except Exception:
+        pass
+
+
 # ============ Pydantic 模型 ============
 
 class ConversationCreate(BaseModel):
@@ -115,6 +135,7 @@ async def check_rate_limit(
     user: UserContext,
     rate_limiter: MultiDimensionRateLimiter,
     operation: Optional[str] = None,
+    service_id: Optional[str] = None,
 ):
     """检查限流"""
     if not rate_limiter:
@@ -124,6 +145,12 @@ async def check_rate_limit(
     result = await rate_limiter.check(context)
 
     if not result.allowed:
+        await _record_security_event(
+            event_type="rate_limited",
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_id or "assistant",
+        )
         raise HTTPException(
             status_code=429,
             detail=RateLimitHeaders.build_exceeded_response(result),
@@ -180,7 +207,12 @@ async def create_conversation(
 
     创建一个新的对话会话，返回对话 ID 用于后续消息交互。
     """
-    await check_rate_limit(user, rate_limiter, operation="thread_create")
+    await check_rate_limit(
+        user,
+        rate_limiter,
+        operation="thread_create",
+        service_id=data.assistant_id,
+    )
 
     try:
         # 构建 Thread 元数据
@@ -280,7 +312,12 @@ async def send_message(
 
     向对话发送消息并等待 AI 回复。适用于简单交互场景。
     """
-    await check_rate_limit(user, rate_limiter, operation="run_create")
+    await check_rate_limit(
+        user,
+        rate_limiter,
+        operation="run_create",
+        service_id="assistant",
+    )
 
     try:
         # 获取对话关联的 assistant_id
@@ -368,7 +405,12 @@ async def stream_message(
 
     向对话发送消息并获取流式回复。适用于需要实时显示 AI 回复的场景。
     """
-    await check_rate_limit(user, rate_limiter, operation="run_create")
+    await check_rate_limit(
+        user,
+        rate_limiter,
+        operation="run_create",
+        service_id="assistant",
+    )
 
     # 获取对话关联的 assistant_id
     try:

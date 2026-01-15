@@ -8,6 +8,14 @@ export const api = axios.create({
 });
 
 /**
+ * Get the API base URL for external references (e.g., code examples).
+ * Uses configured VITE_API_BASE_URL or falls back to current origin.
+ */
+export function getApiBaseUrl(): string {
+  return baseURL || window.location.origin;
+}
+
+/**
  * Get auth data from storage (checks both localStorage and sessionStorage)
  * localStorage is used when rememberMe=true, sessionStorage when rememberMe=false
  */

@@ -74,19 +74,23 @@ class ConfluenceSpaceBindingCreateSchema(BaseModel):
 
     dataset_id: str = Field(..., description="Target dataset ID")
     space_key: str = Field(..., description="Confluence space key (e.g., 'HFDSH')")
-    root_page_id: Optional[str] = Field(default=None, description="Root page ID to sync from (only sync this page and its children)")
+    root_page_id: Optional[str] = Field(default=None, description="Root page ID to sync from (deprecated, use root_page_ids)")
+    root_page_ids: List[str] = Field(default_factory=list, description="List of root page IDs to sync (supports multi-select)")
     include_patterns: List[str] = Field(default_factory=list, description="Title patterns to include")
     exclude_patterns: List[str] = Field(default_factory=list, description="Title patterns to exclude")
     max_depth: int = Field(default=10, ge=1, le=100, description="Maximum page hierarchy depth")
     include_attachments: bool = Field(default=False, description="Include page attachments")
     include_comments: bool = Field(default=False, description="Include page comments")
+    sync_images: bool = Field(default=True, description="Sync and embed images from pages (requires multimodal embedding)")
+    image_max_size_bytes: int = Field(default=3 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024, description="Maximum image size in bytes (default 3MB)")
 
 
 class ConfluenceSpaceBindingUpdateSchema(BaseModel):
     """Update a space binding (including sync mode configuration)"""
     model_config = ConfigDict(extra="allow")
 
-    root_page_id: Optional[str] = None
+    root_page_id: Optional[str] = Field(default=None, description="Root page ID (deprecated, use root_page_ids)")
+    root_page_ids: Optional[List[str]] = Field(default=None, description="List of root page IDs (supports multi-select)")
     include_patterns: Optional[List[str]] = None
     exclude_patterns: Optional[List[str]] = None
     max_depth: Optional[int] = Field(default=None, ge=1, le=100)
@@ -96,6 +100,9 @@ class ConfluenceSpaceBindingUpdateSchema(BaseModel):
     sync_mode: Optional[str] = Field(default=None, description="Sync mode: manual | polling")
     polling_interval_minutes: Optional[int] = Field(default=None, ge=5, le=1440, description="Polling interval in minutes")
     sync_enabled: Optional[bool] = Field(default=None, description="Enable/disable auto sync")
+    # Image sync configuration
+    sync_images: Optional[bool] = Field(default=None, description="Sync and embed images from pages")
+    image_max_size_bytes: Optional[int] = Field(default=None, ge=1024, le=10 * 1024 * 1024, description="Maximum image size in bytes")
 
 
 class ConfluenceSpaceBindingResponseSchema(BaseModel):
@@ -108,12 +115,16 @@ class ConfluenceSpaceBindingResponseSchema(BaseModel):
     space_id: Optional[str] = None
     space_name: Optional[str] = None
     root_page_id: Optional[str] = None
+    root_page_ids: List[str] = Field(default_factory=list)
     root_page_title: Optional[str] = None
+    root_page_titles: List[str] = Field(default_factory=list)
     include_patterns: List[str] = Field(default_factory=list)
     exclude_patterns: List[str] = Field(default_factory=list)
     max_depth: int
     include_attachments: bool
     include_comments: bool
+    sync_images: bool = True
+    image_max_size_bytes: int = 3 * 1024 * 1024
     status: str
     last_sync_at: Optional[str] = None
     synced_page_count: int = 0

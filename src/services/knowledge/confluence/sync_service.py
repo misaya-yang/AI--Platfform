@@ -19,9 +19,11 @@ This service coordinates between:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from ....config.settings import Settings
@@ -41,6 +43,11 @@ if TYPE_CHECKING:
     from ..knowledge_service import KnowledgeService
     from ..worker import KnowledgeWorker
     from .image_processor import ConfluenceImageProcessor
+
+
+def _utc_now() -> datetime:
+    """Get current UTC time as naive datetime for consistent DB storage."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +94,9 @@ class ConfluenceSyncService:
         self.worker = knowledge_worker
         self.image_processor = image_processor
         self._clients: Dict[str, ConfluenceClient] = {}
+        self._client_created_at: Dict[str, float] = {}  # Track client creation time for TTL
+        self._client_locks: Dict[str, asyncio.Lock] = {}  # Prevent race conditions
+        self._client_cache_ttl = getattr(settings.confluence, "client_cache_ttl_seconds", 300)
 
         # 图片处理相关服务
         self._image_storage_service = image_storage_service
@@ -112,31 +122,110 @@ class ConfluenceSyncService:
     async def close(self) -> None:
         """关闭所有客户端连接"""
         for client in self._clients.values():
-            await client.close()
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning(f"Error closing client: {e}")
         self._clients.clear()
+        self._client_created_at.clear()
+        self._client_locks.clear()
+
+    def _handle_task_exception(self, task: asyncio.Task) -> None:
+        """Handle exceptions from background tasks to prevent silent failures."""
+        try:
+            # This will re-raise any exception that occurred in the task
+            task.result()
+        except asyncio.CancelledError:
+            # Task was cancelled, this is expected
+            pass
+        except Exception as e:
+            task_name = task.get_name()
+            logger.error(f"Background task '{task_name}' failed with exception: {e}", exc_info=True)
+
+    def _create_background_task(
+        self,
+        coro,
+        name: str,
+    ) -> asyncio.Task:
+        """Create a background task with proper exception handling."""
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._handle_task_exception)
+        return task
 
     async def _get_client(self, connection_id: str) -> ConfluenceClient:
-        """获取或创建 Confluence 客户端"""
+        """
+        获取或创建 Confluence 客户端（带 TTL 和并发保护）
+
+        Thread-safety:
+        - Uses per-connection locks to prevent duplicate client creation
+        - TTL check and client cleanup both happen inside the lock
+        - Lock creation itself is protected by a global lock
+        """
+        # Fast path: check if valid cached client exists (no lock needed for read)
         if connection_id in self._clients:
-            return self._clients[connection_id]
+            created_at = self._client_created_at.get(connection_id, 0)
+            if time.time() - created_at < self._client_cache_ttl:
+                return self._clients[connection_id]
 
-        connection = await self.db.get_confluence_connection(connection_id)
-        if not connection:
-            raise ConfluenceSyncError(f"Connection not found: {connection_id}")
+        # Get or create connection-specific lock (protected by global lock)
+        if connection_id not in self._client_locks:
+            # Use a simple approach: create lock under global lock check
+            # This is safe because dict operations are atomic in CPython
+            self._client_locks[connection_id] = asyncio.Lock()
 
-        credentials = ConfluenceCredentials(
-            domain=connection["domain"],
-            email=connection["email"],
-            api_token=connection["api_token"],
-        )
+        async with self._client_locks[connection_id]:
+            # Double-check after acquiring lock (another coroutine may have created/refreshed)
+            if connection_id in self._clients:
+                created_at = self._client_created_at.get(connection_id, 0)
+                if time.time() - created_at < self._client_cache_ttl:
+                    return self._clients[connection_id]
+                else:
+                    # Client expired - close it inside the lock to prevent race
+                    logger.debug(f"Client cache expired for {connection_id}, refreshing")
+                    await self._close_client_unsafe(connection_id)
 
-        client = ConfluenceClient(
-            credentials,
-            timeout=self.settings.confluence.request_timeout,
-            max_retries=self.settings.confluence.max_retries,
-        )
-        self._clients[connection_id] = client
-        return client
+            # Create new client
+            connection = await self.db.get_confluence_connection(connection_id)
+            if not connection:
+                raise ConfluenceSyncError(f"Connection not found: {connection_id}")
+
+            credentials = ConfluenceCredentials(
+                domain=connection["domain"],
+                email=connection["email"],
+                api_token=connection["api_token"],
+            )
+
+            client = ConfluenceClient(
+                credentials,
+                timeout=self.settings.confluence.request_timeout,
+                max_retries=self.settings.confluence.max_retries,
+            )
+            self._clients[connection_id] = client
+            self._client_created_at[connection_id] = time.time()
+            return client
+
+    async def _close_client_unsafe(self, connection_id: str) -> None:
+        """
+        Close and remove a cached client (internal, no lock).
+
+        IMPORTANT: Only call this when already holding the connection lock.
+        """
+        if connection_id in self._clients:
+            try:
+                await self._clients[connection_id].close()
+            except Exception as e:
+                logger.warning(f"Error closing client {connection_id}: {e}")
+            del self._clients[connection_id]
+        self._client_created_at.pop(connection_id, None)
+
+    async def _close_client(self, connection_id: str) -> None:
+        """Close and remove a cached client (thread-safe)."""
+        # Acquire lock to prevent race with _get_client
+        if connection_id not in self._client_locks:
+            self._client_locks[connection_id] = asyncio.Lock()
+
+        async with self._client_locks[connection_id]:
+            await self._close_client_unsafe(connection_id)
 
     def _verify_confluence_access(
         self,
@@ -302,6 +391,7 @@ class ConfluenceSyncService:
 
         # 如果没有存储服务，无法创建
         if not self._image_storage_service:
+            logger.debug("No image storage service available, cannot create image processor")
             return None
 
         # 如果提供了自定义 max_image_size，创建新的处理器（不缓存）
@@ -320,7 +410,7 @@ class ConfluenceSyncService:
                 )
                 logger.debug(
                     f"Created image processor for connection {connection_id} "
-                    f"with custom max_image_size={max_image_size}"
+                    f"with custom max_image_size={max_image_size}, vlm={self._vlm_service is not None}"
                 )
                 return processor
             except Exception as e:
@@ -357,8 +447,12 @@ class ConfluenceSyncService:
     def _invalidate_client(self, connection_id: str) -> None:
         """使客户端缓存失效"""
         if connection_id in self._clients:
-            asyncio.create_task(self._clients[connection_id].close())
+            self._create_background_task(
+                self._clients[connection_id].close(),
+                name=f"close-client-{connection_id[:8]}"
+            )
             del self._clients[connection_id]
+        self._client_created_at.pop(connection_id, None)
 
     # ============ Connection Management ============
 
@@ -784,7 +878,7 @@ class ConfluenceSyncService:
         binding_id: Optional[str] = None,
         created_by: Optional[str] = None,
         extra_metadata: Optional[Dict[str, Any]] = None,
-        sync_images: bool = False,
+        sync_images: bool = True,
         tenant_id: Optional[str] = None,
         image_max_size_bytes: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -899,6 +993,12 @@ class ConfluenceSyncService:
                             for idx, segment in enumerate(image_result.segments):
                                 await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
                             doc["image_count"] = image_result.processed_images
+
+                            # 修复：更新 confluence_pages 表的 image_count
+                            if binding_id:
+                                await self.db.update_confluence_page_image_count(
+                                    binding_id, page.page_id, image_result.processed_images
+                                )
                         if image_result.errors:
                             logger.warning(
                                 f"Image processing errors for page {page.page_id}: {image_result.errors}"
@@ -1001,6 +1101,7 @@ class ConfluenceSyncService:
                                     "content_type": "image",
                                     "image_filename": segment.filename,
                                     "image_url": segment.storage_url,
+                                    "vlm_description": segment.vlm_description,  # VLM-generated image description
                                     "is_multimodal": use_multimodal,  # Track embedding type
                                 }
 
@@ -1022,6 +1123,16 @@ class ConfluenceSyncService:
                     logger.warning(f"Failed to store image vector: {vec_err}")
                     # Continue to save segment to database even if vector storage fails
 
+            metadata = {
+                **segment.metadata,
+                "has_vlm_description": bool(segment.vlm_description),
+                "vlm_description_length": len(segment.vlm_description) if segment.vlm_description else 0,
+                "vector_stored": vector_id is not None,
+                "source_position": position,
+            }
+            if segment.context_text and "context_text" not in metadata:
+                metadata["context_text"] = segment.context_text
+
             segment_data = {
                 "segment_id": segment.segment_id,
                 "document_id": segment.document_id,
@@ -1035,19 +1146,12 @@ class ConfluenceSyncService:
                 "image_file_size": segment.file_size,
                 "text": text_content,  # Contains VLM description for RAG search
                 "vector_id": vector_id or segment.vector_id,
-                "metadata": {
-                    **segment.metadata,
-                    "has_vlm_description": bool(segment.vlm_description),
-                    "vlm_description_length": len(segment.vlm_description) if segment.vlm_description else 0,
-                    "vector_stored": vector_id is not None,
-                    # attachment_updated_at is already in segment.metadata for change detection
-                },
+                "metadata": metadata,
             }
             await self.db.save_image_segment(segment_data)
             logger.debug(
                 f"Saved image segment {segment.segment_id} "
-                f"(vlm_description={'yes' if segment.vlm_description else 'no'}, "
-                f"text_length={len(text_content)}, vector_stored={vector_id is not None})"
+                f"(vlm={'yes' if segment.vlm_description else 'no'}, vector={vector_id is not None})"
             )
         except Exception as e:
             logger.error(f"Failed to save image segment {segment.segment_id}: {e}")
@@ -1106,7 +1210,17 @@ class ConfluenceSyncService:
                     return True
 
                 # 检查更新时间
-                stored_updated_at = existing_seg.get("metadata", {}).get("attachment_updated_at")
+                # 修复：metadata 可能是 JSON 字符串（数据库返回），需要安全处理
+                metadata = existing_seg.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except (json.JSONDecodeError, TypeError):
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+
+                stored_updated_at = metadata.get("attachment_updated_at")
                 if stored_updated_at and attachment.updated_at:
                     if attachment.updated_at != stored_updated_at:
                         logger.debug(
@@ -1211,13 +1325,13 @@ class ConfluenceSyncService:
         tenant_id: str,
         dataset_id: str,
         space_key: str,
-        root_page_id: Optional[str] = None,
+        root_page_ids: Optional[List[str]] = None,
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
         max_depth: int = 10,
         include_attachments: bool = False,
         include_comments: bool = False,
-        sync_images: bool = False,
+        sync_images: bool = True,
         image_max_size_bytes: int = 3 * 1024 * 1024,  # 3 MB
         created_by: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1229,7 +1343,7 @@ class ConfluenceSyncService:
             tenant_id: 租户 ID
             dataset_id: 数据集 ID
             space_key: Confluence Space Key
-            root_page_id: 根页面 ID（可选，如果指定则只同步该页面及其子页面）
+            root_page_ids: 根页面 ID 列表（可选，支持多选，如果指定则只同步这些页面及其子页面）
             include_patterns: 包含规则
             exclude_patterns: 排除规则
             max_depth: 最大深度
@@ -1266,14 +1380,23 @@ class ConfluenceSyncService:
         client = await self._get_client(connection_id)
         space = await client.get_space_by_key(space_key)
 
-        # 如果指定了根页面 ID，获取页面标题
-        root_page_title = None
-        if root_page_id:
+        # 处理根页面 IDs（支持多选）
+        effective_root_page_ids = root_page_ids or []
+        root_page_titles = []
+
+        # 获取每个根页面的标题（保持与 IDs 数组对齐）
+        for page_id in effective_root_page_ids:
             try:
-                root_page = await client.get_page(root_page_id)
-                root_page_title = root_page.title
+                root_page = await client.get_page(page_id)
+                root_page_titles.append(root_page.title)
             except Exception as e:
-                logger.warning(f"Failed to get root page {root_page_id}: {e}")
+                logger.warning(f"Failed to get root page {page_id}: {e}")
+                # 使用 page_id 作为后备显示名，保持数组长度一致
+                root_page_titles.append(f"Page {page_id}")
+
+        # 向后兼容：root_page_id 使用第一个元素（如果有）
+        root_page_id = effective_root_page_ids[0] if effective_root_page_ids else None
+        root_page_title = root_page_titles[0] if root_page_titles and root_page_titles[0] else None
 
         binding_id = str(uuid.uuid4())
         binding = {
@@ -1284,8 +1407,10 @@ class ConfluenceSyncService:
             "space_key": space_key,
             "space_id": space.space_id,
             "space_name": space.name,
-            "root_page_id": root_page_id,
-            "root_page_title": root_page_title,
+            "root_page_id": root_page_id,  # Backward compatibility
+            "root_page_ids": effective_root_page_ids,  # New multi-select field
+            "root_page_title": root_page_title,  # Backward compatibility
+            "root_page_titles": root_page_titles,  # New multi-select field (aligned with root_page_ids)
             "include_patterns": include_patterns or [],
             "exclude_patterns": exclude_patterns or [],
             "max_depth": max_depth,
@@ -1484,27 +1609,53 @@ class ConfluenceSyncService:
 
         # 过滤允许更新的字段
         allowed_fields = {
-            "root_page_id", "include_patterns", "exclude_patterns", "max_depth",
+            "root_page_id", "root_page_ids", "root_page_titles",  # 支持多选根页面
+            "include_patterns", "exclude_patterns", "max_depth",
             "include_attachments", "include_comments", "status",
             "sync_images", "image_max_size_bytes",  # 图片同步配置
             "sync_mode", "polling_interval_minutes", "sync_enabled",  # 同步模式配置 (binding 级别)
         }
         filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
 
-        # 如果更新了 root_page_id，需要获取页面标题
-        if "root_page_id" in filtered_updates:
+        # 如果更新了 root_page_ids，需要同步更新 titles 和兼容字段
+        if "root_page_ids" in filtered_updates:
+            raw_ids = filtered_updates.get("root_page_ids") or []
+            root_page_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+            root_page_titles: List[str] = []
+            if root_page_ids:
+                connection_id = binding["connection_id"]
+                client = await self._get_client(connection_id)
+                for page_id in root_page_ids:
+                    try:
+                        root_page = await client.get_page(page_id)
+                        root_page_titles.append(root_page.title)
+                    except Exception as e:
+                        logger.warning(f"Failed to get root page {page_id}: {e}")
+                        root_page_titles.append(f"Page {page_id}")
+            filtered_updates["root_page_ids"] = root_page_ids
+            filtered_updates["root_page_titles"] = root_page_titles
+            filtered_updates["root_page_id"] = root_page_ids[0] if root_page_ids else None
+            filtered_updates["root_page_title"] = root_page_titles[0] if root_page_titles else None
+
+        # 如果仅更新了 root_page_id（兼容老接口），补齐列表字段
+        if "root_page_id" in filtered_updates and "root_page_ids" not in filtered_updates:
             root_page_id = filtered_updates["root_page_id"]
             if root_page_id:
                 try:
                     connection_id = binding["connection_id"]
                     client = await self._get_client(connection_id)
                     root_page = await client.get_page(root_page_id)
-                    filtered_updates["root_page_title"] = root_page.title
+                    root_title = root_page.title
                 except Exception as e:
                     logger.warning(f"Failed to get root page {root_page_id}: {e}")
-                    filtered_updates["root_page_title"] = None
+                    root_title = f"Page {root_page_id}"
+                filtered_updates["root_page_title"] = root_title
+                filtered_updates["root_page_ids"] = [root_page_id]
+                filtered_updates["root_page_titles"] = [root_title]
             else:
                 filtered_updates["root_page_title"] = None
+                filtered_updates["root_page_ids"] = []
+                filtered_updates["root_page_titles"] = []
 
         if filtered_updates:
             await self.db.update_confluence_binding(binding_id, filtered_updates)
@@ -1569,8 +1720,8 @@ class ConfluenceSyncService:
         # 检查是否已有同步在进行
         if binding.get("status") == "syncing" and not force_full_sync:
             return SyncResult(
-                started_at=datetime.utcnow(),
-                completed_at=datetime.utcnow(),
+                started_at=_utc_now(),
+                completed_at=_utc_now(),
                 errors=[{"error": "Sync already in progress"}],
             )
 
@@ -1588,10 +1739,13 @@ class ConfluenceSyncService:
         await self.db.update_confluence_binding(binding_id, {"status": "syncing"})
 
         # 启动后台同步
-        asyncio.create_task(self._sync_space_pages(binding_id, task_id))
+        self._create_background_task(
+            self._sync_space_pages(binding_id, task_id),
+            name=f"sync-space-{binding_id[:8]}"
+        )
 
         return SyncResult(
-            started_at=datetime.utcnow(),
+            started_at=_utc_now(),
             task_id=task_id,
         )
 
@@ -1601,7 +1755,7 @@ class ConfluenceSyncService:
         task_id: str,
     ) -> SyncResult:
         """同步空间中的所有页面（或指定根页面的子页面）"""
-        result = SyncResult(started_at=datetime.utcnow())
+        result = SyncResult(started_at=_utc_now())
 
         binding = await self.db.get_confluence_binding(binding_id)
         if not binding:
@@ -1611,8 +1765,12 @@ class ConfluenceSyncService:
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
         space_id = binding["space_id"]
-        root_page_id = binding.get("root_page_id")
         max_depth = binding.get("max_depth", 10)
+
+        # 支持多选：优先使用 root_page_ids，向后兼容 root_page_id
+        root_page_ids = binding.get("root_page_ids") or []
+        if not root_page_ids and binding.get("root_page_id"):
+            root_page_ids = [binding.get("root_page_id")]
 
         try:
             client = await self._get_client(connection_id)
@@ -1622,11 +1780,19 @@ class ConfluenceSyncService:
             existing_page_ids = {p["page_id"] for p in existing_pages}
             seen_page_ids = set()
 
-            # 如果指定了 root_page_id，则只同步该页面及其子页面
-            if root_page_id:
-                pages_to_sync = await self._get_page_descendants(
-                    client, root_page_id, max_depth
-                )
+            # 如果指定了 root_page_ids，则只同步这些页面及其子页面
+            if root_page_ids:
+                pages_to_sync = []
+                for rid in root_page_ids:
+                    try:
+                        descendants = await self._get_page_descendants(
+                            client, rid, max_depth
+                        )
+                        pages_to_sync.extend(descendants)
+                    except Exception as e:
+                        logger.warning(f"Failed to get descendants for root page {rid}: {e}")
+                # 去重（不同根页面可能有重叠的子页面）
+                pages_to_sync = list(dict.fromkeys(pages_to_sync))
             else:
                 # 获取空间中的所有页面
                 pages_to_sync = []
@@ -1639,7 +1805,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "processing",
                 "total_items": total_count,
-                "started_at": datetime.utcnow(),
+                "started_at": _utc_now(),
             })
 
             # 遍历并同步页面
@@ -1700,7 +1866,7 @@ class ConfluenceSyncService:
                             result.skipped_pages += 1
                             continue
 
-                        # 更新现有文档
+                        # 更新现有文档（内容变化时也需要重新处理图片）
                         doc_id = existing.get("document_id")
                         if doc_id:
                             content_text = extract_plain_text(page.body_storage)
@@ -1713,6 +1879,31 @@ class ConfluenceSyncService:
                                     "progress": 0,
                                 }
                             )
+
+                            # 内容变化时也重新处理图片（修复：之前只更新文本）
+                            sync_images_enabled = binding.get("sync_images", False)
+                            tenant_id = binding.get("tenant_id")
+                            if sync_images_enabled and tenant_id:
+                                try:
+                                    image_count = await self._reprocess_document_images(
+                                        document_id=doc_id,
+                                        connection_id=connection_id,
+                                        page=page,
+                                        dataset_id=dataset_id,
+                                        tenant_id=tenant_id,
+                                        binding_id=binding_id,
+                                        image_max_size_bytes=binding.get("image_max_size_bytes"),
+                                    )
+                                    if image_count > 0:
+                                        # 更新 confluence_pages 表的 image_count
+                                        await self.db.update_confluence_page_image_count(
+                                            binding_id, page.page_id, image_count
+                                        )
+                                except Exception as img_err:
+                                    logger.warning(
+                                        f"Failed to reprocess images for updated page {page.page_id}: {img_err}"
+                                    )
+
                             if self.worker:
                                 await self.worker.enqueue(dataset_id, doc_id)
                             result.updated_documents.append(doc_id)
@@ -1765,12 +1956,12 @@ class ConfluenceSyncService:
                         logger.warning(f"Failed to delete document {doc_id}: {e}")
                 await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
 
-            result.completed_at = datetime.utcnow()
+            result.completed_at = _utc_now()
 
             # 更新绑定状态
             await self.db.update_confluence_binding(binding_id, {
                 "status": "completed",
-                "last_sync_at": datetime.utcnow(),
+                "last_sync_at": _utc_now(),
                 "synced_page_count": result.synced_pages,
                 "total_page_count": result.total_pages,
             })
@@ -1779,7 +1970,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "completed",
                 "progress": 100,
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
                 "result": result.to_dict(),
             })
 
@@ -1795,7 +1986,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "failed",
                 "error": str(e),
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
             })
 
         return result
@@ -1892,9 +2083,15 @@ class ConfluenceSyncService:
 
         # 启动同步
         if page_ids:
-            asyncio.create_task(self._sync_specific_pages(binding_id, task_id, page_ids))
+            self._create_background_task(
+                self._sync_specific_pages(binding_id, task_id, page_ids),
+                name=f"sync-pages-{binding_id[:8]}"
+            )
         else:
-            asyncio.create_task(self._sync_space_pages(binding_id, task_id))
+            self._create_background_task(
+                self._sync_space_pages(binding_id, task_id),
+                name=f"trigger-sync-{binding_id[:8]}"
+            )
 
         return task_id
 
@@ -1905,7 +2102,7 @@ class ConfluenceSyncService:
         page_ids: List[str],
     ) -> SyncResult:
         """同步指定的页面"""
-        result = SyncResult(started_at=datetime.utcnow())
+        result = SyncResult(started_at=_utc_now())
 
         binding = await self.db.get_confluence_binding(binding_id)
         if not binding:
@@ -1922,7 +2119,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "processing",
                 "total_items": len(page_ids),
-                "started_at": datetime.utcnow(),
+                "started_at": _utc_now(),
             })
 
             for i, page_id in enumerate(page_ids):
@@ -1976,17 +2173,17 @@ class ConfluenceSyncService:
                     result.errors.append({"page_id": page_id, "error": str(e)})
                     logger.error(f"Failed to sync page {page_id}: {e}")
 
-            result.completed_at = datetime.utcnow()
+            result.completed_at = _utc_now()
 
             await self.db.update_confluence_binding(binding_id, {
                 "status": "completed",
-                "last_sync_at": datetime.utcnow(),
+                "last_sync_at": _utc_now(),
             })
 
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "completed",
                 "progress": 100,
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
                 "result": result.to_dict(),
             })
 
@@ -2002,7 +2199,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "failed",
                 "error": str(e),
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
             })
 
         return result
@@ -2064,6 +2261,57 @@ class ConfluenceSyncService:
                         "progress": 0,
                     }
                 )
+
+                # 处理图片（如果启用）- 修复：更新文档时也需要处理图片
+                sync_images = binding.get("sync_images", False)
+                tenant_id = binding.get("tenant_id")
+                image_max_size_bytes = binding.get("image_max_size_bytes")
+                image_count = 0
+
+                if sync_images:
+                    if not tenant_id:
+                        logger.warning(
+                            f"Image sync enabled but tenant_id is missing for page {page_id}, "
+                            "skipping image processing"
+                        )
+                    else:
+                        img_processor = await self._get_image_processor(
+                            connection_id, max_image_size=image_max_size_bytes
+                        )
+                        if img_processor:
+                            try:
+                                # 清理旧的图片段（避免重复）
+                                old_image_count = await self.db.delete_image_segments_by_document(doc_id)
+                                if old_image_count > 0:
+                                    logger.info(f"Cleaned up {old_image_count} old image segments for document {doc_id}")
+                                    # 同时清理旧的图片关联
+                                    await self.db.delete_image_associations_by_document(doc_id)
+
+                                image_result = await img_processor.process_page_images(
+                                    page_id=page_id,
+                                    document_id=doc_id,
+                                    tenant_id=tenant_id,
+                                    page_content=page.body_storage,
+                                    page_title=page.title,
+                                    generate_embeddings=True,
+                                )
+                                if image_result.processed_images > 0:
+                                    vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
+                                    logger.info(
+                                        f"Processed {image_result.processed_images} images for page {page_id} "
+                                        f"(vlm_descriptions={vlm_count})"
+                                    )
+                                    # Store image segments in database
+                                    for idx, segment in enumerate(image_result.segments):
+                                        await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
+                                    image_count = image_result.processed_images
+                                if image_result.errors:
+                                    logger.warning(
+                                        f"Image processing errors for page {page_id}: {image_result.errors}"
+                                    )
+                            except Exception as e:
+                                logger.error(f"Failed to process images for page {page_id}: {e}")
+
                 if self.worker:
                     await self.worker.enqueue(dataset_id, doc_id)
 
@@ -2077,8 +2325,9 @@ class ConfluenceSyncService:
                     content_hash=page.content_hash,
                     status="synced",
                     web_url=page.web_url,
+                    image_count=image_count,
                 )
-                return {"status": "success", "action": "updated", "document_id": doc_id}
+                return {"status": "success", "action": "updated", "document_id": doc_id, "image_count": image_count}
             else:
                 # 创建新文档
                 doc = await self._create_document_from_page(
@@ -2434,7 +2683,10 @@ class ConfluenceSyncService:
         await self.db.update_confluence_binding(binding_id, {"status": "syncing"})
 
         # 启动后台同步
-        asyncio.create_task(self._incremental_sync_pages(binding_id, task_id))
+        self._create_background_task(
+            self._incremental_sync_pages(binding_id, task_id),
+            name=f"incremental-sync-{binding_id[:8]}"
+        )
 
         return task_id
 
@@ -2446,7 +2698,7 @@ class ConfluenceSyncService:
         """
         执行增量同步：只处理自上次同步以来修改的页面
         """
-        result = SyncResult(started_at=datetime.utcnow(), task_id=task_id)
+        result = SyncResult(started_at=_utc_now(), task_id=task_id)
 
         binding = await self.db.get_confluence_binding(binding_id)
         if not binding:
@@ -2488,7 +2740,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "processing",
                 "total_items": len(modified_pages),
-                "started_at": datetime.utcnow(),
+                "started_at": _utc_now(),
             })
 
             # 处理修改的页面
@@ -2606,12 +2858,12 @@ class ConfluenceSyncService:
             if deleted_count > 0:
                 logger.info(f"Removed {deleted_count} deleted pages during incremental sync")
 
-            result.completed_at = datetime.utcnow()
+            result.completed_at = _utc_now()
 
             # 更新绑定状态
             await self.db.update_confluence_binding(binding_id, {
                 "status": "completed",
-                "last_sync_at": datetime.utcnow(),
+                "last_sync_at": _utc_now(),
                 "last_sync_type": "incremental",
             })
 
@@ -2619,7 +2871,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "completed",
                 "progress": 100,
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
                 "result": result.to_dict(),
             })
 
@@ -2641,7 +2893,7 @@ class ConfluenceSyncService:
             await self.db.update_confluence_sync_task(task_id, {
                 "status": "failed",
                 "error": str(e),
-                "completed_at": datetime.utcnow(),
+                "completed_at": _utc_now(),
             })
 
         return result

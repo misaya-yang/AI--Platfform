@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 TTL_5M = 300  # 5 minutes
 TTL_1H = 3600  # 1 hour
 TTL_24H = 86400  # 24 hours
+
+# Sliding window configuration
+WINDOW_MINUTES = 5  # Sliding window size for rate calculations
 
 
 @dataclass
@@ -265,9 +269,11 @@ class RealtimeMetricsService:
             pipe.zremrangebyscore("metrics:rt:requests_window", 0, cutoff)
 
             # Track errors separately
+            # 修复：使用唯一 ID 而非时间戳作为 member，避免秒级并发覆盖计数
             if status_code >= 400:
                 error_type = "4xx" if status_code < 500 else "5xx"
-                pipe.zadd(f"metrics:rt:errors_{error_type}", {f"{now}": now})
+                error_id = f"{now}:{uuid.uuid4().hex[:8]}"  # 唯一标识符
+                pipe.zadd(f"metrics:rt:errors_{error_type}", {error_id: now})
                 pipe.zremrangebyscore(f"metrics:rt:errors_{error_type}", 0, cutoff)
                 pipe.expire(f"metrics:rt:errors_{error_type}", TTL_5M)
 
@@ -287,6 +293,37 @@ class RealtimeMetricsService:
             await self.redis._client.set("metrics:rt:queue_depth", depth, ex=TTL_5M)
         except Exception as e:
             logger.debug(f"Failed to update queue depth: {e}")
+
+    async def record_token_usage(
+        self, input_tokens: int, output_tokens: int
+    ) -> None:
+        """Record token usage for real-time metrics.
+
+        This updates the daily token counters in Redis for real-time dashboard.
+
+        Args:
+            input_tokens: Number of input/prompt tokens
+            output_tokens: Number of output/completion tokens
+        """
+        if not self.redis or not self.redis._client:
+            return
+
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            pipe = self.redis._client.pipeline()
+
+            # Increment token counters
+            pipe.incrby(f"metrics:tokens:input:{today}", input_tokens)
+            pipe.incrby(f"metrics:tokens:output:{today}", output_tokens)
+
+            # Set TTL (24 hours + buffer)
+            pipe.expire(f"metrics:tokens:input:{today}", 90000)
+            pipe.expire(f"metrics:tokens:output:{today}", 90000)
+
+            await pipe.execute()
+
+        except Exception as e:
+            logger.debug(f"Failed to record token usage: {e}")
 
     # ========== Query Methods ==========
 
@@ -348,8 +385,10 @@ class RealtimeMetricsService:
             queue_depth = await client.get("metrics:rt:queue_depth")
             snapshot.queue_depth = int(queue_depth or 0)
 
-            # Concurrent requests
-            snapshot.concurrent_requests = self._concurrent_requests
+            # Concurrent requests - 修复：从 Redis 获取而非进程内变量，支持多进程部署
+            # 使用 active_requests zset 的 cardinality 作为并发数
+            active_count = await client.zcard("metrics:rt:active_requests")
+            snapshot.concurrent_requests = active_count or self._concurrent_requests
             snapshot.max_concurrent = self._max_concurrent
 
             # Get today's token/run stats from MetricsRecorder keys
@@ -377,10 +416,41 @@ class RealtimeMetricsService:
             snapshot.total_tokens = input_tokens + output_tokens
             snapshot.token_cost_usd = cost_cents / 100
 
-            # Calculate tokens per minute (last 5 min average extrapolated)
-            snapshot.tokens_per_minute = snapshot.total_tokens / max(1,
-                (datetime.now().hour * 60 + datetime.now().minute) or 1
-            )
+            # 修复：tokens/minute 使用最近5分钟滑动窗口计算（从请求窗口估算）
+            # 而非"日累计/分钟数"算法
+            try:
+                now = time.time()
+                cutoff_5m = now - 300  # 5 分钟前
+
+                # 获取最近5分钟的请求数据
+                window_data = await client.zrangebyscore(
+                    "metrics:rt:requests_window",
+                    cutoff_5m,
+                    now,
+                    withscores=True
+                )
+
+                # 从窗口估算 tokens (使用请求数 * 平均 token)
+                # 如果有今日总量数据，计算更精确的平均值
+                requests_5m = len(window_data) if window_data else 0
+                if requests_5m > 0 and total_runs > 0:
+                    # 使用今日平均每请求 token 数估算
+                    avg_tokens_per_request = snapshot.total_tokens / total_runs
+                    snapshot.tokens_per_minute = round(
+                        (requests_5m * avg_tokens_per_request) / WINDOW_MINUTES, 1
+                    )
+                else:
+                    # 回退到简单计算
+                    elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
+                    snapshot.tokens_per_minute = round(
+                        snapshot.total_tokens / elapsed_minutes, 1
+                    )
+            except Exception:
+                # 发生错误时回退到简单计算
+                elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
+                snapshot.tokens_per_minute = round(
+                    snapshot.total_tokens / elapsed_minutes, 1
+                )
 
             snapshot.total_runs = total_runs
             snapshot.run_success_rate = round(

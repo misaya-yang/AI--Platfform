@@ -48,6 +48,26 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/proxy", tags=["Transparent Proxy"])
 
 
+async def _record_security_event(
+    event_type: str,
+    tenant_id: str,
+    user_id: str,
+    service_id: Optional[str],
+) -> None:
+    try:
+        from ...services.metrics import get_security_event_recorder
+
+        recorder = get_security_event_recorder()
+        await recorder.record_event(
+            tenant_id=tenant_id or "public",
+            user_id=user_id or None,
+            service_id=service_id,
+            event_type=event_type,
+        )
+    except Exception:
+        pass
+
+
 # ============ 依赖注入 ============
 
 def get_transparent_proxy(request: Request) -> TransparentProxy:
@@ -126,6 +146,12 @@ async def check_service_authorization(
     try:
         request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
     except PermissionDeniedError:
+        await _record_security_event(
+            event_type="auth_failed",
+            tenant_id=auth.tenant_id or user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+        )
         logger.warning(
             f"[ProxyAuth] User {user.user_id} lacks service:invoke permission for {service_name}"
         )
@@ -139,6 +165,7 @@ async def check_service_authorization(
     service = await _resolve_service_definition(registry, service_name)
     service_aliases = {service_name}
     if service:
+        request.state.service_id = getattr(service, "service_id", None) or service_name
         if getattr(service, "service_id", None):
             service_aliases.add(service.service_id)
         if getattr(service, "name", None):
@@ -152,6 +179,12 @@ async def check_service_authorization(
             if not auth_config.public:
                 # require_auth
                 if auth_config.require_auth and not user.is_authenticated:
+                    await _record_security_event(
+                        event_type="auth_failed",
+                        tenant_id=auth.tenant_id or user.tenant_id,
+                        user_id=user.user_id,
+                        service_id=getattr(service, "service_id", None) or service_name,
+                    )
                     raise HTTPException(
                         status_code=403,
                         detail=f"Permission denied: authentication required for {service_name}"
@@ -164,6 +197,12 @@ async def check_service_authorization(
                     if not has_role and "admin" not in auth.roles:
                         logger.warning(
                             f"[ProxyAuth] User {user.user_id} role not in allowed_roles for {service_name}"
+                        )
+                        await _record_security_event(
+                            event_type="auth_failed",
+                            tenant_id=auth.tenant_id or user.tenant_id,
+                            user_id=user.user_id,
+                            service_id=getattr(service, "service_id", None) or service_name,
                         )
                         raise HTTPException(
                             status_code=403,
@@ -179,6 +218,12 @@ async def check_service_authorization(
                     api_key_value = request.headers.get(api_key_header) if api_key_header else None
 
                     if not api_key_value:
+                        await _record_security_event(
+                            event_type="auth_failed",
+                            tenant_id=auth.tenant_id or user.tenant_id,
+                            user_id=user.user_id,
+                            service_id=getattr(service, "service_id", None) or service_name,
+                        )
                         raise HTTPException(
                             status_code=403,
                             detail=f"Permission denied: API key required for service {service_name}"
@@ -189,6 +234,12 @@ async def check_service_authorization(
                             api_key_value.startswith(prefix) for prefix in auth_config.allowed_api_keys
                         )
                         if not matched:
+                            await _record_security_event(
+                                event_type="auth_failed",
+                                tenant_id=auth.tenant_id or user.tenant_id,
+                                user_id=user.user_id,
+                                service_id=getattr(service, "service_id", None) or service_name,
+                            )
                             raise HTTPException(
                                 status_code=403,
                                 detail=f"Permission denied: API key not allowed for service {service_name}"
@@ -217,6 +268,12 @@ async def check_service_authorization(
                 if not _service_allowed(allowed, service_aliases):
                     logger.warning(
                         f"[ProxyAuth] Service {service_name} not in allowed_services for user {user.user_id}"
+                    )
+                    await _record_security_event(
+                        event_type="auth_failed",
+                        tenant_id=auth.tenant_id or user.tenant_id,
+                        user_id=user.user_id,
+                        service_id=getattr(service, "service_id", None) or service_name,
                     )
                     raise HTTPException(
                         status_code=403,
@@ -247,6 +304,12 @@ async def check_proxy_rate_limit(
 
     result = await rate_limiter.check(context)
     if not result.allowed:
+        await _record_security_event(
+            event_type="rate_limited",
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+        )
         raise HTTPException(
             status_code=429,
             detail=RateLimitHeaders.build_exceeded_response(result),

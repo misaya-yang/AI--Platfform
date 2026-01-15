@@ -6,9 +6,39 @@ import math
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 import httpx
+
+
+# =============================================================================
+# Multimodal Embedding Model Registry
+# =============================================================================
+# Centralized list of embedding models that support multimodal (image) content.
+# Used by assistant API to identify multimodal knowledge bases.
+
+MULTIMODAL_EMBEDDING_MODELS: FrozenSet[str] = frozenset({
+    # DashScope multimodal models
+    "multimodal-embedding-v1",
+    "multimodal-embedding-one-peace-v1",
+    "multimodal-embedding-one-peace",
+    # Tongyi unified vision models
+    "tongyi-embedding-vision-plus",
+    # Qwen VL models
+    "qwen2.5-vl-embedding",
+})
+
+
+def is_multimodal_embedding_model(model_name: str) -> bool:
+    """Check if a model supports multimodal embedding.
+
+    Args:
+        model_name: The embedding model name to check
+
+    Returns:
+        True if the model supports multimodal (image) embedding
+    """
+    return model_name in MULTIMODAL_EMBEDDING_MODELS
 
 
 class EmbeddingError(RuntimeError):
@@ -131,7 +161,12 @@ class DashScopeEmbedding(BaseEmbedding):
 
     Uses the official `dashscope` SDK when installed, and runs calls in a thread
     to avoid blocking the event loop.
-    
+
+    Features:
+    - Retry with exponential backoff (3 attempts)
+    - Configurable HTTP timeout
+    - Graceful degradation on API errors
+
     API Limits:
     - Max 25 texts per batch
     - Max 2048 tokens per text for v1/v2, 8192 for v3/v4
@@ -144,7 +179,7 @@ class DashScopeEmbedding(BaseEmbedding):
         "text-embedding-v3": 1024,
         "text-embedding-v4": 1024,  # DashScope v4 default dimension
     }
-    
+
     # Max characters per text (conservative: ~2.5 chars/token)
     # DashScope v1/v2: max 2048 tokens, v3: max 8192 tokens
     # But in practice, shorter is safer to avoid InvalidParameter errors
@@ -154,9 +189,14 @@ class DashScopeEmbedding(BaseEmbedding):
         "text-embedding-v3": 8000,   # More conservative for v3
         "text-embedding-v4": 8000,
     }
-    
+
     # DashScope API limit: max 10 texts per batch for v3, 25 for v1/v2
     # Use 6 to be safe across all models
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_BASE_DELAY = 1.0  # seconds
+    REQUEST_TIMEOUT = 60  # seconds for HTTP request
     MAX_BATCH_SIZE = 6
 
     def __init__(
@@ -225,6 +265,80 @@ class DashScopeEmbedding(BaseEmbedding):
         text = text.strip()
         return text if text else "empty"
 
+    async def _call_with_retry(
+        self, batch: List[str], batch_info: str, **kwargs: Any
+    ) -> List[List[float]]:
+        """Call DashScope API with retry and exponential backoff."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                # Use asyncio.wait_for to enforce timeout on the thread call
+                resp = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._TextEmbedding.call,
+                        model=self.model,
+                        input=batch,
+                        api_key=self.api_key,
+                        **kwargs,
+                    ),
+                    timeout=float(self.REQUEST_TIMEOUT),
+                )
+
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code and status_code >= 400:
+                    code = getattr(resp, "code", "") or ""
+                    message = getattr(resp, "message", "") or ""
+                    # Check if retryable (rate limit or server error)
+                    if status_code in (429, 500, 502, 503, 504):
+                        raise EmbeddingError(
+                            f"DashScope retryable error ({batch_info}): {status_code} {code} {message}"
+                        )
+                    # Non-retryable error
+                    raise EmbeddingError(
+                        f"DashScope embeddings failed ({batch_info}): {status_code} {code} {message}"
+                    )
+
+                output = getattr(resp, "output", None)
+                vectors = _parse_dashscope_embeddings(output)
+                return vectors
+
+            except asyncio.TimeoutError:
+                last_error = EmbeddingError(
+                    f"DashScope embedding timeout ({batch_info}): exceeded {self.REQUEST_TIMEOUT}s"
+                )
+                logger.warning(
+                    f"DashScope embedding timeout on attempt {attempt + 1}/{self.MAX_RETRIES} "
+                    f"({batch_info}), retrying..."
+                )
+            except EmbeddingError as e:
+                if "retryable" in str(e).lower() or "timeout" in str(e).lower():
+                    last_error = e
+                    logger.warning(
+                        f"DashScope embedding error on attempt {attempt + 1}/{self.MAX_RETRIES} "
+                        f"({batch_info}): {e}, retrying..."
+                    )
+                else:
+                    # Non-retryable error, raise immediately
+                    raise
+            except Exception as exc:
+                last_error = EmbeddingError(f"DashScope embedding error ({batch_info}): {exc}")
+                logger.warning(
+                    f"DashScope unexpected error on attempt {attempt + 1}/{self.MAX_RETRIES} "
+                    f"({batch_info}): {exc}, retrying..."
+                )
+
+            # Exponential backoff before retry
+            if attempt < self.MAX_RETRIES - 1:
+                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+                await asyncio.sleep(delay)
+
+        # All retries exhausted
+        raise last_error or EmbeddingError(f"DashScope embedding failed after {self.MAX_RETRIES} attempts ({batch_info})")
+
     async def embed_texts(
         self, texts: List[str], text_type: Optional[str] = None
     ) -> List[List[float]]:
@@ -242,35 +356,10 @@ class DashScopeEmbedding(BaseEmbedding):
         all_vectors: List[List[float]] = []
         for i in range(0, len(processed_texts), self.MAX_BATCH_SIZE):
             batch = processed_texts[i:i + self.MAX_BATCH_SIZE]
-            
-            try:
-                resp = await asyncio.to_thread(
-                    self._TextEmbedding.call,
-                    model=self.model,
-                    input=batch,
-                    api_key=self.api_key,
-                    **kwargs,
-                )
+            batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}, texts {i}-{i + len(batch) - 1}"
 
-                status_code = int(getattr(resp, "status_code", 0) or 0)
-                if status_code and status_code >= 400:
-                    code = getattr(resp, "code", "") or ""
-                    message = getattr(resp, "message", "") or ""
-                    # Log which batch failed for debugging
-                    batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}, texts {i}-{i + len(batch) - 1}"
-                    raise EmbeddingError(
-                        f"DashScope embeddings failed ({batch_info}): {status_code} {code} {message}"
-                    )
-
-                output = getattr(resp, "output", None)
-                vectors = _parse_dashscope_embeddings(output)
-                all_vectors.extend(vectors)
-                
-            except EmbeddingError:
-                raise
-            except Exception as exc:
-                batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
-                raise EmbeddingError(f"DashScope embedding error ({batch_info}): {exc}") from exc
+            vectors = await self._call_with_retry(batch, batch_info, **kwargs)
+            all_vectors.extend(vectors)
 
         if self._dimension is None and all_vectors:
             self._dimension = len(all_vectors[0])
@@ -1048,6 +1137,17 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
             input_items.append({"text": self._sanitize_text(context_text)})
 
         return await self._call_api(input_items)
+
+    async def embed_image_and_text(
+        self,
+        image_bytes: bytes,
+        text: Optional[str] = None,
+    ) -> List[float]:
+        """Embed image with optional text - alias for embed_image_with_context.
+
+        Provides compatibility with DashScopeMultimodalEmbedding interface.
+        """
+        return await self.embed_image_with_context(image_bytes, text)
 
     async def embed_mixed_batch(
         self,

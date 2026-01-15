@@ -164,6 +164,8 @@ class DatasetInfoResponse(BaseModel):
     description: Optional[str] = Field(default=None, description="Dataset description")
     document_count: int = Field(default=0, description="Number of documents")
     chunk_count: int = Field(default=0, description="Number of chunks")
+    embedding_model: Optional[str] = Field(default=None, description="Embedding model used")
+    is_multimodal: bool = Field(default=False, description="Whether KB supports multimodal (image) retrieval")
 
 
 class DatasetsListResponse(BaseModel):

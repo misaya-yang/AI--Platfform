@@ -11,7 +11,7 @@ from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
 from ..auth.rbac import RBAC
-from ..exceptions import ServiceNotFoundError
+from ..exceptions import ServiceNotFoundError, RateLimitExceededError
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
 from .validator import RequestValidator
@@ -86,6 +86,20 @@ class GatewayDispatcher:
             self._semaphores[service.service_id] = asyncio.Semaphore(limit)
         return self._semaphores[service.service_id]
 
+    async def _record_rate_limit_event(self, request: UnifiedRequest, service_id: str) -> None:
+        try:
+            from ...services.metrics import get_security_event_recorder
+
+            recorder = get_security_event_recorder()
+            await recorder.record_event(
+                tenant_id=request.tenant_id or "public",
+                user_id=request.user_id or None,
+                service_id=service_id,
+                event_type="rate_limited",
+            )
+        except Exception:
+            pass
+
     async def invoke(
         self,
         request: UnifiedRequest,
@@ -97,7 +111,11 @@ class GatewayDispatcher:
 
         service = await self._get_service(request.service_id)
         await self.validator.validate(request, service, roles)
-        await self.rate_limiter.enforce(request, service, client_ip)
+        try:
+            await self.rate_limiter.enforce(request, service, client_ip)
+        except RateLimitExceededError:
+            await self._record_rate_limit_event(request, service.service_id)
+            raise
 
         # Session persistence (for chat history / multi-turn context)
         session_id: Optional[str] = None
@@ -210,7 +228,11 @@ class GatewayDispatcher:
             await self.validator.validate(request, service, roles)
 
         async def do_rate_limit():
-            await self.rate_limiter.enforce(request, service, client_ip)
+            try:
+                await self.rate_limiter.enforce(request, service, client_ip)
+            except RateLimitExceededError:
+                await self._record_rate_limit_event(request, service.service_id)
+                raise
 
         # Execute validation and rate limiting in parallel
         await asyncio.gather(

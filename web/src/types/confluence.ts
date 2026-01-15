@@ -97,17 +97,22 @@ export interface ConfluencePageTreeResponse {
 export interface ConfluenceBinding {
   binding_id: string;
   connection_id: string;
+  tenant_id: string | null;
   dataset_id: string;
   space_key: string;
   space_id: string | null;
   space_name: string | null;
-  root_page_id: string | null;
-  root_page_title: string | null;
+  root_page_id: string | null;  // Deprecated, use root_page_ids
+  root_page_ids: string[];  // New multi-select support
+  root_page_title: string | null;  // Deprecated, use root_page_titles
+  root_page_titles: string[];  // New multi-select support
   include_patterns: string[];
   exclude_patterns: string[];
   max_depth: number;
   include_attachments: boolean;
   include_comments: boolean;
+  sync_images: boolean;
+  image_max_size_bytes: number;
   status: "pending" | "syncing" | "completed" | "error";
   last_sync_at: string | null;
   synced_page_count: number;
@@ -127,21 +132,28 @@ export interface ConfluenceBinding {
 export interface ConfluenceBindingCreateRequest {
   dataset_id: string;
   space_key: string;
-  root_page_id?: string;
+  root_page_id?: string;  // Deprecated, use root_page_ids
+  root_page_ids?: string[];  // New multi-select support
   include_patterns?: string[];
   exclude_patterns?: string[];
   max_depth?: number;
   include_attachments?: boolean;
   include_comments?: boolean;
+  sync_images?: boolean;
+  image_max_size_bytes?: number;
 }
 
 export interface ConfluenceBindingUpdateRequest {
-  root_page_id?: string;
+  root_page_id?: string;  // Deprecated, use root_page_ids
+  root_page_ids?: string[];  // New multi-select support
   include_patterns?: string[];
   exclude_patterns?: string[];
   max_depth?: number;
   include_attachments?: boolean;
   include_comments?: boolean;
+  // Image sync configuration
+  sync_images?: boolean;
+  image_max_size_bytes?: number;
   // Sync mode configuration (binding-level)
   sync_mode?: "manual" | "polling";
   polling_interval_minutes?: number;

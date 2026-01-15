@@ -6,8 +6,9 @@
 
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { Database, FileText } from "lucide-react";
+import { Database, FileText, Sparkles, Image as ImageIcon } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { DatasetInfo } from "@/api/assistant";
 
@@ -59,8 +60,16 @@ export function KBSelector({
               className="mt-0.5"
             />
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">
-                {dataset.name}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700 dark:text-slate-200 truncate">
+                  {dataset.name}
+                </span>
+                {dataset.is_multimodal && (
+                  <Badge className="bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-300 border-violet-200 dark:border-violet-800/50 text-[9px] px-1.5 py-0 h-4 gap-0.5 shrink-0">
+                    <ImageIcon className="h-2.5 w-2.5" />
+                    多模态
+                  </Badge>
+                )}
               </div>
               {dataset.description && (
                 <div className="text-xs text-slate-500 dark:text-slate-400 line-clamp-1 mt-0.5">

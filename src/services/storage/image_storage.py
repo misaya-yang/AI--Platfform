@@ -619,9 +619,42 @@ class ImageStorageService:
     Provides storage operations specifically for Confluence images.
     """
 
-    def __init__(self, config: StorageConfig):
+    def __init__(self, config: StorageConfig, signing_key: str = ""):
+        """
+        Initialize the image storage service.
+
+        Args:
+            config: Storage configuration
+            signing_key: Optional key for signing local file URLs (HMAC-SHA256).
+                        When provided, all file:// URLs will be signed with
+                        expiry timestamps for security. Recommended for production.
+        """
         self.config = config
+        self._signing_key = signing_key
         self._backend = self._create_backend()
+
+    def _sign_url_if_local(self, url: str) -> str:
+        """
+        Sign a URL if it's a local file URL and signing is enabled.
+
+        Args:
+            url: The URL to potentially sign
+
+        Returns:
+            Signed URL if local and signing_key is configured, otherwise original URL
+        """
+        if not url or not self._signing_key:
+            return url
+
+        if url.startswith("file://"):
+            try:
+                from ...core.crypto import sign_url
+                return sign_url(url, self._signing_key, expiry_seconds=self.config.url_expiry_seconds)
+            except Exception as e:
+                logger.warning(f"Failed to sign URL: {e}")
+                return url
+
+        return url
 
     def _create_backend(self) -> BaseStorageBackend:
         """Create storage backend based on configuration"""
@@ -703,6 +736,10 @@ class ImageStorageService:
             image_metadata.update(sanitized_metadata)
 
         url = await self._backend.upload(key, content, content_type, image_metadata)
+
+        # Sign local file URLs for security
+        url = self._sign_url_if_local(url)
+
         logger.info(f"Uploaded image {filename} ({len(content)} bytes) -> {key}")
         return url
 
@@ -915,10 +952,11 @@ class ImageStorageService:
             expiry_seconds: URL expiry time
 
         Returns:
-            Image URL
+            Image URL (signed if local storage)
         """
         key = self._generate_key(tenant_id, document_id, attachment_id, filename)
-        return self._backend.get_url(key, expiry_seconds)
+        url = self._backend.get_url(key, expiry_seconds)
+        return self._sign_url_if_local(url)
 
     async def exists_by_key(self, storage_key: str) -> bool:
         """
@@ -947,9 +985,10 @@ class ImageStorageService:
             expiry_seconds: URL expiry time
 
         Returns:
-            File URL
+            File URL (signed if local storage)
         """
-        return self._backend.get_url(storage_key, expiry_seconds)
+        url = self._backend.get_url(storage_key, expiry_seconds)
+        return self._sign_url_if_local(url)
 
     async def close(self) -> None:
         """Close the storage service and release resources"""

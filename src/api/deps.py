@@ -135,6 +135,39 @@ def _normalize_roles(raw_roles) -> List[str]:
     return ["user"]
 
 
+def _extract_service_id_from_path(path: str) -> Optional[str]:
+    for prefix in ("/api/v1/proxy/", "/proxy/"):
+        if path.startswith(prefix):
+            remainder = path[len(prefix):]
+            if not remainder:
+                return None
+            return remainder.split("/", 1)[0] or None
+    return None
+
+
+async def _record_auth_failure(
+    request: Request,
+    user_id: Optional[str],
+    tenant_id: Optional[str],
+) -> None:
+    try:
+        if getattr(request.state, "_auth_failure_recorded", False):
+            return
+        request.state._auth_failure_recorded = True
+        from ..services.metrics import get_security_event_recorder
+
+        recorder = get_security_event_recorder()
+        service_id = _extract_service_id_from_path(request.url.path)
+        await recorder.record_event(
+            tenant_id=tenant_id or "public",
+            user_id=user_id,
+            service_id=service_id,
+            event_type="auth_failed",
+        )
+    except Exception:
+        pass
+
+
 async def get_user_context(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -179,16 +212,22 @@ async def get_user_context(
         jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
         jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
 
-        payload = decode_jwt_token(
-            token,
-            secret=jwt_secret,
-            algorithms=jwt_algorithms,
-            audience=auth_cfg.jwt.audience,
-            issuer=auth_cfg.jwt.issuer,
-        )
+        try:
+            payload = decode_jwt_token(
+                token,
+                secret=jwt_secret,
+                algorithms=jwt_algorithms,
+                audience=auth_cfg.jwt.audience,
+                issuer=auth_cfg.jwt.issuer,
+            )
+        except AuthError:
+            await _record_auth_failure(request, None, None)
+            raise
         t_jwt_decode = time.perf_counter()
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
+        tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "")
         if not user_id:
+            await _record_auth_failure(request, None, tenant_id)
             raise AuthError("Missing user_id in JWT token")
 
         # Check token revocation in Redis (if available)
@@ -200,10 +239,10 @@ async def get_user_context(
                 is_valid = await redis.validate_token(token_id)
                 if not is_valid:
                     logger.warning(f"Token revoked for user {user_id}")
+                    await _record_auth_failure(request, user_id, tenant_id)
                     raise AuthError("Token has been revoked")
         t_redis_done = time.perf_counter()
 
-        tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "")
         roles = _normalize_roles(payload.get("roles") or payload.get("role"))
         tier = str(payload.get("tier") or "normal")
         if "admin" in roles:
@@ -280,7 +319,11 @@ async def get_user_context(
                     ))
 
             # Fallback to static allowlist (env-configured keys)
-            verify_api_key(api_key, auth_cfg.api_key.keys)
+            try:
+                verify_api_key(api_key, auth_cfg.api_key.keys)
+            except AuthError:
+                await _record_auth_failure(request, _derive_api_key_user_id(api_key), None)
+                raise
             logger.info(f"[AUTH][TIMING] API_KEY_STATIC total={((time.perf_counter() - t_start) * 1000):.1f}ms")
             return _cache_and_return(UserContext(
                 user_id=_derive_api_key_user_id(api_key),
@@ -336,14 +379,19 @@ async def get_auth_context(
         jwt_secret = get_jwt_secret(auth_cfg.jwt.secret)
         jwt_algorithms = get_jwt_algorithms(auth_cfg.jwt.algorithms)
 
-        payload = decode_jwt_token(
-            token,
-            secret=jwt_secret,
-            algorithms=jwt_algorithms,
-            audience=auth_cfg.jwt.audience,
-            issuer=auth_cfg.jwt.issuer,
-        )
+        try:
+            payload = decode_jwt_token(
+                token,
+                secret=jwt_secret,
+                algorithms=jwt_algorithms,
+                audience=auth_cfg.jwt.audience,
+                issuer=auth_cfg.jwt.issuer,
+            )
+        except AuthError:
+            await _record_auth_failure(request, None, None)
+            raise
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
+        tenant_id = str(payload.get("tenant_id") or "")
 
         # Check token revocation in Redis (if available)
         token_id = payload.get("jti")
@@ -353,9 +401,8 @@ async def get_auth_context(
                 is_valid = await redis.validate_token(token_id)
                 if not is_valid:
                     logger.warning(f"Token revoked for user {user_id}")
+                    await _record_auth_failure(request, user_id, tenant_id)
                     raise AuthError("Token has been revoked")
-
-        tenant_id = str(payload.get("tenant_id") or "")
         raw_roles = payload.get("roles") or payload.get("role") or ["user"]
         if isinstance(raw_roles, str):
             roles = [raw_roles]
@@ -390,6 +437,7 @@ async def get_auth_context(
     if auth_cfg.api_key.enabled:
         key = request.headers.get(auth_cfg.api_key.header_name)
         if not key:
+            await _record_auth_failure(request, None, None)
             raise AuthError("Missing API key")
 
         db = getattr(request.app.state, "database", None)
@@ -410,7 +458,11 @@ async def get_auth_context(
                 request.state.auth = ctx
                 return ctx
 
-        verify_api_key(key, auth_cfg.api_key.keys)
+        try:
+            verify_api_key(key, auth_cfg.api_key.keys)
+        except AuthError:
+            await _record_auth_failure(request, _derive_api_key_user_id(key), tenant_id)
+            raise
         ctx = AuthContext(user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[])
         request.state.auth = ctx
         return ctx

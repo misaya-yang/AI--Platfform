@@ -73,34 +73,48 @@ class BillingInterceptor:
         self,
         callback: Optional[BillingCallback] = None,
         redis_client=None,
+        realtime_metrics=None,  # 修复：添加实时指标服务
         buffer_size: int = 100,
         flush_interval: float = 5.0,
     ):
         """
         初始化计费拦截器
-        
+
         Args:
             callback: 计费回调函数（接收 UsageData）
             redis_client: Redis 客户端（用于发布计费事件）
+            realtime_metrics: RealtimeMetricsService 实例（用于记录实时指标）
             buffer_size: 缓冲区大小（批量推送）
             flush_interval: 刷新间隔（秒）
         """
         self.callback = callback
         self.redis = redis_client
+        self._realtime_metrics = realtime_metrics  # 可能为 None，使用延迟获取
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval
-        
+
         # 计费数据缓冲区
         self._buffer: List[UsageData] = []
         self._buffer_lock = asyncio.Lock()
-        
+
         # 后台刷新任务
         self._flush_task: Optional[asyncio.Task] = None
         self._running = False
-        
+
         # 统计
         self._total_events = 0
         self._total_tokens = 0
+
+    @property
+    def realtime_metrics(self):
+        """获取实时指标服务（支持延迟初始化）"""
+        if self._realtime_metrics is None:
+            try:
+                from ..services.metrics.realtime_metrics import get_realtime_metrics
+                self._realtime_metrics = get_realtime_metrics()
+            except Exception:
+                pass
+        return self._realtime_metrics
     
     async def start(self) -> None:
         """启动后台刷新任务"""
@@ -156,17 +170,43 @@ class BillingInterceptor:
             # 回调方式
             if self.callback:
                 await self.callback(usage)
-            
+
             # Redis 发布方式
             if self.redis:
                 await self._publish_to_redis(usage)
-            
+
+            # 持久化到数据库（通过 UsageRecorder）
+            await self._record_to_database(usage)
+
             # 更新统计
             self._total_events += 1
             self._total_tokens += usage.total_tokens
-            
+
         except Exception as e:
             logger.error(f"Failed to push billing data: {e}")
+
+    async def _record_to_database(self, usage: UsageData) -> None:
+        """持久化使用记录到数据库"""
+        try:
+            from ..services.metrics import get_usage_recorder
+
+            recorder = get_usage_recorder()
+            if recorder:
+                await recorder.record_usage(
+                    tenant_id=usage.tenant_id or "default",
+                    user_id=usage.user_id or "anonymous",
+                    model=usage.model or "unknown",
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    request_id=usage.request_id,
+                    service_id=usage.service_id,
+                    assistant_id=usage.assistant_id,
+                    latency_ms=int(usage.duration_ms),
+                    status="success",
+                    request_type="chat",
+                )
+        except Exception as e:
+            logger.warning(f"Failed to record usage to database: {e}")
     
     async def _publish_to_redis(self, usage: UsageData) -> None:
         """发布计费事件到 Redis"""
@@ -247,35 +287,48 @@ class StreamProcessor:
         self.user_id = user_id
         self.tenant_id = tenant_id
         self.assistant_id = assistant_id
-        
+
         self.start_time = time.time()
-        
+
         # SSE 解析状态
         self._buffer = ""
         self._current_event = ""
         self._usage_collected = False
+        self._realtime_started = False  # 跟踪是否已开始实时指标记录
     
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
         处理流数据块
-        
+
         Args:
             chunk: 原始数据块
-            
+
         Returns:
             原样返回数据块（透传）
         """
+        # 首次调用时记录请求开始（用于实时指标）
+        if not self._realtime_started:
+            self._realtime_started = True
+            if self.interceptor.realtime_metrics:
+                try:
+                    await self.interceptor.realtime_metrics.record_request_start(
+                        request_id=self.request_id,
+                        user_id=self.user_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to record request start: {e}")
+
         try:
             # 尝试解码
             text = chunk.decode("utf-8", errors="ignore")
             self._buffer += text
-            
+
             # 解析完整的 SSE 事件
             await self._parse_events()
-            
+
         except Exception as e:
             logger.debug(f"Error processing chunk: {e}")
-        
+
         # 透传原始数据
         return chunk
     
@@ -289,15 +342,18 @@ class StreamProcessor:
         """处理单个 SSE 事件块"""
         event_type = ""
         data_lines = []
-        
+
         for line in block.split("\n"):
             if line.startswith("event:"):
                 event_type = line[6:].strip()
             elif line.startswith("data:"):
                 data_lines.append(line[5:].strip())
-        
-        # 检查是否是 metadata 事件
-        if event_type == "metadata" or (not event_type and data_lines):
+
+        # 处理可能包含 usage 的事件类型
+        # - metadata: 标准 metadata 事件
+        # - messages/partial: LangGraph 消息流（可能包含 usage_metadata）
+        # - 无事件类型的数据行（某些 OpenAI 格式）
+        if event_type in ("metadata", "messages/partial") or (not event_type and data_lines):
             data_str = "\n".join(data_lines)
             await self._extract_usage(data_str, event_type)
     
@@ -305,32 +361,44 @@ class StreamProcessor:
         """从数据中提取 usage 信息"""
         if self._usage_collected:
             return
-        
+
         if not data_str or data_str == "[DONE]":
             return
-        
+
         try:
             data = json.loads(data_str)
         except json.JSONDecodeError:
             return
-        
+
         # 查找 usage 字段（支持多种格式）
         usage = None
-        
-        # LangGraph 格式
-        if isinstance(data, dict):
+
+        # LangGraph messages/partial 格式（数组）
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    # 检查 usage_metadata（LangGraph 消息格式）
+                    usage_metadata = item.get("usage_metadata")
+                    if usage_metadata and isinstance(usage_metadata, dict):
+                        # usage_metadata 包含 input_tokens, output_tokens, total_tokens
+                        if usage_metadata.get("input_tokens") or usage_metadata.get("output_tokens"):
+                            usage = usage_metadata
+                            break
+
+        # LangGraph/OpenAI 字典格式
+        elif isinstance(data, dict):
             usage = data.get("usage")
-            
+
             # OpenAI 格式（嵌套在 choices 中）
             if not usage and "choices" in data:
                 usage = data.get("usage")
-            
+
             # 检查 run_id 等元数据
             if event_type == "metadata":
                 # LangGraph metadata 事件
                 if "run_id" in data:
                     logger.debug(f"LangGraph run metadata: run_id={data.get('run_id')}")
-        
+
         if usage and isinstance(usage, dict):
             await self._record_usage(usage, data)
     
@@ -378,11 +446,25 @@ class StreamProcessor:
             f"input={input_tokens} output={output_tokens} total={total_tokens} "
             f"duration={duration_ms:.2f}ms"
         )
-        
+
+        # 修复：记录实时指标（用于 Dashboard WebSocket 推送）
+        if self.interceptor.realtime_metrics:
+            try:
+                await self.interceptor.realtime_metrics.record_request_complete(
+                    status_code=200,  # 成功完成
+                    duration_ms=int(duration_ms),
+                )
+                await self.interceptor.realtime_metrics.record_token_usage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to record realtime metrics: {e}")
+
         # 添加到缓冲区
         async with self.interceptor._buffer_lock:
             self.interceptor._buffer.append(usage_data)
-            
+
             # 如果缓冲区满，立即刷新
             if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
                 asyncio.create_task(self.interceptor._flush_buffer())
@@ -390,9 +472,19 @@ class StreamProcessor:
     async def finalize(self) -> None:
         """
         完成流处理
-        
-        处理剩余缓冲区数据。
+
+        处理剩余缓冲区数据并记录请求结束。
         """
         if self._buffer:
             await self._parse_events()
+
+        # 记录请求结束（用于实时并发计数）
+        if self._realtime_started and self.interceptor.realtime_metrics:
+            try:
+                await self.interceptor.realtime_metrics.record_request_end(
+                    request_id=self.request_id,
+                    user_id=self.user_id,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to record request end: {e}")
 

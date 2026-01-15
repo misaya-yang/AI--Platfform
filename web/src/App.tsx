@@ -3,6 +3,7 @@ import zhCN from 'antd/locale/zh_CN';
 import { AppRouter } from "@/router";
 import { useAppStore } from "@/store/useAppStore";
 import { lightTheme, darkTheme } from "@/theme/themeConfig";
+import { Toaster } from "@/components/ui/toaster";
 
 export default function App() {
   const { darkMode } = useAppStore();
@@ -18,6 +19,7 @@ export default function App() {
     >
       <AntApp>
         <AppRouter />
+        <Toaster />
       </AntApp>
     </ConfigProvider>
   );

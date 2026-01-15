@@ -50,6 +50,8 @@ export interface DatasetInfo {
   description?: string | null;
   document_count: number;
   chunk_count: number;
+  embedding_model?: string | null;
+  is_multimodal: boolean;
 }
 
 export interface AssistantConfig {
@@ -245,11 +247,30 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
  * - done: Stream completion
  * - error: Error occurred
  */
+// Helper to get auth token from storage (same as lib/api.ts)
+function getAuthToken(): string | null {
+  const AUTH_STORAGE_KEY = "agent-gateway-auth";
+  // Check localStorage first (rememberMe=true), then sessionStorage (rememberMe=false)
+  let authStorage = localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!authStorage) {
+    authStorage = sessionStorage.getItem(AUTH_STORAGE_KEY);
+  }
+  if (authStorage) {
+    try {
+      const authState = JSON.parse(authStorage);
+      return authState?.state?.token || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function* chatStream(
   request: ChatRequest,
   signal?: AbortSignal
 ): AsyncGenerator<StreamEvent, void, void> {
-  const token = localStorage.getItem("auth_token");
+  const token = getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };

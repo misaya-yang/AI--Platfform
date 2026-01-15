@@ -34,7 +34,8 @@ def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 def _utc_now() -> datetime:
     """Get current UTC time as naive datetime for consistent comparisons."""
-    return datetime.utcnow()
+    # Use timezone-aware now() instead of deprecated utcnow()
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class PollingTask:
@@ -209,14 +210,25 @@ class ConfluenceScheduler:
             f"and {self.page_task_count} page tasks"
         )
 
-    async def stop(self) -> None:
-        """停止调度器"""
+    async def stop(self, timeout_seconds: float = 30.0) -> None:
+        """
+        停止调度器（优雅关闭）
+
+        Args:
+            timeout_seconds: 等待活动同步完成的最大时间（秒），默认 30 秒
+
+        Notes:
+            1. 首先停止接受新的同步请求
+            2. 等待所有活动同步完成（最多等待 timeout_seconds）
+            3. 超时后记录被中断的任务
+        """
         if not self._running:
             return
 
         self._running = False
+        logger.info("Confluence scheduler shutting down...")
 
-        # 取消调度任务
+        # 取消调度任务（停止新任务调度）
         if self._scheduler_task:
             self._scheduler_task.cancel()
             try:
@@ -225,14 +237,55 @@ class ConfluenceScheduler:
                 pass
 
         # 等待所有活动同步完成
-        active_count = len(self._active_syncs) + len(self._active_page_syncs)
+        active_bindings = set(self._active_syncs)
+        active_pages = set(self._active_page_syncs)
+        active_count = len(active_bindings) + len(active_pages)
+
         if active_count > 0:
-            logger.info(f"Waiting for {active_count} active syncs to complete")
-            # 给一些时间让同步完成
-            await asyncio.sleep(2)
+            logger.info(
+                f"Waiting for {active_count} active syncs to complete "
+                f"(timeout={timeout_seconds}s)"
+            )
+            logger.debug(f"Active binding syncs: {active_bindings}")
+            logger.debug(f"Active page syncs: {active_pages}")
+
+            # 等待活动同步完成，定期检查
+            start_time = asyncio.get_event_loop().time()
+            poll_interval = 0.5  # 每 0.5 秒检查一次
+
+            while True:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                current_count = len(self._active_syncs) + len(self._active_page_syncs)
+
+                if current_count == 0:
+                    logger.info("All active syncs completed gracefully")
+                    break
+
+                if elapsed >= timeout_seconds:
+                    # 超时 - 记录被中断的任务
+                    interrupted_bindings = list(self._active_syncs)
+                    interrupted_pages = list(self._active_page_syncs)
+
+                    logger.warning(
+                        f"Shutdown timeout reached after {elapsed:.1f}s. "
+                        f"Interrupted syncs: bindings={interrupted_bindings}, "
+                        f"pages={interrupted_pages}"
+                    )
+
+                    # 记录被中断的任务以便后续恢复（如果需要）
+                    if interrupted_bindings or interrupted_pages:
+                        logger.info(
+                            "These syncs may need to be re-run on next startup: "
+                            f"bindings={interrupted_bindings}, pages={interrupted_pages}"
+                        )
+                    break
+
+                await asyncio.sleep(poll_interval)
 
         self._tasks.clear()
         self._page_tasks.clear()
+        self._active_syncs.clear()
+        self._active_page_syncs.clear()
         logger.info("Confluence scheduler stopped")
 
     async def add_task(

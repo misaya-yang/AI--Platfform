@@ -216,23 +216,79 @@ class MMRConfig:
 
 
 @dataclass
+class MultimodalConfig:
+    """Multimodal retrieval configuration for image-text cross-modal search"""
+    enabled: bool = True  # Enable multimodal retrieval for datasets with images
+
+    # Image search settings
+    image_search_enabled: bool = True  # Directly search image segments (not just associated)
+    image_score_threshold: float = 0.2  # Lower threshold for images (typically score lower)
+    text_score_threshold: float = 0.3  # Threshold for text segments
+    use_separate_thresholds: bool = True  # Use different thresholds for text/image
+
+    # Image boosting
+    image_boost: float = 1.0  # Boost factor for image results (>1 = prefer images)
+
+    # VLM Reranking
+    vlm_rerank_enabled: bool = False  # Use VLM for multimodal reranking
+    vlm_rerank_weight: float = 0.4  # Weight of VLM score in combined ranking
+
+    # Content type filtering
+    content_type_filter: Optional[str] = None  # "text" | "image" | None (all)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "image_search_enabled": self.image_search_enabled,
+            "image_score_threshold": self.image_score_threshold,
+            "text_score_threshold": self.text_score_threshold,
+            "use_separate_thresholds": self.use_separate_thresholds,
+            "image_boost": self.image_boost,
+            "vlm_rerank_enabled": self.vlm_rerank_enabled,
+            "vlm_rerank_weight": self.vlm_rerank_weight,
+            "content_type_filter": self.content_type_filter,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MultimodalConfig":
+        if not data:
+            return cls()
+
+        if isinstance(data, bool):
+            return cls(enabled=data)
+
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            image_search_enabled=bool(data.get("image_search_enabled", True)),
+            image_score_threshold=float(data.get("image_score_threshold", 0.2)),
+            text_score_threshold=float(data.get("text_score_threshold", 0.3)),
+            use_separate_thresholds=bool(data.get("use_separate_thresholds", True)),
+            image_boost=float(data.get("image_boost", 1.0)),
+            vlm_rerank_enabled=bool(data.get("vlm_rerank_enabled", False)),
+            vlm_rerank_weight=float(data.get("vlm_rerank_weight", 0.4)),
+            content_type_filter=data.get("content_type_filter"),
+        )
+
+
+@dataclass
 class RetrievalConfig:
     """Complete retrieval pipeline configuration"""
     mode: RetrievalMode = RetrievalMode.HYBRID
     top_k: int = 5  # Final number of results to return
     score_threshold: Optional[float] = None  # Minimum score threshold
-    
+
     # Component configs
     vector: VectorRetrievalConfig = field(default_factory=VectorRetrievalConfig)
     keyword: KeywordRetrievalConfig = field(default_factory=KeywordRetrievalConfig)
     fusion: FusionConfig = field(default_factory=FusionConfig)
     rerank: RerankConfig = field(default_factory=RerankConfig)
     mmr: MMRConfig = field(default_factory=MMRConfig)
-    
+    multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)  # Multimodal retrieval
+
     # Query enhancement
     query_rewrite: bool = False  # Multi-turn query rewriting
     hyde: bool = False  # Hypothetical Document Embedding
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "mode": self.mode.value,
@@ -243,6 +299,7 @@ class RetrievalConfig:
             "fusion": self.fusion.to_dict(),
             "rerank": self.rerank.to_dict(),
             "mmr": self.mmr.to_dict(),
+            "multimodal": self.multimodal.to_dict(),
             "query_rewrite": self.query_rewrite,
             "hyde": self.hyde,
         }
@@ -271,10 +328,11 @@ class RetrievalConfig:
             fusion=FusionConfig.from_dict(data.get("fusion") or {}),
             rerank=RerankConfig.from_dict(data.get("rerank") or {}),
             mmr=MMRConfig.from_dict(data.get("mmr") or {}),
+            multimodal=MultimodalConfig.from_dict(data.get("multimodal") or {}),
             query_rewrite=bool(data.get("query_rewrite", False)),
             hyde=bool(data.get("hyde", False)),
         )
-    
+
     @classmethod
     def from_flat_dict(cls, data: Dict[str, Any]) -> "RetrievalConfig":
         """Create from flat parameter dict (for API compatibility)"""

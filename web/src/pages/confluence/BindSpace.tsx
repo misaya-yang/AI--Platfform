@@ -33,6 +33,7 @@ import {
   MinusSquare,
   Info,
   Layers,
+  ImageIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,13 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Combobox } from "@/components/ui/combobox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { ComboboxOption } from "@/components/ui/combobox";
 
 import {
@@ -360,6 +368,8 @@ export default function BindSpacePage() {
   const [maxDepth, setMaxDepth] = useState(10);
   const [includeAttachments, setIncludeAttachments] = useState(false);
   const [includeComments, setIncludeComments] = useState(false);
+  const [syncImages, setSyncImages] = useState(true);
+  const [imageMaxSizeBytes, setImageMaxSizeBytes] = useState(3 * 1024 * 1024);
 
   // Queries
   const { data: connection, isLoading: loadingConnection } = useQuery({
@@ -452,22 +462,24 @@ export default function BindSpacePage() {
     setSyncEntireSpace(true);
   };
 
-  // Handle page toggle (single-select mode)
+  // Handle page toggle (multi-select mode)
   const handlePageToggle = useCallback(
     (pageId: string, title: string, hasChildren: boolean) => {
       setSelectedPages((prev) => {
-        // Single-select: toggle the clicked page
-        if (prev.has(pageId)) {
-          // Deselect if already selected - reset to sync entire space
-          setSyncEntireSpace(true);
-          return new Map();
+        const newMap = new Map(prev);
+        if (newMap.has(pageId)) {
+          // Deselect if already selected
+          newMap.delete(pageId);
+          // If no pages selected, reset to sync entire space
+          if (newMap.size === 0) {
+            setSyncEntireSpace(true);
+          }
         } else {
-          // Select only this page (replace any existing selection)
-          const newMap = new Map<string, SelectedPage>();
+          // Add to selection (multi-select)
           newMap.set(pageId, { pageId, title, hasChildren });
           setSyncEntireSpace(false);
-          return newMap;
         }
+        return newMap;
       });
     },
     []
@@ -498,17 +510,20 @@ export default function BindSpacePage() {
   const handleCreate = () => {
     if (!selectedDatasetId || !selectedSpaceKey) return;
 
-    // Get the selected root page (single-select mode)
-    const selectedPage = Array.from(selectedPages.values())[0];
-    const rootPageId = syncEntireSpace ? undefined : selectedPage?.pageId;
+    // Get all selected root pages (multi-select mode)
+    const rootPageIds = syncEntireSpace
+      ? undefined
+      : Array.from(selectedPages.values()).map((p) => p.pageId);
 
     createBindingMutation.mutate({
       dataset_id: selectedDatasetId,
       space_key: selectedSpaceKey,
-      root_page_id: rootPageId,
+      root_page_ids: rootPageIds,  // New multi-select field
       max_depth: maxDepth,
       include_attachments: includeAttachments,
       include_comments: includeComments,
+      sync_images: syncImages,
+      image_max_size_bytes: imageMaxSizeBytes,
     });
   };
 
@@ -871,6 +886,47 @@ export default function BindSpacePage() {
 
               {/* Include Options */}
               <div className="space-y-4">
+                {/* Image Sync - Primary Feature */}
+                <div className="p-4 border rounded-lg bg-gradient-to-r from-violet-500/5 to-purple-500/5 border-violet-500/20">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-violet-500/10 flex items-center justify-center">
+                        <ImageIcon className="h-5 w-5 text-violet-500" />
+                      </div>
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">同步图片</Label>
+                        <p className="text-xs text-muted-foreground">
+                          提取页面中的图片并生成多模态向量索引
+                        </p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={syncImages}
+                      onCheckedChange={setSyncImages}
+                    />
+                  </div>
+                  {syncImages && (
+                    <div className="mt-4 pt-4 border-t border-violet-500/20 flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-xs font-medium text-muted-foreground">最大图片大小</Label>
+                      </div>
+                      <Select
+                        value={String(imageMaxSizeBytes)}
+                        onValueChange={(v) => setImageMaxSizeBytes(Number(v))}
+                      >
+                        <SelectTrigger className="w-32 h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="1048576">1 MB</SelectItem>
+                          <SelectItem value="3145728">3 MB (推荐)</SelectItem>
+                          <SelectItem value="5242880">5 MB</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex items-center justify-between p-3 border rounded-lg">
                   <div className="space-y-0.5">
                     <Label className="text-sm font-medium">{t("confluence.bind.includeAttachments")}</Label>

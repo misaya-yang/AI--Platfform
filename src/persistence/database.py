@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +35,7 @@ class DatabaseStorage:
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = 2,
         pool_max_size: int = 10,
+        encryption_key: str = "",
     ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
@@ -48,6 +49,7 @@ class DatabaseStorage:
         self._permission_cache: Dict[str, tuple[List[str], float]] = {}
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
         self._permission_cache_lock = asyncio.Lock()
+        self._encryption_key = encryption_key
 
     async def _get_cached_permissions(self, user_id: str) -> Optional[List[str]]:
         if self._permission_cache_ttl_seconds <= 0:
@@ -1054,6 +1056,34 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
+    async def find_stuck_documents(
+        self,
+        stuck_threshold_minutes: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """
+        Find documents stuck in processing state.
+
+        Args:
+            stuck_threshold_minutes: Minutes after which a document is considered stuck
+
+        Returns:
+            List of stuck documents with their details
+        """
+        if not self._pool:
+            return []
+
+        query = """
+            SELECT document_id, dataset_id, title, status, progress, updated_at
+            FROM documents
+            WHERE status IN ('parsing', 'segmenting', 'embedding')
+            AND updated_at < NOW() - make_interval(mins => $1)
+            ORDER BY updated_at ASC
+        """
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, stuck_threshold_minutes)
+            return [self._row_to_dict(row) for row in rows]
+
     async def delete_document(self, document_id: str) -> bool:
         """删除 Document（级联删除 Segment）"""
         if not self._pool:
@@ -1138,10 +1168,9 @@ class DatabaseStorage:
                     text, token_count, vector_id, metadata,
                     enabled, status, word_count, keywords, answer, created_by
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                ON CONFLICT (segment_id) DO UPDATE SET
+                ON CONFLICT (document_id, position) DO UPDATE SET
+                    segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
-                    document_id = EXCLUDED.document_id,
-                    position = EXCLUDED.position,
                     text = EXCLUDED.text,
                     token_count = EXCLUDED.token_count,
                     vector_id = EXCLUDED.vector_id,
@@ -1157,7 +1186,10 @@ class DatabaseStorage:
             )
 
     async def delete_segments_by_document(
-        self, document_id: str, exclude_ids: Optional[List[str]] = None
+        self,
+        document_id: str,
+        exclude_ids: Optional[List[str]] = None,
+        content_type: Optional[str] = None,
     ) -> int:
         """
         删除指定文档下的 Segment
@@ -1165,6 +1197,7 @@ class DatabaseStorage:
         Args:
             document_id: 文档 ID
             exclude_ids: 要排除的 segment ID 列表（用于无感更新：先插入新的，再删除旧的）
+            content_type: 可选的内容类型过滤（例如 "text"）
 
         Returns:
             删除的记录数
@@ -1174,15 +1207,19 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             if exclude_ids:
                 # 删除旧的 segments，保留新插入的
-                result = await conn.execute(
-                    "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[])",
-                    document_id,
-                    exclude_ids,
-                )
+                query = "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[])"
+                params: List[Any] = [document_id, exclude_ids]
+                param_idx = 3
             else:
-                result = await conn.execute(
-                    "DELETE FROM segments WHERE document_id = $1", document_id
-                )
+                query = "DELETE FROM segments WHERE document_id = $1"
+                params = [document_id]
+                param_idx = 2
+
+            if content_type:
+                query += f" AND content_type = ${param_idx}"
+                params.append(content_type)
+
+            result = await conn.execute(query, *params)
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
             return 0
@@ -1381,6 +1418,7 @@ class DatabaseStorage:
                 - image_file_size: 文件大小
                 - vector_id: 向量ID (可选)
                 - text: 上下文文本 (可选)
+                - vlm_description: VLM生成的图片描述 (可选)
         """
         if not self._pool:
             return
@@ -1403,10 +1441,10 @@ class DatabaseStorage:
                     text, token_count, vector_id, metadata,
                     content_type, image_url, image_attachment_id,
                     image_filename, image_media_type, image_file_size,
-                    enabled, status
+                    vlm_description, enabled, status
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8,
-                    $9, $10, $11, $12, $13, $14, $15, $16
+                    $9, $10, $11, $12, $13, $14, $15, $16, $17
                 )
                 ON CONFLICT (segment_id) DO UPDATE SET
                     dataset_id = EXCLUDED.dataset_id,
@@ -1418,6 +1456,7 @@ class DatabaseStorage:
                     image_filename = EXCLUDED.image_filename,
                     image_media_type = EXCLUDED.image_media_type,
                     image_file_size = EXCLUDED.image_file_size,
+                    vlm_description = EXCLUDED.vlm_description,
                     updated_at = NOW()
                 """,
                 segment_data.get("segment_id"),
@@ -1434,6 +1473,7 @@ class DatabaseStorage:
                 segment_data.get("image_filename"),
                 segment_data.get("image_media_type"),
                 segment_data.get("image_file_size"),
+                segment_data.get("vlm_description"),  # VLM description
                 True,  # enabled
                 "completed",  # status
             )
@@ -1447,7 +1487,7 @@ class DatabaseStorage:
             document_id: 文档ID
 
         Returns:
-            图片段列表，每个包含 segment_id, image_attachment_id, metadata 等
+            图片段列表，每个包含 segment_id, image_attachment_id, metadata, vlm_description 等
         """
         if not self._pool:
             return []
@@ -1457,7 +1497,7 @@ class DatabaseStorage:
                 SELECT segment_id, document_id, dataset_id, position,
                        text, vector_id, metadata, content_type,
                        image_url, image_attachment_id, image_filename,
-                       image_media_type, image_file_size,
+                       image_media_type, image_file_size, vlm_description,
                        created_at, updated_at
                 FROM segments
                 WHERE document_id = $1 AND content_type = 'image'
@@ -2353,6 +2393,124 @@ class DatabaseStorage:
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
+    # Security event daily aggregates (auth failures, rate limits)
+    # =========================================================================
+
+    async def record_security_event(
+        self,
+        tenant_id: str,
+        user_id: Optional[str],
+        service_id: Optional[str],
+        event_type: str,
+        event_date: Optional[date] = None,
+    ) -> None:
+        """Record a security event into daily aggregates."""
+        if not self._pool:
+            return
+        if event_date is None:
+            event_date = datetime.utcnow().date()
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO security_event_daily_aggregates (
+                    tenant_id, user_id, service_id, event_type, date, event_count
+                ) VALUES (
+                    $1, $2, $3, $4, $5, 1
+                )
+                ON CONFLICT (tenant_id, COALESCE(user_id, ''), COALESCE(service_id, ''), event_type, date)
+                DO UPDATE SET
+                    event_count = security_event_daily_aggregates.event_count + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                tenant_id,
+                user_id or None,
+                service_id or None,
+                event_type,
+                event_date,
+            )
+
+    async def get_security_event_breakdown(
+        self,
+        tenant_id: str,
+        dimension: str,
+        event_type: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Get security event breakdown by dimension."""
+        if not self._pool:
+            return []
+
+        dimension_column = {
+            "user": "user_id",
+            "service": "service_id",
+        }.get(dimension, "user_id")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    {dimension_column} as dimension_value,
+                    SUM(event_count) as total_events
+                FROM security_event_daily_aggregates
+                WHERE tenant_id = $1
+                  AND date >= $2
+                  AND date <= $3
+                  AND event_type = $4
+                  AND {dimension_column} IS NOT NULL
+                GROUP BY {dimension_column}
+                ORDER BY total_events DESC
+                LIMIT $5
+                """,
+                tenant_id,
+                start_date,
+                end_date,
+                event_type,
+                limit,
+            )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_security_event_timeseries(
+        self,
+        tenant_id: str,
+        event_type: str,
+        start_date: date,
+        end_date: date,
+        user_id: Optional[str] = None,
+        service_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get daily time series for security events."""
+        if not self._pool:
+            return []
+
+        async with self._pool.acquire() as conn:
+            query = """
+                SELECT
+                    date,
+                    SUM(event_count) as total_events
+                FROM security_event_daily_aggregates
+                WHERE tenant_id = $1
+                  AND date >= $2
+                  AND date <= $3
+                  AND event_type = $4
+            """
+            params: List[Any] = [tenant_id, start_date, end_date, event_type]
+
+            if user_id:
+                query += " AND user_id = $" + str(len(params) + 1)
+                params.append(user_id)
+            if service_id:
+                query += " AND service_id = $" + str(len(params) + 1)
+                params.append(service_id)
+
+            query += " GROUP BY date ORDER BY date"
+
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
     # LangGraph Thread 映射表 (langgraph_threads)
     # =========================================================================
 
@@ -2542,6 +2700,13 @@ class DatabaseStorage:
         """保存或更新 Confluence 连接配置"""
         if not self._pool:
             return
+
+        # Encrypt API token before storage
+        api_token = connection.get("api_token")
+        if api_token and self._encryption_key:
+            from ..core.crypto import encrypt_value
+            api_token = encrypt_value(api_token, self._encryption_key)
+
         async with self._pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO confluence_connections (
@@ -2566,7 +2731,7 @@ class DatabaseStorage:
                 connection.get("name"),
                 connection.get("domain"),
                 connection.get("email"),
-                connection.get("api_token"),
+                api_token,
                 connection.get("sync_mode", "manual"),
                 connection.get("polling_interval_minutes", 60),
                 connection.get("status", "active"),
@@ -2586,7 +2751,14 @@ class DatabaseStorage:
                 "SELECT * FROM confluence_connections WHERE connection_id = $1",
                 connection_id
             )
-            return self._row_to_dict(row) if row else None
+            if not row:
+                return None
+            result = self._row_to_dict(row)
+            # Decrypt API token if encrypted
+            if result.get("api_token") and self._encryption_key:
+                from ..core.crypto import decrypt_value
+                result["api_token"] = decrypt_value(result["api_token"], self._encryption_key)
+            return result
 
     async def list_confluence_connections(
         self,
@@ -2617,7 +2789,9 @@ class DatabaseStorage:
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
-            return [self._row_to_dict(row) for row in rows]
+            results = [self._row_to_dict(row) for row in rows]
+            # Decrypt API tokens
+            return self._decrypt_connection_tokens(results)
 
     async def get_confluence_connections_with_polling(self) -> List[Dict[str, Any]]:
         """获取启用轮询的 Confluence 连接"""
@@ -2629,7 +2803,18 @@ class DatabaseStorage:
                 WHERE sync_mode = 'polling' AND status = 'active'
                 ORDER BY created_at
             """)
-            return [self._row_to_dict(row) for row in rows]
+            results = [self._row_to_dict(row) for row in rows]
+            return self._decrypt_connection_tokens(results)
+
+    def _decrypt_connection_tokens(self, connections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Decrypt API tokens in connection list"""
+        if not self._encryption_key:
+            return connections
+        from ..core.crypto import decrypt_value
+        for conn in connections:
+            if conn.get("api_token"):
+                conn["api_token"] = decrypt_value(conn["api_token"], self._encryption_key)
+        return connections
 
     async def update_confluence_connection_status(
         self,
@@ -2683,6 +2868,12 @@ class DatabaseStorage:
         """更新 Confluence 连接配置"""
         if not self._pool or not updates:
             return
+
+        # Encrypt API token if being updated
+        if "api_token" in updates and updates["api_token"] and self._encryption_key:
+            from ..core.crypto import encrypt_value
+            updates = dict(updates)  # Make a copy to avoid mutating input
+            updates["api_token"] = encrypt_value(updates["api_token"], self._encryption_key)
 
         set_clauses = []
         params: List[Any] = []
@@ -2751,22 +2942,26 @@ class DatabaseStorage:
             row = await conn.fetchrow("""
                 INSERT INTO confluence_space_bindings (
                     binding_id, connection_id, tenant_id, dataset_id, space_key, space_id,
-                    space_name, root_page_id, root_page_title,
+                    space_name, root_page_id, root_page_ids, root_page_title, root_page_titles,
                     include_patterns, exclude_patterns, max_depth,
-                    include_attachments, include_comments, status,
+                    include_attachments, include_comments, sync_images, image_max_size_bytes, status,
                     last_sync_at, synced_page_count, total_page_count,
                     last_error, created_by, owner_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
                 ON CONFLICT (binding_id) DO UPDATE SET
                     space_id = EXCLUDED.space_id,
                     space_name = EXCLUDED.space_name,
                     root_page_id = EXCLUDED.root_page_id,
+                    root_page_ids = EXCLUDED.root_page_ids,
                     root_page_title = EXCLUDED.root_page_title,
+                    root_page_titles = EXCLUDED.root_page_titles,
                     include_patterns = EXCLUDED.include_patterns,
                     exclude_patterns = EXCLUDED.exclude_patterns,
                     max_depth = EXCLUDED.max_depth,
                     include_attachments = EXCLUDED.include_attachments,
                     include_comments = EXCLUDED.include_comments,
+                    sync_images = EXCLUDED.sync_images,
+                    image_max_size_bytes = EXCLUDED.image_max_size_bytes,
                     status = EXCLUDED.status,
                     last_sync_at = EXCLUDED.last_sync_at,
                     synced_page_count = EXCLUDED.synced_page_count,
@@ -2783,12 +2978,16 @@ class DatabaseStorage:
                 binding.get("space_id"),
                 binding.get("space_name"),
                 binding.get("root_page_id"),
+                binding.get("root_page_ids", []),  # New array field for multi-select
                 binding.get("root_page_title"),
+                binding.get("root_page_titles", []),  # New array field for multi-select
                 json.dumps(binding.get("include_patterns", [])),
                 json.dumps(binding.get("exclude_patterns", [])),
                 binding.get("max_depth", 10),
                 binding.get("include_attachments", False),
                 binding.get("include_comments", False),
+                binding.get("sync_images", True),
+                binding.get("image_max_size_bytes", 3 * 1024 * 1024),
                 binding.get("status", "pending"),
                 binding.get("last_sync_at"),
                 binding.get("synced_page_count", 0),
@@ -2913,6 +3112,8 @@ class DatabaseStorage:
             "max_depth", "include_attachments", "include_comments", "status",
             "last_sync_at", "synced_page_count", "total_page_count", "last_error",
             "root_page_id", "root_page_title",
+            "root_page_ids", "root_page_titles",  # 支持多选根页面
+            "sync_images", "image_max_size_bytes",  # 图片同步配置（修复：之前缺失）
             "sync_mode", "polling_interval_minutes", "last_incremental_sync_at",  # binding 级别同步配置
             "sync_enabled", "next_sync_at",  # 调度器相关
         }
@@ -3354,6 +3555,7 @@ class DatabaseStorage:
         web_url: Optional[str] = None,
         author: Optional[str] = None,
         confluence_updated_at: Optional[str] = None,
+        image_count: int = 0,
     ) -> None:
         """插入或更新 Confluence 页面记录"""
         if not self._pool:
@@ -3377,8 +3579,8 @@ class DatabaseStorage:
                 INSERT INTO confluence_pages (
                     id, binding_id, document_id, page_id, space_key, title,
                     version, content_hash, parent_page_id, depth, status,
-                    last_synced_at, confluence_updated_at, labels, web_url, author
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15)
+                    last_synced_at, confluence_updated_at, labels, web_url, author, image_count
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15, $16)
                 ON CONFLICT (id) DO UPDATE SET
                     document_id = EXCLUDED.document_id,
                     title = EXCLUDED.title,
@@ -3389,6 +3591,8 @@ class DatabaseStorage:
                     confluence_updated_at = EXCLUDED.confluence_updated_at,
                     labels = EXCLUDED.labels,
                     web_url = EXCLUDED.web_url,
+                    image_count = EXCLUDED.image_count,
+                    images_synced_at = CASE WHEN EXCLUDED.image_count > 0 THEN NOW() ELSE confluence_pages.images_synced_at END,
                     updated_at = NOW()
             """,
                 record_id,
@@ -3406,6 +3610,7 @@ class DatabaseStorage:
                 json.dumps(labels or []),  # JSONB 列需要 JSON 字符串
                 web_url,
                 author,
+                image_count,
             )
 
     async def delete_confluence_page_by_page_id(
@@ -3424,6 +3629,32 @@ class DatabaseStorage:
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
+
+    async def update_confluence_page_image_count(
+        self,
+        binding_id: str,
+        page_id: str,
+        image_count: int,
+    ) -> None:
+        """更新 Confluence 页面的图片计数
+
+        Args:
+            binding_id: 绑定 ID
+            page_id: Confluence 页面 ID
+            image_count: 图片数量
+        """
+        if not self._pool:
+            return
+
+        record_id = f"{binding_id}:{page_id}"
+        async with self._pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE confluence_pages
+                SET image_count = $1,
+                    images_synced_at = CASE WHEN $1 > 0 THEN NOW() ELSE images_synced_at END,
+                    updated_at = NOW()
+                WHERE id = $2
+            """, image_count, record_id)
 
     # =========================================================================
     # Confluence Sync Task 表

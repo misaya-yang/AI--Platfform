@@ -48,6 +48,7 @@ from .structured_output import (
     OutputGuardrail,
     validate_output,
 )
+from ..metrics.usage_recorder import get_usage_recorder
 
 if TYPE_CHECKING:
     from ..session.database_session_manager import DatabaseSessionManager
@@ -502,6 +503,28 @@ Please use this web search context to inform your response when relevant."""
                 data=usage
             )
 
+            # Record usage to database for billing/analytics
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model=config.model_id,
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    service_id="assistant",
+                    latency_ms=int(elapsed_ms),
+                    request_type="chat",
+                    metadata={
+                        "session_id": session_id,
+                        "kb_datasets": config.kb_dataset_ids if retrieved_contexts else [],
+                        "web_search": config.web_search_enabled,
+                    },
+                )
+                logger.debug(f"Recorded usage: {usage} for user {user.user_id}")
+            except Exception as e:
+                logger.warning(f"Failed to record usage: {e}")
+
         yield AssistantStreamEvent(
             event_type="done",
             data={
@@ -569,6 +592,28 @@ Please use this web search context to inform your response when relevant."""
 
         elapsed_ms = (time.time() - start_time) * 1000
 
+        # Record usage to database for billing/analytics
+        if usage:
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model=config.model_id,
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=usage.get("output_tokens", 0),
+                    service_id="assistant",
+                    latency_ms=int(elapsed_ms),
+                    request_type="chat",
+                    metadata={
+                        "session_id": session_id,
+                        "kb_datasets": config.kb_dataset_ids if retrieved_contexts else [],
+                    },
+                )
+                logger.debug(f"Recorded usage: {usage} for user {user.user_id}")
+            except Exception as e:
+                logger.warning(f"Failed to record usage: {e}")
+
         return {
             "content": content,
             "usage": usage,
@@ -608,6 +653,7 @@ Please use this web search context to inform your response when relevant."""
                         dataset_id=dataset_id,
                         query=query,
                         top_k=top_k,
+                        score_threshold=score_threshold,  # 修复：传递 score_threshold 保持一致性
                     )
                 else:
                     results, meta = await self.kb_service.retrieve(

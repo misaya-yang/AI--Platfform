@@ -90,6 +90,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         timeout_seconds: float = 30.0,
         image_weight: float = 0.4,
         use_english_prompt: bool = False,
+        image_storage_service: Optional[Any] = None,
     ):
         """
         Initialize MultimodalReranker.
@@ -100,6 +101,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             timeout_seconds: Timeout per VLM call (default 30s)
             image_weight: Weight for image score when combining with original (default 0.4)
             use_english_prompt: Use English prompt instead of Chinese (default False)
+            image_storage_service: Optional storage service for loading images from S3/OSS
         """
         self.vlm_service = vlm_service
         self.max_concurrent = max_concurrent
@@ -107,6 +109,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         self.image_weight = image_weight
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self.prompt_template = self.RELEVANCE_PROMPT_EN if use_english_prompt else self.RELEVANCE_PROMPT
+        self.image_storage_service = image_storage_service
 
     async def rerank(
         self,
@@ -303,10 +306,16 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         Load image bytes from URL.
 
         Args:
-            url: Image URL (S3, OSS, or HTTP)
+            url: Image URL (S3, OSS, HTTP, or file://)
 
         Returns:
             Image bytes or None if loading fails
+
+        Supported URL schemes:
+            - s3://bucket/key - AWS S3 (requires image_storage_service)
+            - oss://bucket/key - Alibaba OSS (requires image_storage_service)
+            - https://... - Standard HTTP(S) URLs
+            - file://... - Local file URLs
         """
         import httpx
 
@@ -314,13 +323,52 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             return None
 
         try:
-            # Handle S3/OSS URLs
+            # Handle S3/OSS URLs via storage service
             if url.startswith("s3://") or url.startswith("oss://"):
-                # TODO: Implement S3/OSS loading via storage service
-                logger.warning(f"S3/OSS URL loading not implemented: {url}")
-                return None
+                if not self.image_storage_service:
+                    logger.warning(
+                        f"S3/OSS URL loading requires image_storage_service: {url}"
+                    )
+                    return None
 
-            # HTTP(S) URL
+                # Parse S3/OSS URL: s3://bucket/path/to/image.png
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                bucket = parsed.netloc
+                key = parsed.path.lstrip("/")
+
+                if not key:
+                    logger.warning(f"Invalid S3/OSS URL (no key): {url}")
+                    return None
+
+                # Use storage service backend to download
+                try:
+                    content = await self.image_storage_service._backend.download(key)
+                    logger.debug(f"Loaded {len(content)} bytes from {url}")
+                    return content
+                except Exception as storage_err:
+                    logger.warning(f"Storage service failed to load {url}: {storage_err}")
+                    return None
+
+            # Handle local file:// URLs
+            if url.startswith("file://"):
+                from urllib.parse import urlparse, unquote
+                import os
+
+                parsed = urlparse(url)
+                # Handle signed URLs by stripping query params
+                file_path = unquote(parsed.path)
+
+                if not os.path.exists(file_path):
+                    logger.warning(f"Local file not found: {file_path}")
+                    return None
+
+                with open(file_path, "rb") as f:
+                    content = f.read()
+                logger.debug(f"Loaded {len(content)} bytes from local file: {file_path}")
+                return content
+
+            # Standard HTTP(S) URL
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url)
                 response.raise_for_status()

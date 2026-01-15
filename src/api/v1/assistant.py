@@ -39,6 +39,7 @@ from ..schemas.assistant import (
 from ...core.auth.user_resolver import UserContext
 from ...services.assistant import AssistantService, AssistantConfig, ModelRegistry, ModelProvider
 from ...services.assistant.assistant_service import RAGMode
+from ...services.knowledge.embedding import is_multimodal_embedding_model
 
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
@@ -159,6 +160,7 @@ async def list_datasets(
             dataset_id = ds.get("dataset_id", "")
             document_count = 0
             chunk_count = 0
+            embedding_model = ds.get("embedding_model", "")
 
             # Fetch statistics for each dataset
             try:
@@ -168,6 +170,10 @@ async def list_datasets(
             except Exception:
                 pass  # Keep defaults if stats fetch fails
 
+            # Determine if multimodal based on embedding model
+            # Uses centralized model registry from services/knowledge/embedding.py
+            is_multimodal = is_multimodal_embedding_model(embedding_model)
+
             datasets.append(
                 DatasetInfoResponse(
                     dataset_id=dataset_id,
@@ -175,6 +181,8 @@ async def list_datasets(
                     description=ds.get("description"),
                     document_count=document_count,
                     chunk_count=chunk_count,
+                    embedding_model=embedding_model or None,
+                    is_multimodal=is_multimodal,
                 )
             )
 

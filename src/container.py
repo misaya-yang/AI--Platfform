@@ -232,6 +232,7 @@ class Container:
             ),
             pool_min_size=getattr(self.settings.database, "pool_min_size", 2),
             pool_max_size=getattr(self.settings.database, "pool_max_size", 10),
+            encryption_key=getattr(self.settings.confluence, "encryption_key", ""),
         )
     
     def _create_redis(self):
@@ -519,13 +520,16 @@ class Container:
         """创建计费拦截器"""
         if not self.settings.proxy.billing_enabled:
             return None
-        
+
         from .proxy.billing_interceptor import BillingInterceptor
-        
+
         redis = self._providers["redis"].get_sync()
-        
+
+        # 注意：realtime_metrics 使用延迟获取（在 BillingInterceptor 内部动态获取）
+        # 因为它在 main.py 启动过程中稍后初始化
         return BillingInterceptor(
             redis_client=redis if redis.enabled else None,
+            realtime_metrics=None,  # 使用延迟获取，见 BillingInterceptor
             buffer_size=self.settings.proxy.billing_buffer_size,
             flush_interval=self.settings.proxy.billing_flush_interval,
         )

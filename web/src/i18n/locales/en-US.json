@@ -31,7 +31,8 @@
     "never": "Never",
     "notSet": "Not set",
     "retry": "Retry",
-    "clear": "Clear"
+    "clear": "Clear",
+    "user": "User"
   },
   "metrics": {
     "title": "Monitoring Dashboard",
@@ -68,6 +69,7 @@
   },
   "nav": {
     "dashboard": "Dashboard",
+    "analytics": "Analytics",
     "services": "Services",
     "knowledge": "Knowledge Base",
     "knowledgeSync": "Knowledge Sync",
@@ -75,7 +77,65 @@
     "assistant": "AI Assistant",
     "tasks": "Tasks",
     "users": "Users",
-    "settings": "Settings"
+    "settings": "Settings",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar"
+  },
+  "analytics": {
+    "title": "Usage Analytics",
+    "subtitle": "Track token usage, costs, and performance",
+    "totalRequests": "Total Requests",
+    "totalTokens": "Total Tokens",
+    "totalCost": "Total Cost",
+    "avgLatency": "Avg Latency",
+    "successRate": "Success Rate",
+    "inputOutput": "In/Out",
+    "costTrend": "Cost Trend",
+    "costBreakdown": "Cost Breakdown",
+    "tokenUsage": "Token Usage by Day",
+    "usageDetails": "Usage Details",
+    "noData": "No data available",
+    "byModel": "Model",
+    "byUser": "User",
+    "byAssistant": "Assistant",
+    "byService": "Service",
+    "requests": "Requests",
+    "inputTokens": "Input Tokens",
+    "outputTokens": "Output Tokens",
+    "cost": "Cost",
+    "percentage": "%",
+    "dateRange": "Date Range",
+    "export": "Export",
+    "exportCsv": "Export CSV",
+    "exportJson": "Export JSON"
+  },
+  "monitoring": {
+    "title": "Monitoring Dashboard",
+    "realtime": "Real-time",
+    "analytics": "Usage Analytics",
+    "realtimeSubtitle": "Real-time gateway metrics and alerts",
+    "analyticsSubtitle": "Historical usage and cost analytics"
+  },
+  "cost": {
+    "title": "Service Cost Analysis",
+    "subtitle": "Independent usage and cost statistics by service type",
+    "service": {
+      "assistant": "AI Assistant",
+      "agent": "Agent Service",
+      "proxy": "Proxy Service",
+      "unknown": "Unknown Service"
+    },
+    "totalCost": "Total Cost",
+    "totalCostAll": "Total Cost",
+    "totalTokens": "Token Usage",
+    "totalTokensAll": "Total Tokens",
+    "totalRequests": "Total Requests",
+    "inputTokens": "Input",
+    "outputTokens": "Output",
+    "requests": "requests",
+    "successRate": "Success Rate",
+    "ofTotal": "of total cost",
+    "noData": "No usage data available"
   },
   "theme": {
     "light": "Light Mode",
@@ -106,6 +166,25 @@
       "successRate": "Success Rate",
       "avgLatency": "Avg Latency",
       "activeServices": "Active Services"
+    },
+    "usageAnalytics": {
+      "title": "Usage by User & Service",
+      "byUser": "By User",
+      "byService": "By Service",
+      "selectUser": "Select user",
+      "selectService": "Select service",
+      "requests": "Requests",
+      "cost": "Cost",
+      "avgLatency": "Avg Latency",
+      "noData": "No usage data"
+    },
+    "securityEvents": {
+      "title": "Auth & Rate Limit Events",
+      "byUser": "By User",
+      "byService": "By Service",
+      "authFailed": "Auth Failed",
+      "rateLimited": "Rate Limited",
+      "noData": "No event data"
     }
   },
   "users": {
@@ -483,7 +562,7 @@
       "entireSpaceDesc": "Sync all pages in this space",
       "selectPages": "Select Pages",
       "selectPagesDesc": "Choose specific pages or folders to sync. Selecting a folder will sync all its child pages.",
-      "singlePageHint": "Select a page as the sync root. The page and all its children will be synchronized.",
+      "singlePageHint": "Select one or more pages to sync. Each selected page and all its children will be synchronized.",
       "selectAllRoots": "Select All Root",
       "clearSelection": "Clear Selection",
       "selectedCount": "{{count}} selected",
@@ -665,5 +744,58 @@
     "ragCitations": "Citations",
     "ragGrounding": "{{percent}}% grounded",
     "ragChunksUsed": "{{used}}/{{total}} chunks used"
+  },
+  "analytics": {
+    "title": "Usage Analytics",
+    "subtitle": "Track token usage, costs, and performance",
+    "totalRequests": "Total Requests",
+    "totalTokens": "Total Tokens",
+    "totalCost": "Total Cost",
+    "avgLatency": "Avg Latency",
+    "successRate": "Success Rate",
+    "inputOutput": "In/Out",
+    "costTrend": "Cost Trend",
+    "costBreakdown": "Cost Breakdown",
+    "tokenUsage": "Token Usage by Day",
+    "usageDetails": "Usage Details",
+    "byModel": "Model",
+    "byUser": "User",
+    "byAssistant": "Assistant",
+    "byService": "Service",
+    "requests": "Requests",
+    "inputTokens": "Input Tokens",
+    "outputTokens": "Output Tokens",
+    "cost": "Cost",
+    "percentage": "%",
+    "noData": "No data available",
+    "export": "Export",
+    "dateRange": "Date Range"
+  },
+  "quota": {
+    "title": "Quota Management",
+    "subtitle": "Manage user quotas and limits",
+    "userQuota": "User Quota",
+    "limits": "Limits",
+    "currentUsage": "Current Usage",
+    "dailyTokens": "Daily Tokens",
+    "monthlyTokens": "Monthly Tokens",
+    "monthlyCost": "Monthly Cost",
+    "requestsPerDay": "Requests/Day",
+    "requestsPerMinute": "Requests/Minute",
+    "warningThreshold": "Warning Threshold",
+    "blocked": "Blocked",
+    "blockedReason": "Blocked Reason",
+    "resetDaily": "Reset Daily",
+    "resetMonthly": "Reset Monthly",
+    "block": "Block User",
+    "unblock": "Unblock User",
+    "alerts": "Quota Alerts",
+    "noAlerts": "No alerts",
+    "acknowledge": "Acknowledge",
+    "summary": "Quota Summary",
+    "totalUsers": "Total Users",
+    "blockedUsers": "Blocked Users",
+    "warningUsers": "Warning",
+    "exceededUsers": "Exceeded"
   }
 }

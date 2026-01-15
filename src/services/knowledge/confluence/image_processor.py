@@ -81,7 +81,7 @@ class ConfluenceImageProcessor:
         self,
         confluence_client: "ConfluenceClient",
         storage_service: "ImageStorageService",
-        multimodal_embedding: Optional["DashScopeMultimodalEmbedding"] = None,
+        multimodal_embedding: Optional["BaseEmbedding"] = None,  # Accept any multimodal embedding
         vlm_service: Optional["DashScopeVLMService"] = None,
         max_image_size: int = MAX_IMAGE_SIZE_BYTES,
         max_images_per_page: int = 50,
@@ -144,11 +144,17 @@ class ConfluenceImageProcessor:
 
         Returns:
             ImageProcessingResult 包含处理结果
+
+        Notes:
+            On critical failure, uploaded images are rolled back (deleted)
+            to prevent orphan files in storage.
         """
         errors: List[str] = []
         segments: List[ImageSegment] = []
         skipped = 0
         failed = 0
+        # Track uploaded URLs for rollback on critical failure
+        uploaded_storage_urls: List[str] = []
 
         try:
             # 1. Get image attachments from Confluence
@@ -166,9 +172,10 @@ class ConfluenceImageProcessor:
                 attachments = attachments[:self.max_images_per_page]
 
             total_images = len(attachments)
+            logger.info(f"[DEBUG] Page {page_id}: Found {total_images} embeddable image attachments")
 
             if total_images == 0:
-                logger.debug(f"No embeddable images found in page {page_id}")
+                logger.info(f"[DEBUG] No embeddable images found in page {page_id}, skipping image processing")
                 return ImageProcessingResult(
                     page_id=page_id,
                     document_id=document_id,
@@ -180,12 +187,20 @@ class ConfluenceImageProcessor:
                     errors=[],
                 )
 
-            # 3. Extract image references from content for context
-            image_contexts: Dict[str, str] = {}
+            # 3. Extract image references from content for context (keep order)
+            image_contexts: Dict[str, List[Dict[str, Any]]] = {}
             if page_content:
                 image_refs = extract_embeddable_images(page_content)
-                for ref in image_refs:
-                    image_contexts[ref.filename] = ref.context_text or ""
+                for idx, ref in enumerate(image_refs):
+                    key = ref.attachment_id or ref.filename
+                    if not key:
+                        continue
+                    image_contexts.setdefault(key, []).append({
+                        "context_text": ref.context_text or "",
+                        "context_index": idx,
+                        "alt_text": ref.alt_text,
+                        "title": ref.title,
+                    })
 
             # 4. Process images concurrently with semaphore-based rate limiting
             vlm_semaphore = asyncio.Semaphore(self.max_concurrent_vlm)
@@ -197,17 +212,31 @@ class ConfluenceImageProcessor:
             ) -> Tuple[Optional[ImageSegment], Optional[str]]:
                 """Process single image with error handling."""
                 try:
+                    context_info: Dict[str, Any] = {}
+                    context_key = attachment.attachment_id or attachment.filename
+                    info_list = image_contexts.get(context_key)
+                    if not info_list and attachment.filename:
+                        info_list = image_contexts.get(attachment.filename)
+                    if info_list:
+                        context_info = info_list.pop(0) or {}
+
                     segment = await self._process_single_image_concurrent(
                         attachment=attachment,
                         document_id=document_id,
                         tenant_id=tenant_id,
-                        context=image_contexts.get(attachment.filename, ""),
+                        context=context_info.get("context_text", ""),
+                        context_index=context_info.get("context_index"),
+                        context_alt=context_info.get("alt_text"),
+                        context_title=context_info.get("title"),
                         generate_embedding=generate_embeddings,
                         page_title=page_title,
                         vlm_semaphore=vlm_semaphore,
                         upload_semaphore=upload_semaphore,
                         embed_semaphore=embed_semaphore,
                     )
+                    # Track uploaded URL for potential rollback
+                    if segment and segment.storage_url:
+                        uploaded_storage_urls.append(segment.storage_url)
                     return segment, None
                 except Exception as e:
                     error_msg = f"Failed to process image {attachment.filename}: {e}"
@@ -249,6 +278,15 @@ class ConfluenceImageProcessor:
         except Exception as e:
             error_msg = f"Failed to process images for page {page_id}: {e}"
             logger.error(error_msg)
+
+            # Rollback: delete any images that were uploaded before the failure
+            if uploaded_storage_urls and self.storage_service:
+                rollback_errors = await self._rollback_uploaded_images(
+                    uploaded_storage_urls, document_id, tenant_id
+                )
+                if rollback_errors:
+                    errors.extend(rollback_errors)
+
             return ImageProcessingResult(
                 page_id=page_id,
                 document_id=document_id,
@@ -257,8 +295,68 @@ class ConfluenceImageProcessor:
                 skipped_images=0,
                 failed_images=1,
                 segments=[],
-                errors=[error_msg],
+                errors=[error_msg] + errors,
             )
+
+    async def _rollback_uploaded_images(
+        self,
+        storage_urls: List[str],
+        document_id: str,
+        tenant_id: str,
+    ) -> List[str]:
+        """
+        Rollback uploaded images by deleting them from storage.
+
+        Args:
+            storage_urls: List of storage URLs to delete
+            document_id: Document ID (for logging)
+            tenant_id: Tenant ID (for logging)
+
+        Returns:
+            List of error messages (empty if all deletions succeeded)
+        """
+        errors: List[str] = []
+        deleted_count = 0
+
+        logger.info(
+            f"Rolling back {len(storage_urls)} uploaded images for document {document_id}"
+        )
+
+        for url in storage_urls:
+            try:
+                # Extract storage key from URL
+                # For file:// URLs, extract the path
+                # For S3/OSS URLs, extract the key from the path
+                if url.startswith("file://"):
+                    from urllib.parse import urlparse, unquote
+                    parsed = urlparse(url)
+                    # Get the path and try to delete
+                    file_path = unquote(parsed.path)
+                    import os
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        deleted_count += 1
+                elif self.storage_service:
+                    # For cloud storage, use the storage service
+                    # Try to extract key from URL and delete
+                    # This is a best-effort cleanup
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    key = parsed.path.lstrip("/")
+                    if key:
+                        await self.storage_service._backend.delete(key)
+                        deleted_count += 1
+            except Exception as e:
+                error_msg = f"Failed to rollback image {url}: {e}"
+                logger.warning(error_msg)
+                errors.append(error_msg)
+
+        logger.info(
+            f"Rollback complete: deleted {deleted_count}/{len(storage_urls)} images "
+            f"(errors={len(errors)})"
+        )
+
+        return errors
 
     async def _process_single_image(
         self,
@@ -266,6 +364,9 @@ class ConfluenceImageProcessor:
         document_id: str,
         tenant_id: str,
         context: str = "",
+        context_index: Optional[int] = None,
+        context_alt: Optional[str] = None,
+        context_title: Optional[str] = None,
         generate_embedding: bool = True,
         page_title: Optional[str] = None,
     ) -> Optional[ImageSegment]:
@@ -385,6 +486,20 @@ class ConfluenceImageProcessor:
                 logger.warning(f"Failed to generate embedding for {attachment.filename}: {e}")
                 # Continue without embedding - image still stored
 
+        metadata = {
+            "confluence_attachment_id": attachment.attachment_id,
+            "page_id": attachment.page_id,
+            "attachment_updated_at": attachment.updated_at,  # For change detection
+        }
+        if context_index is not None:
+            metadata["context_index"] = context_index
+        if context:
+            metadata["context_text"] = context
+        if context_alt:
+            metadata["context_alt"] = context_alt
+        if context_title:
+            metadata["context_title"] = context_title
+
         # Create segment with VLM description and attachment metadata for change detection
         segment = ImageSegment(
             segment_id=segment_id,
@@ -398,11 +513,7 @@ class ConfluenceImageProcessor:
             context_text=context,
             vlm_description=vlm_description,
             embedding=embedding_vector,
-            metadata={
-                "confluence_attachment_id": attachment.attachment_id,
-                "page_id": attachment.page_id,
-                "attachment_updated_at": attachment.updated_at,  # For change detection
-            },
+            metadata=metadata,
         )
 
         logger.debug(f"Created image segment: {segment_id} for {attachment.filename}")
@@ -414,6 +525,9 @@ class ConfluenceImageProcessor:
         document_id: str,
         tenant_id: str,
         context: str = "",
+        context_index: Optional[int] = None,
+        context_alt: Optional[str] = None,
+        context_title: Optional[str] = None,
         generate_embedding: bool = True,
         page_title: Optional[str] = None,
         vlm_semaphore: Optional[asyncio.Semaphore] = None,
@@ -583,6 +697,20 @@ class ConfluenceImageProcessor:
             except Exception as e:
                 logger.warning(f"Failed to generate embedding for {attachment.filename}: {e}")
 
+        metadata = {
+            "confluence_attachment_id": attachment.attachment_id,
+            "page_id": attachment.page_id,
+            "attachment_updated_at": attachment.updated_at,
+        }
+        if context_index is not None:
+            metadata["context_index"] = context_index
+        if context:
+            metadata["context_text"] = context
+        if context_alt:
+            metadata["context_alt"] = context_alt
+        if context_title:
+            metadata["context_title"] = context_title
+
         # Create segment
         segment = ImageSegment(
             segment_id=segment_id,
@@ -596,11 +724,7 @@ class ConfluenceImageProcessor:
             context_text=context,
             vlm_description=vlm_description,
             embedding=embedding_vector,
-            metadata={
-                "confluence_attachment_id": attachment.attachment_id,
-                "page_id": attachment.page_id,
-                "attachment_updated_at": attachment.updated_at,
-            },
+            metadata=metadata,
         )
 
         logger.debug(f"Created image segment: {segment_id} for {attachment.filename}")
@@ -717,13 +841,15 @@ async def create_image_processor(
     vlm_service = None
 
     if dashscope_api_key:
-        # Initialize multimodal embedding
-        from ..embedding import DashScopeMultimodalEmbedding
-        multimodal_embedding = DashScopeMultimodalEmbedding(
-            model=multimodal_model,
+        # Initialize unified multimodal embedding for consistent text-image vector space
+        from ..embedding import UnifiedMultimodalEmbedding
+        # Use tongyi-embedding-vision-plus for best cross-modal search performance
+        unified_model = "tongyi-embedding-vision-plus"
+        multimodal_embedding = UnifiedMultimodalEmbedding(
+            model=unified_model,
             api_key=dashscope_api_key,
         )
-        logger.info(f"Initialized multimodal embedding with model: {multimodal_model}")
+        logger.info(f"Initialized UnifiedMultimodalEmbedding with model: {unified_model}")
 
         # Initialize VLM service for image descriptions
         if enable_vlm_descriptions:

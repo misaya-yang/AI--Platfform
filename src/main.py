@@ -278,12 +278,14 @@ def create_app() -> FastAPI:
             )
             if dashscope_key and dashscope_key.api_key:
                 try:
-                    from .services.knowledge.embedding import DashScopeMultimodalEmbedding
-                    multimodal_embedding = DashScopeMultimodalEmbedding(
-                        model="qwen2.5-vl-embedding",
+                    # Use UnifiedMultimodalEmbedding for consistent text-image vector space
+                    # This ensures cross-modal retrieval works correctly
+                    from .services.knowledge.embedding import UnifiedMultimodalEmbedding
+                    multimodal_embedding = UnifiedMultimodalEmbedding(
+                        model="tongyi-embedding-vision-plus",  # Best for unified cross-modal search
                         api_key=dashscope_key.api_key,
                     )
-                    logger.info("多模态嵌入服务已初始化 (DashScope qwen2.5-vl-embedding)")
+                    logger.info("多模态嵌入服务已初始化 (UnifiedMultimodalEmbedding tongyi-embedding-vision-plus)")
                 except Exception as e:
                     logger.warning(f"多模态嵌入服务初始化失败: {e}")
 
@@ -319,23 +321,41 @@ def create_app() -> FastAPI:
                         local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/images",
                         url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
                     )
-                    image_storage_service = ImageStorageService(storage_config)
+                    # Get signing key for local file URLs (security)
+                    signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
+                    image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
                     app.state.image_storage_service = image_storage_service
-                    logger.info(f"图片存储服务已初始化 (backend={storage_backend.value})")
+                    logger.info(f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})")
                 except Exception as e:
                     logger.warning(f"图片存储服务初始化失败: {e}")
+
+            # Initialize VLM service for image description generation in knowledge service
+            knowledge_vlm_service = None
+            dashscope_config = getattr(settings.knowledge, "dashscope", None)
+            if dashscope_config and dashscope_config.api_key and multimodal_embedding and image_storage_service:
+                try:
+                    from .services.knowledge.vlm_service import DashScopeVLMService
+                    knowledge_vlm_service = DashScopeVLMService(
+                        api_key=dashscope_config.api_key,
+                        model="qwen-vl-max",
+                    )
+                    logger.info("Knowledge VLM 服务已初始化 (qwen-vl-max)")
+                except Exception as e:
+                    logger.warning(f"Knowledge VLM 服务初始化失败: {e}")
 
             app.state.knowledge_service = KnowledgeService(
                 settings=settings,
                 database=container.database,
                 multimodal_embedding=multimodal_embedding,
                 image_storage_service=image_storage_service,
+                vlm_service=knowledge_vlm_service,
             )
             app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
 
             if multimodal_embedding:
-                logger.info(f"知识库服务已启动 (支持图片嵌入, worker_concurrency={settings.knowledge.worker_concurrency})")
+                vlm_status = "with VLM" if knowledge_vlm_service else "no VLM"
+                logger.info(f"知识库服务已启动 (支持图片嵌入, {vlm_status}, worker_concurrency={settings.knowledge.worker_concurrency})")
             else:
                 logger.info(f"知识库服务已启动 (仅文本, worker_concurrency={settings.knowledge.worker_concurrency})")
         else:
@@ -349,12 +369,12 @@ def create_app() -> FastAPI:
             from .services.knowledge.confluence.sync_service import ConfluenceSyncService
             from .services.knowledge.confluence.scheduler import ConfluenceScheduler
 
-            # 复用 Knowledge Service 的图片处理服务
+            # 复用 Knowledge Service 的图片处理服务和 VLM 服务
             confluence_image_storage = getattr(app.state, "image_storage_service", None)
             confluence_multimodal = None
             confluence_vlm_service = None
 
-            # 如果 Knowledge Service 有多模态嵌入，从中获取
+            # 如果 Knowledge Service 已初始化，复用其服务
             if hasattr(app.state, "knowledge_service") and app.state.knowledge_service:
                 confluence_multimodal = getattr(
                     app.state.knowledge_service, "multimodal_embedding", None
@@ -362,21 +382,28 @@ def create_app() -> FastAPI:
                 confluence_image_storage = getattr(
                     app.state.knowledge_service, "image_storage_service", None
                 ) or confluence_image_storage
+                # 复用 VLM 服务以避免重复初始化
+                confluence_vlm_service = getattr(
+                    app.state.knowledge_service, "vlm_service", None
+                )
+                if confluence_vlm_service:
+                    logger.info("Confluence 复用 Knowledge Service 的 VLM 服务")
 
-            # 初始化 VLM 服务用于图片描述生成
-            dashscope_key = getattr(
-                getattr(settings, "knowledge", None), "dashscope", None
-            )
-            if dashscope_key and dashscope_key.api_key and confluence_image_storage:
-                try:
-                    from .services.knowledge.vlm_service import DashScopeVLMService
-                    confluence_vlm_service = DashScopeVLMService(
-                        api_key=dashscope_key.api_key,
-                        model="qwen-vl-max",
-                    )
-                    logger.info("Confluence VLM 服务已初始化 (qwen-vl-max)")
-                except Exception as e:
-                    logger.warning(f"Confluence VLM 服务初始化失败: {e}")
+            # 如果没有从 Knowledge Service 获取到 VLM 服务，则单独初始化
+            if not confluence_vlm_service and confluence_image_storage:
+                dashscope_key = getattr(
+                    getattr(settings, "knowledge", None), "dashscope", None
+                )
+                if dashscope_key and dashscope_key.api_key:
+                    try:
+                        from .services.knowledge.vlm_service import DashScopeVLMService
+                        confluence_vlm_service = DashScopeVLMService(
+                            api_key=dashscope_key.api_key,
+                            model="qwen-vl-max",
+                        )
+                        logger.info("Confluence VLM 服务已初始化 (qwen-vl-max)")
+                    except Exception as e:
+                        logger.warning(f"Confluence VLM 服务初始化失败: {e}")
 
             app.state.confluence_sync_service = ConfluenceSyncService(
                 settings=settings,
@@ -417,6 +444,30 @@ def create_app() -> FastAPI:
         await file_cleanup_service.start()
         app.state.file_cleanup_service = file_cleanup_service
 
+        # 启动使用量调度器（聚合任务、配额重置）
+        if settings.database.enabled:
+            from .services.billing import init_usage_scheduler
+            usage_scheduler = init_usage_scheduler(
+                container.database,
+                retention_days=30,  # 详细记录保留30天
+                aggregation_hour=0,
+                aggregation_minute=30,
+                cleanup_hour=1,
+                cleanup_minute=0,
+                quota_check_interval=3600,  # 每小时检查配额
+            )
+            await usage_scheduler.start()
+            app.state.usage_scheduler = usage_scheduler
+            logger.info("使用量调度器已启动")
+
+            # 启动使用量记录器后台任务
+            from .services.metrics import get_usage_recorder
+            usage_recorder = get_usage_recorder()
+            if usage_recorder:
+                await usage_recorder.start()
+                app.state.usage_recorder = usage_recorder
+                logger.info("使用量记录器已启动")
+
         # 初始化 Assistant Service (GPT-like 体验)
         await _init_assistant_service(app, settings)
 
@@ -445,6 +496,16 @@ def create_app() -> FastAPI:
         file_cleanup_service = getattr(app.state, "file_cleanup_service", None)
         if file_cleanup_service is not None:
             await file_cleanup_service.stop()
+
+        # Stop usage scheduler
+        usage_scheduler = getattr(app.state, "usage_scheduler", None)
+        if usage_scheduler is not None:
+            await usage_scheduler.stop()
+
+        # Stop usage recorder (flush remaining records)
+        usage_recorder = getattr(app.state, "usage_recorder", None)
+        if usage_recorder is not None:
+            await usage_recorder.stop()
 
         # Stop Assistant Service
         assistant_service = getattr(app.state, "assistant_service", None)
@@ -530,6 +591,19 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
 
     # Initialize realtime metrics service for LangSmith-style dashboard
     init_realtime_metrics(container.redis)
+
+    # Initialize usage recorder for persistent usage metrics
+    from .services.metrics import init_usage_recorder
+    init_usage_recorder(container.database)
+
+    # Initialize security event recorder for auth/rate limit aggregates
+    from .services.metrics import init_security_event_recorder
+    init_security_event_recorder(container.database)
+
+    # Initialize billing services
+    from .services.billing import init_quota_service, init_pricing_service
+    init_quota_service(container.database)
+    init_pricing_service(container.database)
 
 
 async def _load_services_from_database(container: Container, settings: Settings) -> None:

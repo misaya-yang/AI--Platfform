@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import type { Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,15 +17,21 @@ import {
 export function DocumentRow({
   doc,
   selected,
+  checked,
   onSelect,
+  onCheck,
   onReindex,
   onDelete,
+  showCheckbox = false,
 }: {
   doc: Document;
   selected: boolean;
+  checked?: boolean;
   onSelect: () => void;
+  onCheck?: (checked: boolean) => void;
   onReindex: () => Promise<void>;
   onDelete: () => Promise<void>;
+  showCheckbox?: boolean;
 }) {
   const [loading, setLoading] = useState(false);
   const [reindexOpen, setReindexOpen] = useState(false);
@@ -82,9 +89,18 @@ export function DocumentRow({
       <div
         className={`
           flex items-center px-5 py-3 border-b border-border/60 last:border-b-0 hover:bg-muted/40 transition-colors
-          ${selected ? "bg-primary/5" : ""}
+          ${selected ? "bg-primary/5" : ""} ${checked ? "bg-primary/10" : ""}
         `}
       >
+        {showCheckbox && (
+          <div className="mr-3 flex items-center">
+            <Checkbox
+              checked={checked}
+              onCheckedChange={(val) => onCheck?.(val === true)}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        )}
         <div className="flex items-center gap-3 flex-1 min-w-0">
           {getFileIcon()}
           <span
