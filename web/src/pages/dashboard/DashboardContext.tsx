@@ -1,0 +1,64 @@
+// web/src/pages/dashboard/DashboardContext.tsx
+
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import dayjs from "dayjs";
+import type { DashboardContext, SourceFilter, RefreshInterval } from "./types";
+
+interface DashboardContextValue extends DashboardContext {
+  setDateRange: (range: [string, string]) => void;
+  setGranularity: (granularity: "hour" | "day") => void;
+  setSource: (source: SourceFilter) => void;
+  setRefreshInterval: (interval: RefreshInterval) => void;
+  triggerRefresh: () => void;
+}
+
+const Context = createContext<DashboardContextValue | null>(null);
+
+export function DashboardProvider({ children }: { children: ReactNode }) {
+  const [dateRange, setDateRange] = useState<[string, string]>([
+    dayjs().subtract(7, "day").format("YYYY-MM-DD"),
+    dayjs().format("YYYY-MM-DD"),
+  ]);
+  const [granularity, setGranularity] = useState<"hour" | "day">("day");
+  const [source, setSource] = useState<SourceFilter>("all");
+  const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>(60);
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+
+  const triggerRefresh = useCallback(() => {
+    setLastRefresh(new Date());
+  }, []);
+
+  // Auto-refresh effect
+  useEffect(() => {
+    if (refreshInterval === 0) return;
+
+    const timer = setInterval(() => {
+      triggerRefresh();
+    }, refreshInterval * 1000);
+
+    return () => clearInterval(timer);
+  }, [refreshInterval, triggerRefresh]);
+
+  const value: DashboardContextValue = {
+    dateRange,
+    granularity,
+    source,
+    refreshInterval,
+    lastRefresh,
+    setDateRange,
+    setGranularity,
+    setSource,
+    setRefreshInterval,
+    triggerRefresh,
+  };
+
+  return <Context.Provider value={value}>{children}</Context.Provider>;
+}
+
+export function useDashboardContext() {
+  const context = useContext(Context);
+  if (!context) {
+    throw new Error("useDashboardContext must be used within DashboardProvider");
+  }
+  return context;
+}
