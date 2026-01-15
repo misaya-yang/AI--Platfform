@@ -18,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...api.deps import get_auth_context, AuthContext
-from ...services.metrics import get_usage_recorder
+from ...services.metrics import compute_data_status, get_usage_recorder
 
 router = APIRouter(prefix="/usage", tags=["usage"])
 
@@ -37,6 +37,9 @@ class UsageSummaryResponse(BaseModel):
     avg_latency_ms: int
     start_date: str
     end_date: str
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
 
 
 class UsageBreakdownItem(BaseModel):
@@ -60,6 +63,9 @@ class UsageBreakdownResponse(BaseModel):
     start_date: str
     end_date: str
     total_cost_usd: float
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
 
 
 class UsageTimeSeriesPoint(BaseModel):
@@ -79,6 +85,9 @@ class UsageTimeSeriesResponse(BaseModel):
     start_date: str
     end_date: str
     granularity: str = "day"
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
 
 
 class UserUsageResponse(BaseModel):
@@ -126,7 +135,23 @@ async def get_usage_summary(
         assistant_id=assistant_id,
     )
 
-    return UsageSummaryResponse(**summary)
+    last_ingested_at = await recorder.get_last_ingested_at(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        granularity="day",
+    )
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=summary.get("total_requests"),
+    )
+
+    return UsageSummaryResponse(
+        **summary,
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
+    )
 
 
 @router.get("/breakdown", response_model=UsageBreakdownResponse)
@@ -168,6 +193,17 @@ async def get_usage_breakdown(
     )
 
     total_cost = sum(item.get("cost_usd", 0) for item in items)
+    total_requests = sum(item.get("requests", 0) for item in items)
+    last_ingested_at = await recorder.get_last_ingested_at(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        granularity="day",
+    )
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=total_requests,
+    )
 
     return UsageBreakdownResponse(
         dimension=dimension,
@@ -175,6 +211,9 @@ async def get_usage_breakdown(
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
         total_cost_usd=round(total_cost, 4),
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
     )
 
 
@@ -186,6 +225,7 @@ async def get_usage_timeseries(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     model: Optional[str] = Query(None, description="Filter by model"),
     service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    granularity: str = Query("day", description="Granularity: hour, day"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageTimeSeriesResponse:
     """
@@ -208,13 +248,29 @@ async def get_usage_timeseries(
         user_id=user_id,
         model=model,
         service_id=service_id,
+        granularity=granularity,
+    )
+
+    total_requests = sum(point.get("requests", 0) for point in data)
+    last_ingested_at = await recorder.get_last_ingested_at(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        granularity=granularity,
+    )
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=total_requests,
     )
 
     return UsageTimeSeriesResponse(
         data=[UsageTimeSeriesPoint(**d) for d in data],
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
-        granularity="day",
+        granularity=granularity,
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
     )
 
 
