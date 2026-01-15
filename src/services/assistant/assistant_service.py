@@ -51,6 +51,7 @@ from .structured_output import (
 from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
 from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
+from .file_processor import ProcessedFiles
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, ArtifactStorageService
 
@@ -1220,8 +1221,23 @@ Please use this web search context to inform your response when relevant."""
         config: AssistantConfig,
         retrieved_contexts: List[RetrievedContext],
         web_search_context: Optional[str] = None,
+        processed_files: Optional[ProcessedFiles] = None,
+        model_supports_vision: bool = False,
     ) -> List[ChatMessage]:
-        """Build the message list for the model."""
+        """Build the message list for the model.
+
+        Args:
+            message: The user's message text.
+            history: Previous conversation history.
+            config: Assistant configuration.
+            retrieved_contexts: KB retrieval results.
+            web_search_context: Web search results as formatted text.
+            processed_files: Processed file contents (images, text, descriptions).
+            model_supports_vision: Whether the model supports vision/multimodal input.
+
+        Returns:
+            List of ChatMessage objects ready to send to the model.
+        """
         messages: List[ChatMessage] = []
 
         # System prompt
@@ -1253,8 +1269,39 @@ Please use this web search context to inform your response when relevant."""
             if role in ("user", "assistant") and content:
                 messages.append(ChatMessage(role=role, content=content))
 
-        # Current message
-        messages.append(ChatMessage(role="user", content=message))
+        # Build user message with potential file content
+        final_message = message
+        user_images: Optional[List[str]] = None
+
+        if processed_files:
+            if model_supports_vision and processed_files.has_images:
+                # Vision model: pass images as base64 data URLs
+                # ChatMessage.images field will be converted to OpenAI Vision API format
+                # in _build_openai_body (already handles data URL format)
+                user_images = [
+                    f"data:{img.media_type};base64,{img.base64_data}"
+                    for img in processed_files.images
+                ]
+                logger.info(f"[FILE INJECT] Added {len(user_images)} images for vision model")
+
+            # For text-only models OR additional text content from documents
+            # Inject text content and image descriptions into the user message
+            if processed_files.text_content:
+                final_message += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
+                logger.info(f"[FILE INJECT] Added text content: {len(processed_files.text_content)} chars")
+
+            if processed_files.image_descriptions and not model_supports_vision:
+                # Only add image descriptions for text-only models
+                # Vision models can see the images directly
+                descriptions = "\n".join(
+                    f"- 图像 {i+1}: {desc}"
+                    for i, desc in enumerate(processed_files.image_descriptions)
+                )
+                final_message += f"\n\n---\n[图像描述]\n{descriptions}"
+                logger.info(f"[FILE INJECT] Added {len(processed_files.image_descriptions)} image descriptions for text model")
+
+        # Current message (with potential file content and images)
+        messages.append(ChatMessage(role="user", content=final_message, images=user_images))
 
         return messages
 
