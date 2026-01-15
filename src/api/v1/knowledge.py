@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from urllib.parse import unquote, urlparse
 
-from ..deps import get_knowledge_service, get_knowledge_worker, get_user_context
+from ..deps import get_knowledge_service, get_knowledge_worker, get_user_context, get_settings
+from ...core.crypto import verify_signed_url, get_unsigned_url
+
+logger = logging.getLogger(__name__)
 from ..schemas.knowledge import (
     BatchDeleteSchema,
     BatchReindexSchema,
@@ -33,6 +39,7 @@ from ..schemas.knowledge import (
     SegmentEnableDisableSchema,
     SegmentUpdateSchema,
 )
+from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.knowledge_service import KnowledgeService
@@ -245,6 +252,177 @@ async def create_document_url(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.post("/knowledge/{dataset_id}/documents/images")
+async def upload_images(
+    dataset_id: str,
+    files: List[UploadFile] = File(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    批量上传图片到知识库
+
+    支持格式: JPEG, PNG, GIF, WebP, BMP
+    最大大小: 3MB per image
+    图片将通过VLM生成描述并进行多模态向量化
+    """
+    try:
+        # Verify access
+        await svc.require_dataset_access(user, dataset_id, required="editor")
+
+        ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"}
+        MAX_IMAGE_SIZE = 3 * 1024 * 1024  # 3MB
+
+        # Magic bytes for image validation (prevents content-type spoofing)
+        IMAGE_MAGIC_BYTES = {
+            b'\xff\xd8\xff': "image/jpeg",      # JPEG
+            b'\x89PNG\r\n\x1a\n': "image/png",  # PNG
+            b'GIF87a': "image/gif",             # GIF87a
+            b'GIF89a': "image/gif",             # GIF89a
+            b'RIFF': "image/webp",              # WebP (starts with RIFF)
+            b'BM': "image/bmp",                 # BMP
+        }
+
+        def validate_image_magic(data: bytes) -> bool:
+            """Validate image by checking magic bytes."""
+            for magic in IMAGE_MAGIC_BYTES:
+                if data.startswith(magic):
+                    return True
+            # Special case for WebP: RIFF....WEBP
+            if data[:4] == b'RIFF' and len(data) >= 12 and data[8:12] == b'WEBP':
+                return True
+            return False
+
+        results = []
+        errors = []
+
+        for file in files:
+            # Validate content type
+            if file.content_type not in ALLOWED_IMAGE_TYPES:
+                errors.append({
+                    "filename": file.filename,
+                    "error": f"Unsupported image type: {file.content_type}"
+                })
+                continue
+
+            # Read and validate size
+            content = await file.read()
+            if len(content) > MAX_IMAGE_SIZE:
+                errors.append({
+                    "filename": file.filename,
+                    "error": f"Image too large: {len(content)} bytes (max {MAX_IMAGE_SIZE})"
+                })
+                continue
+
+            # Validate magic bytes to prevent content-type spoofing
+            if not validate_image_magic(content):
+                errors.append({
+                    "filename": file.filename,
+                    "error": "Invalid image file: magic bytes validation failed"
+                })
+                continue
+
+            # Create document
+            doc = await svc.create_document_from_upload(
+                user,
+                dataset_id,
+                filename=file.filename or "image",
+                content_bytes=content,
+                mime_type=file.content_type,
+            )
+
+            # Enqueue for processing (VLM description + multimodal embedding)
+            await worker.enqueue(dataset_id, doc["document_id"])
+
+            results.append({
+                "document_id": doc["document_id"],
+                "filename": file.filename,
+                "size_bytes": len(content),
+            })
+
+        return {
+            "uploaded": results,
+            "success_count": len(results),
+            "failed_count": len(errors),
+            "errors": errors,
+        }
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/knowledge/images/{segment_id}")
+async def get_image_segment(
+    segment_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Serve image content for a segment.
+
+    Security:
+    - Requires dataset viewer permission
+    - For local file:// URLs: validates HMAC signature and expiry
+    - Path traversal protection via base_path check
+    """
+    try:
+        segment = await svc.db.get_segment(segment_id)
+        if not segment or segment.get("content_type") != "image":
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        dataset_id = str(segment.get("dataset_id") or "")
+        if not dataset_id:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+
+        image_url = segment.get("image_url") or ""
+        if not image_url:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        if image_url.startswith("file://"):
+            if not svc.image_storage_service:
+                raise HTTPException(status_code=503, detail="Image storage service is not initialized.")
+
+            # Verify URL signature for local files (security fix)
+            signing_key = getattr(settings.confluence, "encryption_key", "") or ""
+            if signing_key:
+                is_valid, error_msg = verify_signed_url(image_url, signing_key)
+                if not is_valid:
+                    logger.warning(
+                        f"Invalid image URL signature for segment {segment_id}: {error_msg}"
+                    )
+                    raise HTTPException(status_code=403, detail=f"Access denied: {error_msg}")
+
+            # Get the unsigned URL path for file access
+            unsigned_url = get_unsigned_url(image_url)
+            base_path = Path(svc.image_storage_service.config.local_base_path).expanduser().resolve()
+            parsed = urlparse(unsigned_url)
+            file_path = Path(unquote(parsed.path)).expanduser().resolve()
+
+            # Path traversal protection
+            if base_path not in file_path.parents and file_path != base_path:
+                logger.warning(
+                    f"Path traversal attempt for segment {segment_id}: {file_path}"
+                )
+                raise HTTPException(status_code=403, detail="Access denied")
+            if not file_path.exists():
+                raise HTTPException(status_code=404, detail="Image not found")
+
+            media_type = segment.get("image_media_type") or "application/octet-stream"
+            return StreamingResponse(file_path.open("rb"), media_type=media_type)
+
+        return RedirectResponse(image_url, status_code=307)
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.get("/knowledge/{dataset_id}/documents/{document_id}")
 async def get_document(
     dataset_id: str,
@@ -376,6 +554,12 @@ async def retrieve(
                 include_images=payload.include_images,
                 content_type_filter=payload.content_type_filter,
                 multimodal_rerank=payload.multimodal_rerank,
+                # Advanced multimodal parameters
+                image_search_enabled=payload.image_search_enabled,
+                vlm_rerank_weight=payload.vlm_rerank_weight,
+                image_boost=payload.image_boost,
+                image_score_threshold=payload.image_score_threshold,
+                use_separate_thresholds=payload.use_separate_thresholds,
             )
         else:
             results, meta = await svc.retrieve(
@@ -1156,33 +1340,33 @@ async def preview_chunks(
 ):
     """
     Preview how text would be chunked with the given configuration.
-    
+
     This is useful for testing chunking settings before processing documents.
     """
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
-        
+
         # Import chunking module
         from src.services.knowledge.chunking import (
-            ChunkingConfig, 
-            process_document, 
+            ChunkingConfig,
+            process_document,
             flatten_chunks
         )
-        
+
         # Get chunking config - use provided or fall back to dataset defaults
         if payload.chunking_config:
             config_dict = payload.chunking_config
         else:
             index_config = dataset.get("index_config", {}) or {}
             config_dict = index_config.get("chunking", {})
-        
+
         # Parse config
         config = ChunkingConfig.from_dict(config_dict)
-        
+
         # Process text
         chunks = process_document(payload.text, config)
         flat_chunks = flatten_chunks(chunks)
-        
+
         # Format response
         preview_items = [
             ChunkPreviewItem(
@@ -1194,7 +1378,7 @@ async def preview_chunks(
             )
             for i, chunk in enumerate(flat_chunks)
         ]
-        
+
         return ChunkPreviewResponse(
             total_chunks=len(preview_items),
             chunks=preview_items,
@@ -1206,3 +1390,60 @@ async def preview_chunks(
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Chunking error: {exc}")
+
+
+@router.get("/knowledge/{dataset_id}/sources", summary="Get dataset source statistics")
+async def get_dataset_sources(
+    request: Request,
+    dataset_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Get dataset source statistics including file uploads, URL imports, and Confluence sync.
+
+    Returns counts by source type and details of any Confluence bindings.
+    """
+    try:
+        # Verify access
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Get document statistics by source_type using database
+        docs = await svc.list_documents(user, dataset_id)
+        source_counts: Dict[str, int] = {}
+        for doc in docs:
+            source_type = doc.get("source_type") or "upload"
+            source_counts[source_type] = source_counts.get(source_type, 0) + 1
+
+        # Get Confluence bindings if service is available
+        confluence_bindings = []
+        confluence_svc = getattr(request.app.state, "confluence_sync_service", None)
+        if confluence_svc:
+            try:
+                bindings = await confluence_svc.list_bindings(user, dataset_id=dataset_id)
+                confluence_bindings = [
+                    {
+                        "binding_id": b.get("binding_id"),
+                        "space_name": b.get("space_name"),
+                        "page_count": b.get("synced_page_count") or 0,
+                        "status": b.get("status"),
+                    }
+                    for b in bindings
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to get Confluence bindings for dataset {dataset_id}: {e}")
+
+        return {
+            "file_uploads": {
+                "count": source_counts.get("upload", 0),
+            },
+            "url_imports": {
+                "count": source_counts.get("url", 0),
+            },
+            "confluence_bindings": confluence_bindings,
+            "total_documents": sum(source_counts.values()),
+        }
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
