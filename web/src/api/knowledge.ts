@@ -90,6 +90,37 @@ export async function uploadDocument(datasetId: string, file: File) {
   return data;
 }
 
+export interface ImageUploadResult {
+  uploaded: Array<{
+    document_id: string;
+    filename: string;
+    size_bytes: number;
+  }>;
+  success_count: number;
+  failed_count: number;
+  errors: Array<{
+    filename: string;
+    error: string;
+  }>;
+}
+
+/**
+ * 批量上传图片到知识库
+ * 支持格式: JPEG, PNG, GIF, WebP, BMP
+ * 最大大小: 3MB per image
+ */
+export async function uploadImages(datasetId: string, files: File[]): Promise<ImageUploadResult> {
+  const form = new FormData();
+  files.forEach((file) => {
+    form.append("files", file);
+  });
+  const { data } = await api.post<ImageUploadResult>(
+    `/api/v1/knowledge/${datasetId}/documents/images`,
+    form
+  );
+  return data;
+}
+
 export async function updateDocument(datasetId: string, documentId: string, patch: Partial<Document>) {
   const { data } = await api.put<Document>(`/api/v1/knowledge/${datasetId}/documents/${documentId}`, patch);
   return data;
@@ -228,6 +259,27 @@ export async function debugDataset(datasetId: string) {
 
 export async function getDatasetStatistics(datasetId: string) {
   const { data } = await api.get(`/api/v1/knowledge/${datasetId}/statistics`);
+  return data;
+}
+
+// ============================================================
+// Sources APIs
+// ============================================================
+
+export interface DatasetSources {
+  file_uploads: { count: number };
+  url_imports: { count: number };
+  confluence_bindings: Array<{
+    binding_id: string;
+    space_name: string;
+    page_count: number;
+    status: string;
+  }>;
+  total_documents: number;
+}
+
+export async function getDatasetSources(datasetId: string): Promise<DatasetSources> {
+  const { data } = await api.get<DatasetSources>(`/api/v1/knowledge/${datasetId}/sources`);
   return data;
 }
 
