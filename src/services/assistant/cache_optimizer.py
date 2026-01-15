@@ -7,11 +7,10 @@ Implements Manus-style context caching with three cache layers:
 - Layer 3: Current input (dynamic)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from enum import Enum
 import hashlib
-import json
 
 
 class CacheBreakpoint(Enum):
@@ -65,7 +64,21 @@ class ContextCacheOptimizer:
         current_message: str,
         provider: str,  # "gemini" | "dashscope"
     ) -> List[Dict[str, Any]]:
-        """Build messages with optimal cache structure."""
+        """Build messages with optimal cache structure.
+
+        Args:
+            system_prompt: Base system prompt.
+            tools: Optional list of tool definitions.
+            kb_context: Optional knowledge base context.
+            web_context: Optional web search context.
+            history: Conversation history.
+            current_message: Current user message.
+            provider: LLM provider identifier. Reserved for future
+                provider-specific message formatting.
+
+        Returns:
+            List of messages optimized for cache hit rate.
+        """
         messages = []
 
         # === Layer 1: Static Prefix ===
@@ -73,7 +86,7 @@ class ContextCacheOptimizer:
         system_msg = {"role": "system", "content": system_content}
 
         if self.config.enable_layer1_cache:
-            system_msg["cache_control"] = {"type": "ephemeral"}
+            system_msg["cache_control"] = {"type": CacheBreakpoint.EPHEMERAL.value}
 
         messages.append(system_msg)
 
@@ -93,7 +106,7 @@ class ContextCacheOptimizer:
             })
 
         if self.config.enable_layer2_cache and len(messages) > 1:
-            messages[-1]["cache_control"] = {"type": "ephemeral"}
+            messages[-1]["cache_control"] = {"type": CacheBreakpoint.EPHEMERAL.value}
 
         # === Layer 3: Current Input ===
         messages.append({"role": "user", "content": current_message})
@@ -119,7 +132,7 @@ class ContextCacheOptimizer:
             parts.append(tools_section)
 
         system_content = "\n".join(parts)
-        self._system_prefix_hash = hashlib.md5(system_content.encode()).hexdigest()[:8]
+        self._system_prefix_hash = hashlib.md5(system_content.encode()).hexdigest()[:16]
 
         return system_content
 

@@ -35,6 +35,12 @@ from .structured_output import (
     validate_output,
     create_json_prompt,
 )
+from .cache_optimizer import (
+    CacheConfig,
+    CacheMetrics,
+    CacheBreakpoint,
+    ContextCacheOptimizer,
+)
 
 __all__ = [
     "AssistantService",
@@ -65,4 +71,9 @@ __all__ = [
     "parse_structured_output",
     "validate_output",
     "create_json_prompt",
+    # Cache Optimization
+    "CacheConfig",
+    "CacheMetrics",
+    "CacheBreakpoint",
+    "ContextCacheOptimizer",
 ]
