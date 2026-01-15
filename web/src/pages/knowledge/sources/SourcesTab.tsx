@@ -5,46 +5,44 @@
  * Shows three source options: File Upload, URL Import, and Confluence Sync.
  */
 
-import { useState } from "react";
 import { Upload, Link, Cloud, FileText, ArrowRight } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
 import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
 
-export interface SourceStats {
-  fileCount: number;
-  urlCount: number;
-  confluenceCount: number;
-}
-
 interface SourcesTabProps {
   datasetId: string;
-  stats?: SourceStats;
-  onUploadClick?: () => void;
-  onUrlImportClick?: () => void;
+  onUploadClick: () => void;
+  onUrlClick: () => void;
+  documentStats: {
+    total: number;
+    uploaded: number;
+    fromUrl: number;
+    fromConfluence: number;
+  };
 }
-
-type ActivePanel = "overview" | "confluence";
 
 export function SourcesTab({
   datasetId,
-  stats = { fileCount: 0, urlCount: 0, confluenceCount: 0 },
   onUploadClick,
-  onUrlImportClick,
+  onUrlClick,
+  documentStats,
 }: SourcesTabProps) {
-  const [activePanel, setActivePanel] = useState<ActivePanel>("overview");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const showConfluence = searchParams.get("source") === "confluence";
 
   // If Confluence panel is active, show the full SyncSourcesTab
-  if (activePanel === "confluence") {
+  if (showConfluence) {
     return (
       <div className="space-y-4">
         {/* Back Button */}
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setActivePanel("overview")}
+          onClick={() => setSearchParams({})}
           className="mb-2"
         >
           <ArrowRight className="h-4 w-4 mr-1.5 rotate-180" />
@@ -73,7 +71,7 @@ export function SourcesTab({
       },
       stat: {
         label: "已上传文件",
-        value: stats.fileCount,
+        value: documentStats.uploaded,
       },
       action: {
         label: "上传文件",
@@ -94,11 +92,11 @@ export function SourcesTab({
       },
       stat: {
         label: "已导入网页",
-        value: stats.urlCount,
+        value: documentStats.fromUrl,
       },
       action: {
         label: "导入网页",
-        onClick: onUrlImportClick,
+        onClick: onUrlClick,
       },
     },
     {
@@ -115,11 +113,11 @@ export function SourcesTab({
       },
       stat: {
         label: "已同步页面",
-        value: stats.confluenceCount,
+        value: documentStats.fromConfluence,
       },
       action: {
         label: "管理同步",
-        onClick: () => setActivePanel("confluence"),
+        onClick: () => setSearchParams({ source: "confluence" }),
       },
     },
   ];
@@ -182,7 +180,7 @@ export function SourcesTab({
 
       {/* Total Summary */}
       <div className="text-center text-sm text-muted-foreground pt-4 border-t">
-        共 {stats.fileCount + stats.urlCount + stats.confluenceCount} 个文档来源
+        共 {documentStats.total} 个文档来源
       </div>
     </div>
   );
