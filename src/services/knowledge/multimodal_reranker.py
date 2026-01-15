@@ -57,29 +57,35 @@ class MultimodalReranker:
         image_weight: How much to weight image scores vs original scores
     """
 
-    # Prompt for evaluating image-query relevance
-    RELEVANCE_PROMPT = '''你是一个相关性评估专家。请评估以下图片与用户查询的相关性。
+    # Prompt for evaluating image-query relevance (optimized for VLM scoring)
+    RELEVANCE_PROMPT = '''你是一个专业的图文相关性评估专家。请评估这张图片与用户查询的相关性。
 
 用户查询: {query}
+{description_context}
+评分标准:
+1.0: 图片完美回答用户问题，包含所有查询要素
+0.9: 图片直接回答问题，内容高度相关
+0.7-0.8: 图片部分相关，包含部分查询信息
+0.5-0.6: 图片有一定相关性，但信息不完整
+0.3-0.4: 图片略微相关，只有少量关联内容
+0.1-0.2: 图片与查询关系很弱
+0.0: 图片与查询完全无关
 
-请仔细分析图片内容，然后给出相关性评分:
-- 如果图片直接回答了用户问题，评分 0.9-1.0
-- 如果图片部分相关，评分 0.6-0.8
-- 如果图片略微相关，评分 0.3-0.5
-- 如果图片完全不相关，评分 0.0-0.2
+请只输出一个0到1之间的数字作为评分，不要输出任何解释或其他内容。'''
 
-请只输出一个0到1之间的数字作为评分，不要输出其他内容。'''
-
-    # Alternative English prompt
-    RELEVANCE_PROMPT_EN = '''You are a relevance assessment expert. Evaluate how relevant this image is to the user's query.
+    # Alternative English prompt (optimized for VLM scoring)
+    RELEVANCE_PROMPT_EN = '''You are a professional image-query relevance expert. Evaluate how relevant this image is to the user's query.
 
 User Query: {query}
-
-Analyze the image content carefully, then provide a relevance score:
-- If the image directly answers the question: 0.9-1.0
-- If the image is partially relevant: 0.6-0.8
-- If the image is slightly relevant: 0.3-0.5
-- If the image is not relevant: 0.0-0.2
+{description_context}
+Scoring criteria:
+1.0: Image perfectly answers the query with all required elements
+0.9: Image directly answers the question with highly relevant content
+0.7-0.8: Image is partially relevant, contains some query information
+0.5-0.6: Image has some relevance but incomplete information
+0.3-0.4: Image is slightly relevant with minimal connection
+0.1-0.2: Image has very weak relation to the query
+0.0: Image is completely irrelevant
 
 Output ONLY a single number between 0 and 1 as the score, nothing else.'''
 
@@ -118,9 +124,17 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         top_k: int = 10,
         rerank_images_only: bool = False,
         score_threshold: float = 0.0,
+        score_weight: Optional[float] = None,
     ) -> List[RerankCandidate]:
         """
         Rerank candidates using multimodal scoring.
+
+        Implements smart routing: only image candidates are sent to VLM for scoring,
+        while text candidates retain their original scores. This optimizes VLM usage
+        and reduces latency.
+
+        Score fusion formula:
+            final_score = original_score * (1 - score_weight) + vlm_score * score_weight
 
         Args:
             query: User query text
@@ -128,25 +142,45 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             top_k: Return top-k results after reranking
             rerank_images_only: If True, only rerank image candidates (text keeps original score)
             score_threshold: Minimum score to include in results
+            score_weight: Weight for VLM score in fusion [0.0, 1.0]. If None, uses
+                         self.image_weight from initialization. Higher values give
+                         more weight to VLM relevance scores.
 
         Returns:
-            Reranked candidates sorted by score (descending)
+            Reranked candidates sorted by score (descending).
+            Each candidate's metadata will contain:
+            - vlm_score: Raw VLM relevance score [0.0, 1.0] (for images only)
+            - original_score: Original retrieval score before reranking
         """
         if not candidates:
             return []
 
-        # Separate image and text candidates
+        # Use provided score_weight or fall back to instance default
+        effective_weight = score_weight if score_weight is not None else self.image_weight
+
+        # Separate image and text candidates - VLM is only called for images
         image_candidates = [c for c in candidates if c.media_type == "image"]
         text_candidates = [c for c in candidates if c.media_type == "text"]
 
-        logger.info(f"Multimodal rerank: {len(image_candidates)} images, {len(text_candidates)} text candidates")
+        logger.info(
+            f"Multimodal rerank: {len(image_candidates)} images, "
+            f"{len(text_candidates)} text candidates (weight={effective_weight:.2f})"
+        )
 
-        # Score image candidates using VLM
+        # Score image candidates using VLM (only images go through VLM)
         if image_candidates and self.vlm_service:
-            await self._score_images_batch(query, image_candidates)
+            await self._score_images_batch(query, image_candidates, effective_weight)
+        elif image_candidates:
+            # No VLM service, preserve original scores and store in metadata
+            for c in image_candidates:
+                c.rerank_score = c.original_score
+                c.metadata["original_score"] = c.original_score
+                c.metadata["vlm_score"] = None
+                c.metadata["vlm_skipped"] = "no_vlm_service"
 
         # Text candidates keep original score (or can be boosted by associated images)
         for c in text_candidates:
+            c.metadata["original_score"] = c.original_score
             if rerank_images_only:
                 c.rerank_score = c.original_score
             else:
@@ -164,6 +198,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         self,
         query: str,
         candidates: List[RerankCandidate],
+        score_weight: Optional[float] = None,
     ) -> None:
         """
         Score image candidates in batch with concurrency control.
@@ -171,21 +206,35 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         Args:
             query: User query
             candidates: Image candidates to score (modified in-place)
+            score_weight: Weight for VLM score in fusion. If None, uses self.image_weight.
         """
+        # Use provided weight or instance default
+        effective_weight = score_weight if score_weight is not None else self.image_weight
+
         async def score_one(c: RerankCandidate):
             async with self._semaphore:
                 try:
                     vlm_score = await self._score_single_image(query, c)
-                    # Combine VLM score with original score
+                    # Store original score in metadata before modifying
+                    c.metadata["original_score"] = c.original_score
+                    c.metadata["vlm_score"] = vlm_score
+                    c.metadata["score_weight"] = effective_weight
+                    # Combine VLM score with original score using weighted fusion
                     c.rerank_score = (
-                        (1 - self.image_weight) * c.original_score +
-                        self.image_weight * vlm_score
+                        (1 - effective_weight) * c.original_score +
+                        effective_weight * vlm_score
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout scoring image {c.segment_id}")
+                    c.metadata["original_score"] = c.original_score
+                    c.metadata["vlm_score"] = None
+                    c.metadata["vlm_error"] = "timeout"
                     c.rerank_score = c.original_score * 0.7  # Penalize timeout
                 except Exception as e:
                     logger.warning(f"Failed to score image {c.segment_id}: {e}")
+                    c.metadata["original_score"] = c.original_score
+                    c.metadata["vlm_score"] = None
+                    c.metadata["vlm_error"] = str(e)
                     c.rerank_score = c.original_score * 0.5  # Penalize errors
 
         tasks = [score_one(c) for c in candidates]
@@ -218,8 +267,16 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             logger.warning(f"No image data for {candidate.segment_id}")
             return candidate.original_score
 
-        # Build prompt
-        prompt = self.prompt_template.format(query=query)
+        # Build description context if available
+        description_context = ""
+        if candidate.text:
+            description_context = f"图片描述: {candidate.text}\n" if "你是" in self.prompt_template else f"Image description: {candidate.text}\n"
+
+        # Build prompt with query and optional description
+        prompt = self.prompt_template.format(
+            query=query,
+            description_context=description_context
+        )
 
         try:
             # Call VLM with timeout
