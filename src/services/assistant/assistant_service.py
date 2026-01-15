@@ -63,6 +63,37 @@ class RAGMode(str, Enum):
     DISABLED = "off"    # No KB retrieval
 
 
+class StreamEventType(str, Enum):
+    """SSE event types for assistant streaming responses."""
+    # Core streaming events
+    TEXT_DELTA = "text_delta"
+    THINKING_DELTA = "thinking_delta"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+
+    # Context and retrieval events
+    CONTEXT_RETRIEVED = "context_retrieved"
+    WEB_SEARCH_RESULTS = "web_search_results"
+    RAG_EVALUATION = "rag_evaluation"
+
+    # Session events
+    SESSION_CREATED = "session_created"
+    SESSION_UPDATED = "session_updated"
+
+    # Status events
+    USAGE = "usage"
+    FINISH = "finish"
+    DONE = "done"
+    ERROR = "error"
+    OUTPUT_WARNINGS = "output_warnings"
+
+    # Code execution events
+    CODE_EXECUTION_START = "code_execution_start"
+    CODE_EXECUTION_OUTPUT = "code_execution_output"
+    CODE_EXECUTION_RESULT = "code_execution_result"
+    ARTIFACT_CREATED = "artifact_created"
+
+
 @dataclass
 class AssistantConfig:
     """Configuration for an assistant conversation."""

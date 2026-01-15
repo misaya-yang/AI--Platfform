@@ -26,6 +26,11 @@ export const SSEEventType = {
   FINISH: "finish",
   DONE: "done",
   ERROR: "error",
+  // Code execution events
+  CODE_EXECUTION_START: "code_execution_start",
+  CODE_EXECUTION_OUTPUT: "code_execution_output",
+  CODE_EXECUTION_RESULT: "code_execution_result",
+  ARTIFACT_CREATED: "artifact_created",
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -170,6 +175,42 @@ export interface RAGEvaluation {
   response_grounding: number;
   citations: RAGCitation[];
   evaluation_time_ms: number;
+}
+
+// =============================================================================
+// Code Execution Types
+// =============================================================================
+
+export interface CodeExecutionStart {
+  execution_id: string;
+  language: string;
+  code: string;
+}
+
+export interface CodeExecutionOutput {
+  execution_id: string;
+  output: string;
+}
+
+export interface CodeExecutionResultData {
+  execution_id: string;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  execution_time_ms: number;
+  output_files: Array<{
+    filename: string;
+    content_type: string;
+    size_bytes: number;
+  }>;
+}
+
+export interface ArtifactCreated {
+  artifact_id: string;
+  type: "code" | "chart" | "table" | "file";
+  format: string;
+  title: string;
+  url: string;
 }
 
 // =========================================================================
