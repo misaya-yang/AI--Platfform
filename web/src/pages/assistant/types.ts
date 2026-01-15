@@ -21,6 +21,7 @@ export const SSEEventType = {
   CONTEXT_RETRIEVED: "context_retrieved",
   WEB_SEARCH_RESULTS: "web_search_results",
   RAG_EVALUATION: "rag_evaluation",  // Phase 3: RAG quality metrics
+  CACHE_METRICS: "cache_metrics",  // KV-Cache optimization metrics
   SESSION_CREATED: "session_created",
   SESSION_UPDATED: "session_updated",
   USAGE: "usage",
@@ -101,6 +102,20 @@ export interface RAGEvaluation {
 }
 
 // =============================================================================
+// KV-Cache Metrics
+// =============================================================================
+
+export interface CacheMetrics {
+  layer1_hit: boolean;
+  layer2_hit: boolean;
+  total_input_tokens: number;
+  cached_tokens: number;
+  cache_hit_rate: number;
+  estimated_savings_usd: number;
+  system_prefix_hash: string;
+}
+
+// =============================================================================
 // Attachment Structures (for multimodal input)
 // =============================================================================
 
@@ -162,6 +177,10 @@ export interface ChatMessage {
   // Streaming state
   isStreaming?: boolean;
 
+  // Image generation state (GPT-style)
+  isGeneratingImage?: boolean;
+  imageGenerationPrompt?: string;
+
   // Search status (for GPT-like "Searching..." display)
   searchStatus?: SearchStatusItem[];
 
@@ -176,6 +195,9 @@ export interface ChatMessage {
   // Phase 3: RAG evaluation and enhanced citations
   ragEvaluation?: RAGEvaluation;
   ragCitations?: RAGCitation[];
+
+  // KV-Cache metrics
+  cacheMetrics?: CacheMetrics;
 
   // Web search
   webSearchResults?: WebSearchResult[];
@@ -251,6 +273,17 @@ export interface RAGEvaluationEventData {
   evaluation_time_ms: number;
 }
 
+// KV-Cache metrics event data
+export interface CacheMetricsEventData {
+  layer1_hit: boolean;
+  layer2_hit: boolean;
+  total_input_tokens: number;
+  cached_tokens: number;
+  cache_hit_rate: number;
+  estimated_savings_usd: number;
+  system_prefix_hash: string;
+}
+
 export interface ErrorEventData {
   message: string;
   code?: string;
@@ -299,6 +332,13 @@ export interface SessionSummary {
 // Code Execution State (for Artifacts Panel)
 // =============================================================================
 
+export interface OutputFile {
+  filename: string;
+  content_base64: string;
+  mime_type: string | null;
+  size_bytes: number;
+}
+
 export interface CodeExecutionState {
   isExecuting: boolean;
   executionId: string | null;
@@ -306,6 +346,7 @@ export interface CodeExecutionState {
   output: string;
   executionTimeMs: number | null;
   status: "idle" | "running" | "success" | "error" | "timeout";
+  outputFiles: OutputFile[];
 }
 
 // =============================================================================

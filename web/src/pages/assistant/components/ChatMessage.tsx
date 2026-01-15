@@ -13,7 +13,7 @@
 
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2 } from "lucide-react";
+import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { WebSearchDisplay } from "./WebSearchDisplay";
@@ -165,6 +165,18 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
             )}
         </span>
       )}
+      {/* Cache metrics */}
+      {message.cacheMetrics && message.cacheMetrics.cache_hit_rate > 0 && (
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400">
+          <Zap className="h-3 w-3" />
+          {(message.cacheMetrics.cache_hit_rate * 100).toFixed(0)}% cached
+          {message.cacheMetrics.estimated_savings_usd > 0.0001 && (
+            <span className="text-emerald-500 ml-1">
+              (-${message.cacheMetrics.estimated_savings_usd.toFixed(4)})
+            </span>
+          )}
+        </span>
+      )}
     </motion.div>
   );
 }
@@ -194,6 +206,92 @@ function AttachmentsDisplay({
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** GPT-style image generation placeholder */
+function ImageGeneratingPlaceholder({ prompt }: { prompt?: string }) {
+  const { t } = useTranslation();
+
+  return (
+    <div className="space-y-3">
+      {/* Status header */}
+      <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+        <motion.div
+          animate={{ rotate: 360 }}
+          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+        >
+          <Sparkles className="h-4 w-4 text-pink-500" />
+        </motion.div>
+        <span className="font-medium">
+          {t("assistant.creatingImage", "正在创建图片")}
+        </span>
+      </div>
+
+      {/* Image placeholder box - GPT style */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="relative w-[280px] h-[280px] rounded-2xl overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-700 dark:to-slate-800 border border-slate-200 dark:border-slate-600"
+      >
+        {/* Shimmer effect */}
+        <motion.div
+          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent dark:via-white/10"
+          animate={{
+            x: ["-100%", "100%"],
+          }}
+          transition={{
+            duration: 1.5,
+            repeat: Infinity,
+            ease: "linear",
+          }}
+        />
+
+        {/* Center icon */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <motion.div
+            animate={{
+              scale: [1, 1.1, 1],
+              opacity: [0.5, 0.8, 0.5],
+            }}
+            transition={{
+              duration: 2,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+            className="p-4 rounded-full bg-slate-200/80 dark:bg-slate-600/50"
+          >
+            <ImageIcon className="h-10 w-10 text-slate-400 dark:text-slate-500" />
+          </motion.div>
+
+          {/* Progress dots */}
+          <div className="flex gap-1.5 mt-4">
+            <motion.div
+              className="w-2 h-2 rounded-full bg-pink-400"
+              animate={{ scale: [1, 1.3, 1] }}
+              transition={{ duration: 0.8, repeat: Infinity, delay: 0 }}
+            />
+            <motion.div
+              className="w-2 h-2 rounded-full bg-pink-400"
+              animate={{ scale: [1, 1.3, 1] }}
+              transition={{ duration: 0.8, repeat: Infinity, delay: 0.2 }}
+            />
+            <motion.div
+              className="w-2 h-2 rounded-full bg-pink-400"
+              animate={{ scale: [1, 1.3, 1] }}
+              transition={{ duration: 0.8, repeat: Infinity, delay: 0.4 }}
+            />
+          </div>
+        </div>
+      </motion.div>
+
+      {/* Prompt preview */}
+      {prompt && (
+        <p className="text-xs text-slate-400 dark:text-slate-500 italic truncate max-w-[280px]">
+          "{prompt.length > 50 ? prompt.slice(0, 50) + "..." : prompt}"
+        </p>
+      )}
     </div>
   );
 }
@@ -273,7 +371,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
             </div>
           ) : (
             <div className="text-slate-700 dark:text-slate-200">
-              {message.isStreaming ? (
+              {/* GPT-style image generation placeholder */}
+              {message.isGeneratingImage ? (
+                <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
+              ) : message.isStreaming ? (
                 message.content ? (
                   <StreamOutput
                     text={message.content}
