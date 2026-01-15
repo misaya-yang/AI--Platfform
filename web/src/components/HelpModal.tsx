@@ -47,7 +47,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       key: "services",
       label: (
         <Space>
-          <CloudServerOutlined style={{ color: colors.cyan[500] }} />
+          <CloudServerOutlined style={{ color: colors.primary[400] }} />
           <span>服务管理</span>
         </Space>
       ),
@@ -69,7 +69,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       key: "knowledge",
       label: (
         <Space>
-          <DatabaseOutlined style={{ color: colors.purple[500] }} />
+          <DatabaseOutlined style={{ color: colors.primary[500] }} />
           <span>知识库</span>
           <Tag color="blue" style={{ marginLeft: 4 }}>核心功能</Tag>
         </Space>
@@ -103,7 +103,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       key: "playground",
       label: (
         <Space>
-          <ThunderboltOutlined style={{ color: colors.orange[500] }} />
+          <ThunderboltOutlined style={{ color: colors.primary[600] }} />
           <span>智能对话</span>
         </Space>
       ),
@@ -185,7 +185,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       {/* 项目介绍 */}
       <div style={{
         padding: "16px 20px",
-        background: `linear-gradient(135deg, ${colors.primary[500]}10, ${colors.cyan[500]}10)`,
+        background: `linear-gradient(135deg, ${colors.primary[500]}10, ${colors.primary[300]}10)`,
         borderRadius: 12,
         marginBottom: 20,
       }}>
@@ -205,7 +205,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       {/* 快速开始 */}
       <div style={{ marginBottom: 20 }}>
         <Title level={5}>
-          <BulbOutlined style={{ marginRight: 8, color: colors.orange[500] }} />
+          <BulbOutlined style={{ marginRight: 8, color: colors.primary[500] }} />
           快速开始
         </Title>
         <div style={{

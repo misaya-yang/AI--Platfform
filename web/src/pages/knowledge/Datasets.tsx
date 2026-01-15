@@ -366,9 +366,9 @@ function DatasetCard({
           }}
         >
           <ExperimentOutlined
-            style={{ fontSize: 14, color: colors.cyan[500] }}
+            style={{ fontSize: 14, color: colors.primary[400] }}
           />
-          <Text style={{ fontSize: 13, color: colors.cyan[500] }}>测试</Text>
+          <Text style={{ fontSize: 13, color: colors.primary[400] }}>测试</Text>
         </div>
       </div>
     </Card>
@@ -616,7 +616,7 @@ export function KnowledgeDatasetsPage() {
             title="文档总数"
             value={stats.documents}
             icon={<FileTextOutlined />}
-            color={colors.cyan[500]}
+            color={colors.primary[400]}
             index={1}
           />
         </Col>
@@ -625,7 +625,7 @@ export function KnowledgeDatasetsPage() {
             title="段落总数"
             value={stats.segments}
             icon={<NodeIndexOutlined />}
-            color={colors.purple[500]}
+            color={colors.primary[600]}
             index={2}
           />
         </Col>
@@ -725,7 +725,7 @@ export function KnowledgeDatasetsPage() {
       <Modal
         title={
           <Space>
-            <DeleteOutlined style={{ color: colors.orange[500] }} />
+            <DeleteOutlined style={{ color: "#EF4444" }} />
             <span>确认删除</span>
           </Space>
         }
