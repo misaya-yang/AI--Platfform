@@ -13,6 +13,7 @@ from .realtime_metrics import (
     get_realtime_metrics,
     init_realtime_metrics,
 )
+from .data_status import compute_data_status
 
 __all__ = [
     "MetricsRecorder",
@@ -22,4 +23,5 @@ __all__ = [
     "RealtimeSnapshot",
     "get_realtime_metrics",
     "init_realtime_metrics",
+    "compute_data_status",
 ]
