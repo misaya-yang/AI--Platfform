@@ -311,10 +311,10 @@ class CacheMetricsEvent(BaseModel):
     """Cache performance metrics for KV-cache optimization monitoring."""
     layer1_hit: bool = Field(default=False, description="Whether Layer 1 (system prefix) cache was hit")
     layer2_hit: bool = Field(default=False, description="Whether Layer 2 (session context) cache was hit")
-    total_input_tokens: int = Field(default=0, description="Total input tokens")
-    cached_tokens: int = Field(default=0, description="Number of tokens served from cache")
-    cache_hit_rate: float = Field(default=0.0, description="Cache hit rate (0-1)")
-    estimated_savings_usd: float = Field(default=0.0, description="Estimated cost savings in USD")
+    total_input_tokens: int = Field(default=0, ge=0, description="Total input tokens")
+    cached_tokens: int = Field(default=0, ge=0, description="Number of tokens served from cache")
+    cache_hit_rate: float = Field(default=0.0, ge=0.0, le=1.0, description="Cache hit rate (0-1)")
+    estimated_savings_usd: float = Field(default=0.0, ge=0.0, description="Estimated cost savings in USD")
     system_prefix_hash: str = Field(default="", description="Hash of Layer 1 cache key for debugging")
 
 
@@ -336,6 +336,8 @@ class StreamEventData(BaseModel):
     - tool_result: Tool execution result (data: ToolResultEvent)
     - context_retrieved: KB search results (data: ContextRetrievedEvent)
     - web_search_results: Web search results (data: WebSearchResultsEvent)
+    - rag_evaluation: RAG quality metrics (data: RAGEvaluationEvent)
+    - cache_metrics: KV-cache performance metrics (data: CacheMetricsEvent)
     - usage: Token usage (data: UsageEvent)
     - finish: Generation finished (data: {"reason": str})
     - done: Complete response (data: DoneEvent)
