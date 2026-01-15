@@ -50,6 +50,7 @@ from .structured_output import (
 )
 from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
+from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, ArtifactStorageService
 
@@ -103,6 +104,9 @@ class StreamEventType(str, Enum):
     # Document generation events
     DOCUMENT_GENERATION_START = "document_generation_start"
     DOCUMENT_GENERATION_RESULT = "document_generation_result"
+
+    # KV-Cache metrics
+    CACHE_METRICS = "cache_metrics"
 
 
 @dataclass
@@ -254,6 +258,9 @@ Please use this web search context to inform your response when relevant."""
 
         # Artifact storage (for persisting output files)
         self.artifact_storage = get_artifact_storage()
+
+        # KV-Cache optimization
+        self.cache_optimizer = ContextCacheOptimizer(CacheConfig())
 
     async def _persist_artifacts(
         self,
@@ -966,6 +973,30 @@ Please use this web search context to inform your response when relevant."""
                 data=usage
             )
 
+            # Emit cache metrics event
+            try:
+                provider = self._get_provider_from_model(config.model_id)
+                cache_metrics = self.cache_optimizer.parse_cache_metrics(usage, provider)
+                if cache_metrics.cached_tokens > 0:
+                    yield AssistantStreamEvent(
+                        event_type=StreamEventType.CACHE_METRICS.value,
+                        data={
+                            "layer1_hit": cache_metrics.layer1_hit,
+                            "layer2_hit": cache_metrics.layer2_hit,
+                            "total_input_tokens": cache_metrics.total_input_tokens,
+                            "cached_tokens": cache_metrics.cached_tokens,
+                            "cache_hit_rate": cache_metrics.cache_hit_rate,
+                            "estimated_savings_usd": cache_metrics.estimated_savings_usd,
+                            "system_prefix_hash": cache_metrics.system_prefix_hash,
+                        }
+                    )
+                    logger.info(
+                        f"Cache metrics: {cache_metrics.cached_tokens}/{cache_metrics.total_input_tokens} tokens cached "
+                        f"({cache_metrics.cache_hit_rate:.1%}), savings: ${cache_metrics.estimated_savings_usd:.4f}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to parse cache metrics: {e}")
+
             # Record usage to database for billing/analytics
             try:
                 usage_recorder = get_usage_recorder()
@@ -1274,3 +1305,14 @@ Please use this web search context to inform your response when relevant."""
         executor = CodeExecutorToolExecutor(code_executor=self.code_executor)
         registry.register(CODE_EXECUTOR_TOOL, executor)
         logger.info("Registered code executor tool")
+
+    def _get_provider_from_model(self, model_id: str) -> str:
+        """Get provider identifier from model ID for cache metrics."""
+        model_info = self.model_registry.get_model(model_id)
+        if model_info:
+            provider = model_info.provider.value.lower()
+            if "google" in provider or "gemini" in provider:
+                return "gemini"
+            elif "dashscope" in provider or "qwen" in provider:
+                return "dashscope"
+        return "dashscope"  # Default fallback
