@@ -31,6 +31,11 @@ from .builtin_tools import (
     WebSearchExecutor,
     register_builtin_tools,
 )
+from .code_executor_tool import (
+    CODE_EXECUTOR_TOOL,
+    CodeExecutorToolExecutor,
+    register_code_executor_tool,
+)
 
 __all__ = [
     # Tavily
@@ -53,4 +58,8 @@ __all__ = [
     "KBSearchExecutor",
     "WebSearchExecutor",
     "register_builtin_tools",
+    # Code executor tool
+    "CODE_EXECUTOR_TOOL",
+    "CodeExecutorToolExecutor",
+    "register_code_executor_tool",
 ]
