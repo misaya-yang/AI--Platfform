@@ -294,3 +294,30 @@ export interface SessionSummary {
   updated_at?: string;
   last_message_preview?: string;
 }
+
+// =============================================================================
+// Code Execution State (for Artifacts Panel)
+// =============================================================================
+
+export interface CodeExecutionState {
+  isExecuting: boolean;
+  executionId: string | null;
+  code: string | null;
+  output: string;
+  executionTimeMs: number | null;
+  status: "idle" | "running" | "success" | "error" | "timeout";
+}
+
+// =============================================================================
+// Artifact Data (for Artifacts Panel)
+// =============================================================================
+
+export interface ArtifactData {
+  id: string;
+  type: "code" | "chart" | "table" | "file";
+  format: string;
+  title: string;
+  url?: string;
+  content?: string;
+  createdAt: Date;
+}

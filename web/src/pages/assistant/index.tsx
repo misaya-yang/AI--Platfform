@@ -57,12 +57,14 @@ import {
   listDatasets,
   getConfig,
   chatStream,
+  SSEEventType,
   type ModelInfo,
   type DatasetInfo,
   type AssistantConfig,
   type AssistantMessage,
   type WebSearchResult,
 } from "@/api/assistant";
+import { ArtifactsPanel, type Artifact } from "@/components/artifacts";
 import {
   listSessions,
   createSession,
@@ -95,6 +97,7 @@ import type {
   RAGEvaluationEventData,
   RAGCitation,
   RAGEvaluation,
+  CodeExecutionState,
 } from "./types";
 
 // ============================================================================
@@ -137,6 +140,18 @@ export function AssistantPage() {
   // Panel visibility
   const [showLeftPanel, setShowLeftPanel] = useState(true);
   const [showRightPanel, setShowRightPanel] = useState(true);
+  const [showArtifacts, setShowArtifacts] = useState(false);
+
+  // Artifacts state
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [codeExecution, setCodeExecution] = useState<CodeExecutionState>({
+    isExecuting: false,
+    executionId: null,
+    code: null,
+    output: "",
+    executionTimeMs: null,
+    status: "idle",
+  });
 
   // Collapsible sections
   const [kbSectionOpen, setKbSectionOpen] = useState(true);
@@ -577,6 +592,71 @@ export function AssistantPage() {
             if (event.data && typeof event.data === "object") {
               const doneData = event.data as { duration_ms?: number };
               durationMs = doneData.duration_ms;
+            }
+            break;
+
+          case SSEEventType.CODE_EXECUTION_START:
+            if (event.data && typeof event.data === "object") {
+              const startData = event.data as { execution_id: string; code: string };
+              setCodeExecution({
+                isExecuting: true,
+                executionId: startData.execution_id,
+                code: startData.code,
+                output: "",
+                executionTimeMs: null,
+                status: "running",
+              });
+              setShowArtifacts(true);
+            }
+            break;
+
+          case SSEEventType.CODE_EXECUTION_OUTPUT:
+            if (event.data && typeof event.data === "object") {
+              const outputData = event.data as { output: string };
+              setCodeExecution((prev) => ({
+                ...prev,
+                output: prev.output + outputData.output,
+              }));
+            }
+            break;
+
+          case SSEEventType.CODE_EXECUTION_RESULT:
+            if (event.data && typeof event.data === "object") {
+              const resultData = event.data as {
+                success: boolean;
+                execution_time_ms: number;
+                stderr?: string;
+              };
+              setCodeExecution((prev) => ({
+                ...prev,
+                isExecuting: false,
+                executionTimeMs: resultData.execution_time_ms,
+                status: resultData.success ? "success" : "error",
+                output: prev.output + (resultData.stderr || ""),
+              }));
+            }
+            break;
+
+          case SSEEventType.ARTIFACT_CREATED:
+            if (event.data && typeof event.data === "object") {
+              const artifactData = event.data as {
+                artifact_id: string;
+                type: "code" | "chart" | "table" | "file";
+                format: string;
+                title: string;
+                url?: string;
+              };
+              setArtifacts((prev) => [
+                ...prev,
+                {
+                  id: artifactData.artifact_id,
+                  type: artifactData.type,
+                  format: artifactData.format,
+                  title: artifactData.title,
+                  url: artifactData.url,
+                  createdAt: new Date(),
+                },
+              ]);
             }
             break;
 
@@ -1264,6 +1344,31 @@ export function AssistantPage() {
                       </div>
                     </div>
                   </div>
+                </div>
+              </motion.aside>
+            )}
+          </AnimatePresence>
+
+          {/* Artifacts Panel */}
+          <AnimatePresence>
+            {showArtifacts && (
+              <motion.aside
+                initial={{ width: 0, opacity: 0 }}
+                animate={{ width: 400, opacity: 1 }}
+                exit={{ width: 0, opacity: 0 }}
+                transition={{ duration: 0.2, ease: "easeInOut" }}
+                className="overflow-hidden flex-shrink-0"
+              >
+                <div className="h-full w-[400px]">
+                  <ArtifactsPanel
+                    isOpen={showArtifacts}
+                    onClose={() => setShowArtifacts(false)}
+                    artifacts={artifacts}
+                    executionStatus={codeExecution.status}
+                    executionOutput={codeExecution.output}
+                    currentCode={codeExecution.code || undefined}
+                    executionTimeMs={codeExecution.executionTimeMs || undefined}
+                  />
                 </div>
               </motion.aside>
             )}
