@@ -7,7 +7,6 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
   CloudServerOutlined,
-  CloudSyncOutlined,
   UnorderedListOutlined,
   DatabaseOutlined,
   MenuFoldOutlined,
@@ -53,12 +52,6 @@ const navItems = [
     labelKey: "nav.knowledge",
     icon: <DatabaseOutlined />,
     permission: "knowledge:dataset:view",
-  },
-  {
-    key: "/confluence",
-    labelKey: "nav.knowledgeSync",
-    icon: <CloudSyncOutlined />,
-    permission: "knowledge:confluence:manage",
   },
   {
     key: "/playground",
@@ -306,7 +299,7 @@ export function AppLayout() {
   }));
 
   return (
-    <Layout className="app-layout" style={{ minHeight: '100vh' }}>
+    <Layout className="app-layout" style={{ minHeight: '100vh', minWidth: 1200 }}>
       {/* 侧边栏 */}
       <Sider
         collapsible
@@ -422,7 +415,7 @@ export function AppLayout() {
             )}
             {!collapsed && (
               <Text type="secondary" style={{ marginLeft: 8, fontSize: 13 }}>
-                收起侧栏
+                {t('nav.collapseSidebar')}
               </Text>
             )}
           </motion.div>
@@ -496,7 +489,7 @@ export function AppLayout() {
                 }}>
                   <UserOutlined style={{ color: '#fff', fontSize: 14 }} />
                 </div>
-                <Text style={{ fontSize: 13, fontWeight: 500 }}>{user?.display_name || user?.user_id || '用户'}</Text>
+                <Text style={{ fontSize: 13, fontWeight: 500 }}>{user?.display_name || user?.user_id || t('common.user')}</Text>
               </motion.div>
             </Dropdown>
           </Space>
@@ -506,7 +499,7 @@ export function AppLayout() {
         <Content style={{
           padding: '24px',
           minHeight: 'calc(100vh - 64px)',
-          overflow: 'hidden',
+          overflow: 'auto',
         }}>
           <motion.div
             initial={{ opacity: 0, y: 20 }}
