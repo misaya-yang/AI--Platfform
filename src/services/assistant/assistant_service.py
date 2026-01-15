@@ -51,6 +51,7 @@ from .structured_output import (
 from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
 from ..metrics.usage_recorder import get_usage_recorder
+from ..storage import get_artifact_storage, ArtifactStorageService
 
 if TYPE_CHECKING:
     from ..session.database_session_manager import DatabaseSessionManager
@@ -94,6 +95,14 @@ class StreamEventType(str, Enum):
     CODE_EXECUTION_OUTPUT = "code_execution_output"
     CODE_EXECUTION_RESULT = "code_execution_result"
     ARTIFACT_CREATED = "artifact_created"
+
+    # Image generation events
+    IMAGE_GENERATION_START = "image_generation_start"
+    IMAGE_GENERATION_RESULT = "image_generation_result"
+
+    # Document generation events
+    DOCUMENT_GENERATION_START = "document_generation_start"
+    DOCUMENT_GENERATION_RESULT = "document_generation_result"
 
 
 @dataclass
@@ -242,6 +251,80 @@ Please use this web search context to inform your response when relevant."""
         self.code_executor = code_executor
         if self.code_executor:
             self._register_code_executor_tool()
+
+        # Artifact storage (for persisting output files)
+        self.artifact_storage = get_artifact_storage()
+
+    async def _persist_artifacts(
+        self,
+        user: UserContext,
+        session_id: str,
+        output_files: List[Dict[str, Any]],
+        source: str = "code_execution",
+    ) -> List[Dict[str, Any]]:
+        """
+        Persist output files as artifacts and return updated file info with artifact IDs.
+
+        Args:
+            user: User context
+            session_id: Session ID
+            output_files: List of output files with filename, content_base64, mime_type, size_bytes
+            source: Source of artifacts (code_execution, image_generation, etc.)
+
+        Returns:
+            Updated output_files list with artifact_id added to each file
+        """
+        if not self.artifact_storage or not output_files:
+            return output_files
+
+        import base64
+
+        persisted_files = []
+        for file_info in output_files:
+            try:
+                # Decode base64 content
+                content = base64.b64decode(file_info.get("content_base64", ""))
+                filename = file_info.get("filename", "output")
+                mime_type = file_info.get("mime_type", "application/octet-stream")
+
+                # Determine artifact type and format from mime_type
+                if mime_type.startswith("image/"):
+                    artifact_type = "image"
+                    artifact_format = mime_type.split("/")[-1]  # png, jpeg, etc.
+                elif mime_type == "application/pdf":
+                    artifact_type = "document"
+                    artifact_format = "pdf"
+                elif mime_type in ("text/csv", "application/csv"):
+                    artifact_type = "file"
+                    artifact_format = "csv"
+                else:
+                    artifact_type = "file"
+                    artifact_format = filename.split(".")[-1] if "." in filename else "bin"
+
+                # Create artifact
+                artifact = await self.artifact_storage.create_artifact(
+                    session_id=session_id,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    type=artifact_type,
+                    format=artifact_format,
+                    title=filename,
+                    filename=filename,
+                    content=content,
+                    source=source,
+                )
+
+                # Add artifact_id to file info
+                updated_file = {**file_info, "artifact_id": artifact.artifact_id}
+                persisted_files.append(updated_file)
+
+                logger.debug(f"Persisted artifact: {artifact.artifact_id} ({filename})")
+
+            except Exception as e:
+                logger.warning(f"Failed to persist artifact {file_info.get('filename')}: {e}")
+                persisted_files.append(file_info)  # Keep original file info without artifact_id
+
+        return persisted_files
 
     async def chat_stream(
         self,
@@ -394,46 +477,386 @@ Please use this web search context to inform your response when relevant."""
         total_content = ""
         usage: Dict[str, int] = {}
 
-        try:
-            async for delta in self.model_registry.chat_stream(
-                model_id=config.model_id,
-                messages=messages,
-                temperature=config.temperature,
-                max_tokens=config.max_tokens,
-            ):
-                if delta.content:
-                    total_content += delta.content
+        # Get tools from registry if code executor is available
+        tools = None
+        if self.code_executor:
+            from .tools import get_tool_registry
+            registry = get_tool_registry()
+            tools = registry.get_openai_schemas()
+            logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
+
+        # Agentic loop: handle tool calls until model finishes
+        max_tool_iterations = 5
+        current_messages = messages.copy()
+        iteration = 0
+
+        while iteration < max_tool_iterations:
+            iteration += 1
+            tool_calls_accumulated: Dict[int, Dict[str, Any]] = {}
+            finish_reason = None
+
+            try:
+                async for delta in self.model_registry.chat_stream(
+                    model_id=config.model_id,
+                    messages=current_messages,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                    tools=tools,
+                ):
+                    if delta.content:
+                        total_content += delta.content
+                        yield AssistantStreamEvent(
+                            event_type="text_delta",
+                            data=delta.content
+                        )
+
+                    if delta.tool_calls:
+                        # Accumulate tool call chunks
+                        for tc in delta.tool_calls:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_calls_accumulated:
+                                tool_calls_accumulated[idx] = {
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""}
+                                }
+                            if tc.get("id"):
+                                tool_calls_accumulated[idx]["id"] = tc["id"]
+                            if tc.get("function", {}).get("name"):
+                                tool_calls_accumulated[idx]["function"]["name"] = tc["function"]["name"]
+                            if tc.get("function", {}).get("arguments"):
+                                tool_calls_accumulated[idx]["function"]["arguments"] += tc["function"]["arguments"]
+
+                        yield AssistantStreamEvent(
+                            event_type="tool_call",
+                            data=delta.tool_calls
+                        )
+
+                    if delta.usage:
+                        usage.update(delta.usage)
+
+                    if delta.finish_reason:
+                        finish_reason = delta.finish_reason
+
+            except Exception as e:
+                logger.error(f"Model streaming failed: {e}")
+                yield AssistantStreamEvent(
+                    event_type="error",
+                    data={"message": str(e), "recoverable": False}
+                )
+                return
+
+            # If no tool calls or finish_reason is not "tool_calls", we're done
+            if finish_reason != "tool_calls" or not tool_calls_accumulated:
+                yield AssistantStreamEvent(
+                    event_type="finish",
+                    data={"reason": finish_reason or "stop"}
+                )
+                break
+
+            # Execute tools and continue conversation
+            tool_results = []
+            for idx in sorted(tool_calls_accumulated.keys()):
+                tc = tool_calls_accumulated[idx]
+                tool_name = tc["function"]["name"]
+                tool_args_str = tc["function"]["arguments"]
+                tool_id = tc["id"]
+
+                try:
+                    import json as json_module
+                    tool_args = json_module.loads(tool_args_str) if tool_args_str else {}
+                except json_module.JSONDecodeError:
+                    tool_args = {}
+
+                # Execute tool
+                if tool_name == "execute_python_code" and self.code_executor:
+                    code = tool_args.get("code", "")
                     yield AssistantStreamEvent(
-                        event_type="text_delta",
-                        data=delta.content
+                        event_type=StreamEventType.CODE_EXECUTION_START,
+                        data={"execution_id": tool_id, "language": "python", "code": code}
                     )
 
-                if delta.tool_calls:
+                    try:
+                        result = await self.code_executor.execute(code=code)
+                        success = result.is_success()
+                        output = result.stdout if success else f"Error: {result.stderr or result.error_message}"
+
+                        # Prepare output files
+                        output_files = [
+                            {
+                                "filename": f.filename,
+                                "content_base64": f.to_base64(),
+                                "mime_type": f.mime_type,
+                                "size_bytes": f.size_bytes,
+                            }
+                            for f in result.output_files
+                        ] if result.output_files else []
+
+                        # Persist artifacts to storage
+                        if output_files:
+                            output_files = await self._persist_artifacts(
+                                user=user,
+                                session_id=session_id,
+                                output_files=output_files,
+                                source="code_execution",
+                            )
+
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.CODE_EXECUTION_RESULT,
+                            data={
+                                "execution_id": tool_id,
+                                "success": success,
+                                "stdout": result.stdout,
+                                "stderr": result.stderr,
+                                "execution_time_ms": result.duration_ms,
+                                "output_files": output_files,
+                            }
+                        )
+
+                        # Send ARTIFACT_CREATED events for persisted artifacts
+                        for file_info in output_files:
+                            if file_info.get("artifact_id"):
+                                yield AssistantStreamEvent(
+                                    event_type=StreamEventType.ARTIFACT_CREATED,
+                                    data={
+                                        "artifact_id": file_info["artifact_id"],
+                                        "type": "image" if file_info.get("mime_type", "").startswith("image/") else "file",
+                                        "format": file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "bin",
+                                        "title": file_info.get("filename", "output"),
+                                        "filename": file_info.get("filename"),
+                                        "mime_type": file_info.get("mime_type"),
+                                        "size_bytes": file_info.get("size_bytes"),
+                                        "source": "code_execution",
+                                    }
+                                )
+
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": output,
+                        })
+                    except Exception as e:
+                        logger.error(f"Code execution failed: {e}")
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": f"Execution error: {str(e)}",
+                        })
+
+                elif tool_name == "generate_image":
+                    # Image generation with streaming events
+                    prompt = tool_args.get("prompt", "")
                     yield AssistantStreamEvent(
-                        event_type="tool_call",
-                        data=delta.tool_calls
+                        event_type=StreamEventType.IMAGE_GENERATION_START,
+                        data={"execution_id": tool_id, "prompt": prompt}
                     )
 
-                if delta.usage:
-                    usage.update(delta.usage)
+                    try:
+                        from .tools import get_tool_registry, ToolCallRequest
+                        registry = get_tool_registry()
+                        tool_result = await registry.execute(
+                            ToolCallRequest(
+                                call_id=tool_id,
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                user=user,
+                            )
+                        )
 
-                if delta.finish_reason:
+                        # Persist generated images as artifacts
+                        output_files = tool_result.output_files or []
+                        if output_files:
+                            output_files = await self._persist_artifacts(
+                                user=user,
+                                session_id=session_id,
+                                output_files=output_files,
+                                source="image_generation",
+                            )
+
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.IMAGE_GENERATION_RESULT,
+                            data={
+                                "execution_id": tool_id,
+                                "success": tool_result.success,
+                                "result": tool_result.result,
+                                "error": tool_result.error,
+                                "output_files": output_files,
+                                "duration_ms": tool_result.duration_ms,
+                            }
+                        )
+
+                        # Send ARTIFACT_CREATED events for persisted artifacts
+                        for file_info in output_files:
+                            if file_info.get("artifact_id"):
+                                yield AssistantStreamEvent(
+                                    event_type=StreamEventType.ARTIFACT_CREATED,
+                                    data={
+                                        "artifact_id": file_info["artifact_id"],
+                                        "type": "image",
+                                        "format": file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "png",
+                                        "title": file_info.get("filename", "generated_image"),
+                                        "filename": file_info.get("filename"),
+                                        "mime_type": file_info.get("mime_type"),
+                                        "size_bytes": file_info.get("size_bytes"),
+                                        "source": "image_generation",
+                                    }
+                                )
+
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
+                        })
+                    except Exception as e:
+                        logger.error(f"Image generation failed: {e}")
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": f"Image generation error: {str(e)}",
+                        })
+
+                elif tool_name == "generate_document":
+                    # Document generation with streaming events
+                    title = tool_args.get("title", "Document")
+                    content = tool_args.get("content", "")
+                    format_type = tool_args.get("format", "docx")
+
                     yield AssistantStreamEvent(
-                        event_type="finish",
-                        data={"reason": delta.finish_reason}
+                        event_type=StreamEventType.DOCUMENT_GENERATION_START,
+                        data={"execution_id": tool_id, "title": title, "format": format_type}
                     )
 
-        except Exception as e:
-            logger.error(f"Model streaming failed: {e}")
-            yield AssistantStreamEvent(
-                event_type="error",
-                data={"message": str(e), "recoverable": False}
-            )
-            return
+                    try:
+                        from .tools import get_tool_registry, ToolCallRequest
+                        registry = get_tool_registry()
+                        tool_result = await registry.execute(
+                            ToolCallRequest(
+                                call_id=tool_id,
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                user=user,
+                            )
+                        )
+
+                        # Persist generated documents as artifacts
+                        output_files = tool_result.output_files or []
+                        if output_files:
+                            output_files = await self._persist_artifacts(
+                                user=user,
+                                session_id=session_id,
+                                output_files=output_files,
+                                source="document_generation",
+                            )
+
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.DOCUMENT_GENERATION_RESULT,
+                            data={
+                                "execution_id": tool_id,
+                                "success": tool_result.success,
+                                "result": tool_result.result,
+                                "error": tool_result.error,
+                                "output_files": output_files,
+                                "duration_ms": tool_result.duration_ms,
+                            }
+                        )
+
+                        # Send ARTIFACT_CREATED events for persisted documents
+                        for file_info in output_files:
+                            if file_info.get("artifact_id"):
+                                mime_type = file_info.get("mime_type", "")
+                                doc_format = format_type  # docx, pdf, md
+                                yield AssistantStreamEvent(
+                                    event_type=StreamEventType.ARTIFACT_CREATED,
+                                    data={
+                                        "artifact_id": file_info["artifact_id"],
+                                        "type": "document",
+                                        "format": doc_format,
+                                        "title": file_info.get("filename", title),
+                                        "filename": file_info.get("filename"),
+                                        "mime_type": mime_type,
+                                        "size_bytes": file_info.get("size_bytes"),
+                                        "source": "document_generation",
+                                    }
+                                )
+
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
+                        })
+                    except Exception as e:
+                        logger.error(f"Document generation failed: {e}")
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": f"Document generation error: {str(e)}",
+                        })
+
+                else:
+                    # Execute other registered tools via registry
+                    try:
+                        from .tools import get_tool_registry, ToolCallRequest
+                        registry = get_tool_registry()
+
+                        if registry.get_tool(tool_name):
+                            tool_result = await registry.execute(
+                                ToolCallRequest(
+                                    call_id=tool_id,
+                                    tool_name=tool_name,
+                                    arguments=tool_args,
+                                    user=user,
+                                )
+                            )
+                            tool_results.append({
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
+                            })
+                        else:
+                            tool_results.append({
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": f"Unknown tool: {tool_name}",
+                            })
+                    except Exception as e:
+                        logger.error(f"Tool {tool_name} execution failed: {e}")
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": f"Tool execution error: {str(e)}",
+                        })
+
+            # Add assistant message with tool calls and tool results
+            current_messages.append(ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[tool_calls_accumulated[idx] for idx in sorted(tool_calls_accumulated.keys())]
+            ))
+            for tr in tool_results:
+                current_messages.append(ChatMessage(
+                    role="tool",
+                    content=tr["content"],
+                    tool_call_id=tr["tool_call_id"],
+                ))
+
+            logger.info(f"Tool iteration {iteration}: executed {len(tool_results)} tools, continuing...")
 
         # Step 5: Persist assistant response to session
         if persist_messages and self.session_manager and total_content:
             try:
+                # Serialize contexts for persistence
+                contexts_data = []
+                for ctx in retrieved_contexts:
+                    contexts_data.append({
+                        "dataset_id": ctx.dataset_id,
+                        "dataset_name": ctx.dataset_name,
+                        "chunks": ctx.chunks,
+                        "query": ctx.query,
+                        "took_ms": ctx.took_ms,
+                        "avg_score": ctx.avg_score,
+                        "top_score": ctx.top_score,
+                    })
+
                 await self.session_manager.add_message(
                     session_id=session_id,
                     role="assistant",
@@ -442,6 +865,7 @@ Please use this web search context to inform your response when relevant."""
                         "timestamp": datetime.utcnow().isoformat(),
                         "model_id": config.model_id,
                         "usage": usage,
+                        "contexts": contexts_data if contexts_data else None,
                     },
                 )
             except Exception as e:
@@ -687,12 +1111,21 @@ Please use this web search context to inform your response when relevant."""
             try:
                 # Use retrieve_with_images if available and requested
                 if include_images and hasattr(self.kb_service, 'retrieve_with_images'):
+                    # Expand recall range for multimodal retrieval (top_k * 2.5)
+                    # This ensures images (with naturally lower similarity scores) have a chance to rank in
+                    expanded_top_k = int(top_k * 2.5)
                     results, meta = await self.kb_service.retrieve_with_images(
                         user=user,
                         dataset_id=dataset_id,
                         query=query,
-                        top_k=top_k,
-                        score_threshold=score_threshold,  # 修复：传递 score_threshold 保持一致性
+                        top_k=expanded_top_k,
+                        score_threshold=score_threshold,
+                        include_images=True,
+                        # Multimodal optimization: boost image results and use lower threshold
+                        # Image vectors naturally score lower (~0.5) vs text (~0.8), so we boost aggressively
+                        image_boost=3.0,  # Boost image results to improve their ranking (was 1.5)
+                        use_separate_thresholds=True,
+                        image_score_threshold=0.3,  # Lower threshold for images
                     )
                 else:
                     results, meta = await self.kb_service.retrieve(
@@ -704,7 +1137,15 @@ Please use this web search context to inform your response when relevant."""
                     )
 
                 took_ms = (time.time() - start) * 1000
-                logger.info(f"Dataset '{dataset_id}' returned {len(results)} results in {took_ms:.1f}ms")
+                # Debug: Log content types and image_url presence
+                content_type_counts = {}
+                image_url_count = 0
+                for r in results:
+                    ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                    content_type_counts[ct] = content_type_counts.get(ct, 0) + 1
+                    if r.image_url:
+                        image_url_count += 1
+                logger.info(f"Dataset '{dataset_id}' returned {len(results)} results in {took_ms:.1f}ms - content_types={content_type_counts}, with_image_url={image_url_count}")
 
                 # Convert results to serializable format
                 chunks = []
