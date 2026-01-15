@@ -33,9 +33,21 @@ import {
   User,
   ImageIcon,
   ChevronDown,
+  CheckSquare,
+  Square,
+  ListChecks,
+  LayoutList,
+  Table2,
+  Copy,
+  Code,
+  Terminal,
+  ExternalLink,
+  Check,
+  Cloud,
 } from "lucide-react";
 
 import { useDataset, useDocuments, useSegments } from "@/hooks/useKnowledge";
+import { getApiBaseUrl } from "@/lib/api";
 import {
   deleteDocument,
   deleteSegment,
@@ -43,6 +55,7 @@ import {
   reindexDocument,
   updateSegment,
   uploadDocument,
+  uploadImages,
   createDocumentFromText,
   createDocumentFromUrl,
   deleteDataset,
@@ -53,6 +66,8 @@ import {
   debugDataset,
   updateDatasetConfig,
   previewChunking,
+  batchReindexDocuments,
+  batchDeleteDocuments,
   type ChunkPreviewItem,
 } from "@/api/knowledge";
 import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
@@ -64,6 +79,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { StreamOutput } from "@/components/StreamOutput";
 import {
   Dialog,
@@ -86,9 +102,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { toast } from "@/hooks/use-toast";
 import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentCard } from "@/pages/knowledge/detail/SegmentCard";
 import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
+import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
+import { SourcesTab } from "@/pages/knowledge/sources";
 
 type QAChatMessage = {
   id: string;
@@ -132,9 +151,9 @@ export function KnowledgeDatasetDetailPage() {
   const segments = segmentsQuery.data || [];
 
   const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "settings" | null;
-  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "settings">(
-    initialTab && ["documents", "retrieval", "qa", "settings"].includes(initialTab) ? initialTab : "documents"
+  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "sources" | "settings" | "permissions" | null;
+  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "sources" | "settings" | "permissions">(
+    initialTab && ["documents", "retrieval", "qa", "sources", "settings", "permissions"].includes(initialTab) ? initialTab : "documents"
   );
 
   // Upload state
@@ -276,6 +295,98 @@ export function KnowledgeDatasetDetailPage() {
   const [previewChunksResult, setPreviewChunksResult] = useState<ChunkPreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
 
+  // Batch operations
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
+  const [batchReindexOpen, setBatchReindexOpen] = useState(false);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "uploaded" | "processing" | "failed">("all");
+  const [contentTypeFilter, setContentTypeFilter] = useState<"all" | "document" | "data" | "image">("all");
+
+  // Search state
+  const [searchField, setSearchField] = useState<"name" | "id">("name");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [formatFilter, setFormatFilter] = useState("all");
+
+  // API copy feedback
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Helper function to copy text with feedback
+  const copyToClipboard = async (text: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+      toast.error("复制失败", "请手动复制");
+    }
+  };
+
+  // File type categories for filtering
+  const FILE_TYPE_CATEGORIES = {
+    document: ["pdf", "doc", "docx", "txt", "md", "html", "rtf"],
+    data: ["xls", "xlsx", "csv", "json", "xml"],
+    image: ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"],
+  };
+
+  // Filter documents by status, content type, format, and search term
+  const filteredDocs = useMemo(() => {
+    let result = docs;
+
+    // Filter by search term
+    if (searchTerm.trim()) {
+      const term = searchTerm.toLowerCase().trim();
+      result = result.filter((d) => {
+        if (searchField === "name") {
+          return d.title?.toLowerCase().includes(term);
+        } else {
+          return d.document_id?.toLowerCase().includes(term);
+        }
+      });
+    }
+
+    // Filter by status
+    if (statusFilter !== "all") {
+      if (statusFilter === "processing") {
+        result = result.filter((d) => ["parsing", "segmenting", "embedding"].includes(d.status));
+      } else {
+        result = result.filter((d) => d.status === statusFilter);
+      }
+    }
+
+    // Filter by format
+    if (formatFilter !== "all") {
+      result = result.filter((d) => {
+        const ext = d.title?.split(".").pop()?.toLowerCase() || "";
+        return ext === formatFilter;
+      });
+    }
+
+    // Filter by content type
+    if (contentTypeFilter !== "all") {
+      result = result.filter((d) => {
+        const ext = d.title?.split(".").pop()?.toLowerCase() || "";
+        return FILE_TYPE_CATEGORIES[contentTypeFilter]?.includes(ext);
+      });
+    }
+
+    return result;
+  }, [docs, searchTerm, searchField, statusFilter, formatFilter, contentTypeFilter]);
+
+  // Count documents by content type for badges
+  const contentTypeCounts = useMemo(() => {
+    const counts = { all: docs.length, document: 0, data: 0, image: 0 };
+    docs.forEach((d) => {
+      const ext = d.title?.split(".").pop()?.toLowerCase() || "";
+      if (FILE_TYPE_CATEGORIES.document.includes(ext)) counts.document++;
+      else if (FILE_TYPE_CATEGORIES.data.includes(ext)) counts.data++;
+      else if (FILE_TYPE_CATEGORIES.image.includes(ext)) counts.image++;
+    });
+    return counts;
+  }, [docs]);
+
   // Don't auto-select first document - only show segments when user clicks "查看切片"
 
   useEffect(() => {
@@ -360,7 +471,7 @@ export function KnowledgeDatasetDetailPage() {
       setDatasetConfig(config);
     } catch (e) {
       console.error("Failed to save config:", e);
-      alert("保存配置失败: " + (e instanceof Error ? e.message : String(e)));
+      toast.error("保存配置失败", e instanceof Error ? e.message : String(e));
     } finally {
       setConfigSaving(false);
     }
@@ -401,7 +512,7 @@ export function KnowledgeDatasetDetailPage() {
       setDatasetConfig(config);
     } catch (e) {
       console.error("Failed to save retrieval config:", e);
-      alert("保存检索配置失败: " + (e instanceof Error ? e.message : String(e)));
+      toast.error("保存检索配置失败", e instanceof Error ? e.message : String(e));
     } finally {
       setConfigSaving(false);
     }
@@ -419,7 +530,7 @@ export function KnowledgeDatasetDetailPage() {
       setPreviewChunksResult(result.chunks);
     } catch (e) {
       console.error("Failed to preview chunks:", e);
-      alert("预览分块失败: " + (e instanceof Error ? e.message : String(e)));
+      toast.error("预览分块失败", e instanceof Error ? e.message : String(e));
     } finally {
       setPreviewLoading(false);
     }
@@ -438,6 +549,45 @@ export function KnowledgeDatasetDetailPage() {
       setUploadDialogOpen(true);
     }
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  // When images are selected via image input
+  async function handleImagesSelected(files?: FileList | null) {
+    if (!files || files.length === 0 || !datasetId) return;
+
+    const imageFiles = Array.from(files);
+    setUploading(true);
+
+    try {
+      const result = await uploadImages(datasetId, imageFiles);
+
+      // Refresh document list
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+
+      // Show result
+      if (result.failed_count > 0) {
+        toast.warning(
+          `图片上传完成: ${result.success_count} 成功, ${result.failed_count} 失败`,
+          result.errors.map((e) => `${e.filename}: ${e.error}`).join("; ")
+        );
+      }
+      if (result.success_count > 0) {
+        // Switch to image filter to show uploaded images
+        setContentTypeFilter("image");
+        // Show success message if no failures
+        if (result.failed_count === 0) {
+          toast.success(`成功上传 ${result.success_count} 张图片`, "正在处理中...");
+        }
+      }
+    } catch (e) {
+      console.error("Failed to upload images:", e);
+      toast.error("图片上传失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setUploading(false);
+      // Reset the input
+      const input = document.getElementById("image-upload-input") as HTMLInputElement;
+      if (input) input.value = "";
+    }
   }
 
   // Build chunking config based on mode
@@ -542,7 +692,7 @@ export function KnowledgeDatasetDetailPage() {
     } catch (err) {
       console.error("Upload failed:", err);
       setUploadDialogOpen(false);
-      alert("上传失败: " + (err instanceof Error ? err.message : String(err)));
+      toast.error("上传失败", err instanceof Error ? err.message : String(err));
     } finally {
       setUploading(false);
     }
@@ -578,7 +728,7 @@ export function KnowledgeDatasetDetailPage() {
       setUrlInput("");
       setUrlTitle("");
     } catch (e) {
-      alert("URL获取失败: " + (e instanceof Error ? e.message : String(e)));
+      toast.error("URL获取失败", e instanceof Error ? e.message : String(e));
     } finally {
       setUrlSaving(false);
     }
@@ -596,7 +746,7 @@ export function KnowledgeDatasetDetailPage() {
       }, 1000);
     } catch (e) {
       console.error("Reindex failed:", e);
-      alert("重建索引失败: " + (e instanceof Error ? e.message : String(e)));
+      toast.error("重建索引失败", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -605,6 +755,97 @@ export function KnowledgeDatasetDetailPage() {
     await deleteDocument(datasetId, doc.document_id);
     await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
     if (selectedDocId === doc.document_id) setSelectedDocId(undefined);
+  }
+
+  // Batch operations
+  function toggleBatchMode() {
+    if (batchMode) {
+      // Exit batch mode, clear selection
+      setBatchMode(false);
+      setSelectedDocIds(new Set());
+    } else {
+      setBatchMode(true);
+    }
+  }
+
+  function toggleDocSelection(docId: string) {
+    setSelectedDocIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(docId)) {
+        newSet.delete(docId);
+      } else {
+        newSet.add(docId);
+      }
+      return newSet;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selectedDocIds.size === filteredDocs.length) {
+      // Deselect all
+      setSelectedDocIds(new Set());
+    } else {
+      // Select all filtered docs
+      setSelectedDocIds(new Set(filteredDocs.map((d) => d.document_id)));
+    }
+  }
+
+  function selectByStatus(status: string) {
+    const docsWithStatus = docs.filter((d) => {
+      if (status === "processing") {
+        return ["parsing", "segmenting", "embedding"].includes(d.status);
+      }
+      return d.status === status;
+    });
+    setSelectedDocIds(new Set(docsWithStatus.map((d) => d.document_id)));
+  }
+
+  async function handleBatchReindex() {
+    if (!datasetId || selectedDocIds.size === 0) return;
+    setBatchLoading(true);
+    try {
+      const result = await batchReindexDocuments(datasetId, Array.from(selectedDocIds));
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      setBatchReindexOpen(false);
+      setSelectedDocIds(new Set());
+      // Show result
+      if (result.failed_count > 0) {
+        toast.warning(`批量重建索引完成`, `${result.success_count} 成功, ${result.failed_count} 失败`);
+      } else {
+        toast.success(`批量重建索引完成`, `${result.success_count} 个文档已加入处理队列`);
+      }
+    } catch (e) {
+      console.error("Batch reindex failed:", e);
+      toast.error("批量重建索引失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchDelete() {
+    if (!datasetId || selectedDocIds.size === 0) return;
+    setBatchLoading(true);
+    try {
+      const result = await batchDeleteDocuments(datasetId, Array.from(selectedDocIds));
+      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      setBatchDeleteOpen(false);
+      setSelectedDocIds(new Set());
+      // Clear selected doc if it was deleted
+      if (selectedDocId && selectedDocIds.has(selectedDocId)) {
+        setSelectedDocId(undefined);
+      }
+      // Show result
+      if (result.failed_count > 0) {
+        toast.warning(`批量删除完成`, `${result.success_count} 成功, ${result.failed_count} 失败`);
+      } else {
+        toast.success(`批量删除完成`, `已删除 ${result.success_count} 个文档`);
+      }
+    } catch (e) {
+      console.error("Batch delete failed:", e);
+      toast.error("批量删除失败", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBatchLoading(false);
+    }
   }
 
   function openEdit(segmentId: string, text: string) {
@@ -832,14 +1073,18 @@ export function KnowledgeDatasetDetailPage() {
     documents: "border-primary text-primary bg-primary/10",
     retrieval: "border-primary text-primary bg-primary/10",
     qa: "border-primary text-primary bg-primary/10",
+    sync: "border-primary text-primary bg-primary/10",
     settings: "border-primary text-primary bg-primary/10",
+    permissions: "border-primary text-primary bg-primary/10",
   } as const;
 
   const tabIconStyles = {
     documents: "text-primary",
     retrieval: "text-primary",
     qa: "text-primary",
+    sync: "text-primary",
     settings: "text-primary",
+    permissions: "text-primary",
   } as const;
 
 
@@ -913,7 +1158,9 @@ export function KnowledgeDatasetDetailPage() {
               { key: "documents", label: "文档管理", icon: FileText },
               { key: "retrieval", label: "召回测试", icon: Search },
               { key: "qa", label: "QA 测试", icon: MessageSquare },
+              { key: "sync", label: "同步源", icon: Cloud },
               { key: "settings", label: "配置", icon: Sliders },
+              { key: "permissions", label: "权限", icon: Lock },
             ].map((tab) => (
               <button
                 key={tab.key}
@@ -940,11 +1187,41 @@ export function KnowledgeDatasetDetailPage() {
         {/* 文档管理 Tab */}
         {mainTab === "documents" && (
           <div className="space-y-4">
+            {/* 内容类型子Tab - 圆角药丸风格 */}
+            <div className="inline-flex bg-muted/50 rounded-full p-1">
+              {[
+                { key: "all" as const, label: "全部", icon: LayoutList, count: contentTypeCounts.all },
+                { key: "document" as const, label: "文档", icon: FileText, count: contentTypeCounts.document },
+                { key: "data" as const, label: "数据", icon: Table2, count: contentTypeCounts.data },
+                { key: "image" as const, label: "图片", icon: ImageIcon, count: contentTypeCounts.image },
+              ].map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => setContentTypeFilter(tab.key)}
+                  className={`
+                    flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm transition-all
+                    ${contentTypeFilter === tab.key
+                      ? "bg-background shadow-sm text-foreground font-medium"
+                      : "text-muted-foreground hover:text-foreground"
+                    }
+                  `}
+                >
+                  <tab.icon className="h-4 w-4" />
+                  {tab.label}
+                  {tab.count > 0 && (
+                    <span className={`text-xs ${contentTypeFilter === tab.key ? "text-primary" : "text-muted-foreground"}`}>
+                      {tab.count}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+
             {/* 工具栏 - 阿里云风格 */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 {/* 筛选下拉 */}
-                <Select defaultValue="name">
+                <Select value={searchField} onValueChange={(v) => setSearchField(v as "name" | "id")}>
                   <SelectTrigger className="w-28 bg-card h-9">
                     <SelectValue placeholder="数据名" />
                   </SelectTrigger>
@@ -957,7 +1234,9 @@ export function KnowledgeDatasetDetailPage() {
                 {/* 搜索框 */}
                 <div className="relative">
                   <Input
-                    placeholder="搜索文件名称"
+                    placeholder={searchField === "name" ? "搜索文件名称" : "搜索文档ID"}
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-64 h-9 bg-card pr-8"
                   />
                   <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
@@ -965,18 +1244,19 @@ export function KnowledgeDatasetDetailPage() {
               </div>
 
               <div className="flex items-center gap-2">
-                <Select defaultValue="all">
+                <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}>
                   <SelectTrigger className="w-28 bg-card h-9">
                     <SelectValue placeholder="全部状态" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部状态</SelectItem>
                     <SelectItem value="completed">已完成</SelectItem>
+                    <SelectItem value="uploaded">已上传</SelectItem>
                     <SelectItem value="processing">处理中</SelectItem>
                     <SelectItem value="failed">失败</SelectItem>
                   </SelectContent>
                 </Select>
-                <Select defaultValue="all">
+                <Select value={formatFilter} onValueChange={setFormatFilter}>
                   <SelectTrigger className="w-32 bg-card h-9">
                     <SelectValue placeholder="全部数据格式" />
                   </SelectTrigger>
@@ -999,9 +1279,82 @@ export function KnowledgeDatasetDetailPage() {
                 <Button variant="outline" className="h-9 bg-card">
                   Meta信息
                 </Button>
-                <Button variant="outline" className="h-9 bg-card">
-                  批量操作
-                </Button>
+                {/* 批量操作下拉菜单 */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant={batchMode ? "default" : "outline"}
+                      className={`h-9 ${batchMode ? "bg-primary text-white" : "bg-card"}`}
+                    >
+                      <ListChecks className="h-4 w-4 mr-1.5" />
+                      批量操作
+                      {selectedDocIds.size > 0 && (
+                        <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs">
+                          {selectedDocIds.size}
+                        </Badge>
+                      )}
+                      <ChevronDown className="h-4 w-4 ml-1" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuItem onClick={toggleBatchMode}>
+                      {batchMode ? (
+                        <>
+                          <X className="h-4 w-4 mr-2" />
+                          退出批量模式
+                        </>
+                      ) : (
+                        <>
+                          <CheckSquare className="h-4 w-4 mr-2" />
+                          进入批量模式
+                        </>
+                      )}
+                    </DropdownMenuItem>
+                    {batchMode && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={toggleSelectAll}>
+                          {selectedDocIds.size === filteredDocs.length ? (
+                            <>
+                              <Square className="h-4 w-4 mr-2" />
+                              取消全选
+                            </>
+                          ) : (
+                            <>
+                              <CheckSquare className="h-4 w-4 mr-2" />
+                              全选当前页
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => selectByStatus("uploaded")}>
+                          <Upload className="h-4 w-4 mr-2" />
+                          选择已上传
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => selectByStatus("failed")}>
+                          <X className="h-4 w-4 mr-2" />
+                          选择失败的
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => setBatchReindexOpen(true)}
+                          disabled={selectedDocIds.size === 0}
+                          className="text-primary"
+                        >
+                          <Zap className="h-4 w-4 mr-2" />
+                          批量重建索引 ({selectedDocIds.size})
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => setBatchDeleteOpen(true)}
+                          disabled={selectedDocIds.size === 0}
+                          className="text-destructive"
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          批量删除 ({selectedDocIds.size})
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
 
                 {/* 添加数据下拉菜单 */}
                 <input
@@ -1011,6 +1364,14 @@ export function KnowledgeDatasetDetailPage() {
                   accept=".txt,.md,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
                   multiple
                   onChange={(e) => handleFilesSelected(e.target.files)}
+                />
+                <input
+                  id="image-upload-input"
+                  type="file"
+                  className="hidden"
+                  accept="image/jpeg,image/png,image/gif,image/webp,image/bmp"
+                  multiple
+                  onChange={(e) => handleImagesSelected(e.target.files)}
                 />
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -1028,6 +1389,11 @@ export function KnowledgeDatasetDetailPage() {
                       <Upload className="h-4 w-4 mr-2" />
                       上传文件
                     </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => document.getElementById("image-upload-input")?.click()}>
+                      <ImageIcon className="h-4 w-4 mr-2" />
+                      上传图片
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setUrlDialogOpen(true)}>
                       <Globe className="h-4 w-4 mr-2" />
                       添加 URL
@@ -1045,6 +1411,14 @@ export function KnowledgeDatasetDetailPage() {
             <Card className="p-0 overflow-hidden border-border">
               {/* 表头 */}
               <div className="flex items-center px-5 py-3 bg-muted/40 border-b border-border text-sm font-medium text-muted-foreground">
+                {batchMode && (
+                  <div className="mr-3 flex items-center">
+                    <Checkbox
+                      checked={filteredDocs.length > 0 && selectedDocIds.size === filteredDocs.length}
+                      onCheckedChange={toggleSelectAll}
+                    />
+                  </div>
+                )}
                 <div className="flex-1">数据名称</div>
                 <div className="w-24 text-center">数据大小</div>
                 <div className="w-28 text-center">状态</div>
@@ -1055,17 +1429,20 @@ export function KnowledgeDatasetDetailPage() {
 
               {/* 文档列表 */}
               <div className="max-h-[300px] overflow-auto">
-                {docs.map((doc) => (
+                {filteredDocs.map((doc) => (
                   <DocumentRow
                     key={doc.document_id}
                     doc={doc}
                     selected={selectedDocId === doc.document_id}
+                    checked={selectedDocIds.has(doc.document_id)}
+                    showCheckbox={batchMode}
                     onSelect={() => setSelectedDocId(doc.document_id)}
+                    onCheck={() => toggleDocSelection(doc.document_id)}
                     onReindex={() => handleReindex(doc)}
                     onDelete={() => handleDeleteDoc(doc)}
                   />
                 ))}
-                {docs.length === 0 && !docsQuery.isLoading && (
+                {filteredDocs.length === 0 && !docsQuery.isLoading && (
                   <div className="text-center py-16">
                     <FileText className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
                     <p className="text-muted-foreground">暂无文档</p>
@@ -2456,6 +2833,308 @@ export function KnowledgeDatasetDetailPage() {
                 </div>
               </Card>
             )}
+
+            {/* API 配置展示 */}
+            <Card className="p-5 col-span-2">
+              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <Code className="h-5 w-5 text-violet-500" />
+                API 调用
+              </h3>
+
+              <div className="space-y-4">
+                {/* API 端点信息 */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-4 bg-muted/40 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-muted-foreground font-medium">检索端点</p>
+                      <button
+                        onClick={() => copyToClipboard(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve`, "retrieve-url")}
+                        className="text-muted-foreground hover:text-foreground transition-colors"
+                        title={copiedKey === "retrieve-url" ? "已复制" : "复制"}
+                      >
+                        {copiedKey === "retrieve-url" ? (
+                          <Check className="h-3.5 w-3.5 text-green-500" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                    <code className="text-xs font-mono text-foreground/80 break-all">
+                      POST /api/v1/knowledge/{datasetId}/retrieve
+                    </code>
+                  </div>
+                  <div className="p-4 bg-muted/40 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-muted-foreground font-medium">QA 端点</p>
+                      <button
+                        onClick={() => copyToClipboard(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/qa`, "qa-url")}
+                        className="text-muted-foreground hover:text-foreground transition-colors"
+                        title={copiedKey === "qa-url" ? "已复制" : "复制"}
+                      >
+                        {copiedKey === "qa-url" ? (
+                          <Check className="h-3.5 w-3.5 text-green-500" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                    <code className="text-xs font-mono text-foreground/80 break-all">
+                      POST /api/v1/knowledge/{datasetId}/qa
+                    </code>
+                  </div>
+                </div>
+
+                {/* 代码示例 Tab */}
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="bg-slate-900 text-white">
+                    <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-700">
+                      <Terminal className="h-4 w-4 text-slate-400" />
+                      <span className="text-sm font-medium">请求示例</span>
+                      <div className="ml-auto flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            const curlCmd = `curl -X POST '${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve' \\
+  -H 'Content-Type: application/json' \\
+  -H 'Authorization: Bearer YOUR_API_KEY' \\
+  -d '{
+    "query": "你的查询问题",
+    "top_k": 5,
+    "mode": "hybrid"
+  }'`;
+                            copyToClipboard(curlCmd, "curl");
+                          }}
+                          className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
+                        >
+                          {copiedKey === "curl" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                          {copiedKey === "curl" ? "已复制" : "复制"}
+                        </button>
+                      </div>
+                    </div>
+                    <pre className="p-4 text-xs overflow-x-auto font-mono leading-relaxed">
+                      <code className="text-green-400"># 检索知识库</code>
+                      {"\n"}curl -X POST <span className="text-yellow-300">'{getApiBaseUrl()}/api/v1/knowledge/{datasetId}/retrieve'</span> \
+                      {"\n"}  -H <span className="text-cyan-300">'Content-Type: application/json'</span> \
+                      {"\n"}  -H <span className="text-cyan-300">'Authorization: Bearer YOUR_API_KEY'</span> \
+                      {"\n"}  -d <span className="text-orange-300">{'\'{\n    "query": "你的查询问题",\n    "top_k": 5,\n    "mode": "hybrid"\n  }\''}</span>
+                    </pre>
+                  </div>
+                </div>
+
+                {/* Python 示例 */}
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="bg-slate-900 text-white">
+                    <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-700">
+                      <Code className="h-4 w-4 text-slate-400" />
+                      <span className="text-sm font-medium">Python</span>
+                      <div className="ml-auto flex items-center gap-1">
+                        <button
+                          onClick={() => {
+                            const pythonCode = `import requests
+
+url = "${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve"
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer YOUR_API_KEY"
+}
+payload = {
+    "query": "你的查询问题",
+    "top_k": 5,
+    "mode": "hybrid"  # vector, keyword, or hybrid
+}
+
+response = requests.post(url, json=payload, headers=headers)
+results = response.json()
+
+for chunk in results.get("chunks", []):
+    print(f"Score: {chunk['score']:.3f}")
+    print(f"Content: {chunk['content'][:200]}...")
+    print("-" * 50)`;
+                            copyToClipboard(pythonCode, "python");
+                          }}
+                          className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
+                        >
+                          {copiedKey === "python" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                          {copiedKey === "python" ? "已复制" : "复制"}
+                        </button>
+                      </div>
+                    </div>
+                    <pre className="p-4 text-xs overflow-x-auto font-mono leading-relaxed">
+                      <code className="text-purple-400">import</code> <code className="text-white">requests</code>
+                      {"\n\n"}url = <span className="text-yellow-300">"{getApiBaseUrl()}/api/v1/knowledge/{datasetId}/retrieve"</span>
+                      {"\n"}headers = {"{"}
+                      {"\n"}    <span className="text-cyan-300">"Content-Type"</span>: <span className="text-yellow-300">"application/json"</span>,
+                      {"\n"}    <span className="text-cyan-300">"Authorization"</span>: <span className="text-yellow-300">"Bearer YOUR_API_KEY"</span>
+                      {"\n"}{"}"}
+                      {"\n"}payload = {"{"}
+                      {"\n"}    <span className="text-cyan-300">"query"</span>: <span className="text-yellow-300">"你的查询问题"</span>,
+                      {"\n"}    <span className="text-cyan-300">"top_k"</span>: <span className="text-orange-300">5</span>,
+                      {"\n"}    <span className="text-cyan-300">"mode"</span>: <span className="text-yellow-300">"hybrid"</span>
+                      {"\n"}{"}"}
+                      {"\n\n"}response = requests.post(url, json=payload, headers=headers)
+                      {"\n"}results = response.json()
+                    </pre>
+                  </div>
+                </div>
+
+                {/* 提示信息 */}
+                <div className="p-3 bg-violet-50 border border-violet-200 rounded-lg text-sm text-violet-700 flex items-start gap-2">
+                  <ExternalLink className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium">集成说明</p>
+                    <p className="text-xs mt-1 text-violet-600">
+                      知识库可通过 AI 助手直接使用，或在 LangGraph 代理中作为工具调用。
+                      检索结果支持多模态内容，包括文本和关联图片。
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* 同步源 Tab */}
+        {mainTab === "sync" && datasetId && (
+          <SyncSourcesTab datasetId={datasetId} />
+        )}
+
+        {/* 权限 Tab */}
+        {mainTab === "permissions" && (
+          <div className="max-w-3xl space-y-6">
+            {/* 可见性设置 */}
+            <Card className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
+                  <Globe className="h-5 w-5 text-blue-500" />
+                  访问权限
+                </h3>
+              </div>
+
+              <div className="space-y-4">
+                <p className="text-sm text-muted-foreground">
+                  设置知识库的可见性级别，控制谁可以查看和使用此知识库
+                </p>
+
+                <div className="grid grid-cols-3 gap-4">
+                  {[
+                    { id: "private", name: "私有", desc: "仅创建者可访问", icon: Lock },
+                    { id: "tenant", name: "团队", desc: "同租户所有成员可查看", icon: Users },
+                    { id: "public", name: "公开", desc: "所有人可查看", icon: Globe },
+                  ].map((opt) => {
+                    const Icon = opt.icon;
+                    const currentVisibility = dsQuery.data?.visibility || "private";
+                    const isSelected = currentVisibility === opt.id;
+                    return (
+                      <Card
+                        key={opt.id}
+                        className={`p-4 cursor-pointer transition-all ${
+                          isSelected
+                            ? "border-2 border-primary bg-primary/5"
+                            : "border hover:border-primary/30"
+                        }`}
+                        onClick={async () => {
+                          if (dsQuery.data && opt.id !== currentVisibility) {
+                            try {
+                              await updateDataset(datasetId!, { visibility: opt.id });
+                              dsQuery.refetch();
+                              toast.success("权限已更新");
+                            } catch (e) {
+                              toast.error("更新权限失败", e instanceof Error ? e.message : String(e));
+                            }
+                          }
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon className={`h-4 w-4 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                          <span className="text-sm font-medium">{opt.name}</span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                      </Card>
+                    );
+                  })}
+                </div>
+              </div>
+            </Card>
+
+            {/* 当前权限信息 */}
+            <Card className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
+                  <User className="h-5 w-5 text-emerald-500" />
+                  权限信息
+                </h3>
+              </div>
+
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-3 bg-muted/40 rounded-lg">
+                    <Label className="text-xs text-muted-foreground">创建者</Label>
+                    <p className="text-sm font-medium mt-1">{dsQuery.data?.created_by || "未知"}</p>
+                  </div>
+                  <div className="p-3 bg-muted/40 rounded-lg">
+                    <Label className="text-xs text-muted-foreground">当前可见性</Label>
+                    <div className="flex items-center gap-2 mt-1">
+                      {visibilityIcons[dsQuery.data?.visibility as keyof typeof visibilityIcons] || <Lock className="h-4 w-4" />}
+                      <span className="text-sm font-medium">
+                        {dsQuery.data?.visibility === "private" && "私有"}
+                        {dsQuery.data?.visibility === "tenant" && "团队"}
+                        {dsQuery.data?.visibility === "public" && "公开"}
+                        {!dsQuery.data?.visibility && "私有"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg">
+                  <p className="text-sm text-blue-700 dark:text-blue-300">
+                    <span className="font-medium">提示：</span>
+                    {dsQuery.data?.visibility === "private" && "私有知识库仅创建者本人可访问，可在AI助手和LangGraph中使用。"}
+                    {dsQuery.data?.visibility === "tenant" && "团队知识库对同租户的所有成员可见，成员可在AI助手和LangGraph中使用。"}
+                    {dsQuery.data?.visibility === "public" && "公开知识库对所有用户可见，任何人都可以在AI助手和LangGraph中使用。"}
+                    {!dsQuery.data?.visibility && "私有知识库仅创建者本人可访问，可在AI助手和LangGraph中使用。"}
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            {/* 使用说明 */}
+            <Card className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
+                  <HelpCircle className="h-5 w-5 text-amber-500" />
+                  使用说明
+                </h3>
+              </div>
+
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <div className="flex items-start gap-3">
+                  <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <Bot className="h-3.5 w-3.5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-foreground">AI 助手</p>
+                    <p className="mt-0.5">在AI助手中选择此知识库后，将自动进行RAG检索增强生成。</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <div className="w-6 h-6 rounded-full bg-emerald-500/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <Brain className="h-3.5 w-3.5 text-emerald-500" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-foreground">LangGraph 代理</p>
+                    <p className="mt-0.5">在创建LangGraph代理时配置知识库检索工具，使用此知识库的dataset_id。</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <div className="w-6 h-6 rounded-full bg-violet-500/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                    <Code className="h-3.5 w-3.5 text-violet-500" />
+                  </div>
+                  <div>
+                    <p className="font-medium text-foreground">API 调用</p>
+                    <p className="mt-0.5">通过 <code className="text-xs bg-muted px-1 py-0.5 rounded">/api/v1/knowledge/{dsQuery.data?.dataset_id || "{dataset_id}"}/retrieve</code> 端点直接检索。</p>
+                  </div>
+                </div>
+              </div>
+            </Card>
           </div>
         )}
       </div>
@@ -3223,6 +3902,111 @@ export function KnowledgeDatasetDetailPage() {
             </Button>
             <Button variant="destructive" onClick={handleDeleteDataset} disabled={deleting}>
               {deleting ? "删除中..." : "确认删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量重建索引确认对话框 */}
+      <Dialog open={batchReindexOpen} onOpenChange={setBatchReindexOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-primary" />
+              批量重建索引
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              确定要对选中的 <strong className="text-primary">{selectedDocIds.size}</strong> 个文档重建索引吗？
+            </p>
+            <div className="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
+              <p>• 将重新解析文档并生成新的切片和向量索引</p>
+              <p>• 使用知识库当前的分段配置</p>
+              <p>• 处理过程中文档状态会变为"处理中"</p>
+            </div>
+            {/* 选中的文档列表预览 */}
+            <div className="max-h-32 overflow-auto border border-border rounded-lg">
+              {Array.from(selectedDocIds).slice(0, 10).map((docId) => {
+                const doc = docs.find((d) => d.document_id === docId);
+                return doc ? (
+                  <div key={docId} className="px-3 py-1.5 text-sm border-b border-border/50 last:border-b-0 truncate">
+                    {doc.title}
+                  </div>
+                ) : null;
+              })}
+              {selectedDocIds.size > 10 && (
+                <div className="px-3 py-1.5 text-sm text-muted-foreground">
+                  ... 还有 {selectedDocIds.size - 10} 个文档
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchReindexOpen(false)} disabled={batchLoading}>
+              取消
+            </Button>
+            <Button onClick={handleBatchReindex} disabled={batchLoading} className="bg-primary hover:bg-primary/90">
+              {batchLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  处理中...
+                </>
+              ) : (
+                `确认重建 (${selectedDocIds.size})`
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量删除确认对话框 */}
+      <Dialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <Trash2 className="h-5 w-5" />
+              批量删除文档
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              确定要删除选中的 <strong className="text-destructive">{selectedDocIds.size}</strong> 个文档吗？
+            </p>
+            <div className="bg-destructive/10 rounded-lg p-3 text-xs text-destructive space-y-1">
+              <p>⚠️ 此操作不可撤销</p>
+              <p>• 将永久删除文档及其所有切片和向量索引</p>
+            </div>
+            {/* 选中的文档列表预览 */}
+            <div className="max-h-32 overflow-auto border border-border rounded-lg">
+              {Array.from(selectedDocIds).slice(0, 10).map((docId) => {
+                const doc = docs.find((d) => d.document_id === docId);
+                return doc ? (
+                  <div key={docId} className="px-3 py-1.5 text-sm border-b border-border/50 last:border-b-0 truncate">
+                    {doc.title}
+                  </div>
+                ) : null;
+              })}
+              {selectedDocIds.size > 10 && (
+                <div className="px-3 py-1.5 text-sm text-muted-foreground">
+                  ... 还有 {selectedDocIds.size - 10} 个文档
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchDeleteOpen(false)} disabled={batchLoading}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={handleBatchDelete} disabled={batchLoading}>
+              {batchLoading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  删除中...
+                </>
+              ) : (
+                `确认删除 (${selectedDocIds.size})`
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
