@@ -39,13 +39,22 @@ logger = get_logger(__name__)
 KB_SEARCH_DEFINITION = ToolDefinition(
     name="search_knowledge_base",
     description="Search the internal knowledge base for relevant documents and information. "
-                "Returns the most relevant chunks from the specified datasets.",
+                "Supports text and image retrieval. Returns the most relevant chunks from the specified datasets.",
     parameters=[
         ToolParameter(
             name="query",
             type="string",
             description="The search query in natural language. Be specific and include relevant keywords.",
             required=True,
+        ),
+        ToolParameter(
+            name="intent",
+            type="string",
+            description="Retrieval intent: general=balanced text and image retrieval, "
+                        "find_image=prioritize images, find_document=text only. Default is general.",
+            required=False,
+            default="general",
+            enum=["general", "find_image", "find_document"],
         ),
         ToolParameter(
             name="dataset_ids",
@@ -72,7 +81,9 @@ KB_SEARCH_DEFINITION = ToolDefinition(
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="Use this tool when the user asks questions that might be answered by "
-                "internal documentation, policies, product information, or other company knowledge.",
+                "internal documentation, policies, product information, or other company knowledge. "
+                "Use find_image intent when looking for diagrams, screenshots, or visual content. "
+                "Use find_document intent when looking for specific text-based documents.",
     when_not_to_use="Do not use for questions about current events, external companies, "
                     "or information that wouldn't be in internal documents.",
     examples=[
@@ -85,6 +96,11 @@ KB_SEARCH_DEFINITION = ToolDefinition(
             description="Search specific dataset",
             input={"query": "API authentication methods", "dataset_ids": ["api-docs"], "top_k": 3},
             expected_output="Returns API documentation about authentication",
+        ),
+        ToolExample(
+            description="Search for architecture diagrams",
+            input={"query": "system architecture diagram", "intent": "find_image", "top_k": 5},
+            expected_output="Returns images and diagrams related to system architecture",
         ),
     ],
     timeout_seconds=30,
@@ -100,6 +116,7 @@ class KBSearchExecutor(ToolExecutor):
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """Execute KB search."""
         query = request.arguments.get("query", "")
+        intent = request.arguments.get("intent", "general")
         dataset_ids = request.arguments.get("dataset_ids", [])
         top_k = request.arguments.get("top_k", 5)
         score_threshold = request.arguments.get("score_threshold", 0.5)
@@ -111,6 +128,11 @@ class KBSearchExecutor(ToolExecutor):
                 success=False,
                 error="Query is required",
             )
+
+        # Validate intent parameter
+        valid_intents = {"general", "find_image", "find_document"}
+        if intent not in valid_intents:
+            intent = "general"
 
         try:
             all_results = []
@@ -129,6 +151,7 @@ class KBSearchExecutor(ToolExecutor):
                         query=query,
                         top_k=top_k,
                         score_threshold=score_threshold,
+                        intent=intent,
                     )
 
                     for r in results:
@@ -161,6 +184,7 @@ class KBSearchExecutor(ToolExecutor):
                     "total_results": len(all_results),
                     "datasets_searched": len(dataset_ids),
                     "query": query,
+                    "intent": intent,
                 },
             )
 
