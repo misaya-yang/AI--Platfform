@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -2351,6 +2351,36 @@ class DatabaseStorage:
                 ORDER BY period_start
             """, dimension, dimension_id, period_type, start_time, end_time)
             return [self._row_to_dict(row) for row in rows]
+
+    async def get_usage_last_ingested_at(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        granularity: str = "day",
+    ) -> Optional[datetime]:
+        """Get last ingestion time for usage aggregates."""
+        if not self._pool:
+            return None
+
+        table = "usage_hourly_aggregates" if granularity == "hour" else "usage_daily_aggregates"
+        query = f"""
+            SELECT MAX(updated_at) AS last_ingested
+            FROM {table}
+            WHERE tenant_id = $1
+        """
+        params: List[Any] = [tenant_id]
+
+        if start_date:
+            query += f" AND date >= ${len(params) + 1}"
+            params.append(start_date)
+        if end_date:
+            query += f" AND date <= ${len(params) + 1}"
+            params.append(end_date)
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+            return row["last_ingested"] if row else None
 
     # =========================================================================
     # LangGraph Thread 映射表 (langgraph_threads)
