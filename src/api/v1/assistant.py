@@ -12,6 +12,8 @@ Endpoints:
 - GET /assistant/sessions/{session_id} - Get session details
 - DELETE /assistant/sessions/{session_id} - Delete session
 - GET /assistant/sessions/{session_id}/history - Get session message history
+- GET /assistant/artifacts/{artifact_id} - Get artifact metadata
+- GET /assistant/artifacts/{artifact_id}/download - Download artifact file
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ..deps import get_user_context, get_knowledge_service
@@ -36,6 +38,7 @@ from ..schemas.assistant import (
     ModelInfoResponse,
     ModelsListResponse,
 )
+from ..schemas.artifacts import ArtifactInfo, ArtifactListResponse
 from ...core.auth.user_resolver import UserContext
 from ...services.assistant import AssistantService, AssistantConfig, ModelRegistry, ModelProvider
 from ...services.assistant.assistant_service import RAGMode
@@ -640,3 +643,56 @@ async def get_session_history(
     except Exception as e:
         logger.error(f"Failed to get session history: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get session history: {str(e)}")
+
+
+# =========================================================================
+# Artifact Management Endpoints
+# =========================================================================
+
+@router.get("/artifacts/{artifact_id}", response_model=ArtifactInfo)
+async def get_artifact(
+    artifact_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ArtifactInfo:
+    """
+    Get artifact metadata.
+
+    Returns metadata for an artifact generated during code execution
+    or tool invocation (e.g., charts, tables, files).
+
+    Args:
+        artifact_id: Unique identifier for the artifact.
+
+    Returns:
+        ArtifactInfo with artifact metadata.
+
+    Raises:
+        404: Artifact not found.
+    """
+    # TODO: Implement artifact retrieval
+    raise HTTPException(status_code=404, detail="Artifact not found")
+
+
+@router.get("/artifacts/{artifact_id}/download")
+async def download_artifact(
+    artifact_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Download an artifact file.
+
+    Streams the artifact file content for download.
+
+    Args:
+        artifact_id: Unique identifier for the artifact.
+
+    Returns:
+        FileResponse with the artifact content.
+
+    Raises:
+        404: Artifact not found.
+    """
+    # TODO: Implement artifact download
+    raise HTTPException(status_code=404, detail="Artifact not found")
