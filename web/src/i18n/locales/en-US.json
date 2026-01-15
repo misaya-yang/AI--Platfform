@@ -106,6 +106,16 @@
       "successRate": "Success Rate",
       "avgLatency": "Avg Latency",
       "activeServices": "Active Services"
+    },
+    "granularity": {
+      "day": "By Day",
+      "hour": "By Hour"
+    },
+    "dataStatus": {
+      "ok": "Up to date",
+      "delayed": "Delayed / not ingested",
+      "empty": "No data",
+      "error": "Data error"
     }
   },
   "users": {

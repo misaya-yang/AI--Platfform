@@ -84,6 +84,39 @@ export interface BreakdownResponse {
   items: BreakdownItem[];
 }
 
+export interface SecurityEventBreakdownItem {
+  name: string;
+  count: number;
+  percentage: number;
+}
+
+export interface SecurityEventBreakdownResponse {
+  dimension: "user" | "service";
+  event_type: "auth_failed" | "rate_limited";
+  items: SecurityEventBreakdownItem[];
+  start_date: string;
+  end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
+}
+
+export interface SecurityEventTimeSeriesPoint {
+  date: string;
+  count: number;
+}
+
+export interface SecurityEventTimeSeriesResponse {
+  dimension: "user" | "service";
+  event_type: "auth_failed" | "rate_limited";
+  data: SecurityEventTimeSeriesPoint[];
+  start_date: string;
+  end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
+}
+
 // ============ API Functions ============
 
 /**
@@ -152,6 +185,48 @@ export async function getMetricsBreakdown(
   }
   const response = await api.get<BreakdownResponse>(
     `/api/v1/metrics/breakdown?${params}`
+  );
+  return response.data;
+}
+
+export async function getSecurityEventBreakdown(params: {
+  dimension: "user" | "service";
+  event_type: "auth_failed" | "rate_limited";
+  start_date?: string;
+  end_date?: string;
+  limit?: number;
+}): Promise<SecurityEventBreakdownResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("dimension", params.dimension);
+  searchParams.set("event_type", params.event_type);
+  if (params.start_date) searchParams.set("start_date", params.start_date);
+  if (params.end_date) searchParams.set("end_date", params.end_date);
+  if (params.limit) searchParams.set("limit", params.limit.toString());
+
+  const response = await api.get<SecurityEventBreakdownResponse>(
+    `/api/v1/metrics/security/breakdown?${searchParams.toString()}`
+  );
+  return response.data;
+}
+
+export async function getSecurityEventTimeSeries(params: {
+  dimension: "user" | "service";
+  event_type: "auth_failed" | "rate_limited";
+  start_date?: string;
+  end_date?: string;
+  user_id?: string;
+  service_id?: string;
+}): Promise<SecurityEventTimeSeriesResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("dimension", params.dimension);
+  searchParams.set("event_type", params.event_type);
+  if (params.start_date) searchParams.set("start_date", params.start_date);
+  if (params.end_date) searchParams.set("end_date", params.end_date);
+  if (params.user_id) searchParams.set("user_id", params.user_id);
+  if (params.service_id) searchParams.set("service_id", params.service_id);
+
+  const response = await api.get<SecurityEventTimeSeriesResponse>(
+    `/api/v1/metrics/security/timeseries?${searchParams.toString()}`
   );
   return response.data;
 }
