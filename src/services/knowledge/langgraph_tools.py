@@ -215,8 +215,14 @@ class KnowledgeRetriever:
 
         retrieve_kwargs.update(kwargs)
 
-        results, meta = await self.kb.retrieve(**retrieve_kwargs)
-        
+        # Use retrieve_with_images_v2 for multimodal retrieval with intent support
+        if hasattr(self.kb, 'retrieve_with_images_v2'):
+            results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
+        else:
+            # Fallback to regular retrieve, remove intent param if present
+            retrieve_kwargs.pop("intent", None)
+            results, meta = await self.kb.retrieve(**retrieve_kwargs)
+
         return [
             KBSearchResult(
                 content=r.text,
@@ -825,7 +831,13 @@ class KnowledgeBaseTool:
             if intent is not None:
                 retrieve_kwargs["intent"] = intent
 
-            results, meta = await self.kb.retrieve(**retrieve_kwargs)
+            # Use retrieve_with_images_v2 for multimodal retrieval with intent support
+            if hasattr(self.kb, 'retrieve_with_images_v2'):
+                results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
+            else:
+                # Fallback to regular retrieve, remove intent param if present
+                retrieve_kwargs.pop("intent", None)
+                results, meta = await self.kb.retrieve(**retrieve_kwargs)
 
             search_results = [
                 KBSearchResult(
@@ -1000,7 +1012,13 @@ class MultiKnowledgeBaseTool:
                 if intent is not None:
                     retrieve_kwargs["intent"] = intent
 
-                results, _ = await self.kb.retrieve(**retrieve_kwargs)
+                # Use retrieve_with_images_v2 for multimodal retrieval with intent support
+                if hasattr(self.kb, 'retrieve_with_images_v2'):
+                    results, _ = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
+                else:
+                    # Fallback to regular retrieve, remove intent param if present
+                    retrieve_kwargs.pop("intent", None)
+                    results, _ = await self.kb.retrieve(**retrieve_kwargs)
                 return [
                     KBSearchResult(
                         content=r.text,
