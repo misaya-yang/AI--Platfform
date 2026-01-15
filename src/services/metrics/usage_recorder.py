@@ -672,8 +672,9 @@ class UsageRecorder:
         user_id: Optional[str] = None,
         model: Optional[str] = None,
         service_id: Optional[str] = None,
+        granularity: str = "day",
     ) -> List[Dict[str, Any]]:
-        """Get daily usage time series."""
+        """Get usage time series."""
         if not self.database or not self.database._pool:
             return []
 
@@ -684,6 +685,48 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
+                if granularity == "hour":
+                    query = """
+                        SELECT
+                            bucket_start as bucket,
+                            SUM(request_count) as requests,
+                            SUM(total_input_tokens) as input_tokens,
+                            SUM(total_output_tokens) as output_tokens,
+                            SUM(total_cost_cents) as cost_cents,
+                            AVG(avg_latency_ms) as avg_latency_ms
+                        FROM usage_hourly_aggregates
+                        WHERE tenant_id = $1
+                          AND date >= $2
+                          AND date <= $3
+                    """
+                    params: List[Any] = [tenant_id, start_date, end_date]
+
+                    if user_id:
+                        query += " AND user_id = $" + str(len(params) + 1)
+                        params.append(user_id)
+                    if model:
+                        query += " AND model = $" + str(len(params) + 1)
+                        params.append(model)
+                    if service_id:
+                        query += " AND service_id = $" + str(len(params) + 1)
+                        params.append(service_id)
+
+                    query += " GROUP BY bucket_start ORDER BY bucket_start"
+                    rows = await conn.fetch(query, *params)
+
+                    return [
+                        {
+                            "date": row["bucket"].isoformat(),
+                            "requests": int(row["requests"]),
+                            "input_tokens": int(row["input_tokens"]),
+                            "output_tokens": int(row["output_tokens"]),
+                            "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
+                            "cost_usd": round(int(row["cost_cents"]) / 100, 4),
+                            "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
+                        }
+                        for row in rows
+                    ]
+
                 query = """
                     SELECT
                         date,
@@ -697,7 +740,7 @@ class UsageRecorder:
                       AND date >= $2
                       AND date <= $3
                 """
-                params: List[Any] = [tenant_id, start_date, end_date]
+                params = [tenant_id, start_date, end_date]
 
                 if user_id:
                     query += " AND user_id = $" + str(len(params) + 1)
@@ -729,6 +772,22 @@ class UsageRecorder:
         except Exception as e:
             logger.error(f"Failed to get usage timeseries: {e}")
             return []
+
+    async def get_last_ingested_at(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        granularity: str = "day",
+    ) -> Optional[datetime]:
+        if not self.database or not self.database._pool:
+            return None
+        return await self.database.get_usage_last_ingested_at(
+            tenant_id=tenant_id,
+            start_date=start_date,
+            end_date=end_date,
+            granularity=granularity,
+        )
 
     def _empty_summary(self) -> Dict[str, Any]:
         """Return empty summary."""
