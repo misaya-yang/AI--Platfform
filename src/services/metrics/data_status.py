@@ -1,47 +1,27 @@
-"""
-Data Status Computation
-
-Provides utilities for computing data freshness status for usage analytics.
-"""
-
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 
 def compute_data_status(
     last_ingested_at: Optional[datetime],
+    now: Optional[datetime] = None,
     total_requests: Optional[int] = None,
-) -> Tuple[str, Optional[int]]:
-    """
-    Compute the data freshness status based on the last ingested timestamp.
+    max_age_minutes: int = 60,
+) -> Tuple[str, int]:
+    if now is None:
+        now = datetime.now(timezone.utc)
 
-    Args:
-        last_ingested_at: Timestamp of the last ingested data.
-        total_requests: Total number of requests (if 0 or None, may indicate no data).
-
-    Returns:
-        Tuple of (status, freshness_minutes):
-        - status: One of "live", "delayed", "stale", "no_data"
-        - freshness_minutes: Minutes since last ingestion (or None if no data)
-    """
     if last_ingested_at is None:
-        return ("no_data", None)
+        return "delayed", 9999
 
-    if total_requests is not None and total_requests == 0:
-        return ("no_data", None)
+    age_minutes = int((now - last_ingested_at).total_seconds() / 60)
 
-    now = datetime.utcnow()
-    delta = now - last_ingested_at
-    freshness_minutes = int(delta.total_seconds() / 60)
+    if age_minutes > max_age_minutes:
+        return "delayed", age_minutes
 
-    # Status thresholds
-    if freshness_minutes <= 5:
-        status = "live"
-    elif freshness_minutes <= 60:
-        status = "delayed"
-    else:
-        status = "stale"
+    if total_requests == 0:
+        return "empty", age_minutes
 
-    return (status, freshness_minutes)
+    return "ok", age_minutes

@@ -52,6 +52,51 @@ class UsageRecord:
     output_cost_cents: int = 0
 
 
+def _hour_bucket(ts: float) -> datetime:
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def group_records_by_hour(records: list[UsageRecord]) -> Dict[tuple, Dict[str, Any]]:
+    aggregates: Dict[tuple, Dict[str, Any]] = {}
+    for record in records:
+        bucket = _hour_bucket(record.timestamp)
+        key = (
+            record.tenant_id,
+            record.user_id or "",
+            record.model or "",
+            record.assistant_id or "",
+            record.service_id or "",
+            bucket,
+        )
+
+        if key not in aggregates:
+            aggregates[key] = {
+                "request_count": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cost_cents": 0,
+                "latency_sum": 0,
+                "first_token_sum": 0,
+            }
+
+        agg = aggregates[key]
+        agg["request_count"] += 1
+        if record.status == "success":
+            agg["success_count"] += 1
+        else:
+            agg["error_count"] += 1
+        agg["total_input_tokens"] += record.input_tokens
+        agg["total_output_tokens"] += record.output_tokens
+        agg["total_cost_cents"] += record.input_cost_cents + record.output_cost_cents
+        agg["latency_sum"] += record.latency_ms
+        agg["first_token_sum"] += record.first_token_ms
+
+    return aggregates
+
+
 class UsageRecorder:
     """
     Persistent usage recorder with batch processing support.
@@ -267,6 +312,7 @@ class UsageRecorder:
         try:
             await self._write_records(records)
             await self._update_daily_aggregates(records)
+            await self._update_hourly_aggregates(records)
             logger.debug(f"Flushed {len(records)} usage records")
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
@@ -403,6 +449,67 @@ class UsageRecorder:
                     assistant_id or None,
                     service_id or None,
                     agg_date,
+                    agg["request_count"],
+                    agg["success_count"],
+                    agg["error_count"],
+                    agg["total_input_tokens"],
+                    agg["total_output_tokens"],
+                    agg["total_cost_cents"],
+                    agg["latency_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
+                    agg["first_token_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
+                )
+
+    async def _update_hourly_aggregates(self, records: List[UsageRecord]) -> None:
+        """Update hourly aggregates table."""
+        if not self.database or not self.database._pool:
+            return
+
+        aggregates = group_records_by_hour(records)
+
+        async with self.database._pool.acquire() as conn:
+            for key, agg in aggregates.items():
+                tenant_id, user_id, model, assistant_id, service_id, bucket_start = key
+                bucket_date = bucket_start.date()
+
+                await conn.execute(
+                    """
+                    INSERT INTO usage_hourly_aggregates (
+                        tenant_id, user_id, model, assistant_id, service_id,
+                        bucket_start, date,
+                        request_count, success_count, error_count,
+                        total_input_tokens, total_output_tokens, total_cost_cents,
+                        avg_latency_ms, avg_first_token_ms
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                    )
+                    ON CONFLICT (tenant_id, COALESCE(user_id, ''), COALESCE(model, ''),
+                                 COALESCE(assistant_id, ''), COALESCE(service_id, ''), bucket_start)
+                    DO UPDATE SET
+                        request_count = usage_hourly_aggregates.request_count + EXCLUDED.request_count,
+                        success_count = usage_hourly_aggregates.success_count + EXCLUDED.success_count,
+                        error_count = usage_hourly_aggregates.error_count + EXCLUDED.error_count,
+                        total_input_tokens = usage_hourly_aggregates.total_input_tokens + EXCLUDED.total_input_tokens,
+                        total_output_tokens = usage_hourly_aggregates.total_output_tokens + EXCLUDED.total_output_tokens,
+                        total_cost_cents = usage_hourly_aggregates.total_cost_cents + EXCLUDED.total_cost_cents,
+                        avg_latency_ms = (
+                            (usage_hourly_aggregates.avg_latency_ms * usage_hourly_aggregates.request_count +
+                             EXCLUDED.avg_latency_ms * EXCLUDED.request_count) /
+                            NULLIF(usage_hourly_aggregates.request_count + EXCLUDED.request_count, 0)
+                        ),
+                        avg_first_token_ms = (
+                            (usage_hourly_aggregates.avg_first_token_ms * usage_hourly_aggregates.request_count +
+                             EXCLUDED.avg_first_token_ms * EXCLUDED.request_count) /
+                            NULLIF(usage_hourly_aggregates.request_count + EXCLUDED.request_count, 0)
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    tenant_id,
+                    user_id or None,
+                    model or None,
+                    assistant_id or None,
+                    service_id or None,
+                    bucket_start,
+                    bucket_date,
                     agg["request_count"],
                     agg["success_count"],
                     agg["error_count"],
@@ -565,8 +672,9 @@ class UsageRecorder:
         user_id: Optional[str] = None,
         model: Optional[str] = None,
         service_id: Optional[str] = None,
+        granularity: str = "day",
     ) -> List[Dict[str, Any]]:
-        """Get daily usage time series."""
+        """Get usage time series."""
         if not self.database or not self.database._pool:
             return []
 
@@ -577,6 +685,48 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
+                if granularity == "hour":
+                    query = """
+                        SELECT
+                            bucket_start as bucket,
+                            SUM(request_count) as requests,
+                            SUM(total_input_tokens) as input_tokens,
+                            SUM(total_output_tokens) as output_tokens,
+                            SUM(total_cost_cents) as cost_cents,
+                            AVG(avg_latency_ms) as avg_latency_ms
+                        FROM usage_hourly_aggregates
+                        WHERE tenant_id = $1
+                          AND date >= $2
+                          AND date <= $3
+                    """
+                    params: List[Any] = [tenant_id, start_date, end_date]
+
+                    if user_id:
+                        query += " AND user_id = $" + str(len(params) + 1)
+                        params.append(user_id)
+                    if model:
+                        query += " AND model = $" + str(len(params) + 1)
+                        params.append(model)
+                    if service_id:
+                        query += " AND service_id = $" + str(len(params) + 1)
+                        params.append(service_id)
+
+                    query += " GROUP BY bucket_start ORDER BY bucket_start"
+                    rows = await conn.fetch(query, *params)
+
+                    return [
+                        {
+                            "date": row["bucket"].isoformat(),
+                            "requests": int(row["requests"]),
+                            "input_tokens": int(row["input_tokens"]),
+                            "output_tokens": int(row["output_tokens"]),
+                            "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
+                            "cost_usd": round(int(row["cost_cents"]) / 100, 4),
+                            "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
+                        }
+                        for row in rows
+                    ]
+
                 query = """
                     SELECT
                         date,
@@ -590,7 +740,7 @@ class UsageRecorder:
                       AND date >= $2
                       AND date <= $3
                 """
-                params: List[Any] = [tenant_id, start_date, end_date]
+                params = [tenant_id, start_date, end_date]
 
                 if user_id:
                     query += " AND user_id = $" + str(len(params) + 1)
@@ -622,6 +772,22 @@ class UsageRecorder:
         except Exception as e:
             logger.error(f"Failed to get usage timeseries: {e}")
             return []
+
+    async def get_last_ingested_at(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        granularity: str = "day",
+    ) -> Optional[datetime]:
+        if not self.database or not self.database._pool:
+            return None
+        return await self.database.get_usage_last_ingested_at(
+            tenant_id=tenant_id,
+            start_date=start_date,
+            end_date=end_date,
+            granularity=granularity,
+        )
 
     def _empty_summary(self) -> Dict[str, Any]:
         """Return empty summary."""

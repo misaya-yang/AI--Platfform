@@ -185,6 +185,16 @@
       "authFailed": "Auth Failed",
       "rateLimited": "Rate Limited",
       "noData": "No event data"
+    },
+    "granularity": {
+      "day": "By Day",
+      "hour": "By Hour"
+    },
+    "dataStatus": {
+      "ok": "Up to date",
+      "delayed": "Delayed / not ingested",
+      "empty": "No data",
+      "error": "Data error"
     }
   },
   "users": {

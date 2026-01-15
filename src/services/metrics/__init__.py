@@ -4,7 +4,6 @@ Metrics Service - Dashboard metrics collection and aggregation
 Provides:
 - MetricsRecorder: Core metrics recording to Redis
 - RealtimeMetricsService: Real-time sliding window metrics
-- UsageRecorder: Persistent usage recording to PostgreSQL
 """
 
 from .metrics_recorder import MetricsRecorder, get_metrics_recorder, init_metrics_recorder
@@ -14,12 +13,8 @@ from .realtime_metrics import (
     get_realtime_metrics,
     init_realtime_metrics,
 )
-from .usage_recorder import (
-    UsageRecorder,
-    UsageRecord,
-    get_usage_recorder,
-    init_usage_recorder,
-)
+from .data_status import compute_data_status
+from .usage_recorder import UsageRecorder, get_usage_recorder, init_usage_recorder
 from .security_event_recorder import (
     SecurityEventRecorder,
     get_security_event_recorder,
@@ -34,8 +29,8 @@ __all__ = [
     "RealtimeSnapshot",
     "get_realtime_metrics",
     "init_realtime_metrics",
+    "compute_data_status",
     "UsageRecorder",
-    "UsageRecord",
     "get_usage_recorder",
     "init_usage_recorder",
     "SecurityEventRecorder",

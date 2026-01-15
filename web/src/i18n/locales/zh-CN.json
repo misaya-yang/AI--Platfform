@@ -185,6 +185,16 @@
       "authFailed": "鉴权失败",
       "rateLimited": "限流触发",
       "noData": "暂无事件数据"
+    },
+    "granularity": {
+      "day": "按天",
+      "hour": "按小时"
+    },
+    "dataStatus": {
+      "ok": "数据已更新",
+      "delayed": "数据延迟/尚未入库",
+      "empty": "暂无数据",
+      "error": "数据错误"
     }
   },
   "users": {

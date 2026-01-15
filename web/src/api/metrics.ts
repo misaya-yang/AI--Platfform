@@ -96,6 +96,9 @@ export interface SecurityEventBreakdownResponse {
   items: SecurityEventBreakdownItem[];
   start_date: string;
   end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
 }
 
 export interface SecurityEventTimeSeriesPoint {
@@ -109,6 +112,9 @@ export interface SecurityEventTimeSeriesResponse {
   data: SecurityEventTimeSeriesPoint[];
   start_date: string;
   end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
 }
 
 // ============ API Functions ============

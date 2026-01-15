@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request, Depends, Query, HTTPException
 from pydantic import BaseModel
 
 from ...api.deps import get_auth_context, AuthContext
-from ...services.metrics import get_metrics_recorder
+from ...services.metrics import compute_data_status, get_metrics_recorder
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -128,6 +128,9 @@ class SecurityEventBreakdownResponse(BaseModel):
     items: List[SecurityEventBreakdownItem]
     start_date: str
     end_date: str
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
 
 
 class SecurityEventTimeSeriesPoint(BaseModel):
@@ -145,6 +148,9 @@ class SecurityEventTimeSeriesResponse(BaseModel):
     data: List[SecurityEventTimeSeriesPoint]
     start_date: str
     end_date: str
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
 
 
 # ============ API Endpoints ============
@@ -484,6 +490,7 @@ async def get_security_event_breakdown(
 
     db = getattr(request.app.state, "database", None)
     items: List[SecurityEventBreakdownItem] = []
+    last_ingested_at = None
 
     tenant_id = auth.tenant_id or "public"
     if db and getattr(db, "enabled", False):
@@ -504,6 +511,18 @@ async def get_security_event_breakdown(
             )
             for r in rows
         ]
+        last_ingested_at = await db.get_security_event_last_ingested_at(
+            tenant_id=tenant_id,
+            event_type=event_type,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    total_events = sum(item.count for item in items)
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=total_events,
+    )
 
     return SecurityEventBreakdownResponse(
         dimension=dimension,
@@ -511,6 +530,9 @@ async def get_security_event_breakdown(
         items=items,
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
     )
 
 
@@ -543,6 +565,7 @@ async def get_security_event_timeseries(
 
     db = getattr(request.app.state, "database", None)
     data: List[SecurityEventTimeSeriesPoint] = []
+    last_ingested_at = None
 
     tenant_id = auth.tenant_id or "public"
     if db and getattr(db, "enabled", False):
@@ -561,6 +584,18 @@ async def get_security_event_timeseries(
             )
             for r in rows
         ]
+        last_ingested_at = await db.get_security_event_last_ingested_at(
+            tenant_id=tenant_id,
+            event_type=event_type,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    total_events = sum(point.count for point in data)
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=total_events,
+    )
 
     return SecurityEventTimeSeriesResponse(
         dimension=dimension,
@@ -568,4 +603,7 @@ async def get_security_event_timeseries(
         data=data,
         start_date=start_date.isoformat(),
         end_date=end_date.isoformat(),
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
     )

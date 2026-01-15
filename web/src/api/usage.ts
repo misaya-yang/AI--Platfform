@@ -17,6 +17,9 @@ export interface UsageSummary {
   avg_latency_ms: number;
   start_date: string;
   end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
 }
 
 export interface UsageBreakdownItem {
@@ -38,6 +41,9 @@ export interface UsageBreakdownResponse {
   start_date: string;
   end_date: string;
   total_cost_usd: number;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
 }
 
 export interface UsageTimeSeriesPoint {
@@ -55,6 +61,9 @@ export interface UsageTimeSeriesResponse {
   start_date: string;
   end_date: string;
   granularity: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
 }
 
 // ============ API Functions ============
@@ -111,6 +120,7 @@ export async function getUsageTimeSeries(params?: {
   user_id?: string;
   model?: string;
   service_id?: string;
+  granularity?: string;
 }): Promise<UsageTimeSeriesResponse> {
   const searchParams = new URLSearchParams();
   if (params?.start_date) searchParams.set("start_date", params.start_date);
@@ -118,6 +128,7 @@ export async function getUsageTimeSeries(params?: {
   if (params?.user_id) searchParams.set("user_id", params.user_id);
   if (params?.model) searchParams.set("model", params.model);
   if (params?.service_id) searchParams.set("service_id", params.service_id);
+  if (params?.granularity) searchParams.set("granularity", params.granularity);
 
   const query = searchParams.toString();
   const response = await api.get<UsageTimeSeriesResponse>(`/api/v1/usage/timeseries${query ? `?${query}` : ""}`);

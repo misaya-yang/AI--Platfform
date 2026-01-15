@@ -23,7 +23,6 @@ from .v1.users import router as users_router
 from .v1.presign import router as presign_router
 from .v1.assistant import router as assistant_router
 from .v1.usage import router as usage_router
-from .v1.quota import router as quota_router
 
 api_router = APIRouter()
 
@@ -48,9 +47,8 @@ api_router.include_router(knowledge_router)  # KBMS Knowledge Base
 api_router.include_router(kb_tools_router)  # KB Tools API for LangGraph agents
 api_router.include_router(confluence_router)  # Confluence 集成
 api_router.include_router(metrics_router)  # 系统指标统计
-api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘
 api_router.include_router(usage_router)  # 使用量追踪与分析
-api_router.include_router(quota_router)  # 用户配额管理
+api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API
