@@ -2352,6 +2352,151 @@ class DatabaseStorage:
             """, dimension, dimension_id, period_type, start_time, end_time)
             return [self._row_to_dict(row) for row in rows]
 
+    # =========================================================================
+    # Security event daily aggregates (auth failures, rate limits)
+    # =========================================================================
+
+    async def record_security_event(
+        self,
+        tenant_id: str,
+        user_id: Optional[str],
+        service_id: Optional[str],
+        event_type: str,
+        event_date: Optional[date] = None,
+    ) -> None:
+        """Record a security event into daily aggregates."""
+        if not self._pool:
+            return
+        if event_date is None:
+            event_date = datetime.utcnow().date()
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO security_event_daily_aggregates (
+                    tenant_id, user_id, service_id, event_type, date, event_count
+                ) VALUES (
+                    $1, $2, $3, $4, $5, 1
+                )
+                ON CONFLICT (tenant_id, COALESCE(user_id, ''), COALESCE(service_id, ''), event_type, date)
+                DO UPDATE SET
+                    event_count = security_event_daily_aggregates.event_count + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                tenant_id,
+                user_id or None,
+                service_id or None,
+                event_type,
+                event_date,
+            )
+
+    async def get_security_event_breakdown(
+        self,
+        tenant_id: str,
+        dimension: str,
+        event_type: str,
+        start_date: date,
+        end_date: date,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Get security event breakdown by dimension."""
+        if not self._pool:
+            return []
+
+        dimension_column = {
+            "user": "user_id",
+            "service": "service_id",
+        }.get(dimension, "user_id")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    {dimension_column} as dimension_value,
+                    SUM(event_count) as total_events
+                FROM security_event_daily_aggregates
+                WHERE tenant_id = $1
+                  AND date >= $2
+                  AND date <= $3
+                  AND event_type = $4
+                  AND {dimension_column} IS NOT NULL
+                GROUP BY {dimension_column}
+                ORDER BY total_events DESC
+                LIMIT $5
+                """,
+                tenant_id,
+                start_date,
+                end_date,
+                event_type,
+                limit,
+            )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_security_event_timeseries(
+        self,
+        tenant_id: str,
+        event_type: str,
+        start_date: date,
+        end_date: date,
+        user_id: Optional[str] = None,
+        service_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get daily time series for security events."""
+        if not self._pool:
+            return []
+
+        async with self._pool.acquire() as conn:
+            query = """
+                SELECT
+                    date,
+                    SUM(event_count) as total_events
+                FROM security_event_daily_aggregates
+                WHERE tenant_id = $1
+                  AND date >= $2
+                  AND date <= $3
+                  AND event_type = $4
+            """
+            params: List[Any] = [tenant_id, start_date, end_date, event_type]
+
+            if user_id:
+                query += " AND user_id = $" + str(len(params) + 1)
+                params.append(user_id)
+            if service_id:
+                query += " AND service_id = $" + str(len(params) + 1)
+                params.append(service_id)
+
+            query += " GROUP BY date ORDER BY date"
+
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_security_event_last_ingested_at(
+        self,
+        tenant_id: str,
+        event_type: str,
+        start_date: date,
+        end_date: date,
+    ) -> Optional[datetime]:
+        """Get last ingestion time for security event aggregates."""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT MAX(updated_at) AS last_ingested
+                FROM security_event_daily_aggregates
+                WHERE tenant_id = $1
+                  AND event_type = $2
+                  AND date >= $3
+                  AND date <= $4
+                """,
+                tenant_id,
+                event_type,
+                start_date,
+                end_date,
+            )
+            return row["last_ingested"] if row else None
+
     async def get_usage_last_ingested_at(
         self,
         tenant_id: str,
