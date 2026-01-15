@@ -19,12 +19,10 @@ import {
   LogoutOutlined,
   GlobalOutlined,
 } from "@ant-design/icons";
-import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
 import { useAuthStore } from "@/store/useAuthStore";
 import { logout } from "@/api/auth";
-import { colors } from "@/theme/themeConfig";
 import { HelpModal } from "@/components/HelpModal";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
@@ -85,123 +83,57 @@ const navItems = [
   },
 ];
 
-// Logo 组件 - 科技感渐变
+// Logo component - simple static version
 function Logo({ collapsed }: { collapsed: boolean }) {
   return (
-    <div className="logo-container">
-      <motion.div
-        className="logo-icon"
-        whileHover={{ scale: 1.05, rotate: 5 }}
-        transition={{ type: "spring", stiffness: 400, damping: 10 }}
-      >
+    <div className="flex items-center gap-3">
+      <div className="flex-shrink-0">
         <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <defs>
-            <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor={colors.primary[400]} />
-              <stop offset="50%" stopColor={colors.cyan[400]} />
-              <stop offset="100%" stopColor={colors.purple[400]} />
-            </linearGradient>
-            <filter id="glow">
-              <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
-              <feMerge>
-                <feMergeNode in="coloredBlur"/>
-                <feMergeNode in="SourceGraphic"/>
-              </feMerge>
-            </filter>
-          </defs>
-          <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#logoGradient)" filter="url(#glow)" opacity="0.15"/>
+          <rect x="2" y="2" width="28" height="28" rx="8" fill="#6366F1" opacity="0.1"/>
           <path
             d="M16 6L26 12V20L16 26L6 20V12L16 6Z"
-            stroke="url(#logoGradient)"
+            stroke="#6366F1"
             strokeWidth="2"
             fill="none"
-            strokeLinecap="round"
-            strokeLinejoin="round"
           />
-          <circle cx="16" cy="16" r="4" fill="url(#logoGradient)" />
-          <path d="M16 12V8" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
-          <path d="M19.5 14L23 11.5" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
-          <path d="M19.5 18L23 20.5" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
-          <path d="M16 20V24" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
-          <path d="M12.5 18L9 20.5" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
-          <path d="M12.5 14L9 11.5" stroke="url(#logoGradient)" strokeWidth="2" strokeLinecap="round"/>
+          <circle cx="16" cy="16" r="4" fill="#6366F1" />
         </svg>
-      </motion.div>
-      <AnimatePresence>
-        {!collapsed && (
-          <motion.div
-            className="logo-text"
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -10 }}
-            transition={{ duration: 0.2 }}
-          >
-            <Text strong style={{
-              fontSize: 18,
-              background: `linear-gradient(135deg, ${colors.primary[400]}, ${colors.cyan[400]})`,
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-              letterSpacing: '-0.5px'
-            }}>
-              AI Platform
-            </Text>
-            <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: -4 }}>
-              Unified AI Services
-            </Text>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      </div>
+      {!collapsed && (
+        <div className="flex flex-col">
+          <span className="text-base font-semibold text-foreground">
+            AI Platform
+          </span>
+          <span className="text-xs text-muted-foreground">
+            Unified AI Services
+          </span>
+        </div>
+      )}
     </div>
   );
 }
 
-// 主题切换按钮
+// Theme toggle button - simple version
 function ThemeToggle({ darkMode, onToggle, tooltip }: { darkMode: boolean; onToggle: () => void; tooltip: string }) {
   return (
-    <motion.div
-      className="theme-toggle"
-      whileTap={{ scale: 0.95 }}
-    >
-      <Tooltip title={tooltip}>
-        <div
-          onClick={onToggle}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 36,
-            height: 36,
-            borderRadius: 8,
-            cursor: 'pointer',
-            transition: 'all 0.2s',
-            background: darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
-          }}
-        >
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={darkMode ? 'moon' : 'sun'}
-              initial={{ scale: 0, rotate: -180 }}
-              animate={{ scale: 1, rotate: 0 }}
-              exit={{ scale: 0, rotate: 180 }}
-              transition={{ duration: 0.3 }}
-            >
-              {darkMode ? (
-                <MoonOutlined style={{ fontSize: 18, color: colors.primary[400] }} />
-              ) : (
-                <SunOutlined style={{ fontSize: 18, color: colors.orange[500] }} />
-              )}
-            </motion.div>
-          </AnimatePresence>
-        </div>
-      </Tooltip>
-    </motion.div>
+    <Tooltip title={tooltip}>
+      <button
+        onClick={onToggle}
+        className="flex items-center justify-center w-9 h-9 rounded-md hover:bg-accent transition-colors"
+      >
+        {darkMode ? (
+          <MoonOutlined className="text-lg text-primary" />
+        ) : (
+          <SunOutlined className="text-lg text-amber-500" />
+        )}
+      </button>
+    </Tooltip>
   );
 }
 
 export function AppLayout() {
   const { t, i18n } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
-  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
   const { darkMode, toggleDarkMode } = useAppStore();
@@ -279,23 +211,12 @@ export function AppLayout() {
 
   const menuItems: MenuProps['items'] = filteredNavItems.map(item => ({
     key: item.key,
-    icon: (
-      <motion.span
-        animate={{
-          scale: hoveredItem === item.key ? 1.1 : 1,
-        }}
-        transition={{ type: "spring", stiffness: 400, damping: 17 }}
-      >
-        {item.icon}
-      </motion.span>
-    ),
+    icon: item.icon,
     label: (
       <NavLink to={item.key} style={{ color: 'inherit' }}>
         {t(item.labelKey)}
       </NavLink>
     ),
-    onMouseEnter: () => setHoveredItem(item.key),
-    onMouseLeave: () => setHoveredItem(null),
   }));
 
   return (
@@ -306,8 +227,8 @@ export function AppLayout() {
         collapsed={collapsed}
         onCollapse={setCollapsed}
         trigger={null}
-        width={240}
-        collapsedWidth={72}
+        width={220}
+        collapsedWidth={64}
         className="app-sider"
         style={{
           position: 'fixed',
@@ -315,37 +236,21 @@ export function AppLayout() {
           top: 0,
           bottom: 0,
           zIndex: 100,
-          background: darkMode
-            ? `linear-gradient(180deg, ${colors.neutral[900]} 0%, ${colors.neutral[950]} 100%)`
-            : `linear-gradient(180deg, #ffffff 0%, ${colors.neutral[50]} 100%)`,
-          borderRight: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
-          transition: 'all 0.3s cubic-bezier(0.2, 0, 0, 1)',
-          overflow: 'hidden',
+          background: darkMode ? '#111827' : '#ffffff',
+          borderRight: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
+          transition: 'width 200ms',
         }}
       >
-        {/* Logo 区域 - 与顶部 Header 对齐 */}
+        {/* Logo area */}
         <div style={{
           padding: collapsed ? '0 12px' : '0 20px',
           display: 'flex',
           alignItems: 'center',
           gap: 12,
-          borderBottom: 'none',
-          height: 64, // 与顶部 Header 高度一致
-          transition: 'padding 0.3s',
-          position: 'relative',
+          height: 64,
+          borderBottom: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
         }}>
           <Logo collapsed={collapsed} />
-          {/* 渐变分割线 - 中间深两边淡 */}
-          <div style={{
-            position: 'absolute',
-            bottom: 0,
-            left: '10%',
-            right: '10%',
-            height: 1,
-            background: darkMode
-              ? `linear-gradient(90deg, transparent, ${colors.neutral[600]}, transparent)`
-              : `linear-gradient(90deg, transparent, ${colors.neutral[300]}, transparent)`,
-          }} />
         </div>
 
         {/* 导航菜单 */}
@@ -368,7 +273,7 @@ export function AppLayout() {
         {/* 底部操作区 */}
         <div style={{
           padding: '16px',
-          borderTop: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
+          borderTop: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
           display: 'flex',
           flexDirection: 'column',
           gap: 12,
@@ -392,51 +297,38 @@ export function AppLayout() {
             />
           </div>
 
-          {/* 折叠按钮 */}
-          <motion.div
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+          {/* Collapse button */}
+          <button
             onClick={() => setCollapsed(!collapsed)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '10px',
-              borderRadius: 8,
-              cursor: 'pointer',
-              background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-              transition: 'background 0.2s',
-            }}
+            className="flex items-center justify-center w-full px-3 py-2 rounded-md hover:bg-accent transition-colors cursor-pointer"
           >
             {collapsed ? (
-              <MenuUnfoldOutlined style={{ fontSize: 16, color: colors.neutral[500] }} />
+              <MenuUnfoldOutlined className="text-base text-muted-foreground" />
             ) : (
-              <MenuFoldOutlined style={{ fontSize: 16, color: colors.neutral[500] }} />
+              <>
+                <MenuFoldOutlined className="text-base text-muted-foreground" />
+                <span className="ml-2 text-sm text-muted-foreground">
+                  {t('nav.collapseSidebar')}
+                </span>
+              </>
             )}
-            {!collapsed && (
-              <Text type="secondary" style={{ marginLeft: 8, fontSize: 13 }}>
-                {t('nav.collapseSidebar')}
-              </Text>
-            )}
-          </motion.div>
+          </button>
         </div>
       </Sider>
 
-      {/* 主内容区 */}
+      {/* Main content area */}
       <Layout style={{
-        marginLeft: collapsed ? 72 : 240,
-        transition: 'margin-left 0.3s cubic-bezier(0.2, 0, 0, 1)',
-        background: darkMode ? colors.neutral[900] : colors.neutral[50],
+        marginLeft: collapsed ? 64 : 220,
+        transition: 'margin-left 200ms',
+        background: darkMode ? '#111827' : '#F9FAFB',
         minHeight: '100vh',
       }}>
         {/* 顶部导航栏 */}
         <Header style={{
           padding: '0 24px',
-          background: darkMode
-            ? `rgba(${parseInt(colors.neutral[900].slice(1,3), 16)}, ${parseInt(colors.neutral[900].slice(3,5), 16)}, ${parseInt(colors.neutral[900].slice(5,7), 16)}, 0.8)`
-            : 'rgba(255, 255, 255, 0.8)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: `1px solid ${darkMode ? colors.neutral[800] : colors.neutral[200]}`,
+          background: darkMode ? 'rgba(17, 24, 39, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+          backdropFilter: 'blur(8px)',
+          borderBottom: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
           boxShadow: darkMode
             ? '0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25)'
             : '0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06)',
@@ -462,52 +354,25 @@ export function AppLayout() {
           <Space size={16}>
             {/* 用户菜单 */}
             <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-              <motion.div
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                className="user-menu-trigger"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '6px 12px',
-                  borderRadius: 10,
-                  cursor: 'pointer',
-                  background: darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
-                  transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-                }}
+              <div
+                className="user-menu-trigger flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer hover:bg-accent transition-colors"
               >
-                <div style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: 8,
-                  background: `linear-gradient(135deg, ${colors.primary[400]}, ${colors.cyan[400]})`,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)',
-                }}>
-                  <UserOutlined style={{ color: '#fff', fontSize: 14 }} />
+                <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center">
+                  <UserOutlined className="text-primary" />
                 </div>
                 <Text style={{ fontSize: 13, fontWeight: 500 }}>{user?.display_name || user?.user_id || t('common.user')}</Text>
-              </motion.div>
+              </div>
             </Dropdown>
           </Space>
         </Header>
 
-        {/* 主内容 */}
+        {/* Main content */}
         <Content style={{
           padding: '24px',
           minHeight: 'calc(100vh - 64px)',
           overflow: 'auto',
         }}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, ease: "easeOut" }}
-          >
-            <Outlet />
-          </motion.div>
+          <Outlet />
         </Content>
       </Layout>
 
@@ -531,79 +396,30 @@ export function AppLayout() {
         onClose={() => setShowProfileModal(false)}
       />
 
-      {/* 全局样式 */}
+      {/* Global styles */}
       <style>{`
-        .app-layout {
-          --transition-timing: cubic-bezier(0.2, 0, 0, 1);
-        }
-
-        .logo-container {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .logo-icon {
-          flex-shrink: 0;
-        }
-
-        .logo-text {
-          display: flex;
-          flex-direction: column;
-          min-width: 0;
-        }
-
-        /* 侧边栏菜单样式优化 - 更圆润现代 */
         .app-sider .ant-menu-item {
-          margin: 6px 4px !important;
-          border-radius: 12px !important;
-          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-          height: 44px !important;
-          line-height: 44px !important;
+          margin: 4px 8px !important;
+          border-radius: 6px !important;
+          height: 40px !important;
+          line-height: 40px !important;
         }
 
         .app-sider .ant-menu-item:hover {
-          transform: translateX(3px);
-          background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'} !important;
-        }
-
-        /* 菜单项hover时图标轻微放大 */
-        .app-sider .ant-menu-item:hover .anticon {
-          transform: scale(1.1);
-          transition: transform 0.2s ease;
+          background: ${darkMode ? 'rgba(255,255,255,0.05)' : '#F3F4F6'} !important;
         }
 
         .app-sider .ant-menu-item-selected {
-          background: linear-gradient(135deg,
-            ${colors.primary[500]}25,
-            ${colors.cyan[500]}18
-          ) !important;
-          border-left: none !important;
-          box-shadow: 0 4px 12px ${colors.primary[500]}25;
+          background: ${darkMode ? 'rgba(99, 102, 241, 0.15)' : '#EEF2FF'} !important;
+          border-left: 3px solid #6366F1 !important;
         }
 
-        .app-sider .ant-menu-item-selected::before {
-          content: '';
-          position: absolute;
-          left: 0;
-          top: 50%;
-          transform: translateY(-50%);
-          width: 4px;
-          height: 24px;
-          background: linear-gradient(180deg, ${colors.primary[400]}, ${colors.cyan[400]});
-          border-radius: 0 4px 4px 0;
-        }
-
+        .app-sider .ant-menu-item-selected::before,
         .app-sider .ant-menu-item-selected::after {
           display: none !important;
         }
 
-        /* 用户菜单hover效果 */
-        .user-menu-trigger:hover {
-          background: ${darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)'} !important;
-        }
-
-        /* 滚动条美化 */
+        /* Scrollbar styling */
         .app-sider::-webkit-scrollbar,
         .ant-layout-content::-webkit-scrollbar {
           width: 6px;
@@ -616,31 +432,12 @@ export function AppLayout() {
         }
 
         .app-sider::-webkit-scrollbar-thumb {
-          background: ${colors.neutral[400]}40;
+          background: ${darkMode ? 'rgba(75, 85, 99, 0.4)' : 'rgba(156, 163, 175, 0.4)'};
           border-radius: 3px;
         }
 
         .app-sider::-webkit-scrollbar-thumb:hover {
-          background: ${colors.neutral[400]}60;
-        }
-
-        /* 深色模式下的滚动条 */
-        .dark .app-sider::-webkit-scrollbar-thumb {
-          background: ${colors.neutral[600]}40;
-        }
-
-        .dark .app-sider::-webkit-scrollbar-thumb:hover {
-          background: ${colors.neutral[600]}60;
-        }
-
-        /* 动画效果 */
-        @keyframes pulse-glow {
-          0%, 100% {
-            box-shadow: 0 0 0 0 ${colors.primary[500]}40;
-          }
-          50% {
-            box-shadow: 0 0 20px 5px ${colors.primary[500]}20;
-          }
+          background: ${darkMode ? 'rgba(75, 85, 99, 0.6)' : 'rgba(156, 163, 175, 0.6)'};
         }
       `}</style>
     </Layout>

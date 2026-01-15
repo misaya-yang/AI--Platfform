@@ -1,15 +1,13 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Card, Col, DatePicker, Empty, Row, Select, Spin, Statistic, Tabs } from "antd";
+import { Card, Col, Empty, Row, Select, Spin, Statistic, Tabs } from "antd";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
 import dayjs from "dayjs";
 import { SyncOutlined } from "@ant-design/icons";
 
 import { getUsageBreakdown, getUsageSummary, getUsageTimeSeries } from "@/api/usage";
 import { useAppStore } from "@/store/useAppStore";
-
-const { RangePicker } = DatePicker;
 
 function formatCost(value?: number) {
   if (value == null) return "--";
@@ -22,20 +20,21 @@ function formatLatency(value?: number) {
   return `${Math.round(value)} ms`;
 }
 
-export function UserServiceUsageAnalytics() {
+export function UserServiceUsageAnalytics({
+  dateRange,
+  granularity,
+}: {
+  dateRange: [dayjs.Dayjs, dayjs.Dayjs];
+  granularity: "day" | "hour";
+}) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-    dayjs().subtract(30, "day"),
-    dayjs(),
-  ]);
 
   const startDate = dateRange[0].format("YYYY-MM-DD");
   const endDate = dateRange[1].format("YYYY-MM-DD");
 
   const userBreakdownQuery = useQuery({
-    queryKey: ["usage-breakdown-user", startDate, endDate],
+    queryKey: ["usage-breakdown-user", startDate, endDate, granularity],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "user",
@@ -47,7 +46,7 @@ export function UserServiceUsageAnalytics() {
   });
 
   const serviceBreakdownQuery = useQuery({
-    queryKey: ["usage-breakdown-service", startDate, endDate, "analytics"],
+    queryKey: ["usage-breakdown-service", startDate, endDate, "analytics", granularity],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "service",
@@ -100,7 +99,7 @@ export function UserServiceUsageAnalytics() {
   }, [serviceOptions, selectedService]);
 
   const userSummaryQuery = useQuery({
-    queryKey: ["usage-summary-user", startDate, endDate, selectedUser],
+    queryKey: ["usage-summary-user", startDate, endDate, selectedUser, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
@@ -112,7 +111,7 @@ export function UserServiceUsageAnalytics() {
   });
 
   const serviceSummaryQuery = useQuery({
-    queryKey: ["usage-summary-service", startDate, endDate, selectedService],
+    queryKey: ["usage-summary-service", startDate, endDate, selectedService, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
@@ -124,24 +123,26 @@ export function UserServiceUsageAnalytics() {
   });
 
   const userTimeSeriesQuery = useQuery({
-    queryKey: ["usage-timeseries-user", startDate, endDate, selectedUser],
+    queryKey: ["usage-timeseries-user", startDate, endDate, selectedUser, granularity],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: startDate,
         end_date: endDate,
         user_id: selectedUser,
+        granularity,
       }),
     enabled: !!selectedUser,
     staleTime: 60000,
   });
 
   const serviceTimeSeriesQuery = useQuery({
-    queryKey: ["usage-timeseries-service", startDate, endDate, selectedService],
+    queryKey: ["usage-timeseries-service", startDate, endDate, selectedService, granularity],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: startDate,
         end_date: endDate,
         service_id: selectedService,
+        granularity,
       }),
     enabled: !!selectedService,
     staleTime: 60000,
@@ -187,7 +188,9 @@ export function UserServiceUsageAnalytics() {
             <XAxis
               dataKey="date"
               tick={{ fontSize: 12 }}
-              tickFormatter={(value) => dayjs(value).format("MM-DD")}
+              tickFormatter={(value) =>
+                dayjs(value).format(granularity === "hour" ? "MM-DD HH:00" : "MM-DD")
+              }
             />
             <YAxis
               yAxisId="left"
@@ -205,7 +208,9 @@ export function UserServiceUsageAnalytics() {
                 if (name === "requests") return [value, t("dashboard.usageAnalytics.requests", "Requests")];
                 return [formatCost(value), t("dashboard.usageAnalytics.cost", "Cost")];
               }}
-              labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD")}
+              labelFormatter={(label) =>
+                dayjs(label).format(granularity === "hour" ? "YYYY-MM-DD HH:00" : "YYYY-MM-DD")
+              }
             />
             <Legend />
             <Line
@@ -255,6 +260,14 @@ export function UserServiceUsageAnalytics() {
     </Row>
   );
 
+  const [activeTab, setActiveTab] = useState<"user" | "service">("user");
+  const activeSummary =
+    activeTab === "user" ? userSummaryQuery.data : serviceSummaryQuery.data;
+  const statusLabel = activeSummary?.data_status
+    ? t(`dashboard.dataStatus.${activeSummary.data_status}`, activeSummary.data_status)
+    : undefined;
+  const freshnessMinutes = activeSummary?.data_freshness_minutes;
+
   return (
     <Card
       style={{
@@ -265,16 +278,31 @@ export function UserServiceUsageAnalytics() {
       styles={{ body: { padding: 20 } }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600 }}>
-          {t("dashboard.usageAnalytics.title", "Usage by User & Service")}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>
+            {t("dashboard.usageAnalytics.title", "Usage by User & Service")}
+          </div>
+          {statusLabel && (
+            <span
+              style={{
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 999,
+                background: darkMode ? "#0f172a" : "#f1f5f9",
+                color: darkMode ? "#e2e8f0" : "#475569",
+                border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+              }}
+            >
+              {statusLabel}
+              {typeof freshnessMinutes === "number" ? ` · ${freshnessMinutes}m` : ""}
+            </span>
+          )}
         </div>
-        <RangePicker
-          value={dateRange}
-          onChange={(value) => value && setDateRange(value as [dayjs.Dayjs, dayjs.Dayjs])}
-        />
       </div>
 
       <Tabs
+        activeKey={activeTab}
+        onChange={(key) => setActiveTab(key as "user" | "service")}
         items={[
           {
             key: "user",
@@ -289,6 +317,7 @@ export function UserServiceUsageAnalytics() {
                     onChange={(value) => setSelectedUser(value)}
                     style={{ minWidth: 220 }}
                     loading={userBreakdownQuery.isLoading}
+                    disabled={userOptions.length === 0}
                   />
                   {userBreakdownQuery.isFetching && <SyncOutlined spin />}
                 </div>
@@ -316,6 +345,7 @@ export function UserServiceUsageAnalytics() {
                     onChange={(value) => setSelectedService(value)}
                     style={{ minWidth: 220 }}
                     loading={serviceBreakdownQuery.isLoading}
+                    disabled={serviceOptions.length === 0}
                   />
                   {serviceBreakdownQuery.isFetching && <SyncOutlined spin />}
                 </div>

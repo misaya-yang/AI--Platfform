@@ -9,7 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Card, Row, Col, Statistic, Empty, Spin, Select, DatePicker, Progress, Tooltip } from "antd";
+import { Card, Row, Col, Statistic, Empty, Spin, Progress, Tooltip } from "antd";
 import {
   DollarOutlined,
   ThunderboltOutlined,
@@ -19,13 +19,11 @@ import {
   SyncOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 
 import { getUsageBreakdown, getUsageSummary } from "@/api/usage";
 import type { UsageBreakdownItem } from "@/api/usage";
 import { useAppStore } from "@/store/useAppStore";
-
-const { RangePicker } = DatePicker;
 
 // 服务类型配置
 const SERVICE_CONFIG: Record<string, { icon: React.ReactNode; color: string; gradient: string }> = {
@@ -194,7 +192,7 @@ function ServiceCard({ service, totalCost }: ServiceCardProps) {
 }
 
 // 空状态组件
-function EmptyState({ darkMode }: { darkMode: boolean }) {
+function EmptyState({ darkMode, statusLabel }: { darkMode: boolean; statusLabel?: string }) {
   const { t } = useTranslation();
   return (
     <Card
@@ -208,7 +206,7 @@ function EmptyState({ darkMode }: { darkMode: boolean }) {
         image={Empty.PRESENTED_IMAGE_SIMPLE}
         description={
           <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
-            {t("cost.noData", "暂无用量数据")}
+            {statusLabel || t("cost.noData", "暂无用量数据")}
           </span>
         }
       />
@@ -217,22 +215,22 @@ function EmptyState({ darkMode }: { darkMode: boolean }) {
 }
 
 // 主组件
-export function ServiceCostAnalysis() {
+export function ServiceCostAnalysis({
+  dateRange,
+  granularity,
+}: {
+  dateRange: [dayjs.Dayjs, dayjs.Dayjs];
+  granularity: "day" | "hour";
+}) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-
-  // 日期范围状态
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-    dayjs().subtract(7, "day"),
-    dayjs(),
-  ]);
 
   const startDate = dateRange[0].format("YYYY-MM-DD");
   const endDate = dateRange[1].format("YYYY-MM-DD");
 
   // 获取按服务分解的数据
   const { data: breakdown, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ["usage-breakdown-service", startDate, endDate],
+    queryKey: ["usage-breakdown-service", startDate, endDate, granularity],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "service",
@@ -245,7 +243,7 @@ export function ServiceCostAnalysis() {
 
   // 获取总体摘要
   const { data: summary } = useQuery({
-    queryKey: ["usage-summary", startDate, endDate],
+    queryKey: ["usage-summary", startDate, endDate, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
@@ -261,6 +259,11 @@ export function ServiceCostAnalysis() {
   }, [breakdown]);
 
   const totalCost = breakdown?.total_cost_usd || 0;
+  const dataStatus = summary?.data_status || breakdown?.data_status;
+  const freshness = summary?.data_freshness_minutes ?? breakdown?.data_freshness_minutes;
+  const statusLabel = dataStatus
+    ? t(`dashboard.dataStatus.${dataStatus}`, dataStatus)
+    : undefined;
 
   return (
     <div className="service-cost-analysis">
@@ -292,15 +295,21 @@ export function ServiceCostAnalysis() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <RangePicker
-            value={dateRange}
-            onChange={(dates) => {
-              if (dates && dates[0] && dates[1]) {
-                setDateRange([dates[0], dates[1]]);
-              }
-            }}
-            style={{ borderRadius: 8 }}
-          />
+          {dataStatus && (
+            <span
+              style={{
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 999,
+                background: darkMode ? "#0f172a" : "#f1f5f9",
+                color: darkMode ? "#e2e8f0" : "#475569",
+                border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+              }}
+            >
+              {statusLabel}
+              {typeof freshness === "number" ? ` · ${freshness}m` : ""}
+            </span>
+          )}
           <Tooltip title={t("common.refresh", "刷新")}>
             <div
               onClick={() => refetch()}
@@ -388,7 +397,7 @@ export function ServiceCostAnalysis() {
           ))}
         </Row>
       ) : (
-        <EmptyState darkMode={darkMode} />
+        <EmptyState darkMode={darkMode} statusLabel={statusLabel} />
       )}
     </div>
   );
