@@ -714,12 +714,30 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     from .services.assistant.tools import TavilySearchTool
     tavily_tool = TavilySearchTool(api_key=tavily_api_key or None)
 
+    # Initialize code executor if Docker is available
+    from .services.assistant.code_executor import CodeExecutorService, CodeExecutionConfig
+    code_executor = None
+    try:
+        code_executor = CodeExecutorService(
+            config=CodeExecutionConfig(
+                image="ai-gateway-code-interpreter:latest",
+            )
+        )
+        if code_executor.is_docker_available():
+            logger.info("Code executor initialized with Docker support")
+        else:
+            code_executor = None
+            logger.warning("Docker not available, code execution disabled")
+    except Exception as e:
+        logger.warning(f"Failed to initialize code executor: {e}")
+
     # Create assistant service with session persistence
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=kb_service,
         tavily_api_key=tavily_api_key or None,
         session_manager=session_manager,
+        code_executor=code_executor,
     )
 
     # Initialize Tool Registry (Phase 2)
@@ -741,6 +759,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         features.append("web search")
     if kb_service:
         features.append("KB tools")
+    if code_executor:
+        features.append("code execution")
 
     registered_tools = len(tool_registry.list_tools())
     if registered_tools > 0:

@@ -48,6 +48,8 @@ from .structured_output import (
     OutputGuardrail,
     validate_output,
 )
+from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
+from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
 from ..metrics.usage_recorder import get_usage_recorder
 
 if TYPE_CHECKING:
@@ -216,6 +218,7 @@ Please use this web search context to inform your response when relevant."""
         session_manager: Optional["DatabaseSessionManager"] = None,
         context_config: Optional[ContextConfig] = None,
         enable_rag_evaluation: bool = True,
+        code_executor: Optional[CodeExecutorService] = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -234,6 +237,11 @@ Please use this web search context to inform your response when relevant."""
             check_pii=True,
             check_hallucination=True,
         )
+
+        # Code executor support
+        self.code_executor = code_executor
+        if self.code_executor:
+            self._register_code_executor_tool()
 
     async def chat_stream(
         self,
@@ -815,3 +823,14 @@ Please use this web search context to inform your response when relevant."""
     async def close(self) -> None:
         """Cleanup resources."""
         await self.model_registry.close()
+
+    def _register_code_executor_tool(self) -> None:
+        """Register the code executor tool if available."""
+        if not self.code_executor:
+            return
+
+        from .tools import get_tool_registry
+        registry = get_tool_registry()
+        executor = CodeExecutorToolExecutor(code_executor=self.code_executor)
+        registry.register(CODE_EXECUTOR_TOOL, executor)
+        logger.info("Registered code executor tool")
