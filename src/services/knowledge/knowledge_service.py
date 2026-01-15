@@ -20,7 +20,7 @@ from ...core.observability.logging import get_logger
 logger = get_logger(__name__)
 from ...persistence.database import DatabaseStorage
 from .chunking import ChunkingConfig, process_document, flatten_chunks, ContentType, AssociatedImage
-from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, DashScopeMultimodalEmbedding
+from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, get_cached_embedder, DashScopeMultimodalEmbedding
 from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
 from .ingestion import DocumentImageExtractor, ExtractedImage as IngestionExtractedImage
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
@@ -232,6 +232,36 @@ class KnowledgeService:
                 ds = dict(ds)
                 ds["my_permission"] = perm
                 visible.append(ds)
+
+        # Batch fetch statistics for all visible datasets
+        if visible:
+            dataset_ids = [ds["dataset_id"] for ds in visible]
+            try:
+                stats_batch = await self.db.get_datasets_statistics_batch(dataset_ids)
+                for ds in visible:
+                    ds_id = ds["dataset_id"]
+                    ds_stats = stats_batch.get(ds_id, {})
+                    ds["statistics"] = {
+                        "document_count": ds_stats.get("document_count", 0),
+                        "segment_count": ds_stats.get("segment_count", 0),
+                        "available_document_count": ds_stats.get("document_count", 0),
+                        "available_segment_count": ds_stats.get("segment_count", 0),
+                        "word_count": 0,
+                        "hit_count": 0,
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to fetch batch statistics: {e}")
+                # Set empty statistics if batch fetch fails
+                for ds in visible:
+                    ds["statistics"] = {
+                        "document_count": 0,
+                        "segment_count": 0,
+                        "available_document_count": 0,
+                        "available_segment_count": 0,
+                        "word_count": 0,
+                        "hit_count": 0,
+                    }
+
         return visible
 
 
@@ -1493,16 +1523,17 @@ class KnowledgeService:
             raise ValidationFailedError("mode must be dense|bm25|hybrid")
 
         # Fusion method and weights
+        # Default to RRF (Reciprocal Rank Fusion) - industry best practice for hybrid search
         effective_fusion_method = str(
-            (fusion_method if fusion_method is not None else 
-             fusion if fusion is not None else 
+            (fusion_method if fusion_method is not None else
+             fusion if fusion is not None else
              retrieval_defaults.get("fusion_method") or retrieval_defaults.get("fusion"))
-            or "weighted"
+            or "rrf"  # Changed from "weighted" to "rrf" for better accuracy
         ).lower()
         if effective_fusion_method == "alpha":
-            effective_fusion_method = "weighted"  # Normalize
+            effective_fusion_method = "weighted"  # Normalize legacy param
         if effective_fusion_method not in {"weighted", "rrf"}:
-            effective_fusion_method = "weighted"
+            effective_fusion_method = "rrf"  # Default to RRF
         
         # Weights (default 0.5/0.5 for balanced hybrid)
         # Support legacy 'alpha' parameter (alpha = dense_weight)
@@ -1612,30 +1643,29 @@ class KnowledgeService:
         qvec: Optional[List[float]] = None
         if need_query_vector:
             embedder: Optional[BaseEmbedding] = None
-            try:
-                if is_multimodal:
-                    # Use UnifiedMultimodalEmbedding for cross-modal retrieval
-                    import logging
-                    logging.getLogger(__name__).debug(
-                        f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
-                    )
-                    embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
-                else:
-                    econf = self._resolve_embedding_config(
-                        provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
-                    )
-                    embedder = create_embedding(econf, dimension=dim)
-
-                qvec = await embedder.embed_query(q)
-                # Ensure collection exists and matches dimension (when we need vector ops).
-                collection = await self.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=collection or None,
+            # Use cached embedder to reduce first-call latency (connection reuse)
+            if is_multimodal:
+                # Use UnifiedMultimodalEmbedding for cross-modal retrieval
+                import logging
+                logging.getLogger(__name__).debug(
+                    f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
                 )
-            finally:
-                if embedder:
-                    await embedder.close()
+                embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+            else:
+                econf = self._resolve_embedding_config(
+                    provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
+                )
+                # Use cached embedder for better performance (connection reuse)
+                embedder = await get_cached_embedder(econf, dimension=dim)
+
+            qvec = await embedder.embed_query(q)
+            # Ensure collection exists and matches dimension (when we need vector ops).
+            collection = await self.vector_store.ensure_collection(
+                dataset_id=dataset_id,
+                dimension=embedder.dimension,
+                collection_name=collection or None,
+            )
+            # Note: Don't close cached embedder - it's reused across requests
 
         # --- Dense (Vector) retrieval ---
         dense_hits = []
@@ -2259,6 +2289,13 @@ class KnowledgeService:
             **kwargs,
         )
 
+        # Debug: Log content types from base retrieve
+        content_types_before = {}
+        for r in results:
+            ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            content_types_before[ct] = content_types_before.get(ct, 0) + 1
+        logger.info(f"[retrieve_with_images] Base retrieve returned {len(results)} results: {content_types_before}")
+
         # Apply separate thresholds for text vs image content if requested
         if use_separate_thresholds and results:
             # Handle None values explicitly - kwargs.get returns None if key exists with None value
@@ -2482,6 +2519,317 @@ class KnowledgeService:
             meta["multimodal_rerank_message"] = "VLM service not configured"
 
         return enhanced_results, meta
+
+    async def retrieve_with_images_v2(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
+        intent: str = "general",  # "general" | "find_image" | "find_document"
+        vlm_rerank: bool = True,  # Whether to enable VLM reranking
+        include_images: bool = True,  # Whether to attach associated images
+        **kwargs: Any,
+    ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
+        """
+        Hierarchical multimodal retrieval v2 with intent-aware VLM reranking.
+
+        This enhanced retrieval method implements a two-stage pipeline:
+        1. Expanded recall phase: Retrieve `top_k * 2.5` candidates using hybrid search
+        2. VLM reranking phase: Apply VLM-based reranking for image results (conditional)
+
+        The reranking is applied when:
+        - vlm_rerank=True
+        - intent != "find_document" (document-only searches skip image reranking)
+        - VLM service is available
+
+        Args:
+            user: User context for access control
+            dataset_id: Target dataset ID
+            query: Search query text
+            top_k: Number of final results to return
+            intent: Retrieval intent controlling behavior:
+                - "general": Balanced text and image retrieval with VLM rerank
+                - "find_image": Prioritize image results, aggressive VLM reranking
+                - "find_document": Text-only focus, skip VLM reranking
+            vlm_rerank: Enable VLM-based reranking for image results
+            include_images: Whether to attach associated images to text results
+            **kwargs: Additional arguments passed to retrieve() (e.g., mode, alpha)
+
+        Returns:
+            Tuple of (results, metadata) where:
+            - results: List of RetrieveResult with multimodal content
+            - metadata: Dict with retrieval statistics and debug info
+
+        Example:
+            results, meta = await ks.retrieve_with_images_v2(
+                user=user_ctx,
+                dataset_id="ds_123",
+                query="network architecture diagram",
+                top_k=5,
+                intent="find_image",
+                vlm_rerank=True,
+            )
+        """
+        # Validate intent parameter
+        valid_intents = {"general", "find_image", "find_document"}
+        if intent not in valid_intents:
+            logger.warning(f"Invalid intent '{intent}', defaulting to 'general'")
+            intent = "general"
+
+        # Stage 1: Expanded recall - fetch more candidates for better reranking pool
+        # Use 2.5x expansion for general/find_image, less for find_document
+        expansion_factor = 2.5 if intent != "find_document" else 2.0
+        expanded_top_k = int(top_k * expansion_factor)
+
+        # Configure retrieval mode - use hybrid search (Dense + BM25 + RRF) by default
+        retrieve_kwargs = {
+            "mode": kwargs.get("mode", "hybrid"),
+            "fusion_method": kwargs.get("fusion_method", "rrf"),
+            **{k: v for k, v in kwargs.items() if k not in ("mode", "fusion_method")},
+        }
+
+        # Perform base retrieval with expanded top_k
+        results, meta = await self.retrieve(
+            user=user,
+            dataset_id=dataset_id,
+            query=query,
+            top_k=expanded_top_k,
+            **retrieve_kwargs,
+        )
+
+        # Add v2 metadata
+        meta["retrieval_version"] = "v2"
+        meta["intent"] = intent
+        meta["expanded_top_k"] = expanded_top_k
+        meta["original_top_k"] = top_k
+
+        # Log retrieval statistics
+        content_type_counts: Dict[str, int] = {}
+        for r in results:
+            ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            content_type_counts[ct] = content_type_counts.get(ct, 0) + 1
+        logger.info(
+            f"[retrieve_v2] Stage 1 returned {len(results)} results: {content_type_counts}"
+        )
+        meta["stage1_content_types"] = content_type_counts
+
+        if not results:
+            return results, meta
+
+        # Stage 2: VLM reranking (conditional)
+        # Skip VLM reranking if:
+        # - vlm_rerank is False
+        # - intent is "find_document" (user wants text content, not images)
+        # - VLM service is not available
+        should_vlm_rerank = (
+            vlm_rerank
+            and intent != "find_document"
+            and self.vlm_service is not None
+        )
+
+        if should_vlm_rerank:
+            try:
+                from .multimodal_reranker import MultimodalReranker, RerankCandidate
+
+                # Configure reranker based on intent
+                # find_image: Higher image weight (0.5) for aggressive image prioritization
+                # general: Balanced weight (0.4)
+                image_weight = 0.5 if intent == "find_image" else 0.4
+
+                reranker = MultimodalReranker(
+                    vlm_service=self.vlm_service,
+                    max_concurrent=3,
+                    timeout_seconds=30.0,
+                    image_weight=image_weight,
+                    image_storage_service=self.image_storage_service,
+                )
+
+                # Separate results by content type
+                image_results: List[RetrieveResult] = []
+                text_results: List[RetrieveResult] = []
+
+                for r in results:
+                    content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                    if content_type == "image":
+                        image_results.append(r)
+                    else:
+                        text_results.append(r)
+
+                logger.info(
+                    f"[retrieve_v2] Stage 2: {len(image_results)} images, "
+                    f"{len(text_results)} text candidates for VLM reranking"
+                )
+
+                # Only rerank image results if there are any
+                reranked_image_results: List[RetrieveResult] = []
+                if image_results:
+                    # Convert image results to RerankCandidate format
+                    rerank_candidates: List[RerankCandidate] = []
+                    for r in image_results:
+                        # Load image bytes if we have a URL
+                        image_bytes = None
+                        if r.image_url and self.image_storage_service:
+                            try:
+                                # Try to load image bytes for VLM analysis
+                                import httpx
+                                async with httpx.AsyncClient(timeout=10.0) as client:
+                                    response = await client.get(r.image_url)
+                                    response.raise_for_status()
+                                    image_bytes = response.content
+                            except Exception as load_err:
+                                logger.debug(f"Could not load image for reranking: {load_err}")
+
+                        candidate = RerankCandidate(
+                            segment_id=r.segment_id,
+                            text=r.vlm_description,  # Use VLM description for context
+                            image_url=r.image_url,
+                            image_bytes=image_bytes,
+                            media_type="image",
+                            original_score=r.score,
+                            metadata=r.metadata,
+                        )
+                        rerank_candidates.append(candidate)
+
+                    # Perform VLM reranking on image candidates
+                    reranked_candidates = await reranker.rerank(
+                        query=query,
+                        candidates=rerank_candidates,
+                        top_k=len(rerank_candidates),  # Keep all for merging
+                        rerank_images_only=True,
+                        score_threshold=0.0,
+                    )
+
+                    # Convert back to RetrieveResult format with updated scores
+                    candidate_map = {c.segment_id: c for c in reranked_candidates}
+                    for r in image_results:
+                        if r.segment_id in candidate_map:
+                            reranked_score = candidate_map[r.segment_id].rerank_score
+                            # Create new result with updated score
+                            reranked_image_results.append(
+                                RetrieveResult(
+                                    segment_id=r.segment_id,
+                                    document_id=r.document_id,
+                                    score=reranked_score,
+                                    text=r.text,
+                                    metadata={
+                                        **r.metadata,
+                                        "_original_score": r.score,
+                                        "_vlm_reranked": True,
+                                    },
+                                    content_type=r.content_type,
+                                    image_url=r.image_url,
+                                    vlm_description=r.vlm_description,
+                                    associated_images=r.associated_images,
+                                )
+                            )
+
+                    meta["vlm_rerank_applied"] = True
+                    meta["vlm_rerank_count"] = len(reranked_image_results)
+                    meta["vlm_image_weight"] = image_weight
+
+                # Merge text and reranked image results
+                all_results = text_results + reranked_image_results
+                # Sort by score descending
+                all_results.sort(key=lambda x: x.score, reverse=True)
+                results = all_results
+
+                logger.info(f"[retrieve_v2] After VLM reranking: {len(results)} merged results")
+
+            except Exception as rerank_err:
+                logger.warning(f"[retrieve_v2] VLM reranking failed: {rerank_err}")
+                meta["vlm_rerank_applied"] = False
+                meta["vlm_rerank_error"] = str(rerank_err)
+        else:
+            # Log why VLM reranking was skipped
+            if not vlm_rerank:
+                meta["vlm_rerank_skipped"] = "disabled"
+            elif intent == "find_document":
+                meta["vlm_rerank_skipped"] = "intent_is_find_document"
+            elif not self.vlm_service:
+                meta["vlm_rerank_skipped"] = "vlm_service_unavailable"
+
+        # Truncate to final top_k
+        results = results[:top_k]
+
+        # Stage 3: Attach associated images (same as retrieve_with_images)
+        if include_images and results:
+            segment_ids = [r.segment_id for r in results]
+            associations = await self.db.get_segment_associations_batch(segment_ids)
+
+            enhanced_results: List[RetrieveResult] = []
+            for r in results:
+                enhanced_meta = dict(r.metadata)
+
+                # Build associated images list
+                associated_imgs: List[Dict[str, Any]] = []
+                if r.segment_id in associations and associations[r.segment_id]:
+                    associated_imgs = [
+                        {
+                            "image_segment_id": img["image_segment_id"],
+                            "storage_url": self._normalize_local_image_url(
+                                img.get("storage_url", ""),
+                                img.get("image_segment_id"),
+                            ),
+                            "filename": img.get("filename", ""),
+                            "vlm_description": img.get("vlm_description"),
+                            "proximity_score": float(img.get("proximity_score", 1.0)),
+                            "media_type": img.get("media_type", "image/png"),
+                        }
+                        for img in associations[r.segment_id]
+                    ]
+                    enhanced_meta["has_images"] = True
+                    enhanced_meta["image_count"] = len(associated_imgs)
+                else:
+                    enhanced_meta["has_images"] = False
+                    enhanced_meta["image_count"] = 0
+
+                # Get content_type from metadata or original result
+                content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                image_url = self._normalize_local_image_url(
+                    r.metadata.get("image_url", getattr(r, "image_url", None)),
+                    r.segment_id,
+                )
+                vlm_description = r.metadata.get(
+                    "vlm_description", getattr(r, "vlm_description", None)
+                )
+
+                enhanced_results.append(
+                    RetrieveResult(
+                        segment_id=r.segment_id,
+                        document_id=r.document_id,
+                        score=r.score,
+                        text=r.text,
+                        metadata=enhanced_meta,
+                        content_type=content_type,
+                        image_url=image_url,
+                        vlm_description=vlm_description,
+                        associated_images=tuple(associated_imgs),
+                    )
+                )
+
+            results = enhanced_results
+
+            # Update metadata
+            segments_with_images = sum(
+                1 for r in results if r.metadata.get("has_images", False)
+            )
+            meta["segments_with_images"] = segments_with_images
+            meta["include_images"] = True
+
+        # Final statistics
+        final_content_types: Dict[str, int] = {}
+        for r in results:
+            ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            final_content_types[ct] = final_content_types.get(ct, 0) + 1
+        meta["final_content_types"] = final_content_types
+        meta["final_count"] = len(results)
+
+        logger.info(
+            f"[retrieve_v2] Final: {len(results)} results, content_types={final_content_types}"
+        )
+
+        return results, meta
 
     # ========================= helpers =========================
 
