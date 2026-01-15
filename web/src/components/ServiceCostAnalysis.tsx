@@ -26,26 +26,22 @@ import type { UsageBreakdownItem } from "@/api/usage";
 import { useAppStore } from "@/store/useAppStore";
 
 // 服务类型配置
-const SERVICE_CONFIG: Record<string, { icon: React.ReactNode; color: string; gradient: string }> = {
+const SERVICE_CONFIG: Record<string, { icon: React.ReactNode; color: string }> = {
   assistant: {
     icon: <RobotOutlined />,
     color: "#3b82f6",
-    gradient: "linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%)",
   },
   langgraph: {
     icon: <ThunderboltOutlined />,
     color: "#8b5cf6",
-    gradient: "linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%)",
   },
   proxy: {
     icon: <CloudServerOutlined />,
     color: "#10b981",
-    gradient: "linear-gradient(135deg, #10b981 0%, #34d399 100%)",
   },
   default: {
     icon: <ApiOutlined />,
     color: "#64748b",
-    gradient: "linear-gradient(135deg, #64748b 0%, #94a3b8 100%)",
   },
 };
 
@@ -99,37 +95,14 @@ function ServiceCard({ service, totalCost }: ServiceCardProps) {
         borderRadius: 16,
         border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
         background: darkMode ? "#1e293b" : "#ffffff",
-        overflow: "hidden",
       }}
-      styles={{ body: { padding: 0 } }}
+      styles={{ body: { padding: 20 } }}
     >
-      {/* 头部渐变条 */}
-      <div
-        style={{
-          height: 4,
-          background: config.gradient,
-        }}
-      />
-
-      <div style={{ padding: 20 }}>
         {/* 服务标识 */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-          <div
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 12,
-              background: config.gradient,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 20,
-              color: "#fff",
-              boxShadow: `0 4px 12px ${config.color}40`,
-            }}
-          >
+          <span style={{ fontSize: 20, color: darkMode ? "#94a3b8" : "#64748b" }}>
             {config.icon}
-          </div>
+          </span>
           <div>
             <div style={{ fontSize: 16, fontWeight: 600, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
               {displayName}
@@ -176,7 +149,7 @@ function ServiceCard({ service, totalCost }: ServiceCardProps) {
           <Tooltip title={`${service.percentage.toFixed(1)}% ${t("cost.ofTotal", "占总成本")}`}>
             <Progress
               percent={service.percentage}
-              strokeColor={config.gradient}
+              strokeColor={config.color}
               railColor={darkMode ? "#334155" : "#e2e8f0"}
               showInfo={false}
               size="small"
@@ -186,7 +159,6 @@ function ServiceCard({ service, totalCost }: ServiceCardProps) {
             {service.percentage.toFixed(1)}% {t("cost.ofTotal", "占总成本")}
           </div>
         </div>
-      </div>
     </Card>
   );
 }
@@ -338,9 +310,7 @@ export function ServiceCostAnalysis({
             borderRadius: 16,
             marginBottom: 20,
             border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
-            background: darkMode
-              ? "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)"
-              : "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)",
+            background: darkMode ? "#1e293b" : "#ffffff",
           }}
         >
           <Row gutter={[24, 16]}>
