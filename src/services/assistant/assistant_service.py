@@ -51,7 +51,7 @@ from .structured_output import (
 from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
 from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
-from .file_processor import ProcessedFiles
+from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, ArtifactStorageService
 
@@ -108,6 +108,9 @@ class StreamEventType(str, Enum):
 
     # KV-Cache metrics
     CACHE_METRICS = "cache_metrics"
+
+    # File processing events
+    FILE_PROCESSED = "file_processed"
 
 
 @dataclass
@@ -262,6 +265,13 @@ Please use this web search context to inform your response when relevant."""
 
         # KV-Cache optimization
         self.cache_optimizer = ContextCacheOptimizer(CacheConfig())
+
+        # File processor for upload analysis
+        # Note: VLM service can be injected later if needed for text-only model image descriptions
+        self.file_processor = create_file_processor(
+            vlm_service=None,  # Lazy initialization or inject via setter
+            knowledge_service=kb_service,
+        )
 
     async def _persist_artifacts(
         self,
@@ -472,6 +482,44 @@ Please use this web search context to inform your response when relevant."""
                     data={"message": f"Web search failed: {str(e)}", "recoverable": True}
                 )
 
+        # Step 2.5: Process uploaded files if any
+        processed_files: Optional[ProcessedFiles] = None
+        model_supports_vision = model_info.supports_vision if model_info else False
+
+        if config.file_paths:
+            try:
+                processed_files = await self.file_processor.process_files(
+                    file_paths=config.file_paths,
+                    session_id=session_id,
+                    user=user,
+                    model_supports_vision=model_supports_vision,
+                )
+
+                # Emit file processing event
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.FILE_PROCESSED.value,
+                    data={
+                        "image_count": len(processed_files.images),
+                        "text_length": len(processed_files.text_content),
+                        "description_count": len(processed_files.image_descriptions),
+                        "requires_rag": processed_files.requires_rag,
+                        "file_metadata": processed_files.file_metadata,
+                    }
+                )
+                logger.info(
+                    f"[FILE PROCESS] Processed {len(config.file_paths)} files: "
+                    f"images={len(processed_files.images)}, "
+                    f"text_chars={len(processed_files.text_content)}, "
+                    f"descriptions={len(processed_files.image_descriptions)}, "
+                    f"requires_rag={processed_files.requires_rag}"
+                )
+            except Exception as e:
+                logger.error(f"File processing failed: {e}", exc_info=True)
+                yield AssistantStreamEvent(
+                    event_type="error",
+                    data={"message": f"File processing failed: {str(e)}", "recoverable": True}
+                )
+
         # Step 3: Build messages (use processed_history with context management applied)
         messages = self._build_messages(
             message=message,
@@ -479,6 +527,8 @@ Please use this web search context to inform your response when relevant."""
             config=config,
             retrieved_contexts=retrieved_contexts,
             web_search_context=web_search_context,
+            processed_files=processed_files,
+            model_supports_vision=model_supports_vision,
         )
 
         # Step 4: Stream from model
