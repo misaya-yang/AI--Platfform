@@ -1111,14 +1111,13 @@ Please use this web search context to inform your response when relevant."""
             try:
                 # Use retrieve_with_images if available and requested
                 if include_images and hasattr(self.kb_service, 'retrieve_with_images'):
-                    # Expand recall range for multimodal retrieval (top_k * 2.5)
-                    # This ensures images (with naturally lower similarity scores) have a chance to rank in
-                    expanded_top_k = int(top_k * 2.5)
+                    # Pass original top_k - internal expansion is handled by retrieve_with_images
+                    # (knowledge_service applies its own expansion factor for multimodal retrieval)
                     results, meta = await self.kb_service.retrieve_with_images(
                         user=user,
                         dataset_id=dataset_id,
                         query=query,
-                        top_k=expanded_top_k,
+                        top_k=top_k,
                         score_threshold=score_threshold,
                         include_images=True,
                         # Multimodal optimization: boost image results and use lower threshold
