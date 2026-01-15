@@ -1,15 +1,13 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Card, DatePicker, Empty, Spin, Tabs } from "antd";
+import { Card, Empty, Spin, Tabs } from "antd";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
 import dayjs from "dayjs";
 import { SyncOutlined } from "@ant-design/icons";
 
 import { getSecurityEventBreakdown } from "@/api/metrics";
 import { useAppStore } from "@/store/useAppStore";
-
-const { RangePicker } = DatePicker;
 
 type BreakdownDatum = {
   name: string;
@@ -18,19 +16,21 @@ type BreakdownDatum = {
   total: number;
 };
 
-export function SecurityEventCharts() {
+export function SecurityEventCharts({
+  dateRange,
+  granularity,
+}: {
+  dateRange: [dayjs.Dayjs, dayjs.Dayjs];
+  granularity: "day" | "hour";
+}) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-    dayjs().subtract(30, "day"),
-    dayjs(),
-  ]);
 
   const startDate = dateRange[0].format("YYYY-MM-DD");
   const endDate = dateRange[1].format("YYYY-MM-DD");
 
   const userAuthQuery = useQuery({
-    queryKey: ["security-breakdown", "user", "auth_failed", startDate, endDate],
+    queryKey: ["security-breakdown", "user", "auth_failed", startDate, endDate, granularity],
     queryFn: () =>
       getSecurityEventBreakdown({
         dimension: "user",
@@ -43,7 +43,7 @@ export function SecurityEventCharts() {
   });
 
   const userRateQuery = useQuery({
-    queryKey: ["security-breakdown", "user", "rate_limited", startDate, endDate],
+    queryKey: ["security-breakdown", "user", "rate_limited", startDate, endDate, granularity],
     queryFn: () =>
       getSecurityEventBreakdown({
         dimension: "user",
@@ -56,7 +56,7 @@ export function SecurityEventCharts() {
   });
 
   const serviceAuthQuery = useQuery({
-    queryKey: ["security-breakdown", "service", "auth_failed", startDate, endDate],
+    queryKey: ["security-breakdown", "service", "auth_failed", startDate, endDate, granularity],
     queryFn: () =>
       getSecurityEventBreakdown({
         dimension: "service",
@@ -69,7 +69,7 @@ export function SecurityEventCharts() {
   });
 
   const serviceRateQuery = useQuery({
-    queryKey: ["security-breakdown", "service", "rate_limited", startDate, endDate],
+    queryKey: ["security-breakdown", "service", "rate_limited", startDate, endDate, granularity],
     queryFn: () =>
       getSecurityEventBreakdown({
         dimension: "service",
@@ -176,6 +176,16 @@ export function SecurityEventCharts() {
     );
   };
 
+  const [activeTab, setActiveTab] = useState<"user" | "service">("user");
+  const statusSource =
+    activeTab === "user"
+      ? userAuthQuery.data || userRateQuery.data
+      : serviceAuthQuery.data || serviceRateQuery.data;
+  const statusLabel = statusSource?.data_status
+    ? t(`dashboard.dataStatus.${statusSource.data_status}`, statusSource.data_status)
+    : undefined;
+  const freshnessMinutes = statusSource?.data_freshness_minutes;
+
   return (
     <Card
       style={{
@@ -186,16 +196,31 @@ export function SecurityEventCharts() {
       styles={{ body: { padding: 20 } }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <div style={{ fontSize: 16, fontWeight: 600 }}>
-          {t("dashboard.securityEvents.title", "Auth & Rate Limit Events")}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 16, fontWeight: 600 }}>
+            {t("dashboard.securityEvents.title", "Auth & Rate Limit Events")}
+          </div>
+          {statusLabel && (
+            <span
+              style={{
+                fontSize: 12,
+                padding: "4px 10px",
+                borderRadius: 999,
+                background: darkMode ? "#0f172a" : "#f1f5f9",
+                color: darkMode ? "#e2e8f0" : "#475569",
+                border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+              }}
+            >
+              {statusLabel}
+              {typeof freshnessMinutes === "number" ? ` · ${freshnessMinutes}m` : ""}
+            </span>
+          )}
         </div>
-        <RangePicker
-          value={dateRange}
-          onChange={(value) => value && setDateRange(value as [dayjs.Dayjs, dayjs.Dayjs])}
-        />
       </div>
 
       <Tabs
+        activeKey={activeTab}
+        onChange={(key) => setActiveTab(key as "user" | "service")}
         items={[
           {
             key: "user",
