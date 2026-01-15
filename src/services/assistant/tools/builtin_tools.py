@@ -145,13 +145,20 @@ class KBSearchExecutor(ToolExecutor):
 
             for dataset_id in dataset_ids:
                 try:
-                    results, meta = await self.kb_service.retrieve(
+                    # Use retrieve_with_images_v2 for multimodal retrieval with intent support
+                    # Set include_images based on intent (skip images for find_document intent)
+                    include_images = intent != "find_document"
+                    # Enable VLM reranking for image-focused queries
+                    vlm_rerank = intent in ("general", "find_image")
+
+                    results, meta = await self.kb_service.retrieve_with_images_v2(
                         user=request.user,
                         dataset_id=dataset_id,
                         query=query,
                         top_k=top_k,
-                        score_threshold=score_threshold,
                         intent=intent,
+                        vlm_rerank=vlm_rerank,
+                        include_images=include_images,
                     )
 
                     for r in results:
