@@ -375,3 +375,23 @@ export interface ArtifactData {
   content?: string;
   createdAt: Date;
 }
+
+// =============================================================================
+// Task Panel Types (for Agentic workflow progress)
+// =============================================================================
+
+export type AgentTaskStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export interface AgentTask {
+  id: string;
+  description: string;
+  status: AgentTaskStatus;
+  result?: string;
+  error?: string;
+}
+
+export interface CollectedInfo {
+  key: string;
+  value: string;
+  source: string;
+}

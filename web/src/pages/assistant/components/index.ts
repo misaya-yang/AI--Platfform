@@ -15,3 +15,7 @@ export { StyleSelector } from "./StyleSelector";
 export { CompactModelSelector } from "./CompactModelSelector";
 export { CompactKBSelector } from "./CompactKBSelector";
 export { WebSearchToggle } from "./WebSearchToggle";
+
+// Agentic workflow components
+export { TaskPanel } from "./TaskPanel";
+export type { Task, TaskStatus, CollectedInfo, TaskPanelProps } from "./TaskPanel";
