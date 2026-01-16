@@ -52,7 +52,10 @@ from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_ex
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
 from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
 from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
+from .context_engine import ContextEngine, ContextStructure
+from .working_memory import WorkingMemory, TaskStatus
 from ..metrics.usage_recorder import get_usage_recorder
+from ..metrics.realtime_metrics import get_realtime_metrics
 from ..storage import get_artifact_storage, ArtifactStorageService
 
 if TYPE_CHECKING:
@@ -112,6 +115,10 @@ class StreamEventType(str, Enum):
     # File processing events
     FILE_PROCESSED = "file_processed"
 
+    # Working memory events (Context Engine)
+    WORKING_MEMORY_UPDATE = "working_memory_update"
+    TASK_PLANNING = "task_planning"
+
 
 @dataclass
 class AssistantConfig:
@@ -146,6 +153,11 @@ class AssistantConfig:
     output_max_length: int = 10000
     output_check_pii: bool = True
     output_format: OutputFormat = OutputFormat.TEXT
+
+    # Context Engine settings (Phase 5: KV-Cache optimization)
+    use_context_engine: bool = False  # Enable Context Engine for optimized caching
+    user_preferences: Optional[str] = None  # User-level preferences for context
+    long_term_memory: Optional[str] = None  # Persistent user knowledge
 
 
 @dataclass
@@ -272,6 +284,10 @@ Please use this web search context to inform your response when relevant."""
             vlm_service=None,  # Lazy initialization or inject via setter
             knowledge_service=kb_service,
         )
+
+        # Context Engine for KV-Cache optimization (Phase 5)
+        # Per-session working memory for task tracking
+        self._working_memories: Dict[str, WorkingMemory] = {}
 
     async def _persist_artifacts(
         self,
@@ -529,6 +545,7 @@ Please use this web search context to inform your response when relevant."""
             web_search_context=web_search_context,
             processed_files=processed_files,
             model_supports_vision=model_supports_vision,
+            session_id=session_id,
         )
 
         # Step 4: Stream from model
@@ -1049,14 +1066,16 @@ Please use this web search context to inform your response when relevant."""
                 logger.warning(f"Failed to parse cache metrics: {e}")
 
             # Record usage to database for billing/analytics
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
             try:
                 usage_recorder = get_usage_recorder()
                 await usage_recorder.record_usage(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
                     model=config.model_id,
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     service_id="assistant",
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
@@ -1069,6 +1088,15 @@ Please use this web search context to inform your response when relevant."""
                 logger.debug(f"Recorded usage: {usage} for user {user.user_id}")
             except Exception as e:
                 logger.warning(f"Failed to record usage: {e}")
+
+            # Update real-time metrics in Redis for dashboard
+            try:
+                realtime_metrics = get_realtime_metrics()
+                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
+                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
+                    logger.debug(f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}")
+            except Exception as e:
+                logger.warning(f"Failed to update realtime metrics: {e}")
 
         yield AssistantStreamEvent(
             event_type="done",
@@ -1125,6 +1153,7 @@ Please use this web search context to inform your response when relevant."""
             history=history,
             config=config,
             retrieved_contexts=retrieved_contexts,
+            session_id=session_id,
         )
 
         # Get response
@@ -1139,14 +1168,16 @@ Please use this web search context to inform your response when relevant."""
 
         # Record usage to database for billing/analytics
         if usage:
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
             try:
                 usage_recorder = get_usage_recorder()
                 await usage_recorder.record_usage(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
                     model=config.model_id,
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=usage.get("output_tokens", 0),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     service_id="assistant",
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
@@ -1158,6 +1189,15 @@ Please use this web search context to inform your response when relevant."""
                 logger.debug(f"Recorded usage: {usage} for user {user.user_id}")
             except Exception as e:
                 logger.warning(f"Failed to record usage: {e}")
+
+            # Update real-time metrics in Redis for dashboard
+            try:
+                realtime_metrics = get_realtime_metrics()
+                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
+                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
+                    logger.debug(f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}")
+            except Exception as e:
+                logger.warning(f"Failed to update realtime metrics: {e}")
 
         return {
             "content": content,
@@ -1273,6 +1313,7 @@ Please use this web search context to inform your response when relevant."""
         web_search_context: Optional[str] = None,
         processed_files: Optional[ProcessedFiles] = None,
         model_supports_vision: bool = False,
+        session_id: Optional[str] = None,
     ) -> List[ChatMessage]:
         """Build the message list for the model.
 
@@ -1284,10 +1325,25 @@ Please use this web search context to inform your response when relevant."""
             web_search_context: Web search results as formatted text.
             processed_files: Processed file contents (images, text, descriptions).
             model_supports_vision: Whether the model supports vision/multimodal input.
+            session_id: Session ID for working memory lookup (Context Engine mode).
 
         Returns:
             List of ChatMessage objects ready to send to the model.
         """
+        # Use Context Engine for optimized caching if enabled
+        if config.use_context_engine:
+            return self._build_messages_with_context_engine(
+                message=message,
+                history=history,
+                config=config,
+                retrieved_contexts=retrieved_contexts,
+                web_search_context=web_search_context,
+                processed_files=processed_files,
+                model_supports_vision=model_supports_vision,
+                session_id=session_id,
+            )
+
+        # Legacy message building (original implementation)
         messages: List[ChatMessage] = []
 
         # System prompt
@@ -1354,6 +1410,186 @@ Please use this web search context to inform your response when relevant."""
         messages.append(ChatMessage(role="user", content=final_message, images=user_images))
 
         return messages
+
+    def _build_messages_with_context_engine(
+        self,
+        message: str,
+        history: List[Dict[str, str]],
+        config: AssistantConfig,
+        retrieved_contexts: List[RetrievedContext],
+        web_search_context: Optional[str] = None,
+        processed_files: Optional[ProcessedFiles] = None,
+        model_supports_vision: bool = False,
+        session_id: Optional[str] = None,
+    ) -> List[ChatMessage]:
+        """Build messages using Context Engine for KV-Cache optimization.
+
+        This method uses the ContextEngine class to construct messages with
+        a stable prefix design that maximizes cache hit rates.
+
+        Key differences from legacy _build_messages:
+        - System prompt is built with layered structure (stable first)
+        - User preferences and long-term memory are injected into system prompt
+        - Working memory (task state) is included for multi-step task focus
+        - KB/web context goes into current_context (end of user message)
+
+        Args:
+            message: The user's message text.
+            history: Previous conversation history.
+            config: Assistant configuration.
+            retrieved_contexts: KB retrieval results.
+            web_search_context: Web search results as formatted text.
+            processed_files: Processed file contents.
+            model_supports_vision: Whether the model supports vision.
+            session_id: Session ID for working memory lookup.
+
+        Returns:
+            List of ChatMessage objects with optimized structure.
+        """
+        # Get provider from model_id to configure ContextEngine
+        provider = self._get_provider_from_model(config.model_id)
+        context_engine = ContextEngine(provider=provider)
+
+        # Build current context (KB + web search results)
+        current_context_parts: List[str] = []
+        if retrieved_contexts:
+            context_text = self._format_context(retrieved_contexts)
+            current_context_parts.append(self.CONTEXT_TEMPLATE.format(context=context_text))
+            logger.info(f"[CONTEXT ENGINE] KB context: {len(context_text)} chars")
+
+        if web_search_context:
+            current_context_parts.append(self.WEB_CONTEXT_TEMPLATE.format(context=web_search_context))
+            logger.info(f"[CONTEXT ENGINE] Web context: {len(web_search_context)} chars")
+
+        # Get working memory task state if available
+        task_state: Optional[str] = None
+        if session_id and session_id in self._working_memories:
+            working_memory = self._working_memories[session_id]
+            task_state = working_memory.to_markdown()
+            logger.info(f"[CONTEXT ENGINE] Task state injected: {len(task_state)} chars")
+
+        # Build ContextStructure with layered content
+        context_structure = ContextStructure(
+            system_prompt=config.system_prompt or self.DEFAULT_SYSTEM_PROMPT,
+            tool_definitions=[],  # Tool definitions handled separately
+            user_preferences=config.user_preferences,
+            long_term_memory=config.long_term_memory,
+            task_state=task_state,
+            conversation_history=[
+                {"role": h.get("role", "user"), "content": h.get("content", "")}
+                for h in history
+                if h.get("role") in ("user", "assistant") and h.get("content")
+            ],
+            current_context="\n\n".join(current_context_parts) if current_context_parts else None,
+            current_query=message,
+        )
+
+        # Build messages using ContextEngine
+        raw_messages = context_engine.build_messages(context_structure)
+
+        # Convert to ChatMessage objects and handle file content
+        messages: List[ChatMessage] = []
+        for i, msg in enumerate(raw_messages):
+            role = msg["role"]
+            content = msg["content"]
+
+            # For the last user message, handle file attachments
+            if i == len(raw_messages) - 1 and role == "user" and processed_files:
+                content, images = self._inject_file_content(
+                    content=content,
+                    processed_files=processed_files,
+                    model_supports_vision=model_supports_vision,
+                )
+                messages.append(ChatMessage(role=role, content=content, images=images))
+            else:
+                messages.append(ChatMessage(role=role, content=content))
+
+        logger.info(f"[CONTEXT ENGINE] Built {len(messages)} messages with stable prefix design")
+        return messages
+
+    def _inject_file_content(
+        self,
+        content: str,
+        processed_files: ProcessedFiles,
+        model_supports_vision: bool,
+    ) -> tuple[str, Optional[List[str]]]:
+        """Inject file content into user message.
+
+        Args:
+            content: Original user message content.
+            processed_files: Processed file contents.
+            model_supports_vision: Whether model supports vision.
+
+        Returns:
+            Tuple of (updated content, optional image list).
+        """
+        user_images: Optional[List[str]] = None
+
+        if model_supports_vision and processed_files.has_images:
+            user_images = [
+                f"data:{img.media_type};base64,{img.base64_data}"
+                for img in processed_files.images
+            ]
+            logger.info(f"[CONTEXT ENGINE] Added {len(user_images)} images")
+
+        if processed_files.text_content:
+            content += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
+            logger.info(f"[CONTEXT ENGINE] Added text content: {len(processed_files.text_content)} chars")
+
+        if processed_files.image_descriptions and not model_supports_vision:
+            descriptions = "\n".join(
+                f"- 图像 {i+1}: {desc}"
+                for i, desc in enumerate(processed_files.image_descriptions)
+            )
+            content += f"\n\n---\n[图像描述]\n{descriptions}"
+            logger.info(f"[CONTEXT ENGINE] Added {len(processed_files.image_descriptions)} image descriptions")
+
+        return content, user_images
+
+    def _get_provider_from_model(self, model_id: str) -> str:
+        """Get provider name from model ID for ContextEngine configuration.
+
+        Args:
+            model_id: The model identifier.
+
+        Returns:
+            Provider name string.
+        """
+        model_id_lower = model_id.lower()
+        if "claude" in model_id_lower:
+            return "anthropic"
+        elif "gpt" in model_id_lower or "o1" in model_id_lower:
+            return "openai"
+        elif "deepseek" in model_id_lower:
+            return "deepseek"
+        elif "qwen" in model_id_lower:
+            return "dashscope"
+        elif "gemini" in model_id_lower:
+            return "google"
+        else:
+            return "openai"  # Default to OpenAI format
+
+    def get_working_memory(self, session_id: str) -> WorkingMemory:
+        """Get or create working memory for a session.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            WorkingMemory instance for the session.
+        """
+        if session_id not in self._working_memories:
+            self._working_memories[session_id] = WorkingMemory(session_id=session_id)
+        return self._working_memories[session_id]
+
+    def clear_working_memory(self, session_id: str) -> None:
+        """Clear working memory for a session.
+
+        Args:
+            session_id: The session ID.
+        """
+        if session_id in self._working_memories:
+            del self._working_memories[session_id]
 
     def _format_context(self, contexts: List[RetrievedContext]) -> str:
         """Format retrieved contexts for injection into the prompt."""
