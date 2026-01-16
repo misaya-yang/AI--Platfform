@@ -25,6 +25,14 @@ from src.services.assistant.streaming_writer import (
 )
 
 
+def create_mock_user():
+    """Create a mock UserContext for tests."""
+    mock_user = MagicMock()
+    mock_user.tenant_id = "test_tenant"
+    mock_user.user_id = "test_user"
+    return mock_user
+
+
 # =============================================================================
 # StreamChunk Tests
 # =============================================================================
@@ -617,7 +625,7 @@ class TestKBSearch:
         results = await writer._search_kb(
             query="test query",
             dataset_ids=["dataset_1"],
-            user=None,
+            user=create_mock_user(),
         )
 
         assert len(results) == 1
@@ -647,7 +655,7 @@ class TestKBSearch:
         results = await writer._search_kb(
             query="test query",
             dataset_ids=["dataset_1", "dataset_2"],
-            user=None,
+            user=create_mock_user(),
         )
 
         assert len(results) == 2
@@ -706,7 +714,7 @@ class TestKBSearch:
         results = await writer._search_kb(
             query="test",
             dataset_ids=["dataset_1"],
-            user=None,
+            user=create_mock_user(),
         )
 
         assert len(results) == 3
@@ -807,6 +815,7 @@ class TestWriteWithVerification:
         async for chunk in writer.write_with_verification(
             writing_prompt="Explain the refund policy",
             dataset_ids=["policies"],
+            user=create_mock_user(),
         ):
             chunks.append(chunk)
 

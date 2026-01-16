@@ -661,6 +661,11 @@ class StreamingWriter:
 
         for dataset_id in dataset_ids:
             try:
+                # Skip if no user context provided
+                if user is None:
+                    logger.warning("KB search skipped: no user context provided")
+                    continue
+
                 # Call KB service retrieve
                 retrieve_results, meta = await self.kb_service.retrieve(
                     user=user,
@@ -683,7 +688,13 @@ class StreamingWriter:
                 continue
 
         # Sort by score and limit to top_k
-        results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        def get_score(item: Dict[str, Any]) -> float:
+            score = item.get("score", 0)
+            if isinstance(score, (int, float)):
+                return float(score)
+            return 0.0
+
+        results.sort(key=get_score, reverse=True)
         return results[:self.search_top_k]
 
 
