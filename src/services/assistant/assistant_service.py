@@ -119,6 +119,9 @@ class StreamEventType(str, Enum):
     WORKING_MEMORY_UPDATE = "working_memory_update"
     TASK_PLANNING = "task_planning"
 
+    # Tool execution error event (for error preservation)
+    TOOL_ERROR = "tool_error"
+
 
 @dataclass
 class AssistantConfig:
@@ -189,6 +192,60 @@ class RAGEvaluation:
     citations: List[Citation] = field(default_factory=list)
     quality_score: float = 0.0
     grounding_ratio: float = 0.0  # What % of response is grounded in sources
+
+
+@dataclass
+class ToolErrorInfo:
+    """
+    Structured error information for tool execution failures.
+
+    Based on Manus Context Engineering principle: Don't hide failures from the agent.
+    By preserving rich error context, the model can:
+    - Understand what went wrong
+    - Adjust its approach on retry
+    - Provide better feedback to users
+
+    Attributes:
+        tool_name: Name of the tool that failed
+        tool_call_id: ID of the tool call
+        error_type: Type/class of the error
+        error_message: Human-readable error message
+        arguments: The arguments that were passed to the tool
+        suggestion: Optional suggestion for how to fix the issue
+        timestamp: When the error occurred
+    """
+    tool_name: str
+    tool_call_id: str
+    error_type: str
+    error_message: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    suggestion: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+    def to_rich_context(self) -> str:
+        """
+        Format error as rich context for the model.
+
+        This format is designed to help the model understand and potentially
+        recover from the error. The structure is:
+        - Clear error type and message
+        - Arguments that caused the failure
+        - Actionable suggestion when available
+        """
+        lines = [
+            f"[TOOL ERROR] {self.tool_name} failed",
+            f"Error Type: {self.error_type}",
+            f"Error Message: {self.error_message}",
+        ]
+
+        if self.arguments:
+            args_str = ", ".join(f"{k}={repr(v)[:100]}" for k, v in self.arguments.items())
+            lines.append(f"Arguments: {args_str}")
+
+        if self.suggestion:
+            lines.append(f"Suggestion: {self.suggestion}")
+
+        return "\n".join(lines)
 
 
 class AssistantService:
@@ -711,11 +768,30 @@ Please use this web search context to inform your response when relevant."""
                             "content": output,
                         })
                     except Exception as e:
-                        logger.error(f"Code execution failed: {e}")
+                        logger.error(f"Code execution failed: {e}", exc_info=True)
+                        # Create structured error for better agent recovery
+                        error_info = self._create_tool_error(
+                            tool_name=tool_name,
+                            tool_call_id=tool_id,
+                            error=e,
+                            arguments=tool_args,
+                        )
+                        # Emit error event for frontend
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.TOOL_ERROR,
+                            data={
+                                "tool_name": error_info.tool_name,
+                                "tool_call_id": error_info.tool_call_id,
+                                "error_type": error_info.error_type,
+                                "error_message": error_info.error_message,
+                                "suggestion": error_info.suggestion,
+                            }
+                        )
+                        # Add rich error context to tool results for model
                         tool_results.append({
                             "tool_call_id": tool_id,
                             "role": "tool",
-                            "content": f"Execution error: {str(e)}",
+                            "content": error_info.to_rich_context(),
                         })
 
                 elif tool_name == "generate_image":
@@ -783,11 +859,30 @@ Please use this web search context to inform your response when relevant."""
                             "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
                         })
                     except Exception as e:
-                        logger.error(f"Image generation failed: {e}")
+                        logger.error(f"Image generation failed: {e}", exc_info=True)
+                        # Create structured error for better agent recovery
+                        error_info = self._create_tool_error(
+                            tool_name=tool_name,
+                            tool_call_id=tool_id,
+                            error=e,
+                            arguments=tool_args,
+                        )
+                        # Emit error event for frontend
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.TOOL_ERROR,
+                            data={
+                                "tool_name": error_info.tool_name,
+                                "tool_call_id": error_info.tool_call_id,
+                                "error_type": error_info.error_type,
+                                "error_message": error_info.error_message,
+                                "suggestion": error_info.suggestion,
+                            }
+                        )
+                        # Add rich error context to tool results for model
                         tool_results.append({
                             "tool_call_id": tool_id,
                             "role": "tool",
-                            "content": f"Image generation error: {str(e)}",
+                            "content": error_info.to_rich_context(),
                         })
 
                 elif tool_name == "generate_document":
@@ -860,11 +955,30 @@ Please use this web search context to inform your response when relevant."""
                             "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
                         })
                     except Exception as e:
-                        logger.error(f"Document generation failed: {e}")
+                        logger.error(f"Document generation failed: {e}", exc_info=True)
+                        # Create structured error for better agent recovery
+                        error_info = self._create_tool_error(
+                            tool_name=tool_name,
+                            tool_call_id=tool_id,
+                            error=e,
+                            arguments=tool_args,
+                        )
+                        # Emit error event for frontend
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.TOOL_ERROR,
+                            data={
+                                "tool_name": error_info.tool_name,
+                                "tool_call_id": error_info.tool_call_id,
+                                "error_type": error_info.error_type,
+                                "error_message": error_info.error_message,
+                                "suggestion": error_info.suggestion,
+                            }
+                        )
+                        # Add rich error context to tool results for model
                         tool_results.append({
                             "tool_call_id": tool_id,
                             "role": "tool",
-                            "content": f"Document generation error: {str(e)}",
+                            "content": error_info.to_rich_context(),
                         })
 
                 else:
@@ -888,17 +1002,55 @@ Please use this web search context to inform your response when relevant."""
                                 "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
                             })
                         else:
+                            # Unknown tool - create structured error
+                            error_info = ToolErrorInfo(
+                                tool_name=tool_name,
+                                tool_call_id=tool_id,
+                                error_type="UnknownToolError",
+                                error_message=f"Tool '{tool_name}' is not registered",
+                                arguments=tool_args,
+                                suggestion="Check available tools. The tool may have been misspelled or is not available.",
+                            )
+                            yield AssistantStreamEvent(
+                                event_type=StreamEventType.TOOL_ERROR,
+                                data={
+                                    "tool_name": error_info.tool_name,
+                                    "tool_call_id": error_info.tool_call_id,
+                                    "error_type": error_info.error_type,
+                                    "error_message": error_info.error_message,
+                                    "suggestion": error_info.suggestion,
+                                }
+                            )
                             tool_results.append({
                                 "tool_call_id": tool_id,
                                 "role": "tool",
-                                "content": f"Unknown tool: {tool_name}",
+                                "content": error_info.to_rich_context(),
                             })
                     except Exception as e:
-                        logger.error(f"Tool {tool_name} execution failed: {e}")
+                        logger.error(f"Tool {tool_name} execution failed: {e}", exc_info=True)
+                        # Create structured error for better agent recovery
+                        error_info = self._create_tool_error(
+                            tool_name=tool_name,
+                            tool_call_id=tool_id,
+                            error=e,
+                            arguments=tool_args,
+                        )
+                        # Emit error event for frontend
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.TOOL_ERROR,
+                            data={
+                                "tool_name": error_info.tool_name,
+                                "tool_call_id": error_info.tool_call_id,
+                                "error_type": error_info.error_type,
+                                "error_message": error_info.error_message,
+                                "suggestion": error_info.suggestion,
+                            }
+                        )
+                        # Add rich error context to tool results for model
                         tool_results.append({
                             "tool_call_id": tool_id,
                             "role": "tool",
-                            "content": f"Tool execution error: {str(e)}",
+                            "content": error_info.to_rich_context(),
                         })
 
             # Add assistant message with tool calls and tool results
@@ -1607,6 +1759,113 @@ Please use this web search context to inform your response when relevant."""
                     parts.append(f"\n[{i}] (relevance: {score:.2f})\n{content}")
 
         return "\n".join(parts)
+
+    def _create_tool_error(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        error: Exception,
+        arguments: Dict[str, Any],
+    ) -> ToolErrorInfo:
+        """
+        Create a structured ToolErrorInfo from an exception.
+
+        This implements the Manus Context Engineering principle of preserving
+        error information for the agent. The suggestion field provides
+        actionable guidance based on common error patterns.
+
+        Args:
+            tool_name: Name of the tool that failed
+            tool_call_id: ID of the tool call
+            error: The exception that was raised
+            arguments: Arguments that were passed to the tool
+
+        Returns:
+            ToolErrorInfo with rich error context
+        """
+        error_type = type(error).__name__
+        error_message = str(error)
+
+        # Generate suggestions based on common error patterns
+        suggestion = self._get_error_suggestion(tool_name, error_type, error_message, arguments)
+
+        return ToolErrorInfo(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            error_type=error_type,
+            error_message=error_message,
+            arguments=arguments,
+            suggestion=suggestion,
+        )
+
+    def _get_error_suggestion(
+        self,
+        tool_name: str,
+        error_type: str,
+        error_message: str,
+        arguments: Dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Generate a suggestion for recovering from a tool error.
+
+        Maps common error patterns to actionable suggestions that help
+        the model adjust its approach on retry.
+
+        Args:
+            tool_name: Name of the tool
+            error_type: Type of the error
+            error_message: Error message
+            arguments: Tool arguments
+
+        Returns:
+            A suggestion string, or None if no specific suggestion applies
+        """
+        error_lower = error_message.lower()
+
+        # Code execution errors
+        if tool_name == "execute_python_code":
+            if "timeout" in error_lower:
+                return "The code took too long. Consider breaking it into smaller steps or optimizing the algorithm."
+            if "syntax" in error_lower:
+                return "There's a syntax error in the code. Check for missing colons, brackets, or indentation issues."
+            if "import" in error_lower or "module" in error_lower:
+                return "A required module is not available. Use only standard library modules or check module name spelling."
+            if "memory" in error_lower:
+                return "The code used too much memory. Consider processing data in smaller chunks."
+            if "permission" in error_lower or "access" in error_lower:
+                return "File access was denied. The sandbox restricts file system access."
+
+        # Image generation errors
+        if tool_name == "generate_image":
+            if "content policy" in error_lower or "safety" in error_lower:
+                return "The prompt was flagged by content policy. Rephrase the prompt to be more appropriate."
+            if "rate limit" in error_lower:
+                return "Rate limit exceeded. Wait a moment before trying again."
+            if "invalid" in error_lower and "prompt" in error_lower:
+                return "The prompt format is invalid. Ensure it's a clear, descriptive text."
+
+        # Document generation errors
+        if tool_name == "generate_document":
+            if "format" in error_lower:
+                return "The document format is not supported. Use docx, pdf, or md."
+            if "content" in error_lower and "empty" in error_lower:
+                return "Document content cannot be empty. Provide content to include in the document."
+
+        # JSON parsing errors (common across tools)
+        if error_type == "JSONDecodeError":
+            return "The arguments contain invalid JSON. Ensure proper JSON formatting with quoted strings and escaped characters."
+
+        # Network/API errors
+        if "connection" in error_lower or "network" in error_lower:
+            return "Network connection failed. This may be temporary - you can retry."
+        if "api" in error_lower and ("key" in error_lower or "auth" in error_lower):
+            return "API authentication failed. This is a configuration issue, not something you can fix."
+
+        # Generic timeout
+        if "timeout" in error_lower:
+            return "The operation timed out. Consider simplifying the request or breaking it into smaller parts."
+
+        return None
 
     def get_available_models(self) -> List[Dict[str, Any]]:
         """Get list of available models with metadata."""
