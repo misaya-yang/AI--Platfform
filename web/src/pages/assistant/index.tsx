@@ -92,6 +92,7 @@ import type {
   RAGEvaluation,
   CodeExecutionState,
   CacheMetricsEventData,
+  FileProcessedEventData,
 } from "./types";
 
 // ============================================================================
@@ -791,6 +792,30 @@ export function AssistantPage() {
                   )
                 );
               }
+            }
+            break;
+
+          case "file_processed":
+            // Handle file processing completion event
+            if (event.data && typeof event.data === "object") {
+              const fileData = event.data as FileProcessedEventData;
+
+              // Calculate total file count
+              const fileCount = fileData.image_count + (fileData.text_length > 0 ? 1 : 0);
+
+              // Add a "files" search status item
+              const filesStatus: SearchStatusItem = {
+                type: "files" as const,
+                state: "completed",
+                resultCount: fileCount,
+              };
+
+              searchStatus = [...searchStatus, filesStatus];
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMessage.id ? { ...m, searchStatus } : m
+                )
+              );
             }
             break;
 

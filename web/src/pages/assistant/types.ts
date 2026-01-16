@@ -20,6 +20,7 @@ export const SSEEventType = {
   TOOL_RESULT: "tool_result",
   CONTEXT_RETRIEVED: "context_retrieved",
   WEB_SEARCH_RESULTS: "web_search_results",
+  FILE_PROCESSED: "file_processed",  // File upload processing complete
   RAG_EVALUATION: "rag_evaluation",  // Phase 3: RAG quality metrics
   CACHE_METRICS: "cache_metrics",  // KV-Cache optimization metrics
   SESSION_CREATED: "session_created",
@@ -152,7 +153,7 @@ export interface RetrievedContext {
 // Search Status (for GPT-like "Searching..." display)
 // =============================================================================
 
-export type SearchType = "kb" | "web";
+export type SearchType = "kb" | "web" | "files";
 export type SearchState = "searching" | "completed" | "error";
 
 export interface SearchStatusItem {
@@ -288,6 +289,18 @@ export interface ErrorEventData {
   message: string;
   code?: string;
   recoverable: boolean;
+}
+
+// File processed event data (after backend processes uploaded files)
+export interface FileProcessedEventData {
+  image_count: number;
+  text_length: number;
+  description_count: number;
+  requires_rag: boolean;
+  files?: Array<{
+    file_path: string;
+    type: "image" | "document";
+  }>;
 }
 
 export interface StreamEvent {
