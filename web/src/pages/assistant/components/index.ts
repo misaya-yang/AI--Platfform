@@ -19,3 +19,6 @@ export { WebSearchToggle } from "./WebSearchToggle";
 // Agentic workflow components
 export { TaskPanel } from "./TaskPanel";
 export type { Task, TaskStatus, CollectedInfo, TaskPanelProps } from "./TaskPanel";
+
+// Parallel execution visualization
+export { ParallelExecutionView } from "./ParallelExecutionView";

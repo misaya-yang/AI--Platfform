@@ -395,3 +395,29 @@ export interface CollectedInfo {
   value: string;
   source: string;
 }
+
+// =============================================================================
+// Parallel Execution Types (for Tool Execution Visualization)
+// =============================================================================
+
+export type ToolExecutionStatus = "pending" | "running" | "completed" | "failed";
+
+export interface ToolExecution {
+  id: string;
+  tool: string;
+  status: ToolExecutionStatus;
+  progress?: number;
+  duration?: number;
+  result?: string;
+  error?: string;
+}
+
+export interface ParallelGroup {
+  groupId: number;
+  executions: ToolExecution[];
+}
+
+export interface ParallelExecutionViewProps {
+  groups: ParallelGroup[];
+  currentGroup: number;
+}
