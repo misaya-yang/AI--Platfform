@@ -7,10 +7,17 @@ Provides a GPT-like assistant experience with:
 - Streaming responses
 - RAG evaluation and citation tracking (Phase 3)
 - Structured output and validation (Phase 4)
+- Write-while-search capability (Phase 2.3)
 """
 
 from .assistant_service import AssistantService, AssistantConfig, RAGEvaluation
 from .model_registry import ModelRegistry, ModelProvider, ModelInfo
+from .streaming_writer import (
+    StreamChunk,
+    StreamingWriter,
+    create_streaming_writer,
+    DEFAULT_VERIFICATION_TRIGGERS,
+)
 from .rag_metrics import (
     RAGEvaluator,
     RAGMetrics,
@@ -94,4 +101,9 @@ __all__ = [
     "ImageContent",
     "FileProcessError",
     "create_file_processor",
+    # StreamingWriter (Phase 2.3: Write-while-search)
+    "StreamChunk",
+    "StreamingWriter",
+    "create_streaming_writer",
+    "DEFAULT_VERIFICATION_TRIGGERS",
 ]
