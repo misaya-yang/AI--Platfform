@@ -165,12 +165,18 @@ class ContextCompressor:
 
         Args:
             messages: List of conversation messages to compress
-            target_tokens: Target maximum token count for compressed context
+            target_tokens: Target maximum token count for compressed context.
+                Note: Currently used for estimation only. Future versions may
+                implement adaptive compression to meet this target.
             preserve_recent: Number of recent messages to keep intact (default: 6)
 
         Returns:
             CompressedContext containing summary, preserved elements, and recent messages
         """
+        # Note: target_tokens is reserved for future adaptive compression
+        # Currently, we do fixed preservation based on preserve_recent
+        _ = target_tokens
+
         if not messages:
             return CompressedContext(
                 summary="",
