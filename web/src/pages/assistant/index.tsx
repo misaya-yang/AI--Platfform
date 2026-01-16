@@ -80,6 +80,8 @@ import {
   QuickActionsMenu,
   StyleSelector,
   CompactModelSelector,
+  TaskPanel,
+  ParallelExecutionView,
 } from "./components";
 import { DEFAULT_STYLE_ID, getStyleSystemPrompt } from "./styles";
 import type {
@@ -93,6 +95,13 @@ import type {
   CodeExecutionState,
   CacheMetricsEventData,
   FileProcessedEventData,
+  // Agentic workflow types
+  WorkingMemoryUpdateEventData,
+  TaskPlanningEventData,
+  ToolErrorEventData,
+  AgentTask,
+  CollectedInfo,
+  ParallelGroup,
 } from "./types";
 
 // ============================================================================
@@ -158,6 +167,17 @@ export function AssistantPage() {
     status: "idle",
     outputFiles: [],
   });
+
+  // Agentic workflow state
+  const [workingMemory, setWorkingMemory] = useState<{
+    goal?: string;
+    tasks: AgentTask[];
+    collectedInfo: CollectedInfo[];
+    notes: string[];
+  } | null>(null);
+  const [parallelGroups, setParallelGroups] = useState<ParallelGroup[]>([]);
+  const [currentParallelGroup, setCurrentParallelGroup] = useState(0);
+  const [showTaskPanel, setShowTaskPanel] = useState(false);
 
   // Load initial data
   useEffect(() => {
@@ -383,6 +403,11 @@ export function AssistantPage() {
       status: "idle",
       outputFiles: [],
     });
+    // Reset agentic workflow state
+    setWorkingMemory(null);
+    setParallelGroups([]);
+    setCurrentParallelGroup(0);
+    setShowTaskPanel(false);
   }, []);
 
   // Handle session selection
@@ -459,6 +484,12 @@ export function AssistantPage() {
       if (loadedArtifacts.length > 0) {
         setShowArtifacts(true);
       }
+
+      // Reset agentic workflow state when switching sessions
+      setWorkingMemory(null);
+      setParallelGroups([]);
+      setCurrentParallelGroup(0);
+      setShowTaskPanel(false);
 
       // Restore session config if available
       const config = sessionDetails.config;
@@ -1051,6 +1082,49 @@ export function AssistantPage() {
             }
             break;
 
+          // Agentic workflow events
+          case SSEEventType.TASK_PLANNING:
+            if (event.data && typeof event.data === "object") {
+              const planData = event.data as TaskPlanningEventData;
+              setWorkingMemory({
+                goal: planData.goal,
+                tasks: planData.tasks.map(t => ({
+                  id: t.id,
+                  description: t.description,
+                  status: "pending" as const,
+                })),
+                collectedInfo: [],
+                notes: [],
+              });
+              setShowTaskPanel(true);
+            }
+            break;
+
+          case SSEEventType.WORKING_MEMORY_UPDATE:
+            if (event.data && typeof event.data === "object") {
+              const memoryData = event.data as WorkingMemoryUpdateEventData;
+              setWorkingMemory({
+                goal: memoryData.goal,
+                tasks: memoryData.tasks,
+                collectedInfo: memoryData.collected_info,
+                notes: memoryData.notes,
+              });
+              setShowTaskPanel(true);
+            }
+            break;
+
+          case SSEEventType.TOOL_ERROR:
+            if (event.data && typeof event.data === "object") {
+              const errorData = event.data as ToolErrorEventData;
+              // Could show a toast notification or add to task panel
+              console.warn("Tool error:", errorData);
+            }
+            break;
+
+          case SSEEventType.MEMORY_LOADED:
+            // User preferences loaded - could show a subtle notification
+            break;
+
           case "error":
             const errorData = event.data as { message?: string };
             content += `\n\n**Error:** ${errorData?.message || "Unknown error"}`;
@@ -1548,6 +1622,15 @@ export function AssistantPage() {
                   </motion.div>
                 ) : (
                   <div className="space-y-6">
+                    {/* Task Panel for agentic workflows */}
+                    {showTaskPanel && workingMemory && (
+                      <TaskPanel
+                        goal={workingMemory.goal}
+                        tasks={workingMemory.tasks}
+                        collectedInfo={workingMemory.collectedInfo}
+                        isVisible={showTaskPanel}
+                      />
+                    )}
                     {messages.map((message) => (
                       <ChatMessage key={message.id} message={message} />
                     ))}
