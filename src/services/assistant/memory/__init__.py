@@ -17,12 +17,30 @@ from .memory_manager import (
     LongTermMemoryLayer,
     MemoryManager,
 )
+from .compressor import (
+    CompressedContext,
+    ContextCompressor,
+    LLMService,
+    PRESERVE_PATTERNS,
+    ARTIFACT_PATTERN,
+    MAX_PRESERVED_URLS,
+    MAX_PRESERVED_CODE_BLOCKS,
+)
 
 __all__ = [
+    # Memory Manager
     "MemoryDatabase",
     "MemoryLayer",
     "WorkingMemoryLayer",
     "SessionMemoryLayer",
     "LongTermMemoryLayer",
     "MemoryManager",
+    # Context Compressor
+    "CompressedContext",
+    "ContextCompressor",
+    "LLMService",
+    "PRESERVE_PATTERNS",
+    "ARTIFACT_PATTERN",
+    "MAX_PRESERVED_URLS",
+    "MAX_PRESERVED_CODE_BLOCKS",
 ]
