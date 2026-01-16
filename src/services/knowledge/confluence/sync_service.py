@@ -981,7 +981,6 @@ class ConfluenceSyncService:
                             tenant_id=tenant_id,
                             page_content=page.body_storage,
                             page_title=page.title,
-                            generate_embeddings=True,
                         )
                         if image_result.processed_images > 0:
                             vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
