@@ -29,6 +29,13 @@ export const SSEEventType = {
   FINISH: "finish",
   DONE: "done",
   ERROR: "error",
+  // Output validation
+  OUTPUT_WARNINGS: "output_warnings",
+  // Agentic workflow events
+  WORKING_MEMORY_UPDATE: "working_memory_update",
+  TASK_PLANNING: "task_planning",
+  MEMORY_LOADED: "memory_loaded",
+  TOOL_ERROR: "tool_error",
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -300,6 +307,66 @@ export interface FileProcessedEventData {
   files?: Array<{
     file_path: string;
     type: "image" | "document";
+  }>;
+}
+
+// Task planning event data - sent when agent creates an execution plan
+export interface TaskPlanningEventData {
+  goal: string;
+  tasks: Array<{
+    id: string;
+    description: string;
+    type: string;
+    dependencies: string[];
+  }>;
+  parallel_groups: string[][];
+}
+
+// Working memory update event data - sent during task execution to report progress
+export interface WorkingMemoryUpdateEventData {
+  goal?: string;
+  tasks: Array<{
+    id: string;
+    description: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked';
+    result?: string;
+    error?: string;
+  }>;
+  collected_info: Array<{
+    key: string;
+    value: string;
+    source: string;
+  }>;
+  notes: string[];
+  progress: {
+    total: number;
+    completed: number;
+    failed: number;
+    percentage: number;
+  };
+}
+
+// Memory loaded event data - sent when user preferences are loaded
+export interface MemoryLoadedEventData {
+  preferences_loaded: boolean;
+}
+
+// Tool error event data - sent when a tool execution fails
+export interface ToolErrorEventData {
+  tool_name: string;
+  error_type: string;
+  error_message: string;
+  suggestion?: string;
+  recoverable: boolean;
+  context?: Record<string, unknown>;
+}
+
+// Output warnings event data - validation warnings about the response
+export interface OutputWarningsEventData {
+  warnings: Array<{
+    type: string;
+    message: string;
+    severity: 'low' | 'medium' | 'high';
   }>;
 }
 

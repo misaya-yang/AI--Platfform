@@ -37,6 +37,15 @@ export const SSEEventType = {
   // Document generation events
   DOCUMENT_GENERATION_START: "document_generation_start",
   DOCUMENT_GENERATION_RESULT: "document_generation_result",
+  // KV-Cache metrics
+  CACHE_METRICS: "cache_metrics",
+  // Output validation
+  OUTPUT_WARNINGS: "output_warnings",
+  // Agentic workflow events
+  WORKING_MEMORY_UPDATE: "working_memory_update",
+  TASK_PLANNING: "task_planning",
+  MEMORY_LOADED: "memory_loaded",
+  TOOL_ERROR: "tool_error",
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -222,6 +231,91 @@ export interface ArtifactCreated {
   format: string;
   title: string;
   url: string;
+}
+
+// =============================================================================
+// Agentic Workflow Event Types
+// =============================================================================
+
+/**
+ * Task planning event data - sent when agent creates an execution plan.
+ */
+export interface TaskPlanningEvent {
+  goal: string;
+  tasks: Array<{
+    id: string;
+    description: string;
+    type: string;
+    dependencies: string[];
+  }>;
+  parallel_groups: string[][];
+}
+
+/**
+ * Working memory update event data - sent during task execution to report progress.
+ */
+export interface WorkingMemoryUpdateEvent {
+  goal?: string;
+  tasks: Array<{
+    id: string;
+    description: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked';
+    result?: string;
+    error?: string;
+  }>;
+  collected_info: Array<{
+    key: string;
+    value: string;
+    source: string;
+  }>;
+  notes: string[];
+  progress: {
+    total: number;
+    completed: number;
+    failed: number;
+    percentage: number;
+  };
+}
+
+/**
+ * Memory loaded event data - sent when user preferences are loaded.
+ */
+export interface MemoryLoadedEvent {
+  preferences_loaded: boolean;
+}
+
+/**
+ * Tool error event data - sent when a tool execution fails.
+ */
+export interface ToolErrorEvent {
+  tool_name: string;
+  error_type: string;
+  error_message: string;
+  suggestion?: string;
+  recoverable: boolean;
+  context?: Record<string, unknown>;
+}
+
+/**
+ * Cache metrics event data - KV-Cache performance metrics.
+ */
+export interface CacheMetricsEvent {
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_hit_rate?: number;
+}
+
+/**
+ * Output warnings event data - validation warnings about the response.
+ */
+export interface OutputWarningsEvent {
+  warnings: Array<{
+    type: string;
+    message: string;
+    severity: 'low' | 'medium' | 'high';
+  }>;
 }
 
 // =========================================================================
