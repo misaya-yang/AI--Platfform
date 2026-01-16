@@ -85,7 +85,6 @@ class ConfluenceSyncService:
         knowledge_worker: Optional["KnowledgeWorker"] = None,
         image_processor: Optional["ConfluenceImageProcessor"] = None,
         image_storage_service: Optional[Any] = None,
-        multimodal_embedding: Optional[Any] = None,
         vlm_service: Optional[Any] = None,
     ):
         self.settings = settings
@@ -98,9 +97,8 @@ class ConfluenceSyncService:
         self._client_locks: Dict[str, asyncio.Lock] = {}  # Prevent race conditions
         self._client_cache_ttl = getattr(settings.confluence, "client_cache_ttl_seconds", 300)
 
-        # 图片处理相关服务
+        # 图片处理相关服务 (Text-First RAG: 不再需要 multimodal_embedding)
         self._image_storage_service = image_storage_service
-        self._multimodal_embedding = multimodal_embedding
         self._vlm_service = vlm_service
         self._image_processors: Dict[str, "ConfluenceImageProcessor"] = {}
 
@@ -403,7 +401,6 @@ class ConfluenceSyncService:
                 processor = ConfluenceImageProcessor(
                     confluence_client=client,
                     storage_service=self._image_storage_service,
-                    multimodal_embedding=self._multimodal_embedding,
                     vlm_service=self._vlm_service,
                     generate_vlm_descriptions=self._vlm_service is not None,
                     max_image_size=max_image_size,
@@ -421,7 +418,7 @@ class ConfluenceSyncService:
         if connection_id in self._image_processors:
             return self._image_processors[connection_id]
 
-        # 创建新的 image_processor（使用默认配置）
+        # 创建新的 image_processor（Text-First RAG: 无需 multimodal embedding）
         try:
             # 延迟导入以避免循环依赖
             from .image_processor import ConfluenceImageProcessor
@@ -430,7 +427,6 @@ class ConfluenceSyncService:
             processor = ConfluenceImageProcessor(
                 confluence_client=client,
                 storage_service=self._image_storage_service,
-                multimodal_embedding=self._multimodal_embedding,
                 vlm_service=self._vlm_service,
                 generate_vlm_descriptions=self._vlm_service is not None,
             )
@@ -1015,7 +1011,14 @@ class ConfluenceSyncService:
         binding_id: Optional[str] = None,
         position: int = 0,
     ) -> None:
-        """保存图片段到数据库并存入向量库"""
+        """
+        保存图片段到数据库并存入向量库
+
+        Text-First RAG 架构:
+        - 使用 VLM 描述作为文本内容进行 embedding
+        - 统一使用 dataset 配置的 embedding provider (Gemini/DashScope/OpenAI)
+        - 图片通过 S3 URL 存储，检索时返回 presigned URL
+        """
         try:
             # Build text content from VLM description and context
             # VLM description is the primary searchable text for RAG
@@ -1040,8 +1043,8 @@ class ConfluenceSyncService:
                             # Create embedder using dataset's embedding config
                             from ..embedding import create_embedding
 
-                            embedding_provider = str(dataset.get("embedding_provider") or "local")
-                            embedding_model = str(dataset.get("embedding_model") or "hash-384")
+                            embedding_provider = str(dataset.get("embedding_provider") or "gemini")
+                            embedding_model = str(dataset.get("embedding_model") or "gemini-embedding-001")
                             embedding_config = dataset.get("embedding_config") or {}
                             if not isinstance(embedding_config, dict):
                                 embedding_config = {}
@@ -1052,38 +1055,25 @@ class ConfluenceSyncService:
                                 embedding_config=embedding_config,
                             )
 
-                            # Check if segment has pre-computed multimodal embedding
-                            collection_dim = int(dataset.get("embedding_dimension") or 0)
-                            use_multimodal = False
+                            collection_dim = int(dataset.get("embedding_dimension") or 1024)
                             vector = None
 
-                            if segment.has_embedding:
-                                # Use pre-computed multimodal embedding if dimension matches
-                                if segment.embedding_dimension == collection_dim:
-                                    vector = segment.embedding
-                                    use_multimodal = True
-                                    logger.debug(
-                                        f"Using pre-computed multimodal embedding for {segment.filename} "
-                                        f"(dim={segment.embedding_dimension})"
+                            # Text-First RAG: Always use text embedding for VLM descriptions
+                            embedder = create_embedding(
+                                econf, dimension=collection_dim or None
+                            )
+                            try:
+                                # For Gemini, use text_type="document" for optimal retrieval
+                                if hasattr(embedder, 'embed_texts'):
+                                    vectors = await embedder.embed_texts(
+                                        [text_content], text_type="document"
                                     )
                                 else:
-                                    logger.debug(
-                                        f"Multimodal embedding dimension mismatch for {segment.filename}: "
-                                        f"segment={segment.embedding_dimension}, collection={collection_dim}, "
-                                        f"falling back to text embedding"
-                                    )
-
-                            # Fall back to text embedding if no multimodal or dimension mismatch
-                            if vector is None and text_content:
-                                embedder = create_embedding(
-                                    econf, dimension=collection_dim or None
-                                )
-                                try:
                                     vectors = await embedder.embed_documents([text_content])
-                                    if vectors and len(vectors) > 0:
-                                        vector = vectors[0]
-                                finally:
-                                    await embedder.close()
+                                if vectors and len(vectors) > 0:
+                                    vector = vectors[0]
+                            finally:
+                                await embedder.close()
 
                             if vector:
                                 vector_id = segment.segment_id
@@ -1101,7 +1091,6 @@ class ConfluenceSyncService:
                                     "image_filename": segment.filename,
                                     "image_url": segment.storage_url,
                                     "vlm_description": segment.vlm_description,  # VLM-generated image description
-                                    "is_multimodal": use_multimodal,  # Track embedding type
                                 }
 
                                 # Upsert to Qdrant
@@ -1115,7 +1104,7 @@ class ConfluenceSyncService:
                                 )
                                 logger.info(
                                     f"Stored image vector in Qdrant: {segment.filename} "
-                                    f"(collection={collection}, multimodal={use_multimodal}, "
+                                    f"(collection={collection}, provider={embedding_provider}, "
                                     f"text_len={len(text_content) if text_content else 0})"
                                 )
                 except Exception as vec_err:
@@ -1297,7 +1286,6 @@ class ConfluenceSyncService:
                 tenant_id=tenant_id,
                 page_content=page.body_storage,
                 page_title=page.title,
-                generate_embeddings=True,
             )
 
             if image_result.processed_images > 0:
@@ -2295,7 +2283,6 @@ class ConfluenceSyncService:
                                     tenant_id=tenant_id,
                                     page_content=page.body_storage,
                                     page_title=page.title,
-                                    generate_embeddings=True,
                                 )
                                 if image_result.processed_images > 0:
                                     vlm_count = sum(1 for s in image_result.segments if s.vlm_description)

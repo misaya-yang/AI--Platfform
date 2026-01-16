@@ -21,9 +21,10 @@ class DatasetCreateSchema(BaseModel):
     kb_type: str = "document"  # document|data|image|audio_video
     use_case: str = "basic_qa"  # basic_qa|rich_text_response
 
-    embedding_provider: str = "local"
-    embedding_model: str = "hash-384"
-    embedding_dimension: Optional[int] = None
+    # Text-First RAG: Default to Gemini embedding
+    embedding_provider: str = "gemini"  # gemini|openai|dashscope|local
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimension: Optional[int] = 1024  # Gemini supports 768/1024/1536/3072
     embedding_config: Dict[str, Any] = Field(default_factory=dict)
 
     index_config: Dict[str, Any] = Field(default_factory=dict)
@@ -415,6 +416,75 @@ class QABatchTestResultSchema(BaseModel):
     """Batch test results"""
     results: List[QATestResultSchema] = Field(default_factory=list)
     summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ============================================================
+# Batch Retrieval Schemas
+# ============================================================
+
+class BatchRetrieveRequestSchema(BaseModel):
+    """Batch retrieval request - parallel retrieval with multiple queries.
+
+    Usage:
+    - queries: List of queries to retrieve in parallel
+    - Or use query with comma-separated queries: "query1,query2,query3"
+
+    Returns results grouped by query.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    queries: Optional[List[str]] = None  # List of queries for batch retrieval
+    query: Optional[str] = None  # Single query or comma-separated queries
+    top_k: int = 5  # Top-k per query
+    mode: str = "hybrid"
+    document_id: Optional[str] = None
+
+    # Fusion weights
+    dense_weight: Optional[float] = None
+    bm25_weight: Optional[float] = None
+    fusion_method: Optional[str] = None
+    alpha: Optional[float] = None
+    score_threshold: Optional[float] = None
+
+    # Advanced options
+    vector_top_k: Optional[int] = None
+    keyword_top_k: Optional[int] = None
+    candidate_top_k: Optional[int] = None
+    keyword_candidate_k: Optional[int] = None
+    fusion: Optional[str] = None
+    rrf_k: Optional[int] = None
+    rrf_weights: Dict[str, float] = Field(default_factory=dict)
+
+    # Post-processing
+    rerank: Optional[bool] = None
+    rerank_model: Optional[str] = None
+    rerank_top_n: Optional[int] = None
+    mmr: Optional[bool] = None
+    mmr_lambda: Optional[float] = None
+    mmr_threshold: Optional[float] = None
+
+    # Multimodal options
+    include_images: bool = True
+    include_associated_images: bool = True
+
+    # Batch-specific options
+    max_parallel: int = 10  # Max parallel queries (limit concurrency)
+    dedupe_results: bool = False  # Remove duplicate segments across queries
+
+
+class BatchRetrieveResultSchema(BaseModel):
+    """Result for a single query in batch retrieval."""
+    query: str
+    results: List[Dict[str, Any]] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchRetrieveResponseSchema(BaseModel):
+    """Batch retrieval response with results grouped by query."""
+    batch_results: List[BatchRetrieveResultSchema] = Field(default_factory=list)
+    total_queries: int = 0
+    total_results: int = 0
+    execution_time_ms: float = 0.0
 
 
 # ============================================================

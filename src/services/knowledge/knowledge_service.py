@@ -2132,7 +2132,8 @@ class KnowledgeService:
             if len(final_sorted) < original_count:
                 meta["pipeline_stages"].append(f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results")
         
-        results: List[RetrieveResult] = []
+        # Build result candidates first (to collect image URLs for presigned generation)
+        result_candidates: List[Dict[str, Any]] = []
         for rank, c in enumerate(final_sorted, 1):
             seg_id = str(c.get("segment_id") or "")
             payload = dict(c.get("metadata") or {})
@@ -2150,33 +2151,33 @@ class KnowledgeService:
             # Stage 1: Raw scores (keep both new and old field names for compatibility)
             dense_raw = c.get("_dense_score")
             bm25_raw = c.get("_bm25_score")
-            
+
             # New field names
             payload["_dense_score"] = round(dense_raw, 4) if dense_raw is not None else "N/A"
             payload["_bm25_score"] = round(bm25_raw, 4) if bm25_raw is not None else "N/A"
-            
+
             # OLD field names for backward compatibility
             if dense_raw is not None:
                 payload["_vector_score"] = round(dense_raw, 4)
             if bm25_raw is not None:
                 payload["_keyword_score"] = round(bm25_raw, 4)
-            
+
             # Stage 2: Normalized scores
             dense_norm = c.get("_dense_score_norm")
             bm25_norm = c.get("_bm25_score_norm")
             payload["_dense_score_norm"] = round(dense_norm, 4) if dense_norm is not None else "N/A"
             payload["_bm25_score_norm"] = round(bm25_norm, 4) if bm25_norm is not None else "N/A"
-            
+
             # Stage 3: Fusion score
             fusion = c.get("_fusion_score")
             payload["_fusion_score"] = round(fusion, 4) if fusion is not None else "N/A"
             if c.get("_rrf_score") is not None:
                 payload["_rrf_score"] = round(c.get("_rrf_score"), 4)
-            
+
             # Stage 4: Rerank score
             rerank = c.get("_rerank_score")
             payload["_rerank_score"] = round(rerank, 4) if rerank is not None else "N/A"
-            
+
             # Stage 5: MMR scores
             mmr = c.get("_mmr_score")
             mmr_rel = c.get("_mmr_relevance")
@@ -2184,17 +2185,17 @@ class KnowledgeService:
             payload["_mmr_score"] = round(mmr, 4) if mmr is not None else "N/A"
             payload["_mmr_relevance"] = round(mmr_rel, 4) if mmr_rel is not None else "N/A"
             payload["_mmr_max_sim"] = round(mmr_max, 4) if mmr_max is not None else "N/A"
-            
+
             # Also keep old name for compatibility
             if mmr_rel is not None:
                 payload["_relevance_score"] = round(mmr_rel, 4)
-            
+
             # Text match info
             payload["_text_match_score"] = c.get("_text_match_score")
             payload["_exact_match"] = c.get("_exact_match")
             payload["_term_matches"] = c.get("_term_matches")
             payload["_term_ratio"] = c.get("_term_ratio")
-            
+
             # Rank
             payload["_rank"] = rank
 
@@ -2203,21 +2204,62 @@ class KnowledgeService:
 
             # Extract multimodal fields from payload/metadata
             content_type = payload.get("content_type", "text")
-            image_url = self._normalize_local_image_url(payload.get("image_url"), seg_id)
-            if image_url != payload.get("image_url"):
-                payload["image_url"] = image_url
+            raw_image_url = payload.get("image_url")
             vlm_description = payload.get("vlm_description")
+
+            result_candidates.append({
+                "seg_id": seg_id,
+                "document_id": str(c.get("document_id") or ""),
+                "score": score,
+                "text": str(c.get("text") or ""),
+                "payload": payload,
+                "content_type": content_type,
+                "raw_image_url": raw_image_url,
+                "vlm_description": vlm_description,
+            })
+
+        # Generate presigned URLs for image results (Text-First RAG)
+        async def get_presigned_url_for_result(cand: Dict[str, Any]) -> Optional[str]:
+            """Generate presigned URL for an image result."""
+            content_type = cand.get("content_type")
+            raw_url = cand.get("raw_image_url")
+            seg_id = cand.get("seg_id")
+
+            if content_type == "image" and raw_url:
+                # Use presigned URL for S3/OSS, API endpoint for local
+                return await self._get_presigned_image_url(raw_url, seg_id)
+            elif raw_url:
+                # For non-image content with image URLs, use simple normalization
+                return self._normalize_local_image_url(raw_url, seg_id)
+            return None
+
+        # Generate presigned URLs in parallel
+        presigned_tasks = [get_presigned_url_for_result(c) for c in result_candidates]
+        presigned_urls = await asyncio.gather(*presigned_tasks)
+
+        # Build final results with presigned URLs
+        results: List[RetrieveResult] = []
+        for cand, presigned_url in zip(result_candidates, presigned_urls):
+            payload = cand["payload"]
+            image_url = presigned_url or cand.get("raw_image_url")
+
+            # Update payload with normalized/presigned URL
+            if image_url and image_url != cand.get("raw_image_url"):
+                payload["image_url"] = image_url
+                # Also add presigned_url field for clarity
+                if cand.get("content_type") == "image":
+                    payload["image_presigned_url"] = image_url
 
             results.append(
                 RetrieveResult(
-                    segment_id=seg_id,
-                    document_id=str(c.get("document_id") or ""),
-                    score=score,
-                    text=str(c.get("text") or ""),
+                    segment_id=cand["seg_id"],
+                    document_id=cand["document_id"],
+                    score=cand["score"],
+                    text=cand["text"],
                     metadata=payload,
-                    content_type=content_type,
+                    content_type=cand["content_type"],
                     image_url=image_url,
-                    vlm_description=vlm_description,
+                    vlm_description=cand["vlm_description"],
                 )
             )
 
@@ -2822,6 +2864,150 @@ class KnowledgeService:
         )
 
         return results, meta
+
+    async def retrieve_batch(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        queries: List[str],
+        top_k: int = 5,
+        mode: str = "hybrid",
+        document_id: Optional[str] = None,
+        dense_weight: Optional[float] = None,
+        bm25_weight: Optional[float] = None,
+        fusion_method: Optional[str] = None,
+        alpha: Optional[float] = None,
+        score_threshold: Optional[float] = None,
+        vector_top_k: Optional[int] = None,
+        keyword_top_k: Optional[int] = None,
+        candidate_top_k: Optional[int] = None,
+        keyword_candidate_k: Optional[int] = None,
+        fusion: Optional[str] = None,
+        rrf_k: Optional[int] = None,
+        rrf_weights: Optional[Dict[str, float]] = None,
+        rerank: Optional[bool] = None,
+        rerank_model: Optional[str] = None,
+        rerank_top_n: Optional[int] = None,
+        mmr: Optional[bool] = None,
+        mmr_lambda: Optional[float] = None,
+        mmr_threshold: Optional[float] = None,
+        include_images: bool = True,
+        include_associated_images: bool = True,
+        max_parallel: int = 10,
+        dedupe_results: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Batch retrieval - parallel retrieval with multiple queries.
+
+        Args:
+            queries: List of queries to retrieve in parallel
+            max_parallel: Maximum concurrent retrievals (default 10)
+            dedupe_results: Remove duplicate segments across queries
+            ... (same params as retrieve)
+
+        Returns:
+            Tuple of (batch_results, meta) where batch_results is a list of
+            {query, results, meta} dicts for each query.
+        """
+        import asyncio
+        import time
+
+        start_time = time.time()
+
+        # Validate dataset access once
+        await self.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Filter empty queries
+        valid_queries = [q.strip() for q in queries if q and q.strip()]
+        if not valid_queries:
+            return [], {"error": "No valid queries provided"}
+
+        # Limit concurrency
+        semaphore = asyncio.Semaphore(max_parallel)
+
+        async def _retrieve_single(query: str) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    results, meta = await self.retrieve(
+                        user=user,
+                        dataset_id=dataset_id,
+                        query=query,
+                        top_k=top_k,
+                        mode=mode,
+                        document_id=document_id,
+                        dense_weight=dense_weight,
+                        bm25_weight=bm25_weight,
+                        fusion_method=fusion_method,
+                        alpha=alpha,
+                        score_threshold=score_threshold,
+                        vector_top_k=vector_top_k,
+                        keyword_top_k=keyword_top_k,
+                        candidate_top_k=candidate_top_k,
+                        keyword_candidate_k=keyword_candidate_k,
+                        fusion=fusion,
+                        rrf_k=rrf_k,
+                        rrf_weights=rrf_weights,
+                        rerank=rerank,
+                        rerank_model=rerank_model,
+                        rerank_top_n=rerank_top_n,
+                        mmr=mmr,
+                        mmr_lambda=mmr_lambda,
+                        mmr_threshold=mmr_threshold,
+                    )
+                    return {
+                        "query": query,
+                        "results": [
+                            {
+                                "segment_id": r.segment_id,
+                                "document_id": r.document_id,
+                                "score": r.score,
+                                "text": r.text,
+                                "metadata": r.metadata,
+                                "content_type": getattr(r, "content_type", "text"),
+                                "image_url": getattr(r, "image_url", None),
+                                "vlm_description": getattr(r, "vlm_description", None),
+                            }
+                            for r in results
+                        ],
+                        "meta": meta,
+                    }
+                except Exception as e:
+                    logger.warning(f"[retrieve_batch] Query '{query}' failed: {e}")
+                    return {
+                        "query": query,
+                        "results": [],
+                        "meta": {"error": str(e)},
+                    }
+
+        # Execute all queries in parallel
+        batch_results = await asyncio.gather(
+            *[_retrieve_single(q) for q in valid_queries]
+        )
+
+        # Dedupe results if requested
+        if dedupe_results:
+            seen_segment_ids: set = set()
+            for result in batch_results:
+                deduped = []
+                for r in result.get("results", []):
+                    seg_id = r.get("segment_id")
+                    if seg_id and seg_id not in seen_segment_ids:
+                        seen_segment_ids.add(seg_id)
+                        deduped.append(r)
+                result["results"] = deduped
+
+        # Build metadata
+        execution_time_ms = (time.time() - start_time) * 1000
+        total_results = sum(len(r.get("results", [])) for r in batch_results)
+
+        meta = {
+            "total_queries": len(valid_queries),
+            "total_results": total_results,
+            "execution_time_ms": round(execution_time_ms, 2),
+            "max_parallel": max_parallel,
+            "dedupe_results": dedupe_results,
+        }
+
+        return batch_results, meta
 
     # ========================= helpers =========================
 
@@ -3680,6 +3866,51 @@ class KnowledgeService:
             return image_url
         if isinstance(image_url, str) and image_url.startswith("file://"):
             return f"/api/v1/knowledge/images/{segment_id}"
+        return image_url
+
+    async def _get_presigned_image_url(
+        self,
+        image_url: Optional[str],
+        segment_id: Optional[str],
+        expiry_seconds: int = 3600,
+    ) -> Optional[str]:
+        """
+        Get presigned URL for an image.
+
+        Text-First RAG: Generate presigned URLs for image results so LLMs can access them.
+
+        Args:
+            image_url: The stored image URL (S3/OSS/file://)
+            segment_id: Segment ID (for local storage API fallback)
+            expiry_seconds: URL expiry time
+
+        Returns:
+            Presigned URL or API endpoint for accessing the image
+        """
+        if not image_url:
+            return None
+
+        # Handle local file:// URLs - use API endpoint
+        if isinstance(image_url, str) and image_url.startswith("file://"):
+            if segment_id:
+                return f"/api/v1/knowledge/images/{segment_id}"
+            return None
+
+        # For S3/OSS URLs, generate presigned URL if storage service is available
+        if self.image_storage_service:
+            try:
+                presigned = await self.image_storage_service.get_presigned_url(
+                    storage_url=image_url,
+                    expiry_seconds=expiry_seconds,
+                    segment_id=segment_id,
+                )
+                if presigned:
+                    return presigned
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to generate presigned URL: {e}")
+
+        # Fall back to original URL
         return image_url
 
     # ========================= P3: Multimodal Image-Chunk Association =========================

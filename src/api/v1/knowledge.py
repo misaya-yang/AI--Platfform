@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 from ..schemas.knowledge import (
     BatchDeleteSchema,
     BatchReindexSchema,
+    BatchRetrieveRequestSchema,
     ChunkingConfigSchema,
     DatasetConfigUpdateSchema,
     ChunkPreviewRequestSchema,
@@ -607,6 +608,76 @@ async def retrieve(
                 for r in results
             ],
             "metadata": meta,
+        }
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/retrieve_batch")
+async def retrieve_batch(
+    dataset_id: str,
+    payload: BatchRetrieveRequestSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Batch retrieval endpoint - parallel retrieval with multiple queries.
+
+    Supports two formats:
+    - queries: List of queries ["query1", "query2", "query3"]
+    - query: Comma-separated queries "query1,query2,query3"
+
+    Returns results grouped by query with execution time metrics.
+    """
+    try:
+        # Parse queries from either format
+        queries: list[str] = []
+        if payload.queries:
+            queries = payload.queries
+        elif payload.query:
+            # Support comma-separated queries
+            queries = [q.strip() for q in payload.query.split(",") if q.strip()]
+
+        if not queries:
+            raise ValidationFailedError("No queries provided. Use 'queries' list or comma-separated 'query' string.")
+
+        batch_results, meta = await svc.retrieve_batch(
+            user=user,
+            dataset_id=dataset_id,
+            queries=queries,
+            top_k=payload.top_k,
+            mode=payload.mode,
+            document_id=payload.document_id,
+            dense_weight=payload.dense_weight,
+            bm25_weight=payload.bm25_weight,
+            fusion_method=payload.fusion_method,
+            alpha=payload.alpha,
+            score_threshold=payload.score_threshold,
+            vector_top_k=payload.vector_top_k,
+            keyword_top_k=payload.keyword_top_k,
+            candidate_top_k=payload.candidate_top_k,
+            keyword_candidate_k=payload.keyword_candidate_k,
+            fusion=payload.fusion,
+            rrf_k=payload.rrf_k,
+            rrf_weights=payload.rrf_weights or {},
+            rerank=payload.rerank,
+            rerank_model=payload.rerank_model,
+            rerank_top_n=payload.rerank_top_n,
+            mmr=payload.mmr,
+            mmr_lambda=payload.mmr_lambda,
+            mmr_threshold=payload.mmr_threshold,
+            include_images=payload.include_images,
+            include_associated_images=payload.include_associated_images,
+            max_parallel=payload.max_parallel,
+            dedupe_results=payload.dedupe_results,
+        )
+
+        return {
+            "batch_results": batch_results,
+            "total_queries": meta.get("total_queries", len(queries)),
+            "total_results": meta.get("total_results", 0),
+            "execution_time_ms": meta.get("execution_time_ms", 0),
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))

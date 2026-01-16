@@ -990,6 +990,100 @@ class ImageStorageService:
         url = self._backend.get_url(storage_key, expiry_seconds)
         return self._sign_url_if_local(url)
 
+    async def get_presigned_url(
+        self,
+        storage_url: str,
+        expiry_seconds: int = 3600,
+        segment_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Generate a presigned URL for accessing an image.
+
+        Text-First RAG: Use this method to generate presigned URLs for image
+        results in search responses.
+
+        Args:
+            storage_url: The stored URL (can be S3/OSS URL, file:// URL, or storage key)
+            expiry_seconds: URL expiry time in seconds
+            segment_id: Optional segment ID (used for local storage API fallback)
+
+        Returns:
+            Presigned URL for downloading the image, or API endpoint for local storage
+        """
+        if not storage_url:
+            return None
+
+        # Handle local file:// URLs - convert to API endpoint
+        if storage_url.startswith("file://"):
+            if segment_id:
+                return f"/api/v1/knowledge/images/{segment_id}"
+            # Try to extract segment info from URL if no segment_id provided
+            logger.warning(f"Local file URL without segment_id: {storage_url}")
+            return None
+
+        # Handle S3 backend - generate presigned download URL
+        if self.config.backend == StorageBackend.S3 and isinstance(self._backend, S3StorageBackend):
+            # Extract key from URL
+            key = self._extract_key_from_url(storage_url)
+            if key:
+                presigned = await self._backend.generate_presigned_download_url(
+                    key=key,
+                    expiry_seconds=expiry_seconds,
+                )
+                if presigned:
+                    return presigned
+
+            # Fall back to direct URL if presigned generation fails
+            return storage_url
+
+        # Handle OSS backend - for now, return the public URL
+        # OSS presigned URLs can be added later if needed
+        if self.config.backend == StorageBackend.OSS:
+            return storage_url
+
+        # Default: return the original URL
+        return storage_url
+
+    def _extract_key_from_url(self, url: str) -> Optional[str]:
+        """
+        Extract storage key from a URL.
+
+        Args:
+            url: Storage URL (S3/OSS URL or key)
+
+        Returns:
+            Storage key or None
+        """
+        if not url:
+            return None
+
+        # If it's already a key (starts with knowledge/), return as-is
+        if url.startswith("knowledge/"):
+            return url
+
+        # Handle S3 URLs
+        # Format: https://{bucket}.s3.{region}.amazonaws.com/{key}
+        # or: {endpoint}/{bucket}/{key}
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+
+            if parsed.scheme in ("http", "https"):
+                path = parsed.path.lstrip("/")
+                # If URL contains bucket name in host, path is the key
+                if self.config.s3_bucket and self.config.s3_bucket in parsed.netloc:
+                    return path
+                # If using endpoint URL, first segment might be bucket
+                if self.config.s3_endpoint_url and path.startswith(f"{self.config.s3_bucket}/"):
+                    return path[len(self.config.s3_bucket) + 1:]
+                # Otherwise, assume path is the key
+                return path
+
+            return url
+        except Exception as e:
+            logger.warning(f"Failed to extract key from URL {url}: {e}")
+            return None
+
     async def close(self) -> None:
         """Close the storage service and release resources"""
         if self._backend is not None:
