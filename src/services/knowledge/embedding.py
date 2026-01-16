@@ -87,8 +87,16 @@ class BaseEmbedding(ABC):
         return None
 
     async def embed_query(self, query: str) -> List[float]:
+        # Check cache first
+        cached = get_cached_query_embedding(self.provider, self.model, query)
+        if cached is not None:
+            return cached
+        # Compute embedding
         vectors = await self.embed_texts([query], text_type="query")
-        return vectors[0]
+        result = vectors[0]
+        # Cache the result
+        set_cached_query_embedding(self.provider, self.model, query, result)
+        return result
 
     async def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
         return await self.embed_texts(list(texts), text_type="document")
@@ -766,6 +774,71 @@ def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
     if not vectors:
         raise EmbeddingError("DashScope embeddings response empty")
     return vectors
+
+
+# =============================================================================
+# Embedder Cache - Singleton per config to reuse HTTP connections
+# =============================================================================
+_embedder_cache: Dict[str, BaseEmbedding] = {}
+_embedder_cache_lock = asyncio.Lock()
+
+# =============================================================================
+# Query Embedding Cache - LRU cache for query embeddings to avoid recomputation
+# =============================================================================
+from functools import lru_cache
+from collections import OrderedDict
+import threading
+
+_query_embedding_cache: OrderedDict[str, List[float]] = OrderedDict()
+_query_cache_lock = threading.Lock()
+_QUERY_CACHE_MAX_SIZE = 500  # Max cached queries
+
+
+def _get_query_cache_key(provider: str, model: str, query: str) -> str:
+    """Generate cache key for query embedding."""
+    return f"{provider}:{model}:{hashlib.md5(query.encode()).hexdigest()}"
+
+
+def get_cached_query_embedding(provider: str, model: str, query: str) -> Optional[List[float]]:
+    """Get cached query embedding if exists."""
+    key = _get_query_cache_key(provider, model, query)
+    with _query_cache_lock:
+        if key in _query_embedding_cache:
+            # Move to end (LRU)
+            _query_embedding_cache.move_to_end(key)
+            return _query_embedding_cache[key]
+    return None
+
+
+def set_cached_query_embedding(provider: str, model: str, query: str, embedding: List[float]) -> None:
+    """Cache query embedding."""
+    key = _get_query_cache_key(provider, model, query)
+    with _query_cache_lock:
+        if key in _query_embedding_cache:
+            _query_embedding_cache.move_to_end(key)
+        else:
+            _query_embedding_cache[key] = embedding
+            # Evict oldest if over limit
+            while len(_query_embedding_cache) > _QUERY_CACHE_MAX_SIZE:
+                _query_embedding_cache.popitem(last=False)
+
+
+def _make_cache_key(config: EmbeddingConfig, dimension: Optional[int]) -> str:
+    """Generate cache key for embedder config."""
+    return f"{config.provider}:{config.model}:{config.api_key[:8] if config.api_key else ''}:{dimension or ''}"
+
+
+async def get_cached_embedder(config: EmbeddingConfig, dimension: Optional[int] = None) -> BaseEmbedding:
+    """Get or create cached embedder instance.
+
+    This helps reduce first-call latency by reusing HTTP connections.
+    """
+    cache_key = _make_cache_key(config, dimension)
+
+    async with _embedder_cache_lock:
+        if cache_key not in _embedder_cache:
+            _embedder_cache[cache_key] = create_embedding(config, dimension)
+        return _embedder_cache[cache_key]
 
 
 def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -> BaseEmbedding:

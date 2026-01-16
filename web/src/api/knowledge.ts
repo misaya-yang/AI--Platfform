@@ -288,14 +288,14 @@ export async function getDatasetSources(datasetId: string): Promise<DatasetSourc
 // ============================================================
 
 export async function batchReindexDocuments(datasetId: string, documentIds: string[]) {
-  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch/reindex`, {
+  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch-reindex`, {
     document_ids: documentIds,
   });
   return data;
 }
 
 export async function batchDeleteDocuments(datasetId: string, documentIds: string[]) {
-  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch/delete`, {
+  const { data } = await api.post<BatchOperationResult>(`/api/v1/knowledge/${datasetId}/documents/batch-delete`, {
     document_ids: documentIds,
   });
   return data;

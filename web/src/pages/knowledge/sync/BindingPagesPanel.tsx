@@ -10,6 +10,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   RefreshCcw,
+  RefreshCw,
   Search,
   FileText,
   FolderOpen,
@@ -79,15 +80,25 @@ interface BindingPagesPanelProps {
 
 function StatusBadge({
   status,
+  effectiveStatusProp,
   documentStatus,
   documentProgress,
 }: {
   status: ConfluencePageRecord["status"];
+  effectiveStatusProp?: ConfluencePageRecord["effective_status"];
   documentStatus?: string;
   documentProgress?: number;
 }) {
   const getEffectiveStatus = () => {
-    if (!documentStatus) return status;
+    // If backend provides effective_status, use it directly for needs_resync detection
+    if (effectiveStatusProp === "needs_resync") {
+      return "needs_resync";
+    }
+
+    if (!documentStatus) {
+      // Use backend's effective_status if available, otherwise fall back to status
+      return effectiveStatusProp || status;
+    }
     switch (documentStatus) {
       case "completed":
         return "synced";
@@ -101,7 +112,7 @@ function StatusBadge({
       case "uploaded":
         return "uploaded";
       default:
-        return status;
+        return effectiveStatusProp || status;
     }
   };
 
@@ -127,6 +138,11 @@ function StatusBadge({
       color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
       icon: <Clock className="h-3 w-3" />,
       label: "待处理",
+    },
+    needs_resync: {
+      color: "bg-orange-500/10 text-orange-600 border-orange-200 dark:border-orange-800",
+      icon: <RefreshCw className="h-3 w-3" />,
+      label: "需要重新同步",
     },
     error: {
       color: "bg-rose-500/10 text-rose-600 border-rose-200 dark:border-rose-800",
@@ -217,6 +233,7 @@ function PageListRow({
       <div className="w-24 flex-shrink-0">
         <StatusBadge
           status={page.status}
+          effectiveStatusProp={page.effective_status}
           documentStatus={page.document_status}
           documentProgress={page.document_progress}
         />
@@ -332,17 +349,18 @@ export function BindingPagesPanel({
     queryFn: () => listPages(bindingId),
     enabled: !!bindingId,
     refetchInterval: (data) => {
-      // Only poll if there are pages being processed
+      // Poll more frequently when user just triggered sync
+      if (syncingIds.size > 0) return 2000;
+
+      // Poll if there are pages being processed
       const pages = data?.pages || [];
+      const processingStatuses = ["uploaded", "parsing", "segmenting", "embedding", "embedding_images"];
       const hasProcessing = pages.some(
         (p) =>
           p.status === "pending" ||
-          p.document_status === "parsing" ||
-          p.document_status === "segmenting" ||
-          p.document_status === "embedding" ||
-          p.document_status === "embedding_images"
+          (p.document_status && processingStatuses.includes(p.document_status))
       );
-      return hasProcessing ? 5000 : false; // Poll every 5s if processing, otherwise don't poll
+      return hasProcessing ? 3000 : false;
     },
   });
 
@@ -350,7 +368,7 @@ export function BindingPagesPanel({
 
   // Create stable dependency for useMemo
   const pagesKey = useMemo(() => {
-    return pages.map(p => `${p.page_record_id}-${p.status}-${p.document_status}`).join(',');
+    return pages.map(p => `${p.id}-${p.status}-${p.document_status}`).join(',');
   }, [pages]);
 
   // Filtered pages
@@ -388,6 +406,10 @@ export function BindingPagesPanel({
     mutationFn: (pageRecordId: string) => syncSinglePage(pageRecordId),
     onMutate: (pageRecordId) => {
       setSyncingIds((prev) => new Set(prev).add(pageRecordId));
+    },
+    onSuccess: (_, pageRecordId) => {
+      const page = pages.find((p) => p.id === pageRecordId);
+      toast.success("同步成功", page?.title || "页面同步已完成");
     },
     onSettled: (_, __, pageRecordId) => {
       setSyncingIds((prev) => {
@@ -440,7 +462,7 @@ export function BindingPagesPanel({
     if (selectedIds.size === filteredPages.length) {
       setSelectedIds(new Set());
     } else {
-      setSelectedIds(new Set(filteredPages.map((p) => p.page_record_id)));
+      setSelectedIds(new Set(filteredPages.map((p) => p.id)));
     }
   };
 
@@ -594,12 +616,12 @@ export function BindingPagesPanel({
           <div className="max-h-[500px] overflow-y-auto">
             {filteredPages.map((page) => (
               <PageListRow
-                key={page.page_record_id}
+                key={page.id}
                 page={page}
-                isSelected={selectedIds.has(page.page_record_id)}
-                isSyncing={syncingIds.has(page.page_record_id)}
-                onSelect={(checked) => handleSelectOne(page.page_record_id, checked)}
-                onSync={() => syncSingleMutation.mutate(page.page_record_id)}
+                isSelected={selectedIds.has(page.id)}
+                isSyncing={syncingIds.has(page.id)}
+                onSelect={(checked) => handleSelectOne(page.id, checked)}
+                onSync={() => syncSingleMutation.mutate(page.id)}
                 onConfigureSync={() => setConfigPageRecord(page)}
               />
             ))}

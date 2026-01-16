@@ -22,7 +22,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
-from ..services.metrics import get_metrics_recorder
+from ..services.metrics import get_metrics_recorder, get_usage_recorder
+from ..services.metrics.realtime_metrics import get_realtime_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -814,6 +815,24 @@ class LangGraphProxy:
             except Exception:
                 pass
 
+            # Record usage to PostgreSQL (async run, tokens will be 0)
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model="langgraph-agent",
+                    input_tokens=0,
+                    output_tokens=0,
+                    service_id="langgraph",
+                    assistant_id=assistant_id,
+                    latency_ms=int(duration_ms),
+                    request_type="run_async",
+                    status=run_status,
+                )
+            except Exception:
+                pass
+
     async def create_run_wait(
         self,
         user: UserContext,
@@ -878,6 +897,32 @@ class LangGraphProxy:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
+            except Exception:
+                pass
+
+            # Record usage to PostgreSQL for billing/analytics
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model="langgraph-agent",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    service_id="langgraph",
+                    assistant_id=assistant_id,
+                    latency_ms=int(duration_ms),
+                    request_type="run",
+                    status=run_status,
+                )
+            except Exception:
+                pass
+
+            # Update real-time metrics in Redis for dashboard
+            try:
+                realtime_metrics = get_realtime_metrics()
+                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
+                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
             except Exception:
                 pass
 
@@ -976,6 +1021,34 @@ class LangGraphProxy:
                 )
             except Exception as metrics_err:
                 logger.debug(f"Failed to record run metrics: {metrics_err}")
+
+            # Record usage to PostgreSQL for billing/analytics
+            input_tokens = token_tracker["input"]
+            output_tokens = token_tracker["output"]
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model="langgraph-agent",  # Generic model name for agent runs
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    service_id="langgraph",
+                    assistant_id=assistant_id,
+                    latency_ms=int(duration_ms),
+                    request_type="run",
+                    status=run_status,
+                )
+            except Exception as usage_err:
+                logger.debug(f"Failed to record usage: {usage_err}")
+
+            # Update real-time metrics in Redis for dashboard
+            try:
+                realtime_metrics = get_realtime_metrics()
+                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
+                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
+            except Exception:
+                pass
 
     def _extract_token_usage(
         self,
@@ -1132,6 +1205,32 @@ class LangGraphProxy:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
+            except Exception:
+                pass
+
+            # Record usage to PostgreSQL for billing/analytics
+            try:
+                usage_recorder = get_usage_recorder()
+                await usage_recorder.record_usage(
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    model="langgraph-agent",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    service_id="langgraph",
+                    assistant_id=assistant_id,
+                    latency_ms=int(duration_ms),
+                    request_type="run",
+                    status=run_status,
+                )
+            except Exception:
+                pass
+
+            # Update real-time metrics in Redis for dashboard
+            try:
+                realtime_metrics = get_realtime_metrics()
+                if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
+                    await realtime_metrics.record_token_usage(input_tokens, output_tokens)
             except Exception:
                 pass
 

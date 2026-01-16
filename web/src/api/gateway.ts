@@ -61,3 +61,19 @@ export async function getTaskResult(taskId: string) {
   );
   return data;
 }
+
+// 供应商状态类型
+export interface ProviderStatus {
+  name: string;
+  status: "configured" | "not_configured";
+  configured: boolean;
+  model_count: number;
+  last_check: string;
+}
+
+export async function getProvidersHealth() {
+  const { data } = await api.get<Record<string, ProviderStatus>>(
+    "/api/v1/health/providers"
+  );
+  return data;
+}

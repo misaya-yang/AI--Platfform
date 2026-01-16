@@ -9,6 +9,9 @@ import {
   BarChart3,
   Terminal,
   RefreshCw,
+  Image as ImageIcon,
+  FileType,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,12 +20,25 @@ import { ExecutionStatus, type ExecutionStatusType } from "./ExecutionStatus";
 
 export interface Artifact {
   id: string;
-  type: "code" | "chart" | "table" | "file";
+  type: "code" | "chart" | "table" | "file" | "image" | "document";
   format: string;
   title: string;
   url?: string;
   content?: string;
   createdAt: Date;
+  // Extended fields for persisted artifacts
+  filename?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  source?: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
+}
+
+export interface OutputFile {
+  filename: string;
+  content_base64: string;
+  mime_type: string | null;
+  size_bytes: number;
+  artifact_id?: string;
 }
 
 interface ArtifactsPanelProps {
@@ -33,8 +49,52 @@ interface ArtifactsPanelProps {
   executionOutput: string;
   currentCode?: string;
   executionTimeMs?: number;
+  outputFiles?: OutputFile[];
   onRerun?: () => void;
   className?: string;
+}
+
+// Helper to format file size
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Helper to get icon for file type
+function getFileIcon(mimeType?: string, format?: string) {
+  if (mimeType?.startsWith("image/") || format === "png" || format === "jpg" || format === "jpeg") {
+    return <ImageIcon className="h-5 w-5 text-blue-500 flex-shrink-0" />;
+  }
+  if (mimeType?.includes("pdf") || format === "pdf") {
+    return <FileType className="h-5 w-5 text-red-500 flex-shrink-0" />;
+  }
+  if (mimeType?.includes("word") || format === "docx" || format === "doc") {
+    return <FileText className="h-5 w-5 text-blue-600 flex-shrink-0" />;
+  }
+  if (mimeType?.includes("markdown") || format === "md") {
+    return <FileText className="h-5 w-5 text-gray-600 flex-shrink-0" />;
+  }
+  return <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />;
+}
+
+// Helper to get source badge
+function getSourceBadge(source?: string) {
+  if (!source) return null;
+  const labels: Record<string, { text: string; className: string }> = {
+    code_execution: { text: "Code", className: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400" },
+    image_generation: { text: "AI Image", className: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
+    document_generation: { text: "AI Doc", className: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" },
+    ai: { text: "AI", className: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400" },
+    user: { text: "User", className: "bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400" },
+  };
+  const badge = labels[source];
+  if (!badge) return null;
+  return (
+    <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium", badge.className)}>
+      {badge.text}
+    </span>
+  );
 }
 
 export function ArtifactsPanel({
@@ -45,13 +105,40 @@ export function ArtifactsPanel({
   executionOutput,
   currentCode,
   executionTimeMs,
+  outputFiles = [],
   onRerun,
   className,
 }: ArtifactsPanelProps) {
   const [copiedCode, setCopiedCode] = React.useState(false);
 
+  // Categorize artifacts
   const charts = artifacts.filter((a) => a.type === "chart");
-  const files = artifacts.filter((a) => a.type === "file" || a.type === "table");
+  const images = artifacts.filter((a) => a.type === "image" || a.mimeType?.startsWith("image/"));
+  const documents = artifacts.filter((a) =>
+    a.type === "document" ||
+    a.format === "docx" ||
+    a.format === "pdf" ||
+    a.format === "md" ||
+    a.mimeType?.includes("word") ||
+    a.mimeType?.includes("pdf")
+  );
+  const otherFiles = artifacts.filter((a) =>
+    (a.type === "file" || a.type === "table") &&
+    !documents.includes(a) &&
+    !images.includes(a)
+  );
+
+  // Filter output files
+  const imageOutputFiles = outputFiles.filter(
+    (f) => f.mime_type?.startsWith("image/")
+  );
+  const otherOutputFiles = outputFiles.filter(
+    (f) => !f.mime_type?.startsWith("image/")
+  );
+
+  // Count for tabs
+  const chartsCount = charts.length + images.length + imageOutputFiles.length;
+  const filesCount = documents.length + otherFiles.length + otherOutputFiles.length;
 
   const handleCopyCode = React.useCallback(async () => {
     if (!currentCode) return;
@@ -112,19 +199,19 @@ export function ArtifactsPanel({
           </TabsTrigger>
           <TabsTrigger value="charts" className="gap-1.5">
             <BarChart3 className="h-3.5 w-3.5" />
-            Charts
-            {charts.length > 0 && (
+            Images
+            {chartsCount > 0 && (
               <span className="ml-1 text-xs text-muted-foreground">
-                ({charts.length})
+                ({chartsCount})
               </span>
             )}
           </TabsTrigger>
           <TabsTrigger value="files" className="gap-1.5">
             <FileText className="h-3.5 w-3.5" />
             Files
-            {files.length > 0 && (
+            {filesCount > 0 && (
               <span className="ml-1 text-xs text-muted-foreground">
-                ({files.length})
+                ({filesCount})
               </span>
             )}
           </TabsTrigger>
@@ -179,15 +266,103 @@ export function ArtifactsPanel({
           </div>
         </TabsContent>
 
-        {/* Charts Tab */}
+        {/* Charts/Images Tab */}
         <TabsContent value="charts" className="flex-1 min-h-0 m-0 px-4 pb-4">
           <div className="h-full overflow-auto">
-            {charts.length === 0 ? (
+            {chartsCount === 0 ? (
               <div className="flex items-center justify-center h-full text-muted-foreground">
-                <p className="text-sm italic">No charts generated</p>
+                <p className="text-sm italic">No images or charts generated</p>
               </div>
             ) : (
               <div className="space-y-4">
+                {/* Output images from code execution (base64) */}
+                {imageOutputFiles.map((file, index) => (
+                  <div
+                    key={`output-${index}`}
+                    className="rounded-md border border-border bg-card overflow-hidden"
+                  >
+                    <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div>
+                          <h3 className="text-sm font-medium">{file.filename}</h3>
+                          <p className="text-xs text-muted-foreground">
+                            {file.mime_type || "image"} • {formatFileSize(file.size_bytes)}
+                          </p>
+                        </div>
+                        {getSourceBadge("code_execution")}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="gap-1.5"
+                        onClick={() => {
+                          const link = document.createElement("a");
+                          link.href = `data:${file.mime_type || "image/png"};base64,${file.content_base64}`;
+                          link.download = file.filename;
+                          link.click();
+                        }}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download
+                      </Button>
+                    </div>
+                    <div className="p-4 flex justify-center bg-muted/20">
+                      <img
+                        src={`data:${file.mime_type || "image/png"};base64,${file.content_base64}`}
+                        alt={file.filename}
+                        className="max-w-full h-auto max-h-[500px] object-contain"
+                      />
+                    </div>
+                  </div>
+                ))}
+
+                {/* Persisted image artifacts */}
+                {images.map((image) => (
+                  <div
+                    key={image.id}
+                    className="rounded-md border border-border bg-card overflow-hidden"
+                  >
+                    <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div>
+                          <h3 className="text-sm font-medium">{image.title}</h3>
+                          <p className="text-xs text-muted-foreground">
+                            {image.format} {image.sizeBytes && `• ${formatFileSize(image.sizeBytes)}`}
+                          </p>
+                        </div>
+                        {getSourceBadge(image.source)}
+                      </div>
+                      {image.url && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          asChild
+                        >
+                          <a href={image.url} download={image.filename || image.title} target="_blank" rel="noopener noreferrer">
+                            <Download className="h-3.5 w-3.5" />
+                            Download
+                          </a>
+                        </Button>
+                      )}
+                    </div>
+                    <div className="p-4 flex justify-center bg-muted/20">
+                      {image.url ? (
+                        <img
+                          src={image.url}
+                          alt={image.title}
+                          className="max-w-full h-auto max-h-[500px] object-contain"
+                        />
+                      ) : (
+                        <p className="text-sm text-muted-foreground italic">
+                          Image preview unavailable
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Chart artifacts */}
                 {charts.map((chart) => (
                   <div
                     key={chart.id}
@@ -226,25 +401,72 @@ export function ArtifactsPanel({
         {/* Files Tab */}
         <TabsContent value="files" className="flex-1 min-h-0 m-0 px-4 pb-4">
           <div className="h-full overflow-auto">
-            {files.length === 0 ? (
+            {filesCount === 0 ? (
               <div className="flex items-center justify-center h-full text-muted-foreground">
                 <p className="text-sm italic">No files generated</p>
               </div>
             ) : (
               <div className="space-y-2">
-                {files.map((file) => (
+                {/* Document artifacts (docx, pdf, md) */}
+                {documents.map((doc) => (
+                  <div
+                    key={doc.id}
+                    className="flex items-center justify-between p-3 rounded-md border border-border bg-card hover:bg-accent/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      {getFileIcon(doc.mimeType, doc.format)}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium truncate">
+                            {doc.filename || doc.title}
+                          </p>
+                          {getSourceBadge(doc.source)}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {doc.format.toUpperCase()} {doc.sizeBytes && `• ${formatFileSize(doc.sizeBytes)}`}
+                        </p>
+                      </div>
+                    </div>
+                    {doc.url && (
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          asChild
+                          className="gap-1.5"
+                        >
+                          <a
+                            href={doc.url}
+                            download={doc.filename || doc.title}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            Download
+                          </a>
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {/* Other file artifacts */}
+                {otherFiles.map((file) => (
                   <div
                     key={file.id}
                     className="flex items-center justify-between p-3 rounded-md border border-border bg-card hover:bg-accent/50 transition-colors"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">
-                          {file.title}
-                        </p>
+                      {getFileIcon(file.mimeType, file.format)}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium truncate">
+                            {file.filename || file.title}
+                          </p>
+                          {getSourceBadge(file.source)}
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                          {file.format}
+                          {file.format} {file.sizeBytes && `• ${formatFileSize(file.sizeBytes)}`}
                         </p>
                       </div>
                     </div>
@@ -257,7 +479,7 @@ export function ArtifactsPanel({
                       >
                         <a
                           href={file.url}
-                          download={file.title}
+                          download={file.filename || file.title}
                           target="_blank"
                           rel="noopener noreferrer"
                         >
@@ -266,6 +488,43 @@ export function ArtifactsPanel({
                         </a>
                       </Button>
                     )}
+                  </div>
+                ))}
+
+                {/* Output files from code execution (non-image) */}
+                {otherOutputFiles.map((file, index) => (
+                  <div
+                    key={`output-file-${index}`}
+                    className="flex items-center justify-between p-3 rounded-md border border-border bg-card hover:bg-accent/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      {getFileIcon(file.mime_type || undefined)}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium truncate">
+                            {file.filename}
+                          </p>
+                          {getSourceBadge("code_execution")}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {file.mime_type || "file"} • {formatFileSize(file.size_bytes)}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="gap-1.5 flex-shrink-0"
+                      onClick={() => {
+                        const link = document.createElement("a");
+                        link.href = `data:${file.mime_type || "application/octet-stream"};base64,${file.content_base64}`;
+                        link.download = file.filename;
+                        link.click();
+                      }}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download
+                    </Button>
                   </div>
                 ))}
               </div>

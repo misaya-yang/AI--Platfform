@@ -1,7 +1,26 @@
-import { memo, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useMemo, useState } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { marked } from "marked";
+import { ImageIcon, Download, ExternalLink } from "lucide-react";
+import "katex/dist/katex.min.css";
+
+/**
+ * Custom URL transform that allows data: URLs for base64 images.
+ * By default, react-markdown filters out data: URLs for security.
+ * Since our images come from trusted AI generation, we allow them.
+ * @see https://github.com/remarkjs/react-markdown#urltransform
+ */
+function allowDataUrlTransform(url: string): string {
+  // Allow data: URLs for images (base64 encoded)
+  if (url.startsWith("data:image/")) {
+    return url;
+  }
+  // Use default transform for all other URLs (security filtering)
+  return defaultUrlTransform(url);
+}
 
 interface StreamOutputProps {
   text: string;
@@ -15,6 +34,102 @@ interface ParsedBlocks {
   blocks: string[];
   /** Global definitions (link references, footnotes) to prepend to each block */
   definitions: string;
+}
+
+/**
+ * Custom image renderer with support for base64 data URLs.
+ * Provides loading state, error handling, and download capability.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+
+  const isBase64 = src?.startsWith("data:");
+  const displayAlt = alt || "Generated Image";
+
+  // Download base64 image
+  const handleDownload = () => {
+    if (!src) return;
+
+    const link = document.createElement("a");
+    link.href = src;
+    link.download = `${displayAlt.replace(/\s+/g, "_")}_${Date.now()}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Open in new tab
+  const handleOpenInNewTab = () => {
+    if (!src) return;
+    const newWindow = window.open();
+    if (newWindow) {
+      newWindow.document.write(`
+        <html>
+          <head><title>${displayAlt}</title></head>
+          <body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;">
+            <img src="${src}" alt="${displayAlt}" style="max-width:100%;max-height:100vh;object-fit:contain;" />
+          </body>
+        </html>
+      `);
+    }
+  };
+
+  if (hasError) {
+    return (
+      <span className="flex flex-col items-center justify-center p-6 my-3 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700" style={{ display: 'flex' }}>
+        <ImageIcon className="h-10 w-10 text-slate-400 mb-2" />
+        <span className="text-sm text-slate-500">图片加载失败</span>
+      </span>
+    );
+  }
+
+  return (
+    <span className="relative group my-3 block">
+      {/* Loading placeholder */}
+      {isLoading && (
+        <span className="absolute inset-0 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 animate-pulse" style={{ display: 'flex' }}>
+          <ImageIcon className="h-10 w-10 text-slate-400" />
+        </span>
+      )}
+
+      {/* Image */}
+      <img
+        src={src}
+        alt={displayAlt}
+        className={`
+          max-w-full rounded-xl shadow-lg border border-slate-200 dark:border-slate-700
+          transition-all duration-300
+          ${isLoading ? "opacity-0 h-[200px]" : "opacity-100"}
+        `}
+        onLoad={() => setIsLoading(false)}
+        onError={() => {
+          setIsLoading(false);
+          setHasError(true);
+        }}
+      />
+
+      {/* Hover actions for base64 images */}
+      {!isLoading && isBase64 && (
+        <span className="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={handleDownload}
+            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
+            title="下载图片"
+          >
+            <Download className="h-4 w-4" />
+          </button>
+          <button
+            onClick={handleOpenInNewTab}
+            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
+            title="在新标签页打开"
+          >
+            <ExternalLink className="h-4 w-4" />
+          </button>
+        </span>
+      )}
+    </span>
+  );
 }
 
 /**
@@ -62,7 +177,23 @@ const MemoizedMarkdownBlock = memo(
     // Prepend definitions to each block so references resolve correctly
     const fullContent = definitions ? `${definitions}\n\n${content}` : content;
     return (
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      <ReactMarkdown
+        remarkPlugins={[
+          remarkGfm,
+          // Configure remark-math to be more lenient with spacing
+          [remarkMath, { singleDollarTextMath: true }],
+        ]}
+        rehypePlugins={[
+          // Configure rehype-katex for better error handling
+          [rehypeKatex, { throwOnError: false, strict: false }],
+        ]}
+        // Allow data: URLs for base64 images (filtered by default for security)
+        urlTransform={allowDataUrlTransform}
+        components={{
+          // Custom image renderer with base64 support
+          img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
+        }}
+      >
         {fullContent}
       </ReactMarkdown>
     );

@@ -1,5 +1,14 @@
 import { api } from "@/lib/api";
 
+// 会话配置（知识库、模型等）
+export interface SessionConfig {
+  selected_model?: string;
+  selected_datasets?: string[];
+  web_search_enabled?: boolean;
+  temperature?: number;
+  selected_style?: string;
+}
+
 export interface SessionSummary {
   session_id: string;
   user_id: string;
@@ -8,6 +17,7 @@ export interface SessionSummary {
   created_at: string;
   updated_at?: string | null;
   metadata?: Record<string, unknown> | null;
+  config?: SessionConfig | null;
 }
 
 export interface SessionMessageToolCall {
@@ -15,6 +25,26 @@ export interface SessionMessageToolCall {
   name: string;
   arguments: string;
   result?: string | null;
+}
+
+// Context chunk from KB retrieval
+export interface SessionContextChunk {
+  content: string;
+  metadata?: Record<string, unknown>;
+  score?: number;
+  document_id?: string;
+  document_name?: string;
+}
+
+// Retrieved context from a dataset
+export interface SessionRetrievedContext {
+  dataset_id: string;
+  dataset_name: string;
+  chunks: SessionContextChunk[];
+  query: string;
+  took_ms: number;
+  avg_score?: number;
+  top_score?: number;
 }
 
 export interface SessionMessageMetadata {
@@ -25,6 +55,15 @@ export interface SessionMessageMetadata {
     total_tokens?: number;
     duration_ms?: number;
     first_token_ms?: number;
+  };
+  // KB retrieval contexts
+  contexts?: SessionRetrievedContext[] | null;
+  // Model and usage info
+  model_id?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
   };
 }
 
@@ -46,8 +85,14 @@ export async function listSessions(params?: {
 export async function createSession(body?: {
   service_id?: string;
   metadata?: Record<string, unknown>;
+  config?: SessionConfig;
 }): Promise<{ session_id: string }> {
   const { data } = await api.post<{ session_id: string }>("/api/v1/sessions", body || {});
+  return data;
+}
+
+export async function getSession(sessionId: string): Promise<SessionSummary> {
+  const { data } = await api.get<SessionSummary>(`/api/v1/sessions/${sessionId}`);
   return data;
 }
 
@@ -57,7 +102,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
 export async function updateSession(
   sessionId: string,
-  body: { metadata?: Record<string, unknown> }
+  body: { metadata?: Record<string, unknown>; config?: SessionConfig }
 ): Promise<void> {
   await api.patch(`/api/v1/sessions/${sessionId}`, body);
 }

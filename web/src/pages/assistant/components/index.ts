@@ -9,3 +9,9 @@ export { QuickActionsMenu } from "./QuickActionsMenu";
 export { PromptCard, PromptSuggestions } from "./PromptSuggestions";
 export { ModelSelector } from "./ModelSelector";
 export { KBSelector } from "./KBSelector";
+
+// New compact control bar components
+export { StyleSelector } from "./StyleSelector";
+export { CompactModelSelector } from "./CompactModelSelector";
+export { CompactKBSelector } from "./CompactKBSelector";
+export { WebSearchToggle } from "./WebSearchToggle";

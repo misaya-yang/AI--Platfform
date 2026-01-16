@@ -196,6 +196,7 @@ class ToolCallResult:
     error: Optional[str] = None
     duration_ms: float = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    output_files: List[Dict[str, Any]] = field(default_factory=list)  # [{filename, content_base64, mime_type, size_bytes}]
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -207,6 +208,7 @@ class ToolCallResult:
             "error": self.error,
             "duration_ms": self.duration_ms,
             "metadata": self.metadata,
+            "output_files": self.output_files,
         }
 
 

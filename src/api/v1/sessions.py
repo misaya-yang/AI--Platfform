@@ -16,10 +16,12 @@ router = APIRouter()
 class SessionCreate(BaseModel):
     service_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None  # 会话配置（知识库、模型等）
 
 
 class SessionUpdate(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None  # 会话配置（知识库、模型等）
 
 
 class SessionMessageCreate(BaseModel):
@@ -50,6 +52,7 @@ async def list_sessions(
             "created_at": s.created_at,
             "updated_at": s.updated_at,
             "metadata": s.metadata,
+            "config": getattr(s, "config", None),
         }
         for s in sessions
     ]
@@ -61,12 +64,17 @@ async def create_session(
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
 ):
-    session = await session_manager.create(
-        user_id=user.user_id,
-        tenant_id=user.tenant_id,
-        service_id=body.service_id,
-        metadata=body.metadata,
-    )
+    # DatabaseSessionManager 支持 config 参数，内存版本不支持
+    create_kwargs = {
+        "user_id": user.user_id,
+        "tenant_id": user.tenant_id,
+        "service_id": body.service_id,
+        "metadata": body.metadata,
+    }
+    if body.config:
+        create_kwargs["config"] = body.config
+
+    session = await session_manager.create(**create_kwargs)
     return {"session_id": session.session_id}
 
 
@@ -86,6 +94,7 @@ async def get_session(
         "created_at": session.created_at,
         "updated_at": session.updated_at,
         "metadata": session.metadata,
+        "config": getattr(session, "config", None),
     }
 
 
@@ -107,7 +116,15 @@ async def update_session(
         else:
             session.metadata = session.metadata or {}
             session.metadata.update(body.metadata)
-    
+
+    if body.config:
+        # 支持 update_config 方法（DatabaseSessionManager）或直接更新（内存版本）
+        if hasattr(session_manager, 'update_config'):
+            await session_manager.update_config(session_id, body.config)
+        else:
+            session.config = getattr(session, 'config', {}) or {}
+            session.config.update(body.config)
+
     return {"session_id": session_id, "status": "updated"}
 
 

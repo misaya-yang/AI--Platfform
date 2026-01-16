@@ -23,6 +23,9 @@ from .v1.users import router as users_router
 from .v1.presign import router as presign_router
 from .v1.assistant import router as assistant_router
 from .v1.usage import router as usage_router
+from .v1.api_keys import router as api_keys_router
+from .v1.providers import router as providers_router
+from .v1.models import router as models_router
 
 api_router = APIRouter()
 
@@ -30,6 +33,7 @@ api_router = APIRouter()
 api_router.include_router(auth_router)  # 认证：登录/登出/改密
 api_router.include_router(users_router)  # 用户管理 CRUD
 api_router.include_router(roles_router)  # 角色权限管理
+api_router.include_router(api_keys_router)  # API Key 管理
 
 # 核心业务 API
 api_router.include_router(invoke_router)
@@ -52,3 +56,5 @@ api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪�
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API
+api_router.include_router(providers_router)  # LLM Provider 管理
+api_router.include_router(models_router)  # LLM Model 管理

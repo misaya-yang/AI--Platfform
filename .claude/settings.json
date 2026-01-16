@@ -5,5 +5,10 @@
     "github@claude-plugins-official": true,
     "code-review@claude-code-plugins": true,
     "superpowers@superpowers-marketplace": true
+  },
+  "permissions": {
+    "allow": [
+      "Read(//Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/**)"
+    ]
   }
 }

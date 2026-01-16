@@ -26,6 +26,11 @@ import {
   Lock,
   Users,
   Globe,
+  Image,
+  Database,
+  PlayCircle,
+  MessageSquare,
+  FileImage,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -50,7 +55,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 import { createDataset, uploadDocument, createDocumentFromUrl, previewChunking, type ChunkPreviewItem } from "@/api/knowledge";
-import type { ChunkingMode } from "@/types/knowledge";
+import type { ChunkingMode, ChunkingConfig } from "@/types/knowledge";
 
 // ============================================================
 // Types & Constants
@@ -124,6 +129,67 @@ const VISIBILITY_OPTIONS: Array<{
   },
 ];
 
+// 知识库类型选项
+type KBType = "document" | "data" | "image" | "audio_video";
+const KB_TYPE_OPTIONS: Array<{
+  id: KBType;
+  name: string;
+  desc: string;
+  icon: typeof FileText;
+  color: string;
+}> = [
+  {
+    id: "document",
+    name: "文档搜索",
+    desc: "上传文档构建知识库，可根据文档内容进行提问并获取回答",
+    icon: FileText,
+    color: "text-blue-500",
+  },
+  {
+    id: "data",
+    name: "数据查询",
+    desc: "上传结构化数据，支持表格数据查询和统计分析",
+    icon: Database,
+    color: "text-green-500",
+  },
+  {
+    id: "image",
+    name: "图片问答",
+    desc: "上传图片素材，支持图像内容识别与问答",
+    icon: Image,
+    color: "text-purple-500",
+  },
+  {
+    id: "audio_video",
+    name: "音视频搜索",
+    desc: "上传音频视频内容，支持多媒体内容检索",
+    icon: PlayCircle,
+    color: "text-orange-500",
+  },
+];
+
+// 使用场景选项
+type UseCase = "basic_qa" | "rich_text_response";
+const USE_CASE_OPTIONS: Array<{
+  id: UseCase;
+  name: string;
+  desc: string;
+  icon: typeof MessageSquare;
+}> = [
+  {
+    id: "basic_qa",
+    name: "基础文档问答",
+    desc: "标准问答场景，返回精准文本答案",
+    icon: MessageSquare,
+  },
+  {
+    id: "rich_text_response",
+    name: "图文并茂回复",
+    desc: "支持富文本响应，包含图片和格式化内容",
+    icon: FileImage,
+  },
+];
+
 // 验证常量
 const MAX_NAME_LENGTH = 100;
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -135,12 +201,7 @@ const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 // Sub-Components
 // ============================================================
 
-interface ChunkPreviewConfig {
-  mode: string;
-  chunk_size: number;
-  chunk_overlap: number;
-  remove_extra_spaces?: boolean;
-}
+type ChunkPreviewConfig = Pick<ChunkingConfig, "mode" | "chunk_size" | "chunk_overlap" | "remove_extra_spaces">;
 
 function ChunkPreviewSection({ datasetId, config }: { datasetId: string; config: ChunkPreviewConfig }) {
   const [text, setText] = useState(`# Sample Header
@@ -289,6 +350,8 @@ export default function DatasetCreatePage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [visibility, setVisibility] = useState<VisibilityType>("private");
+  const [kbType, setKbType] = useState<KBType>("document");
+  const [useCase, setUseCase] = useState<UseCase>("basic_qa");
   const [embeddingModel, setEmbeddingModel] = useState("dashscope:text-embedding-v4");
 
   // Step 2: Data Source
@@ -399,6 +462,8 @@ export default function DatasetCreatePage() {
         name: name.trim(),
         description: description.trim(),
         visibility,
+        kb_type: kbType,
+        use_case: useCase,
         embedding_provider: provider,
         embedding_model: model,
         embedding_dimension: embModel?.dimension || 1024,
@@ -630,6 +695,103 @@ export default function DatasetCreatePage() {
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            {/* 知识库类型选择 */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Label className="text-sm font-medium">
+                  知识库类型 <span className="text-red-500">*</span>
+                </Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="max-w-xs">选择知识库类型以匹配您的数据类型和使用场景</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {KB_TYPE_OPTIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  return (
+                    <Card
+                      key={opt.id}
+                      className={`p-4 cursor-pointer transition-all ${
+                        kbType === opt.id
+                          ? "border-2 border-primary bg-primary/5"
+                          : "border hover:border-primary/30"
+                      }`}
+                      onClick={() => setKbType(opt.id)}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`p-2 rounded-lg bg-muted/50 ${kbType === opt.id ? "bg-primary/10" : ""}`}>
+                          <Icon className={`h-5 w-5 ${kbType === opt.id ? "text-primary" : opt.color}`} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium">{opt.name}</span>
+                            <div
+                              className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                                kbType === opt.id
+                                  ? "border-primary bg-primary/50"
+                                  : "border-border"
+                              }`}
+                            >
+                              {kbType === opt.id && (
+                                <div className="w-2 h-2 rounded-full bg-card" />
+                              )}
+                            </div>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 使用场景选择 */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Label className="text-sm font-medium">使用场景</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="max-w-xs">选择知识库的使用场景，优化检索和回复效果</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {USE_CASE_OPTIONS.map((opt) => {
+                  const Icon = opt.icon;
+                  return (
+                    <Card
+                      key={opt.id}
+                      className={`p-4 cursor-pointer transition-all ${
+                        useCase === opt.id
+                          ? "border-2 border-primary bg-primary/5"
+                          : "border hover:border-primary/30"
+                      }`}
+                      onClick={() => setUseCase(opt.id)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Icon className={`h-4 w-4 ${useCase === opt.id ? "text-primary" : "text-muted-foreground"}`} />
+                        <span className="text-sm font-medium">{opt.name}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                    </Card>
+                  );
+                })}
+              </div>
             </div>
 
             {/* 可见性设置 */}

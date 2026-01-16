@@ -107,6 +107,7 @@ import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentCard } from "@/pages/knowledge/detail/SegmentCard";
 import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
 import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
+import { ConfluenceBindingManager } from "./components/ConfluenceBindingManager";
 import { SourcesTab } from "@/pages/knowledge/sources";
 
 type QAChatMessage = {
@@ -151,9 +152,9 @@ export function KnowledgeDatasetDetailPage() {
   const segments = segmentsQuery.data || [];
 
   const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "sources" | "settings" | "permissions" | null;
-  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "sources" | "settings" | "permissions">(
-    initialTab && ["documents", "retrieval", "qa", "sources", "settings", "permissions"].includes(initialTab) ? initialTab : "documents"
+  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "sources" | "confluence" | "settings" | "permissions" | null;
+  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "sources" | "confluence" | "settings" | "permissions">(
+    initialTab && ["documents", "retrieval", "qa", "sources", "confluence", "settings", "permissions"].includes(initialTab) ? initialTab : "documents"
   );
 
   // Upload state
@@ -289,6 +290,7 @@ export function KnowledgeDatasetDetailPage() {
   const [editRerankModel, setEditRerankModel] = useState("gte-rerank");
   const [editMmrEnabled, setEditMmrEnabled] = useState(false);
   const [editMmrLambda, setEditMmrLambda] = useState(0.5);
+  const [editScoreThreshold, setEditScoreThreshold] = useState(0.3);
 
   // Chunk preview
   const [previewText, setPreviewText] = useState("");
@@ -446,6 +448,8 @@ export function KnowledgeDatasetDetailPage() {
         setEditRerankModel(config.retrieval.rerank?.model || "gte-rerank");
         setEditMmrEnabled(config.retrieval.mmr?.enabled ?? false);
         setEditMmrLambda(config.retrieval.mmr?.lambda ?? 0.5);
+        // Score threshold
+        setEditScoreThreshold(config.retrieval.score_threshold ?? 0.3);
       }
     } catch (e) {
       console.error("Failed to load config:", e);
@@ -491,6 +495,7 @@ export function KnowledgeDatasetDetailPage() {
         retrieval_config: {
           mode: modeMap[editRetrievalMode] || "hybrid",
           top_k: editTopK,
+          score_threshold: editScoreThreshold,
           fusion: {
             strategy: editFusionStrategy,
             alpha: editDenseWeight,
@@ -1073,6 +1078,8 @@ export function KnowledgeDatasetDetailPage() {
     documents: "border-primary text-primary bg-primary/10",
     retrieval: "border-primary text-primary bg-primary/10",
     qa: "border-primary text-primary bg-primary/10",
+    sources: "border-primary text-primary bg-primary/10",
+    confluence: "border-primary text-primary bg-primary/10",
     sync: "border-primary text-primary bg-primary/10",
     settings: "border-primary text-primary bg-primary/10",
     permissions: "border-primary text-primary bg-primary/10",
@@ -1082,6 +1089,8 @@ export function KnowledgeDatasetDetailPage() {
     documents: "text-primary",
     retrieval: "text-primary",
     qa: "text-primary",
+    sources: "text-primary",
+    confluence: "text-primary",
     sync: "text-primary",
     settings: "text-primary",
     permissions: "text-primary",
@@ -1159,6 +1168,7 @@ export function KnowledgeDatasetDetailPage() {
               { key: "retrieval", label: "召回测试", icon: Search },
               { key: "qa", label: "QA 测试", icon: MessageSquare },
               { key: "sources", label: "数据来源", icon: Cloud },
+              { key: "confluence", label: "Confluence", icon: ExternalLink },
               { key: "settings", label: "配置", icon: Sliders },
               { key: "permissions", label: "权限", icon: Lock },
             ].map((tab) => (
@@ -2449,6 +2459,25 @@ export function KnowledgeDatasetDetailPage() {
                     />
                   </div>
 
+                  {/* Score Threshold */}
+                  <div>
+                    <div className="flex justify-between items-center">
+                      <Label className="text-sm">相关性阈值 (Score Threshold)</Label>
+                      <span className="text-sm text-muted-foreground">{(editScoreThreshold * 100).toFixed(0)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={editScoreThreshold * 100}
+                      onChange={(e) => setEditScoreThreshold(Number(e.target.value) / 100)}
+                      className="w-full mt-2"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      过滤低于此分数的结果，推荐 30% 以上
+                    </p>
+                  </div>
+
                   {/* 融合配置 - 仅hybrid模式 */}
                   {editRetrievalMode === "hybrid" && (
                     <div className="p-3 bg-primary/5 rounded-lg space-y-3">
@@ -2576,7 +2605,7 @@ export function KnowledgeDatasetDetailPage() {
                 </div>
               ) : datasetConfig ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <div className="p-3 bg-muted/40 rounded-lg">
                       <p className="text-xs text-muted-foreground">检索模式</p>
                       <p className="font-medium text-foreground mt-1">
@@ -2587,6 +2616,12 @@ export function KnowledgeDatasetDetailPage() {
                       <p className="text-xs text-muted-foreground">默认 Top K</p>
                       <p className="font-medium text-foreground mt-1">
                         {datasetConfig.retrieval?.top_k || 5}
+                      </p>
+                    </div>
+                    <div className="p-3 bg-muted/40 rounded-lg">
+                      <p className="text-xs text-muted-foreground">相关性阈值</p>
+                      <p className="font-medium text-foreground mt-1">
+                        {((datasetConfig.retrieval?.score_threshold ?? 0.3) * 100).toFixed(0)}%
                       </p>
                     </div>
                   </div>
@@ -3012,6 +3047,11 @@ for chunk in results.get("chunks", []):
               <SyncSourcesTab datasetId={datasetId} />
             </div>
           </div>
+        )}
+
+        {/* Confluence Tab */}
+        {mainTab === "confluence" && datasetId && (
+          <ConfluenceBindingManager datasetId={datasetId} />
         )}
 
         {/* 权限 Tab */}

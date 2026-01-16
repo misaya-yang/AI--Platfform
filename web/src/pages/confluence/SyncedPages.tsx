@@ -12,6 +12,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   RefreshCcw,
+  RefreshCw,
   List,
   GitBranch,
   Search,
@@ -140,6 +141,11 @@ function StatusBadge({ status, documentStatus, documentProgress }: StatusBadgePr
       color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
       icon: <Clock className="h-3 w-3" />,
       label: t("confluence.syncedPages.status.pending"),
+    },
+    needs_resync: {
+      color: "bg-orange-500/10 text-orange-600 border-orange-200 dark:border-orange-800",
+      icon: <RefreshCw className="h-3 w-3" />,
+      label: t("confluence.syncedPages.status.needsResync"),
     },
     error: {
       color: "bg-rose-500/10 text-rose-600 border-rose-200 dark:border-rose-800",
@@ -606,10 +612,34 @@ export default function SyncedPagesPage() {
         limit: 500,
       }),
     enabled: !!bindingId,
-    refetchInterval: binding?.status === "syncing" ? 3000 : false,
+    // Poll when: binding is syncing, any page is processing, or user triggered sync
+    refetchInterval: (query) => {
+      // If binding is syncing, poll
+      if (binding?.status === "syncing") return 3000;
+
+      // If any page was just synced by user, poll
+      if (syncingIds.size > 0) return 2000;
+
+      // If any page has processing document_status, poll
+      const pages = (query.state.data as typeof pagesResponse)?.pages || [];
+      const processingStatuses = ["uploaded", "parsing", "segmenting", "embedding", "embedding_images"];
+      const hasProcessing = pages.some(p =>
+        p.document_status && processingStatuses.includes(p.document_status)
+      );
+      if (hasProcessing) return 3000;
+
+      return false;
+    },
   });
 
-  const pages = pagesResponse?.pages || [];
+  // Filter out pages without valid id (defensive coding for data integrity issues)
+  const pages = (pagesResponse?.pages || []).filter((page) => {
+    if (!page.id) {
+      console.warn('[SyncedPages] Page missing id field:', page.title, page);
+      return false;
+    }
+    return true;
+  });
 
   // Synced page IDs (for AddPagesModal to show already synced pages)
   const syncedPageIds = useMemo(() => {
@@ -699,6 +729,13 @@ export default function SyncedPagesPage() {
   }, [filteredPages, selectedIds]);
 
   const handleSyncPage = useCallback(async (pageId: string) => {
+    // Validate pageId to prevent API calls with undefined/empty IDs
+    if (!pageId) {
+      console.error('[SyncedPages] handleSyncPage called with invalid pageId:', pageId);
+      showToast(t("confluence.syncedPages.invalidPageId", { defaultValue: "Invalid page ID" }), "error");
+      return;
+    }
+
     // Find page title for better feedback
     const page = pages.find((p) => p.id === pageId);
     const pageTitle = page?.title || "Page";

@@ -326,6 +326,12 @@ def create_app() -> FastAPI:
                     image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
                     app.state.image_storage_service = image_storage_service
                     logger.info(f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})")
+
+                    # Initialize artifact storage service (reuse same storage config)
+                    from .services.storage import init_artifact_storage
+                    artifact_storage = init_artifact_storage(storage_config, container.database)
+                    app.state.artifact_storage = artifact_storage
+                    logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
                 except Exception as e:
                     logger.warning(f"图片存储服务初始化失败: {e}")
 
@@ -605,6 +611,13 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     init_quota_service(container.database)
     init_pricing_service(container.database)
 
+    # Initialize LLM provider and model services
+    from .services.llm import ProviderService, ModelService
+    import os
+    encryption_key = os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
+    app.state.provider_service = ProviderService(container.database, encryption_key)
+    app.state.model_service = ModelService(container.database)
+
 
 async def _load_services_from_database(container: Container, settings: Settings) -> None:
     """从数据库加载服务"""
@@ -647,6 +660,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     - ANTHROPIC_API_KEY
     - DEEPSEEK_API_KEY
     - DASHSCOPE_API_KEY (或复用 knowledge.dashscope.api_key)
+    - GOOGLE_API_KEY
+
+    同时将配置同步到数据库，确保前端可以管理。
     """
     import os
     from .services.assistant import AssistantService, ModelRegistry, ModelProvider
@@ -654,52 +670,134 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     model_registry = ModelRegistry()
     configured_providers = []
 
-    # OpenAI
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if openai_key:
-        model_registry.configure_provider(
-            ModelProvider.OPENAI,
-            api_key=openai_key,
-            base_url=openai_base_url,
-        )
-        configured_providers.append("openai")
+    # 默认 provider 配置定义
+    DEFAULT_PROVIDER_CONFIGS = {
+        "openai": {
+            "display_name": "OpenAI",
+            "api_type": "openai",
+            "base_url": "https://api.openai.com",
+            "env_key": "OPENAI_API_KEY",
+            "env_base_url": "OPENAI_BASE_URL",
+        },
+        "anthropic": {
+            "display_name": "Anthropic",
+            "api_type": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "env_key": "ANTHROPIC_API_KEY",
+            "env_base_url": "ANTHROPIC_BASE_URL",
+        },
+        "deepseek": {
+            "display_name": "DeepSeek",
+            "api_type": "openai",
+            "base_url": "https://api.deepseek.com",
+            "env_key": "DEEPSEEK_API_KEY",
+            "env_base_url": "DEEPSEEK_BASE_URL",
+        },
+        "dashscope": {
+            "display_name": "Qwen/DashScope",
+            "api_type": "openai",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
+            "env_key": "DASHSCOPE_API_KEY",
+            "env_base_url": None,
+        },
+        "google": {
+            "display_name": "Google Gemini",
+            "api_type": "google",
+            "base_url": "https://generativelanguage.googleapis.com",
+            "env_key": "GOOGLE_API_KEY",
+            "env_base_url": None,
+        },
+    }
 
-    # Anthropic
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    anthropic_base_url = os.environ.get("ANTHROPIC_BASE_URL")
-    if anthropic_key:
-        model_registry.configure_provider(
-            ModelProvider.ANTHROPIC,
-            api_key=anthropic_key,
-            base_url=anthropic_base_url,
-        )
-        configured_providers.append("anthropic")
+    # 获取 provider_service 用于同步到数据库
+    provider_service = getattr(app.state, "provider_service", None)
+    tenant_id = "default"
 
-    # DeepSeek
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    deepseek_base_url = os.environ.get("DEEPSEEK_BASE_URL")
-    if deepseek_key:
-        model_registry.configure_provider(
-            ModelProvider.DEEPSEEK,
-            api_key=deepseek_key,
-            base_url=deepseek_base_url,
-        )
-        configured_providers.append("deepseek")
+    # 处理每个 provider
+    for provider_id, config in DEFAULT_PROVIDER_CONFIGS.items():
+        # 从环境变量获取 API key
+        api_key = os.environ.get(config["env_key"], "")
 
-    # DashScope (Qwen)
-    dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    # Fallback to knowledge.dashscope.api_key if not set
-    if not dashscope_key:
-        knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
-        if knowledge_dashscope:
-            dashscope_key = getattr(knowledge_dashscope, "api_key", "")
-    if dashscope_key:
-        model_registry.configure_provider(
-            ModelProvider.DASHSCOPE,
-            api_key=dashscope_key,
-        )
-        configured_providers.append("dashscope")
+        # DashScope 特殊处理：fallback 到 knowledge.dashscope.api_key
+        if provider_id == "dashscope" and not api_key:
+            knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
+            if knowledge_dashscope:
+                api_key = getattr(knowledge_dashscope, "api_key", "")
+
+        # 获取自定义 base_url
+        base_url = None
+        if config.get("env_base_url"):
+            base_url = os.environ.get(config["env_base_url"])
+        if not base_url:
+            base_url = config["base_url"]
+
+        # 配置 ModelRegistry（内存中）
+        if api_key:
+            try:
+                model_registry.configure_provider(
+                    ModelProvider(provider_id),
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+                configured_providers.append(provider_id)
+            except ValueError:
+                logger.warning(f"Unknown provider enum: {provider_id}")
+
+        # 同步到数据库（如果 provider_service 可用）
+        if provider_service:
+            try:
+                existing = await provider_service.get_provider(tenant_id, provider_id)
+                if not existing:
+                    # 创建新 provider
+                    await provider_service.create_provider(
+                        tenant_id=tenant_id,
+                        provider_id=provider_id,
+                        display_name=config["display_name"],
+                        api_type=config["api_type"],
+                        base_url=base_url,
+                        api_key=api_key if api_key else None,
+                        is_enabled=True,
+                    )
+                    logger.info(f"Created provider {provider_id} in database")
+                elif api_key and not existing.get("has_api_key"):
+                    # 更新 API key（如果数据库中没有但环境变量有）
+                    await provider_service.update_provider(
+                        tenant_id=tenant_id,
+                        provider_id=provider_id,
+                        api_key=api_key,
+                    )
+                    logger.info(f"Updated API key for provider {provider_id}")
+            except Exception as e:
+                logger.warning(f"Failed to sync provider {provider_id} to database: {e}")
+
+    # 从数据库加载 providers（用于加载数据库中用户配置的 providers）
+    if provider_service:
+        try:
+            db_providers = await provider_service.list_providers(tenant_id, include_disabled=False)
+            for p in db_providers:
+                provider_id = p.get("provider_id", "")
+                if provider_id in configured_providers:
+                    continue  # 已从环境变量配置
+                if not p.get("has_api_key"):
+                    continue  # 没有 API key
+
+                # 从数据库加载 API key 并配置 ModelRegistry
+                api_key = await provider_service._get_api_key(tenant_id, provider_id)
+                if api_key:
+                    try:
+                        provider_enum = ModelProvider(provider_id)
+                        model_registry.configure_provider(
+                            provider_enum,
+                            api_key=api_key,
+                            base_url=p.get("base_url"),
+                        )
+                        configured_providers.append(provider_id)
+                        logger.info(f"Loaded provider {provider_id} from database")
+                    except ValueError:
+                        # 自定义 provider，目前不支持
+                        logger.debug(f"Custom provider {provider_id} not in enum, skipping")
+        except Exception as e:
+            logger.warning(f"Failed to load providers from database: {e}")
 
     # Get KB service if available
     kb_service = getattr(app.state, "knowledge_service", None)
@@ -741,14 +839,32 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     )
 
     # Initialize Tool Registry (Phase 2)
-    from .services.assistant.tools import get_tool_registry, register_builtin_tools
+    from .services.assistant.tools import get_tool_registry, register_builtin_tools, register_code_executor_tool, register_document_generation_tool
+    from .services.assistant.tools.image_generator_tool import register_image_generation_tool
     tool_registry = get_tool_registry()
     register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool)
+
+    # Register code executor tool if available
+    if code_executor:
+        register_code_executor_tool(code_executor=code_executor)
+
+    # Register image generation tool if DashScope is configured
+    image_gen_registered = register_image_generation_tool()
+
+    # Register document generation tool (always available)
+    doc_gen_registered = register_document_generation_tool()
 
     # Store in app.state
     app.state.model_registry = model_registry
     app.state.assistant_service = assistant_service
     app.state.tool_registry = tool_registry
+
+    # Load models from database (if available)
+    model_service = getattr(app.state, "model_service", None)
+    if model_service:
+        loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
+        if loaded > 0:
+            logger.info(f"Loaded {loaded} models from database into registry")
 
     features = []
     if configured_providers:
@@ -761,6 +877,10 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         features.append("KB tools")
     if code_executor:
         features.append("code execution")
+    if image_gen_registered:
+        features.append("image generation")
+    if doc_gen_registered:
+        features.append("document generation")
 
     registered_tools = len(tool_registry.list_tools())
     if registered_tools > 0:

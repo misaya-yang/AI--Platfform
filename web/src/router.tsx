@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppLayout } from "@/layouts/AppLayout";
-import { DashboardPage } from "@/pages/Dashboard";
+import { EnterpriseDashboard } from "@/pages/dashboard/index";
 import { ServicesPage } from "@/pages/Services";
 import { PlaygroundPage } from "@/pages/Playground";
 import { TasksPage } from "@/pages/Tasks";
@@ -34,7 +34,7 @@ export function AppRouter() {
           path="/dashboard"
           element={
             <ProtectedRoute requiredPermission="console:dashboard:view">
-              <DashboardPage />
+              <EnterpriseDashboard />
             </ProtectedRoute>
           }
         />

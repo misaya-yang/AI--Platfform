@@ -16,6 +16,8 @@ export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "
 export type FusionStrategy = "rrf" | "weighted";
 export type Visibility = "private" | "tenant" | "public";
 export type DocumentStatus = "pending" | "parsing" | "segmenting" | "embedding" | "completed" | "failed";
+export type KBType = "document" | "data" | "image" | "audio_video";
+export type UseCase = "basic_qa" | "rich_text_response";
 
 // ============================================================
 // Dataset Types
@@ -27,6 +29,8 @@ export interface Dataset {
   description?: string;
   tenant_id?: string;
   visibility: Visibility;
+  kb_type?: KBType;  // document | data | image | audio_video
+  use_case?: UseCase;  // basic_qa | rich_text_response
   embedding_provider: string;
   embedding_model: string;
   embedding_dimension?: number;
@@ -483,6 +487,8 @@ export interface DatasetCreateRequest {
   name: string;
   description?: string;
   visibility?: Visibility;
+  kb_type?: KBType;
+  use_case?: UseCase;
   embedding_provider: string;
   embedding_model: string;
   embedding_dimension?: number;

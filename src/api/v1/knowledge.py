@@ -1447,3 +1447,111 @@ async def get_dataset_sources(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# =============================================================================
+# Maintenance Endpoints (Internal Use Only)
+# =============================================================================
+
+@router.post("/knowledge/{dataset_id}/maintenance/dedupe")
+async def dedupe_segments(
+    dataset_id: str,
+    request: Request,
+    dry_run: bool = Query(default=True, description="If true, only report duplicates without deleting"),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Remove duplicate segments from a dataset.
+
+    Duplicates are identified by content_hash. The oldest segment is kept,
+    newer duplicates are deleted from both database and vector store.
+
+    Use dry_run=true to preview what would be deleted.
+
+    Internal maintenance: Use X-Internal-Maintenance: true header to bypass permission check.
+    """
+    from collections import defaultdict
+
+    try:
+        # Allow internal maintenance calls to bypass permission check
+        internal_header = request.headers.get("X-Internal-Maintenance", "").lower()
+        if internal_header == "true":
+            dataset = await svc.db.get_dataset(dataset_id)
+            if not dataset:
+                raise ValidationFailedError(f"dataset {dataset_id} not found")
+        else:
+            # Require admin/owner access for maintenance operations
+            dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
+
+        collection_name = dataset.get("collection_name")
+
+        # Get all segments grouped by content_hash
+        segments = await svc.db.list_segments(dataset_id, limit=10000)
+
+        # Group by content_hash
+        hash_to_segments = defaultdict(list)
+        for seg in segments:
+            content_hash = seg.get("content_hash") or ""
+            if content_hash:
+                hash_to_segments[content_hash].append(seg)
+
+        # Find duplicates (keep oldest, delete rest)
+        duplicates_to_delete = []
+        for content_hash, segs in hash_to_segments.items():
+            if len(segs) > 1:
+                # Sort by created_at, keep oldest
+                segs.sort(key=lambda x: x.get("created_at") or "")
+                duplicates_to_delete.extend(segs[1:])
+
+        result = {
+            "dataset_id": dataset_id,
+            "total_segments": len(segments),
+            "unique_content": len(hash_to_segments),
+            "duplicates_found": len(duplicates_to_delete),
+            "dry_run": dry_run,
+        }
+
+        if dry_run:
+            # Return preview of duplicates
+            result["duplicates_preview"] = [
+                {
+                    "segment_id": seg.get("segment_id"),
+                    "content_preview": (seg.get("content") or "")[:100],
+                }
+                for seg in duplicates_to_delete[:10]
+            ]
+            return result
+
+        # Actually delete duplicates
+        deleted_count = 0
+        errors = []
+
+        for seg in duplicates_to_delete:
+            seg_id = seg.get("segment_id")
+            try:
+                # Delete from vector store
+                if collection_name:
+                    vector_id = seg.get("vector_id") or seg_id
+                    try:
+                        await svc.vector_store.delete_points(collection_name, [vector_id])
+                    except Exception:
+                        pass
+
+                # Delete from database
+                ok = await svc.db.delete_segment(seg_id)
+                if ok:
+                    deleted_count += 1
+            except Exception as e:
+                errors.append({"segment_id": seg_id, "error": str(e)})
+
+        result["deleted_count"] = deleted_count
+        if errors:
+            result["errors"] = errors[:10]
+
+        return result
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

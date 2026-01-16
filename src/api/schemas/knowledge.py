@@ -17,6 +17,10 @@ class DatasetCreateSchema(BaseModel):
     description: Optional[str] = ""
     visibility: str = "private"  # private|tenant|public
 
+    # KB type and use case (multimodal support)
+    kb_type: str = "document"  # document|data|image|audio_video
+    use_case: str = "basic_qa"  # basic_qa|rich_text_response
+
     embedding_provider: str = "local"
     embedding_model: str = "hash-384"
     embedding_dimension: Optional[int] = None
@@ -25,7 +29,7 @@ class DatasetCreateSchema(BaseModel):
     index_config: Dict[str, Any] = Field(default_factory=dict)
     collection_name: Optional[str] = None
     indexing_technique: str = "high_quality"  # high_quality|economy
-    
+
     # Optional process rules
     process_rule: Optional[Dict[str, Any]] = None
 
@@ -36,6 +40,8 @@ class DatasetUpdateSchema(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     visibility: Optional[str] = None
+    kb_type: Optional[str] = None  # document|data|image|audio_video
+    use_case: Optional[str] = None  # basic_qa|rich_text_response
     embedding_provider: Optional[str] = None
     embedding_model: Optional[str] = None
     embedding_dimension: Optional[int] = None

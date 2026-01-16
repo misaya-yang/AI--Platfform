@@ -54,6 +54,10 @@ class MemoryDatabase(Protocol):
 
     This protocol defines the methods that will be implemented in Task 3.4
     for session and user memory persistence.
+
+    Note: The database implementation will handle tenant_id internally by
+    looking up the tenant from session_id or user_id. The caller does not
+    need to provide tenant_id explicitly.
     """
 
     async def store_session_memory(
@@ -204,7 +208,10 @@ class WorkingMemoryLayer(MemoryLayer):
         query_lower = query.lower()
 
         for key, value in self._storage.items():
-            # Check if query matches key
+            # Convert value to string for matching
+            value_str = json.dumps(value) if not isinstance(value, str) else value
+
+            # Check if query matches key or value (not both to avoid duplicates)
             if query_lower in key.lower():
                 results.append({
                     "key": key,
@@ -212,11 +219,7 @@ class WorkingMemoryLayer(MemoryLayer):
                     "metadata": self._metadata.get(key, {}),
                     "timestamp": self._timestamps.get(key),
                 })
-                continue
-
-            # Check if query matches value (string representation)
-            value_str = json.dumps(value) if not isinstance(value, str) else value
-            if query_lower in value_str.lower():
+            elif query_lower in value_str.lower():
                 results.append({
                     "key": key,
                     "value": value,
@@ -224,10 +227,11 @@ class WorkingMemoryLayer(MemoryLayer):
                     "timestamp": self._timestamps.get(key),
                 })
 
+            # Check limit after both conditions
             if len(results) >= limit:
                 break
 
-        return results[:limit]
+        return results
 
     def clear(self) -> None:
         """Clear all working memory data."""

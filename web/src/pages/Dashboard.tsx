@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { useServices, useHealth } from "@/hooks/useServices";
 import { ServiceCard } from "@/components/ServiceCard";
+import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { ServiceCostAnalysis } from "@/components/ServiceCostAnalysis";
 import { UserServiceUsageAnalytics } from "@/components/UserServiceUsageAnalytics";
 import { SecurityEventCharts } from "@/components/SecurityEventCharts";
@@ -45,8 +46,9 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* 服务列表 */}
+      {/* 服务入口 */}
       <div>
+        <h3 className="text-base font-medium mb-3">{t("dashboard.serviceEndpoints", "服务入口")}</h3>
         {servicesQuery.isLoading ? (
           <div className="text-sm text-muted-foreground">{t("dashboard.loadingServices")}</div>
         ) : (
@@ -61,6 +63,9 @@ export function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* 模型供应商状态 */}
+      <ProviderStatusCard />
 
       {/* 服务成本分析 */}
       <ServiceCostAnalysis dateRange={dateRange} granularity={granularity} />

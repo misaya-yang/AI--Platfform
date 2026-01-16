@@ -851,7 +851,12 @@ class KnowledgeService:
                 await self.vector_store.delete_points(collection, [pid])
             except Exception:
                 pass
-        return await self.db.delete_segment(segment_id)
+        document_id = str(seg.get("document_id") or "")
+        result = await self.db.delete_segment(segment_id)
+        # Update document segment_count after deletion
+        if result and document_id:
+            await self.db.refresh_document_segment_count(document_id)
+        return result
 
     # ========================= Ingest pipeline =========================
 
@@ -893,25 +898,55 @@ class KnowledgeService:
             flat_chunks = flatten_chunks(chunk_objects)
             
             # Convert to the format expected by the rest of the pipeline
-            chunks = [(c.text, c.token_count) for c in flat_chunks]
-            
+            # Include content_hash for incremental update detection
+            import hashlib
+            chunks = [
+                (c.text, c.token_count, hashlib.md5(c.text.encode()).hexdigest())
+                for c in flat_chunks
+            ]
+
             if not chunks:
                 await self.db.update_document_status(
                     document_id, status="failed", progress=100, error="no segments generated"
                 )
                 return
 
-            # Prepare segments (delete old vectors/segments first)
-            old_segments = await self.db.list_segments(
-                dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
+            # Get existing segment hashes for incremental update comparison
+            existing_hashes = await self.db.get_segment_hashes_by_document(document_id, content_type="text")
+
+            # Classify chunks: unchanged (skip), changed (update), new (insert)
+            # Also track which old segments to delete
+            chunks_to_embed = []  # (position, text, token_count, content_hash)
+            unchanged_segments = []  # segment_ids to keep as-is
+            vectors_to_delete = []  # old vector_ids that need replacement
+
+            for pos, (text, token_count, content_hash) in enumerate(chunks):
+                old_seg = existing_hashes.get(pos)
+                if old_seg and old_seg.get("content_hash") == content_hash:
+                    # Content unchanged - keep existing segment and vector
+                    unchanged_segments.append(old_seg["segment_id"])
+                    logger.info(f"Segment at position {pos} unchanged, skipping embed")
+                else:
+                    # Content changed or new - needs embedding
+                    chunks_to_embed.append((pos, text, token_count, content_hash))
+                    if old_seg and old_seg.get("vector_id"):
+                        # Old vector needs to be replaced
+                        vectors_to_delete.append(old_seg["vector_id"])
+
+            # Find excess old segments (positions beyond new chunk count)
+            max_new_pos = len(chunks) - 1
+            excess_segments = []
+            for pos, seg_info in existing_hashes.items():
+                if pos > max_new_pos:
+                    excess_segments.append(seg_info["segment_id"])
+                    if seg_info.get("vector_id"):
+                        vectors_to_delete.append(seg_info["vector_id"])
+
+            logger.info(
+                f"Incremental update for document {document_id}: "
+                f"{len(unchanged_segments)} unchanged, {len(chunks_to_embed)} to embed, "
+                f"{len(excess_segments)} to delete"
             )
-            old_text_segments = [
-                s for s in old_segments
-                if str(s.get("content_type", "text")).lower() == "text"
-            ]
-            old_point_ids = [
-                str(s.get("vector_id") or s.get("segment_id") or "") for s in old_text_segments
-            ]
 
             embedding_provider = str(dataset.get("embedding_provider") or "local")
             embedding_model = str(dataset.get("embedding_model") or "hash-384")
@@ -921,11 +956,13 @@ class KnowledgeService:
             is_multimodal = self._is_multimodal_dataset(dataset)
 
             embedder: Optional[BaseEmbedding] = None
+            embed_timeout = 60.0  # Default timeout for embedding operations
             try:
                 if is_multimodal:
                     # Use UnifiedMultimodalEmbedding for consistent text-image vector space
                     logger.info(f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}")
                     embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+                    embed_timeout = 90.0  # Longer timeout for multimodal
                 else:
                     econf = self._resolve_embedding_config(
                         provider=embedding_provider,
@@ -935,6 +972,7 @@ class KnowledgeService:
                     embedder = create_embedding(
                         econf, dimension=int(dataset.get("embedding_dimension") or 0) or None
                     )
+                    embed_timeout = float(econf.timeout_seconds) + 30.0
 
                 # If dimension is unknown, dry-run to fetch it.
                 if embedder._dimension is None:
@@ -963,110 +1001,99 @@ class KnowledgeService:
 
             await self.db.update_document_status(document_id, status="embedding", progress=35)
 
-            # NOTE: We use "insert-first-delete-later" strategy for zero-downtime updates.
-            # Old vectors are deleted AFTER new vectors are inserted to ensure the document
-            # remains searchable throughout the update process.
+            # Incremental update strategy:
+            # 1. Only embed chunks that changed or are new
+            # 2. Keep unchanged segments and vectors intact
+            # 3. Delete excess old segments and their vectors
 
-            # Embed + upsert
             segment_rows: List[Dict[str, Any]] = []
             points = []
             try:
                 from qdrant_client.http import models as qmodels  # type: ignore
 
-                # Use smaller batch size for DashScope compatibility (max 10 per API call)
-                batch_size = 8
-                total = len(chunks)
-                embedded = 0
-                
-                import logging
-                logger = logging.getLogger(__name__)
+                # If no chunks need embedding, skip to cleanup
+                if chunks_to_embed:
+                    # Use smaller batch size for DashScope compatibility (max 10 per API call)
+                    batch_size = 8
+                    total = len(chunks_to_embed)
+                    embedded = 0
 
-                for i in range(0, total, batch_size):
-                    batch = chunks[i : i + batch_size]
-                    texts = [t for t, _ in batch]
-                    
-                    try:
-                        vectors = await asyncio.wait_for(
-                            embedder.embed_documents(texts),
-                            timeout=float(econf.timeout_seconds) + 30.0,
-                        )
-                    except Exception as embed_err:
-                        # Log detailed error for debugging
-                        text_lengths = [len(t) for t in texts]
-                        logger.error(
-                            f"Embedding failed for batch {i // batch_size + 1}: {embed_err}. "
-                            f"Text lengths: {text_lengths}, Provider: {embedding_provider}, Model: {embedding_model}"
-                        )
-                        raise
+                    for i in range(0, total, batch_size):
+                        batch = chunks_to_embed[i : i + batch_size]
+                        texts = [text for _, text, _, _ in batch]
 
-                    for j, (chunk_text, token_count) in enumerate(batch):
-                        pos = i + j
-                        seg_id = str(uuid.uuid4())
-                        payload = {
-                            "dataset_id": dataset_id,
-                            "document_id": document_id,
-                            "segment_id": seg_id,
-                            "position": pos,
-                            "text": chunk_text,
-                            "token_count": token_count,
-                        }
-                        points.append(
-                            qmodels.PointStruct(
-                                id=seg_id,
-                                vector=vectors[j],
-                                payload=payload,
+                        try:
+                            vectors = await asyncio.wait_for(
+                                embedder.embed_documents(texts),
+                                timeout=embed_timeout,
                             )
-                        )
-                        segment_rows.append(
-                            {
-                                "segment_id": seg_id,
+                        except Exception as embed_err:
+                            # Log detailed error for debugging
+                            text_lengths = [len(t) for t in texts]
+                            logger.error(
+                                f"Embedding failed for batch {i // batch_size + 1}: {embed_err}. "
+                                f"Text lengths: {text_lengths}, Provider: {embedding_provider}, Model: {embedding_model}"
+                            )
+                            raise
+
+                        for j, (pos, chunk_text, token_count, content_hash) in enumerate(batch):
+                            seg_id = str(uuid.uuid4())
+                            payload = {
                                 "dataset_id": dataset_id,
                                 "document_id": document_id,
+                                "segment_id": seg_id,
                                 "position": pos,
                                 "text": chunk_text,
                                 "token_count": token_count,
-                                "vector_id": seg_id,
-                                "metadata": {},
                             }
+                            points.append(
+                                qmodels.PointStruct(
+                                    id=seg_id,
+                                    vector=vectors[j],
+                                    payload=payload,
+                                )
+                            )
+                            segment_rows.append(
+                                {
+                                    "segment_id": seg_id,
+                                    "dataset_id": dataset_id,
+                                    "document_id": document_id,
+                                    "position": pos,
+                                    "text": chunk_text,
+                                    "token_count": token_count,
+                                    "vector_id": seg_id,
+                                    "content_hash": content_hash,
+                                    "metadata": {},
+                                }
+                            )
+
+                        embedded += len(batch)
+                        progress = 35 + (embedded / max(total, 1)) * 55
+                        await self.db.update_document_status(
+                            document_id, status="embedding", progress=min(progress, 95)
                         )
 
-                    embedded += len(batch)
-                    progress = 35 + (embedded / max(total, 1)) * 55
-                    await self.db.update_document_status(
-                        document_id, status="embedding", progress=min(progress, 95)
-                    )
+                    # Upsert new/changed vectors and segments
+                    await self.vector_store.upsert(collection_name=collection, points=points)
+                    await self.db.insert_segments(segment_rows)
+                    logger.info(f"Upserted {len(segment_rows)} segments for document {document_id}")
+                else:
+                    logger.info(f"All segments unchanged for document {document_id}, no embedding needed")
 
-                # Zero-downtime update strategy:
-                # 1. Upsert new vectors to vector store
-                # 2. Upsert new segments to DB (ON CONFLICT on document_id+position updates in-place)
-                # 3. Delete excess old segments (if document shrunk)
-                # 4. Cleanup old vectors from vector store
-
-                # Upsert new vectors and segments first (keeps data available)
-                await self.vector_store.upsert(collection_name=collection, points=points)
-                await self.db.insert_segments(segment_rows)
-
-                # Get new segment IDs for exclusion when deleting old segments
-                new_segment_ids = [s["segment_id"] for s in segment_rows]
-
-                # Delete old segments that are no longer needed
-                # The insert_segments already updated existing positions via ON CONFLICT (document_id, position)
-                if old_text_segments:
+                # Delete excess old segments (positions beyond new chunk count)
+                if excess_segments:
                     deleted_count = await self.db.delete_segments_by_document(
-                        document_id, exclude_ids=new_segment_ids, content_type="text"
+                        document_id, exclude_ids=unchanged_segments + [s["segment_id"] for s in segment_rows],
+                        content_type="text"
                     )
                     if deleted_count > 0:
-                        logger.debug(
-                            f"Deleted {deleted_count} excess old segments for document {document_id}"
-                        )
+                        logger.info(f"Deleted {deleted_count} excess segments for document {document_id}")
 
-                # Cleanup old vectors from vector store
-                if old_point_ids and collection:
+                # Cleanup old vectors that were replaced or from deleted segments
+                if vectors_to_delete and collection:
                     try:
-                        await self.vector_store.delete_points(collection, old_point_ids)
-                        logger.debug(
-                            f"Cleaned up {len(old_point_ids)} old vectors for document {document_id}"
-                        )
+                        await self.vector_store.delete_points(collection, vectors_to_delete)
+                        logger.info(f"Cleaned up {len(vectors_to_delete)} old vectors for document {document_id}")
                     except Exception as cleanup_err:
                         # Non-fatal: old vectors may cause slight duplication but won't break search
                         logger.warning(
@@ -1135,6 +1162,9 @@ class KnowledgeService:
                         f"Image association failed for document {document_id}: {assoc_err}"
                     )
                     # Continue even if association fails
+
+                # Update document segment_count after successful ingestion
+                await self.db.refresh_document_segment_count(document_id)
 
                 await self.db.update_document_status(document_id, status="completed", progress=100)
             except Exception as exc:
@@ -1667,57 +1697,51 @@ class KnowledgeService:
             )
             # Note: Don't close cached embedder - it's reused across requests
 
-        # --- Dense (Vector) retrieval ---
-        dense_hits = []
-        dense_hits_raw_count = 0
-        if effective_mode in {"dense", "hybrid"}:
+        # --- Parallel Dense + BM25 retrieval for better latency ---
+        import asyncio
+
+        async def _dense_search() -> tuple[list, int]:
+            """Dense (vector) retrieval task."""
+            if effective_mode not in {"dense", "hybrid"}:
+                return [], 0
             if not qvec:
                 raise ValidationFailedError("dense retrieval requires query embedding")
             if not collection:
                 raise ValidationFailedError("dataset collection_name is missing")
             try:
-                raw_dense_hits = await self.vector_store.search(
+                raw_hits = await self.vector_store.search(
                     collection_name=collection,
                     query_vector=qvec,
                     top_k=vector_k,
                     document_id=document_id,
                     with_payload=True,
                 )
-                dense_hits_raw_count = len(raw_dense_hits)
-                
-                # Filter by score threshold if set, and filter out empty text results
-                for h in raw_dense_hits:
+                raw_count = len(raw_hits)
+                filtered = []
+                for h in raw_hits:
                     payload = dict(h.payload or {})
                     text = str(payload.get("text") or "").strip()
-                    
-                    # Skip results without text content
                     if not text:
                         continue
-                    
-                    # Apply score threshold for vector results
                     if effective_score_threshold > 0.0 and h.score < effective_score_threshold:
                         continue
-                    
-                    dense_hits.append(h)
-                    
+                    filtered.append(h)
+                return filtered, raw_count
             except Exception as vec_err:
-                # Log but continue to keyword search if available
                 import logging
                 logging.getLogger(__name__).warning(f"Dense search failed: {vec_err}")
                 if effective_mode == "dense":
                     raise ValidationFailedError(f"Dense search failed: {vec_err}")
+                return [], 0
 
-        # --- BM25 (Keyword) retrieval ---
-        bm25_hits: List[Dict[str, Any]] = []
-        bm25_hits_raw_count = 0
-        if effective_mode in {"bm25", "hybrid"}:
+        async def _bm25_search() -> tuple[list, int]:
+            """BM25 (keyword) retrieval task."""
+            if effective_mode not in {"bm25", "hybrid"}:
+                return [], 0
             query_tokens = tokenize(q)
-            # Use original query as a term if tokenization didn't produce anything useful
             terms = list(dict.fromkeys(query_tokens))[:12]
             if not terms:
                 terms = [q.strip()]
-            
-            # Also add original query (lowercased) to help with short words
             if q.strip().lower() not in [t.lower() for t in terms]:
                 terms.append(q.strip().lower())
 
@@ -1727,31 +1751,20 @@ class KnowledgeService:
                 document_id=document_id,
                 limit=keyword_pool_k,
             )
-            bm25_hits_raw_count = len(rows)
-
-            # Filter out rows with empty text first
+            raw_count = len(rows)
             valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
-
             doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
             scores = bm25_scores(query_tokens, doc_tokens)
 
+            hits = []
             for row, score in zip(valid_rows, scores):
                 seg_id = str(row.get("segment_id") or "")
                 if not seg_id:
                     continue
-                    
                 text = str(row.get("text") or "").strip()
-                if not text:
+                if not text or score <= 0.0:
                     continue
-                
-                # For BM25 hits, we use raw BM25 score
-                # Only filter if score is 0 (no term matches)
-                if score <= 0.0:
-                    continue
-                    
-                # Build metadata including multimodal fields from separate columns
                 seg_metadata = _ensure_dict(row.get("metadata"))
-                # Include multimodal fields from database columns
                 if row.get("content_type"):
                     seg_metadata["content_type"] = row.get("content_type")
                 if row.get("image_url"):
@@ -1760,19 +1773,21 @@ class KnowledgeService:
                     seg_metadata["vlm_description"] = row.get("vlm_description")
                 if row.get("image_filename"):
                     seg_metadata["image_filename"] = row.get("image_filename")
+                hits.append({
+                    "segment_id": seg_id,
+                    "document_id": str(row.get("document_id") or ""),
+                    "text": text,
+                    "metadata": seg_metadata,
+                    "bm25_score": float(score),
+                })
+            hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+            return hits[:keyword_k], raw_count
 
-                bm25_hits.append(
-                    {
-                        "segment_id": seg_id,
-                        "document_id": str(row.get("document_id") or ""),
-                        "text": text,
-                        "metadata": seg_metadata,
-                        "bm25_score": float(score),
-                    }
-                )
-
-            bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            bm25_hits = bm25_hits[:keyword_k]
+        # Execute Dense and BM25 in parallel
+        (dense_hits, dense_hits_raw_count), (bm25_hits, bm25_hits_raw_count) = await asyncio.gather(
+            _dense_search(),
+            _bm25_search(),
+        )
 
         # --- Merge candidates with clear score tracking ---
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -1996,17 +2011,10 @@ class KnowledgeService:
         if effective_mode == "hybrid":
             meta["pipeline_stages"].append(f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}")
 
-        # --- Stage 4: Optional rerank (DashScope cross-encoder) ---
+        # --- Stage 4: Optional rerank (Async DashScope cross-encoder) ---
         if rerank_enabled and ranked:
             try:
-                import asyncio
-
-                try:
-                    from dashscope import TextReRank  # type: ignore
-                except Exception as exc:  # pragma: no cover
-                    raise ValidationFailedError(
-                        "dashscope package is required for rerank (pip install dashscope)"
-                    ) from exc
+                from .text_reranker import get_text_reranker
 
                 api_key = (
                     getattr(self.settings.knowledge.dashscope, "api_key", None)
@@ -2018,41 +2026,25 @@ class KnowledgeService:
                 if not api_key:
                     raise ValidationFailedError("DashScope api_key is required for rerank")
 
-                # Configure DashScope base URL if needed (for compatible mode)
-                import dashscope
-                if not dashscope.base_http_api_url:
-                     dashscope.base_http_api_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
+                # Use async reranker with connection pooling and caching
+                reranker = get_text_reranker(api_key=api_key, model=effective_rerank_model)
                 docs = [str(c.get("text") or "") for c in ranked]
-                resp = await asyncio.to_thread(
-                    TextReRank.call,
-                    model=effective_rerank_model,
+                rerank_results = await reranker.rerank(
                     query=q,
                     documents=docs,
                     top_n=effective_rerank_top_n,
-                    api_key=api_key,
-                    return_documents=False,
                 )
 
-                status_code = int(getattr(resp, "status_code", 0) or 0)
-                if status_code and status_code >= 400:
-                    code = getattr(resp, "code", "") or ""
-                    message = getattr(resp, "message", "") or ""
-                    raise ValidationFailedError(f"DashScope rerank failed: {status_code} {code} {message}")
-
-                output = getattr(resp, "output", None)
-                results = getattr(output, "results", None) if output is not None else None
                 reranked: List[Dict[str, Any]] = []
-                if results:
-                    for r in results:
-                        idx = int(getattr(r, "index", -1))
-                        score = float(getattr(r, "relevance_score", 0.0))
-                        if 0 <= idx < len(ranked):
-                            c = ranked[idx]
-                            c["_rerank_score"] = score
-                            c["_final_score"] = score  # Rerank score becomes final score
-                            reranked.append(c)
-                
+                for r in rerank_results:
+                    idx = r.index
+                    score = r.relevance_score
+                    if 0 <= idx < len(ranked):
+                        c = ranked[idx]
+                        c["_rerank_score"] = score
+                        c["_final_score"] = score  # Rerank score becomes final score
+                        reranked.append(c)
+
                 # Sort by rerank score
                 if reranked:
                     ranked = sorted(reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True)
@@ -3621,6 +3613,9 @@ class KnowledgeService:
             await self.db.update_segment_fields(seg_id, {"vector_id": seg_id, "status": "completed"})
         except Exception as exc:
             await self.db.update_segment_fields(seg_id, {"status": "error", "error": str(exc)})
+
+        # Update document segment_count after creating a new segment
+        await self.db.refresh_document_segment_count(document_id)
 
         return await self.db.get_segment(seg_id) or seg
 

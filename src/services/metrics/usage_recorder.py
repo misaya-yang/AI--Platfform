@@ -11,6 +11,7 @@ This service handles:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -53,8 +54,10 @@ class UsageRecord:
 
 
 def _hour_bucket(ts: float) -> datetime:
+    """Convert timestamp to hour bucket as naive UTC datetime."""
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.replace(minute=0, second=0, microsecond=0)
+    # Return naive datetime (no timezone) to match TIMESTAMP columns in PostgreSQL
+    return dt.replace(minute=0, second=0, microsecond=0, tzinfo=None)
 
 
 def group_records_by_hour(records: list[UsageRecord]) -> Dict[tuple, Dict[str, Any]]:
@@ -212,12 +215,16 @@ class UsageRecorder:
             input_price = pricing.get("input", Decimal("0.001"))
             output_price = pricing.get("output", Decimal("0.002"))
 
-            # Cost in cents (multiply by 100)
-            input_cost = (Decimal(record.input_tokens) / 1000) * input_price * 100
-            output_cost = (Decimal(record.output_tokens) / 1000) * output_price * 100
+            # Cost in microcents (multiply by 100 * 10000 = 1000000) for precision
+            # 1 dollar = 100 cents = 1,000,000 microcents
+            # Final cost_usd = cost_cents / 100, but we store cents as microcents / 10000
+            # So we use cents * 10000 for internal storage precision
+            input_cost = (Decimal(record.input_tokens) / 1000) * input_price * 100 * 10000
+            output_cost = (Decimal(record.output_tokens) / 1000) * output_price * 100 * 10000
 
-            record.input_cost_cents = int(input_cost)
-            record.output_cost_cents = int(output_cost)
+            # Store as microcents (cents * 10000) to preserve precision for low-cost models
+            record.input_cost_cents = round(float(input_cost))
+            record.output_cost_cents = round(float(output_cost))
 
     async def _get_model_pricing(self, model: str) -> Optional[Dict[str, Decimal]]:
         """Get pricing for a model from cache or database."""
@@ -356,8 +363,9 @@ class UsageRecorder:
                         r.first_token_ms,
                         r.status,
                         r.request_type,
-                        r.metadata,
-                        datetime.fromtimestamp(r.timestamp, tz=timezone.utc),
+                        json.dumps(r.metadata) if r.metadata else "{}",
+                        # Use naive UTC datetime to match TIMESTAMP column
+                        datetime.fromtimestamp(r.timestamp, tz=timezone.utc).replace(tzinfo=None),
                     )
                     for r in records
                 ],
@@ -573,7 +581,6 @@ class UsageRecorder:
                     params.append(assistant_id)
 
                 row = await conn.fetchrow(query, *params)
-
                 if not row:
                     return self._empty_summary()
 
@@ -586,7 +593,9 @@ class UsageRecorder:
                     "total_input_tokens": int(row["total_input_tokens"]),
                     "total_output_tokens": int(row["total_output_tokens"]),
                     "total_tokens": int(row["total_input_tokens"]) + int(row["total_output_tokens"]),
-                    "total_cost_usd": round(int(row["total_cost_cents"]) / 100, 4),
+                    # cost_cents is stored as microcents (cents * 10000) for precision
+                    # Convert: microcents / 10000 = cents, cents / 100 = USD
+                    "total_cost_usd": round(int(row["total_cost_cents"]) / 1000000, 6),
                     "avg_latency_ms": int(row["avg_latency_ms"]),
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
@@ -654,7 +663,8 @@ class UsageRecorder:
                         "input_tokens": int(row["total_input_tokens"]),
                         "output_tokens": int(row["total_output_tokens"]),
                         "total_tokens": int(row["total_input_tokens"]) + int(row["total_output_tokens"]),
-                        "cost_usd": round(int(row["total_cost_cents"]) / 100, 4),
+                        # cost_cents is stored as microcents (cents * 10000) for precision
+                        "cost_usd": round(int(row["total_cost_cents"]) / 1000000, 6),
                         "percentage": round(int(row["total_cost_cents"]) / total_cost * 100, 1) if total_cost > 0 else 0,
                     }
                     for row in rows
@@ -721,7 +731,8 @@ class UsageRecorder:
                             "input_tokens": int(row["input_tokens"]),
                             "output_tokens": int(row["output_tokens"]),
                             "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
-                            "cost_usd": round(int(row["cost_cents"]) / 100, 4),
+                            # cost_cents is stored as microcents (cents * 10000) for precision
+                            "cost_usd": round(int(row["cost_cents"]) / 1000000, 6),
                             "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
                         }
                         for row in rows
@@ -763,7 +774,8 @@ class UsageRecorder:
                         "input_tokens": int(row["input_tokens"]),
                         "output_tokens": int(row["output_tokens"]),
                         "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
-                        "cost_usd": round(int(row["cost_cents"]) / 100, 4),
+                        # cost_cents is stored as microcents (cents * 10000) for precision
+                        "cost_usd": round(int(row["cost_cents"]) / 1000000, 6),
                         "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
                     }
                     for row in rows

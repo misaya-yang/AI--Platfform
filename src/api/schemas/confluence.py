@@ -280,6 +280,12 @@ class ConfluencePageRecordSchema(BaseModel):
     parent_page_id: Optional[str] = None
     depth: int = 0
     status: str
+    # effective_status: 计算后的有效状态
+    # 当 status='synced' 但文档不存在或无 segment 时，返回 'needs_resync'
+    effective_status: Optional[str] = None
+    # 关联文档的处理状态
+    document_status: Optional[str] = None
+    document_progress: Optional[int] = None
     last_synced_at: Optional[str] = None
     confluence_updated_at: Optional[str] = None
     error: Optional[str] = None
@@ -313,6 +319,9 @@ class ConfluencePageListResponseSchema(BaseModel):
     synced: int = 0
     pending: int = 0
     error: int = 0
+    # needs_resync: 需要重新同步的页面数量
+    # 当页面 status='synced' 但关联文档不存在或无 segment 时
+    needs_resync: int = 0
 
 
 # ============================================================

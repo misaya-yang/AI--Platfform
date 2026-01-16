@@ -218,8 +218,9 @@ export function CitationDisplay({ citations, evaluation, className }: CitationDi
 
   if (!citations || citations.length === 0) return null;
 
-  // Filter to only show used and implicit citations
-  const relevantCitations = citations.filter((c) => c.status !== "unused");
+  // Show all citations (retrieved sources), not just "used" ones
+  // This makes sense because users want to see all sources that were retrieved and considered
+  const relevantCitations = citations;
   const usedCount = citations.filter((c) => c.status === "used").length;
 
   return (

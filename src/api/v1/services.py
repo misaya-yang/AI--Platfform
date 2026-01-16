@@ -150,13 +150,46 @@ async def list_services(
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """列出服务（需要 service:view 权限）"""
+    """列出服务（需要 service:view 权限）
+
+    返回所有服务，包括：
+    - 虚拟服务（AI 助手）：内置多功能助手
+    - LangGraph 服务：外部 LangGraph Agent
+    - 代理服务：LLM API 代理
+    """
     # 权限检查：需要 service:view 权限
     request.app.state.dispatcher.rbac.require(auth.roles, "service:view")
 
-    st = ServiceType(service_type) if service_type else None
-    services = await registry.list(service_type=st, tags=tags)
-    return [
+    # 构建虚拟服务列表（内置服务，不在数据库中）
+    virtual_services = []
+
+    # AI 助手虚拟服务
+    assistant_service = getattr(request.app.state, "assistant_service", None)
+    if service_type is None or service_type == "assistant":
+        virtual_services.append({
+            "service_id": "assistant",
+            "name": "AI 助手",
+            "description": "内置多功能 AI 助手，支持知识库检索、网页搜索、工具调用、图像生成",
+            "version": "2.0.0",
+            "service_type": "assistant",
+            "supported_modes": ["chat", "stream"],
+            "accepted_content_types": ["application/json"],
+            "output_content_types": ["application/json", "text/event-stream"],
+            "status": "active" if assistant_service else "unavailable",
+            "tags": ["builtin", "assistant", "rag", "tools"],
+            "metadata": {
+                "is_virtual": True,
+                "endpoint": "/api/v1/assistant",
+                "features": ["chat", "stream", "rag", "web_search", "tools", "image_generation"],
+            },
+        })
+
+    # 从数据库获取注册的服务
+    st = ServiceType(service_type) if service_type and service_type not in ["assistant"] else None
+    db_services = await registry.list(service_type=st, tags=tags)
+
+    # 转换数据库服务为字典
+    db_service_list = [
         {
             "service_id": s.service_id,
             "name": s.name,
@@ -170,8 +203,11 @@ async def list_services(
             "tags": s.tags,
             "metadata": s.metadata,
         }
-        for s in services
+        for s in db_services
     ]
+
+    # 合并虚拟服务和数据库服务（虚拟服务在前）
+    return virtual_services + db_service_list
 
 
 @router.get("/services/{service_id}")

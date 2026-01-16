@@ -390,7 +390,33 @@
     "status": {
       "connected": "Connected",
       "disabled": "Disabled",
-      "error": "Error"
+      "error": "Error",
+      "synced": "Synced",
+      "pending": "Pending",
+      "needsResync": "Needs Resync"
+    },
+    "syncStatus": {
+      "success": "Sync successful",
+      "failed": "Sync failed: {{error}}",
+      "triggered": "Sync triggered",
+      "batchStarted": "Batch sync started"
+    },
+    "binding": {
+      "title": "Confluence Bindings",
+      "subtitle": "Sync Confluence spaces to this knowledge base",
+      "addBinding": "Add Binding",
+      "unbind": "Unbind",
+      "unbindConfirm": "Confirm Unbind",
+      "unbindDescription": "Are you sure you want to unbind \"{{name}}\"?",
+      "deleteDocuments": "Also delete synced documents",
+      "deleteDocumentsHint": "If unchecked, synced documents will remain in the knowledge base",
+      "emptyTitle": "No Confluence Bindings",
+      "emptyDescription": "Bind a Confluence space to this knowledge base to automatically sync pages and keep content updated",
+      "syncConfig": "Sync Configuration",
+      "refresh": "Refresh",
+      "pagesCount": "{{count}} pages",
+      "manual": "Manual",
+      "everyMinutes": "Every {{minutes}} min"
     },
     "bindingStatus": {
       "pending": "Pending",
@@ -636,6 +662,7 @@
         "pending": "Pending",
         "processing": "Processing",
         "uploaded": "Uploaded",
+        "needsResync": "Needs Resync",
         "error": "Error",
         "deleted": "Deleted"
       },
@@ -753,7 +780,17 @@
     "ragUsage": "Usage",
     "ragCitations": "Citations",
     "ragGrounding": "{{percent}}% grounded",
-    "ragChunksUsed": "{{used}}/{{total}} chunks used"
+    "ragChunksUsed": "{{used}}/{{total}} chunks used",
+
+    "styleTitle": "Customize Response Style",
+    "styleHint": "Select a style above to customize how AI responds.",
+    "kb": "Knowledge Base",
+    "selectKB": "Select Knowledge Base",
+    "webSearchOn": "Click to disable web search",
+    "webSearchOff": "Click to enable web search",
+    "addPhotosFiles": "Add photos and files",
+    "companyKB": "Company Knowledge Base",
+    "webSearchMenu": "Web Search"
   },
   "analytics": {
     "title": "Usage Analytics",

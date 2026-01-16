@@ -42,14 +42,18 @@ class KBSearchRequest(BaseModel):
         description="Retrieval mode. 'auto' selects best mode based on query characteristics"
     )
 
-    # Advanced options (usually not needed)
-    rerank: bool = Field(default=False, description="Enable reranking for improved relevance")
+    # Advanced options - SOTA defaults for production quality
+    rerank: bool = Field(
+        default=True,
+        description="Enable cross-encoder reranking for improved relevance (15-30% accuracy boost)"
+    )
     mmr: bool = Field(default=False, description="Enable MMR for result diversity")
     score_threshold: Optional[float] = Field(
-        default=None,
+        default=0.3,
         ge=0.0,
         le=1.0,
-        description="Minimum score threshold (0.0-1.0). Results below this are filtered out"
+        description="Minimum score threshold (0.0-1.0). Results below this are filtered out. "
+                    "Default 0.3 filters low-quality matches."
     )
 
     # Multimodal options
@@ -102,14 +106,14 @@ class KBMultiSearchRequest(BaseModel):
 
     top_k: int = Field(default=5, ge=1, le=50, description="Total results to return after merging")
     mode: Literal["auto", "hybrid", "dense", "bm25"] = Field(default="auto")
-    rerank: bool = Field(default=False)
+    rerank: bool = Field(default=True, description="Enable reranking (SOTA default)")
     mmr: bool = Field(default=False)
-    score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    score_threshold: Optional[float] = Field(default=0.3, ge=0.0, le=1.0)
 
-    # Merge strategy
+    # Merge strategy - RRF is best for multi-source fusion
     merge_strategy: Literal["score", "round_robin", "rrf"] = Field(
-        default="score",
-        description="How to merge results from multiple datasets"
+        default="rrf",
+        description="How to merge results from multiple datasets. RRF (Reciprocal Rank Fusion) is recommended."
     )
 
 

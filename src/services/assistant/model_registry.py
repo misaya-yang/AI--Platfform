@@ -28,6 +28,14 @@ class ModelProvider(str, Enum):
     ANTHROPIC = "anthropic"
     DEEPSEEK = "deepseek"
     DASHSCOPE = "dashscope"
+    GOOGLE = "google"
+
+
+class ModelAccessLevel(str, Enum):
+    """Model access permission levels."""
+    PUBLIC = "public"      # Available to all authenticated users
+    PREMIUM = "premium"    # Available to premium/paid users only
+    ADMIN = "admin"        # Admin-only models (expensive or experimental)
 
 
 @dataclass
@@ -42,18 +50,31 @@ class ModelInfo:
     supports_tools: bool = True
     input_price_per_1k: float = 0.0  # USD per 1K tokens
     output_price_per_1k: float = 0.0
+    access_level: ModelAccessLevel = ModelAccessLevel.PUBLIC  # Permission level required
 
 
 def _sanitize_usage(raw_usage: Dict[str, Any]) -> Dict[str, int]:
     """
-    Sanitize usage dict to only include integer values.
+    Sanitize and normalize usage dict.
+
+    - Only include integer values (filter out nested dicts)
+    - Normalize OpenAI keys (prompt_tokens -> input_tokens, completion_tokens -> output_tokens)
 
     Some providers (e.g., DashScope) return nested dicts like:
     {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0}}
-
-    We only keep top-level int fields for compatibility.
     """
-    return {k: v for k, v in raw_usage.items() if isinstance(v, int)}
+    result: Dict[str, int] = {}
+    for k, v in raw_usage.items():
+        if not isinstance(v, int):
+            continue
+        # Normalize OpenAI-style keys to standard format
+        if k == "prompt_tokens":
+            result["input_tokens"] = v
+        elif k == "completion_tokens":
+            result["output_tokens"] = v
+        else:
+            result[k] = v
+    return result
 
 
 @dataclass
@@ -225,6 +246,65 @@ DEFAULT_MODELS: Dict[ModelProvider, List[ModelInfo]] = {
             output_price_per_1k=0.009,
         ),
     ],
+    ModelProvider.GOOGLE: [
+        # Gemini 3.0 系列 (2025年1月发布) - 高端模型，仅限管理员
+        ModelInfo(
+            id="gemini-3-pro-preview",
+            name="Gemini 3 Pro",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.002,  # $2 per 1M = $0.002 per 1K
+            output_price_per_1k=0.012,  # $12 per 1M = $0.012 per 1K
+            access_level=ModelAccessLevel.ADMIN,  # 高价模型，仅管理员可用
+        ),
+        ModelInfo(
+            id="gemini-3-flash-preview",
+            name="Gemini 3 Flash",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.0005,  # $0.50 per 1M
+            output_price_per_1k=0.003,  # $3 per 1M
+            access_level=ModelAccessLevel.ADMIN,  # 管理员可用
+        ),
+        # Gemini 2.5 系列 (稳定版)
+        ModelInfo(
+            id="gemini-2.5-pro",
+            name="Gemini 2.5 Pro",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.00125,  # $1.25 per 1M
+            output_price_per_1k=0.005,  # $5 per 1M
+            access_level=ModelAccessLevel.ADMIN,  # 高价模型
+        ),
+        ModelInfo(
+            id="gemini-2.5-flash",
+            name="Gemini 2.5 Flash",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.000075,  # $0.075 per 1M
+            output_price_per_1k=0.0003,  # $0.30 per 1M
+            access_level=ModelAccessLevel.PREMIUM,  # 性价比较高，付费用户可用
+        ),
+        ModelInfo(
+            id="gemini-2.5-flash-lite",
+            name="Gemini 2.5 Flash Lite",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.00005,
+            output_price_per_1k=0.0002,
+            access_level=ModelAccessLevel.PUBLIC,  # 最便宜的Google模型，普通用户可用
+        ),
+    ],
 }
 
 
@@ -244,17 +324,91 @@ class ModelRegistry:
         ModelProvider.ANTHROPIC: "https://api.anthropic.com",
         ModelProvider.DEEPSEEK: "https://api.deepseek.com",
         ModelProvider.DASHSCOPE: "https://dashscope.aliyuncs.com/compatible-mode",
+        ModelProvider.GOOGLE: "https://generativelanguage.googleapis.com",
     }
 
-    def __init__(self):
+    def __init__(self, use_default_models: bool = True):
         self._configs: Dict[ModelProvider, ModelConfig] = {}
         self._models: Dict[str, ModelInfo] = {}
         self._clients: Dict[ModelProvider, httpx.AsyncClient] = {}
+        self._db_models_loaded: bool = False
 
-        # Initialize default model catalog
-        for provider, models in DEFAULT_MODELS.items():
-            for model in models:
-                self._models[model.id] = model
+        # Initialize default model catalog (fallback)
+        if use_default_models:
+            for provider, models in DEFAULT_MODELS.items():
+                for model in models:
+                    self._models[model.id] = model
+
+    async def load_models_from_database(self, model_service, tenant_id: str = "default") -> int:
+        """
+        Load models from database, replacing default models.
+
+        Args:
+            model_service: ModelService instance
+            tenant_id: Tenant ID to load models for
+
+        Returns:
+            Number of models loaded
+        """
+        try:
+            db_models = await model_service.list_models(
+                tenant_id=tenant_id,
+                include_disabled=False,
+            )
+
+            if not db_models:
+                logger.info("No models in database, keeping default catalog")
+                return 0
+
+            # Clear existing models and load from database
+            loaded_count = 0
+            for row in db_models:
+                try:
+                    # Map provider_id to ModelProvider enum
+                    provider_id = row.get("provider_id", "")
+                    try:
+                        provider = ModelProvider(provider_id)
+                    except ValueError:
+                        # Unknown provider, skip
+                        logger.warning(f"Unknown provider {provider_id} for model {row.get('model_id')}")
+                        continue
+
+                    # Map access_level string to enum
+                    access_str = row.get("access_level", "public")
+                    try:
+                        access_level = ModelAccessLevel(access_str)
+                    except ValueError:
+                        access_level = ModelAccessLevel.PUBLIC
+
+                    model = ModelInfo(
+                        id=row["model_id"],
+                        name=row["display_name"],
+                        provider=provider,
+                        context_window=row.get("context_window", 128000),
+                        max_output_tokens=row.get("max_output_tokens", 4096),
+                        supports_vision=row.get("supports_vision", False),
+                        supports_tools=row.get("supports_tools", True),
+                        input_price_per_1k=float(row.get("input_price_per_1k", 0)),
+                        output_price_per_1k=float(row.get("output_price_per_1k", 0)),
+                        access_level=access_level,
+                    )
+                    self._models[model.id] = model
+                    loaded_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to load model {row.get('model_id')}: {e}")
+
+            self._db_models_loaded = True
+            logger.info(f"Loaded {loaded_count} models from database")
+            return loaded_count
+
+        except Exception as e:
+            logger.warning(f"Failed to load models from database: {e}")
+            return 0
+
+    def clear_models(self) -> None:
+        """Clear all models from registry."""
+        self._models.clear()
+        self._db_models_loaded = False
 
     def configure_provider(
         self,
@@ -317,6 +471,11 @@ class ModelRegistry:
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             }
+        elif provider == ModelProvider.GOOGLE:
+            # Google uses API key in URL, not header
+            return {
+                "Content-Type": "application/json",
+            }
         else:
             # OpenAI-compatible (OpenAI, DeepSeek, DashScope)
             return {
@@ -337,6 +496,10 @@ class ModelRegistry:
         """Build request body for the provider's API."""
         if provider == ModelProvider.ANTHROPIC:
             return self._build_anthropic_body(
+                model_id, messages, temperature, max_tokens, tools, stream
+            )
+        elif provider == ModelProvider.GOOGLE:
+            return self._build_google_body(
                 model_id, messages, temperature, max_tokens, tools, stream
             )
         else:
@@ -468,6 +631,79 @@ class ModelRegistry:
                 body["tools"] = anthropic_tools
         return body
 
+    def _build_google_body(
+        self,
+        model_id: str,
+        messages: List[ChatMessage],
+        temperature: float,
+        max_tokens: Optional[int],
+        tools: Optional[List[Dict[str, Any]]],
+        stream: bool,
+    ) -> Dict[str, Any]:
+        """Build Google Gemini API request body."""
+        contents = []
+        system_instruction = None
+
+        for msg in messages:
+            if msg.role == "system":
+                system_instruction = msg.content
+                continue
+
+            role = "user" if msg.role == "user" else "model"
+            parts = []
+
+            # Handle vision content
+            if msg.images and msg.role == "user":
+                for img in msg.images:
+                    if img.startswith("http"):
+                        parts.append({
+                            "file_data": {
+                                "file_uri": img,
+                                "mime_type": "image/jpeg"
+                            }
+                        })
+                    else:
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": img
+                            }
+                        })
+                parts.append({"text": msg.content})
+            else:
+                parts.append({"text": msg.content})
+
+            contents.append({"role": role, "parts": parts})
+
+        body: Dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens or 8192,
+            }
+        }
+
+        if system_instruction:
+            body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+
+        if tools:
+            # Convert OpenAI tool format to Google format
+            google_tools = []
+            function_declarations = []
+            for tool in tools:
+                if tool.get("type") == "function":
+                    func = tool["function"]
+                    function_declarations.append({
+                        "name": func["name"],
+                        "description": func.get("description", ""),
+                        "parameters": func.get("parameters", {"type": "object", "properties": {}}),
+                    })
+            if function_declarations:
+                google_tools.append({"functionDeclarations": function_declarations})
+                body["tools"] = google_tools
+
+        return body
+
     async def chat(
         self,
         model_id: str,
@@ -491,13 +727,34 @@ class ModelRegistry:
             model.provider, model_id, messages, temperature, max_tokens, tools, stream=False
         )
 
-        endpoint = "/v1/messages" if model.provider == ModelProvider.ANTHROPIC else "/v1/chat/completions"
+        if model.provider == ModelProvider.GOOGLE:
+            # Google API uses different endpoint format
+            config = self._configs.get(model.provider)
+            endpoint = f"/v1beta/models/{model_id}:generateContent?key={config.api_key}"
+        elif model.provider == ModelProvider.ANTHROPIC:
+            endpoint = "/v1/messages"
+        else:
+            endpoint = "/v1/chat/completions"
 
         response = await client.post(endpoint, json=body)
         response.raise_for_status()
         data = response.json()
 
-        if model.provider == ModelProvider.ANTHROPIC:
+        if model.provider == ModelProvider.GOOGLE:
+            # Parse Google Gemini response
+            content = ""
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for part in parts:
+                    if "text" in part:
+                        content += part["text"]
+            usage_meta = data.get("usageMetadata", {})
+            usage = {
+                "input_tokens": usage_meta.get("promptTokenCount", 0),
+                "output_tokens": usage_meta.get("candidatesTokenCount", 0),
+            }
+        elif model.provider == ModelProvider.ANTHROPIC:
             content = ""
             for block in data.get("content", []):
                 if block.get("type") == "text":
@@ -534,12 +791,17 @@ class ModelRegistry:
             model.provider, model_id, messages, temperature, max_tokens, tools, stream=True
         )
 
-        endpoint = "/v1/messages" if model.provider == ModelProvider.ANTHROPIC else "/v1/chat/completions"
-
-        if model.provider == ModelProvider.ANTHROPIC:
+        if model.provider == ModelProvider.GOOGLE:
+            config = self._configs.get(model.provider)
+            endpoint = f"/v1beta/models/{model_id}:streamGenerateContent?key={config.api_key}&alt=sse"
+            async for delta in self._stream_google(client, endpoint, body):
+                yield delta
+        elif model.provider == ModelProvider.ANTHROPIC:
+            endpoint = "/v1/messages"
             async for delta in self._stream_anthropic(client, endpoint, body):
                 yield delta
         else:
+            endpoint = "/v1/chat/completions"
             async for delta in self._stream_openai(client, endpoint, body):
                 yield delta
 
@@ -563,18 +825,30 @@ class ModelRegistry:
                 except json.JSONDecodeError:
                     continue
 
-                # Handle usage in final chunk
+                # Handle usage - can appear in final chunk alongside choices
+                usage_data = None
                 if isinstance(evt.get("usage"), dict):
-                    yield StreamDelta(usage=_sanitize_usage(evt["usage"]))
+                    usage_data = _sanitize_usage(evt["usage"])
+                    logger.debug(f"[USAGE] Received usage data: {usage_data}")
+
+                # Safely get choices - may be empty list or missing
+                choices = evt.get("choices", [])
+                if not choices:
+                    # No choices in this event, only yield if we have usage data
+                    if usage_data:
+                        yield StreamDelta(usage=usage_data)
                     continue
 
-                choice = evt.get("choices", [{}])[0]
+                choice = choices[0]
                 delta = choice.get("delta", {})
+                finish_reason = choice.get("finish_reason")
 
+                # Yield delta with all available info (content, tool_calls, finish_reason, usage)
                 yield StreamDelta(
                     content=delta.get("content", ""),
                     tool_calls=delta.get("tool_calls"),
-                    finish_reason=choice.get("finish_reason"),
+                    finish_reason=finish_reason,
+                    usage=usage_data,
                 )
 
     async def _stream_anthropic(
@@ -618,6 +892,52 @@ class ModelRegistry:
                     usage = evt.get("message", {}).get("usage", {})
                     if usage.get("input_tokens"):
                         yield StreamDelta(usage={"input_tokens": usage["input_tokens"]})
+
+    async def _stream_google(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+        body: Dict[str, Any],
+    ) -> AsyncIterator[StreamDelta]:
+        """Stream from Google Gemini API."""
+        async with client.stream("POST", endpoint, json=body) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                try:
+                    evt = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                # Parse Google Gemini streaming response
+                candidates = evt.get("candidates", [])
+                if candidates:
+                    candidate = candidates[0]
+                    content = candidate.get("content", {})
+                    parts = content.get("parts", [])
+                    for part in parts:
+                        if "text" in part:
+                            yield StreamDelta(content=part["text"])
+
+                    # Check finish reason
+                    finish_reason = candidate.get("finishReason")
+                    if finish_reason:
+                        yield StreamDelta(finish_reason=finish_reason.lower())
+
+                # Handle usage metadata
+                usage_meta = evt.get("usageMetadata", {})
+                if usage_meta:
+                    usage = {}
+                    if "promptTokenCount" in usage_meta:
+                        usage["input_tokens"] = usage_meta["promptTokenCount"]
+                    if "candidatesTokenCount" in usage_meta:
+                        usage["output_tokens"] = usage_meta["candidatesTokenCount"]
+                    if usage:
+                        yield StreamDelta(usage=usage)
 
     async def close(self) -> None:
         """Close all HTTP clients."""

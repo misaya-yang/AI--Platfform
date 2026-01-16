@@ -1311,6 +1311,9 @@ class ConfluenceSyncService:
                 for idx, segment in enumerate(image_result.segments):
                     await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
 
+            # Update document segment_count after reprocessing images
+            await self.db.refresh_document_segment_count(document_id)
+
             return image_result.processed_images
 
         except Exception as e:

@@ -7,6 +7,7 @@ interface PopoverContextValue {
   open: boolean;
   setOpen: (open: boolean) => void;
   triggerRef: React.RefObject<HTMLButtonElement>;
+  contentRef: React.RefObject<HTMLDivElement>;
 }
 
 const PopoverContext = React.createContext<PopoverContextValue | null>(null);
@@ -28,6 +29,7 @@ interface PopoverProps {
 const Popover = ({ children, open: controlledOpen, onOpenChange }: PopoverProps) => {
   const [internalOpen, setInternalOpen] = React.useState(false);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
 
   const open = controlledOpen !== undefined ? controlledOpen : internalOpen;
   const setOpen = React.useCallback(
@@ -46,7 +48,9 @@ const Popover = ({ children, open: controlledOpen, onOpenChange }: PopoverProps)
 
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
+      // Don't close if clicking on trigger or inside content
       if (triggerRef.current?.contains(target)) return;
+      if (contentRef.current?.contains(target)) return;
       setOpen(false);
     };
 
@@ -54,17 +58,18 @@ const Popover = ({ children, open: controlledOpen, onOpenChange }: PopoverProps)
       if (e.key === "Escape") setOpen(false);
     };
 
-    document.addEventListener("mousedown", handleClickOutside);
+    // Use 'click' instead of 'mousedown' to allow onClick handlers to fire first
+    document.addEventListener("click", handleClickOutside);
     document.addEventListener("keydown", handleEscape);
 
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("click", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
   }, [open, setOpen]);
 
   return (
-    <PopoverContext.Provider value={{ open, setOpen, triggerRef }}>
+    <PopoverContext.Provider value={{ open, setOpen, triggerRef, contentRef }}>
       {children}
     </PopoverContext.Provider>
   );
@@ -106,8 +111,7 @@ interface PopoverContentProps extends React.HTMLAttributes<HTMLDivElement> {
 
 const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
   ({ className, align = "center", side = "bottom", sideOffset = 8, children, ...props }, ref) => {
-    const { open, triggerRef } = usePopoverContext();
-    const contentRef = React.useRef<HTMLDivElement>(null);
+    const { open, triggerRef, contentRef } = usePopoverContext();
     const [position, setPosition] = React.useState({ top: 0, left: 0 });
 
     React.useEffect(() => {
@@ -138,7 +142,7 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       top = Math.max(8, Math.min(top, window.innerHeight - (content?.offsetHeight || 0) - 8));
 
       setPosition({ top, left });
-    }, [open, align, side, sideOffset, triggerRef]);
+    }, [open, align, side, sideOffset, triggerRef, contentRef]);
 
     if (!open) return null;
 

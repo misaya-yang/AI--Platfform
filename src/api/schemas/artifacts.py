@@ -1,25 +1,30 @@
 """
 Artifact schemas for assistant API.
 
-Artifacts represent outputs from code execution, data analysis,
-or other tool invocations (e.g., charts, tables, code files).
+Artifacts represent outputs from code execution, document generation,
+image generation, or other tool invocations.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
 
 class ArtifactInfo(BaseModel):
-    """Artifact metadata."""
+    """Artifact metadata for API responses."""
 
     artifact_id: str
-    execution_id: str
-    type: str  # code, chart, table, file
-    format: str  # png, csv, json, etc.
+    session_id: str
+    type: str  # image, document, chart, code, file
+    format: str  # png, pdf, docx, md, csv, json, etc.
+    title: str
     filename: str
-    title: Optional[str] = None
     size_bytes: int
+    mime_type: Optional[str] = None
+    source: str = "ai"  # ai | user | code_execution
+    message_id: Optional[str] = None
+    download_url: Optional[str] = None  # Presigned URL for download
+    metadata: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
 
 
@@ -28,3 +33,17 @@ class ArtifactListResponse(BaseModel):
 
     artifacts: List[ArtifactInfo]
     total: int
+
+
+class ArtifactCreateRequest(BaseModel):
+    """Request to create an artifact."""
+
+    session_id: str
+    type: str
+    format: str
+    title: str
+    filename: str
+    content_base64: str  # Base64 encoded content
+    source: str = "ai"
+    message_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None

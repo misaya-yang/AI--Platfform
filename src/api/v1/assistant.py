@@ -37,9 +37,13 @@ from ..schemas.assistant import (
     DatasetsListResponse,
     ModelInfoResponse,
     ModelsListResponse,
+    ImageGenerationRequest,
+    ImageGenerationResponse,
+    GeneratedImage,
 )
-from ..schemas.artifacts import ArtifactInfo, ArtifactListResponse
+from ..schemas.artifacts import ArtifactInfo, ArtifactListResponse, ArtifactCreateRequest
 from ...core.auth.user_resolver import UserContext
+from ...services.storage import get_artifact_storage
 from ...services.assistant import AssistantService, AssistantConfig, ModelRegistry, ModelProvider
 from ...services.assistant.assistant_service import RAGMode
 from ...services.knowledge.embedding import is_multimodal_embedding_model
@@ -113,17 +117,54 @@ def get_model_registry(request: Request) -> ModelRegistry:
     return registry
 
 
+def _user_can_access_model(user: UserContext, access_level: str) -> bool:
+    """
+    Check if a user can access a model based on access level.
+
+    Access levels:
+    - public: All authenticated users
+    - premium: Users with tier=premium/enterprise/admin or role=admin
+    - admin: Only users with tier=admin or role=admin
+    """
+    from ...services.assistant.model_registry import ModelAccessLevel
+
+    # Admin users can access everything
+    if user.tier == "admin" or "admin" in user.roles:
+        return True
+
+    if access_level == ModelAccessLevel.PUBLIC.value:
+        return True
+    elif access_level == ModelAccessLevel.PREMIUM.value:
+        return user.tier in ("premium", "enterprise", "admin")
+    elif access_level == ModelAccessLevel.ADMIN.value:
+        return False  # Only admins, checked above
+
+    return True  # Default allow for unknown levels
+
+
 @router.get("/models", response_model=ModelsListResponse)
 async def list_models(
+    user: UserContext = Depends(get_user_context),
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ModelsListResponse:
     """
     List available LLM models.
 
-    Returns models from all configured providers (OpenAI, Anthropic, DeepSeek, DashScope).
+    Returns models from all configured providers (OpenAI, Anthropic, DeepSeek, DashScope, Google).
     Only models from providers with valid API keys are returned.
+    Models are filtered based on user's permission level:
+    - public: Available to all authenticated users
+    - premium: Available to premium/enterprise/admin users only
+    - admin: Available to admin users only (e.g., expensive Google Gemini 3 models)
     """
-    models = model_registry.get_available_models()
+    all_models = model_registry.get_available_models()
+
+    # Filter models based on user's access level
+    accessible_models = [
+        m for m in all_models
+        if _user_can_access_model(user, m.access_level.value)
+    ]
+
     return ModelsListResponse(
         models=[
             ModelInfoResponse(
@@ -134,8 +175,11 @@ async def list_models(
                 max_output_tokens=m.max_output_tokens,
                 supports_vision=m.supports_vision,
                 supports_tools=m.supports_tools,
+                access_level=m.access_level.value,
+                input_price_per_1k=m.input_price_per_1k,
+                output_price_per_1k=m.output_price_per_1k,
             )
-            for m in models
+            for m in accessible_models
         ]
     )
 
@@ -279,9 +323,23 @@ async def list_tools(
     )
 
 
+def _check_model_permission(user: UserContext, model_id: str, model_registry: ModelRegistry) -> None:
+    """Check if user has permission to use the specified model."""
+    model = model_registry.get_model(model_id)
+    if model is None:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
+
+    if not _user_can_access_model(user, model.access_level.value):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied: Model '{model_id}' requires {model.access_level.value} access level"
+        )
+
+
 @router.post("/chat", response_model=AssistantChatResponse)
 async def chat(
     body: AssistantChatRequest,
+    request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> AssistantChatResponse:
@@ -291,6 +349,11 @@ async def chat(
     Sends a message and receives the complete response at once.
     Suitable for simple integrations that don't need streaming.
     """
+    # Check model permission
+    model_registry = getattr(request.app.state, "model_registry", None)
+    if model_registry:
+        _check_model_permission(user, body.model_id, model_registry)
+
     session_id = body.session_id or str(uuid.uuid4())
 
     # Map string mode to enum
@@ -344,6 +407,7 @@ async def chat(
 @router.post("/chat/stream")
 async def chat_stream(
     body: AssistantChatRequest,
+    request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ):
@@ -359,6 +423,11 @@ async def chat_stream(
     - done: Stream completion
     - error: Error occurred
     """
+    # Check model permission
+    model_registry = getattr(request.app.state, "model_registry", None)
+    if model_registry:
+        _check_model_permission(user, body.model_id, model_registry)
+
     session_id = body.session_id or str(uuid.uuid4())
 
     # Debug: Log incoming request parameters
@@ -649,6 +718,74 @@ async def get_session_history(
 # Artifact Management Endpoints
 # =========================================================================
 
+@router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListResponse)
+async def list_session_artifacts(
+    session_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ArtifactListResponse:
+    """
+    List all artifacts for a session.
+
+    Returns artifacts created during the conversation session.
+    Artifacts are loaded when switching back to a conversation.
+
+    Args:
+        session_id: Session ID to get artifacts for.
+
+    Returns:
+        ArtifactListResponse with list of artifacts.
+    """
+    # Verify session ownership
+    session_manager = get_session_manager(request)
+    try:
+        session = await session_manager.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+            raise HTTPException(status_code=404, detail="Session not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to verify session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Get artifacts
+    artifact_storage = get_artifact_storage()
+    if not artifact_storage:
+        return ArtifactListResponse(artifacts=[], total=0)
+
+    try:
+        artifacts = await artifact_storage.get_session_artifacts(session_id, user.tenant_id)
+
+        # Generate presigned download URLs
+        artifact_list = []
+        for art in artifacts:
+            download_url = await artifact_storage.get_presigned_download_url(art)
+            artifact_list.append(
+                ArtifactInfo(
+                    artifact_id=art.artifact_id,
+                    session_id=art.session_id,
+                    type=art.type,
+                    format=art.format,
+                    title=art.title,
+                    filename=art.filename,
+                    size_bytes=art.size_bytes,
+                    mime_type=art.mime_type,
+                    source=art.source,
+                    message_id=art.message_id,
+                    download_url=download_url,
+                    metadata=art.metadata,
+                    created_at=art.created_at.isoformat() if art.created_at else None,
+                )
+            )
+
+        return ArtifactListResponse(artifacts=artifact_list, total=len(artifact_list))
+    except Exception as e:
+        logger.error(f"Failed to list artifacts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactInfo)
 async def get_artifact(
     artifact_id: str,
@@ -656,22 +793,182 @@ async def get_artifact(
     user: UserContext = Depends(get_user_context),
 ) -> ArtifactInfo:
     """
-    Get artifact metadata.
+    Get artifact metadata with fresh download URL.
 
-    Returns metadata for an artifact generated during code execution
-    or tool invocation (e.g., charts, tables, files).
+    Returns metadata for an artifact including a fresh presigned download URL.
 
     Args:
         artifact_id: Unique identifier for the artifact.
 
     Returns:
-        ArtifactInfo with artifact metadata.
+        ArtifactInfo with artifact metadata and download URL.
 
     Raises:
         404: Artifact not found.
     """
-    # TODO: Implement artifact retrieval
-    raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact_storage = get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(status_code=503, detail="Artifact storage not initialized")
+
+    try:
+        artifact = await artifact_storage.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Verify ownership
+        if artifact.tenant_id != user.tenant_id or artifact.user_id != user.user_id:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Generate fresh presigned URL
+        download_url = await artifact_storage.get_presigned_download_url(artifact)
+
+        return ArtifactInfo(
+            artifact_id=artifact.artifact_id,
+            session_id=artifact.session_id,
+            type=artifact.type,
+            format=artifact.format,
+            title=artifact.title,
+            filename=artifact.filename,
+            size_bytes=artifact.size_bytes,
+            mime_type=artifact.mime_type,
+            source=artifact.source,
+            message_id=artifact.message_id,
+            download_url=download_url,
+            metadata=artifact.metadata,
+            created_at=artifact.created_at.isoformat() if artifact.created_at else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get artifact: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/artifacts", response_model=ArtifactInfo)
+async def create_artifact(
+    body: ArtifactCreateRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Create an artifact from base64 encoded content.
+
+    Used for saving generated images, documents, etc. to the artifact storage.
+
+    Args:
+        body: Artifact creation request with base64 encoded content.
+
+    Returns:
+        Created artifact metadata with download URL.
+    """
+    import base64
+
+    artifact_storage = get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(status_code=503, detail="Artifact storage not initialized")
+
+    try:
+        # Decode base64 content
+        try:
+            content = base64.b64decode(body.content_base64)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 content: {e}")
+
+        # Determine MIME type
+        mime_type_map = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "pdf": "application/pdf",
+            "json": "application/json",
+            "csv": "text/csv",
+            "md": "text/markdown",
+            "txt": "text/plain",
+        }
+        mime_type = mime_type_map.get(body.format.lower(), "application/octet-stream")
+
+        # Create artifact
+        artifact = await artifact_storage.create_artifact(
+            session_id=body.session_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            type=body.type,
+            format=body.format,
+            title=body.title,
+            filename=body.filename,
+            content=content,
+            source=body.source,
+            message_id=body.message_id,
+            metadata=body.metadata,
+        )
+
+        # Generate download URL
+        download_url = await artifact_storage.get_download_url(artifact.artifact_id)
+
+        return ArtifactInfo(
+            artifact_id=artifact.artifact_id,
+            session_id=artifact.session_id,
+            type=artifact.type,
+            format=artifact.format,
+            title=artifact.title,
+            filename=artifact.filename,
+            size_bytes=artifact.size_bytes,
+            mime_type=artifact.mime_type,
+            source=artifact.source,
+            message_id=artifact.message_id,
+            download_url=download_url,
+            metadata=artifact.metadata,
+            created_at=artifact.created_at.isoformat() if artifact.created_at else None,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create artifact: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/artifacts/{artifact_id}")
+async def delete_artifact(
+    artifact_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Delete an artifact.
+
+    Removes the artifact file from storage and metadata from database.
+
+    Args:
+        artifact_id: Unique identifier for the artifact.
+
+    Returns:
+        Confirmation of deletion.
+
+    Raises:
+        404: Artifact not found.
+    """
+    artifact_storage = get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(status_code=503, detail="Artifact storage not initialized")
+
+    try:
+        artifact = await artifact_storage.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Verify ownership
+        if artifact.tenant_id != user.tenant_id or artifact.user_id != user.user_id:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        await artifact_storage.delete_artifact(artifact_id)
+        return {"artifact_id": artifact_id, "status": "deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete artifact: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/artifacts/{artifact_id}/download")
@@ -683,16 +980,216 @@ async def download_artifact(
     """
     Download an artifact file.
 
-    Streams the artifact file content for download.
+    Redirects to presigned URL or streams content directly.
 
     Args:
         artifact_id: Unique identifier for the artifact.
 
     Returns:
-        FileResponse with the artifact content.
+        Redirect to download URL or streaming response.
 
     Raises:
         404: Artifact not found.
     """
-    # TODO: Implement artifact download
-    raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact_storage = get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(status_code=503, detail="Artifact storage not initialized")
+
+    try:
+        artifact = await artifact_storage.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Verify ownership
+        if artifact.tenant_id != user.tenant_id or artifact.user_id != user.user_id:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Get presigned URL and redirect
+        download_url = await artifact_storage.get_presigned_download_url(artifact)
+        if download_url:
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=download_url)
+
+        # Fallback: stream content directly
+        content = await artifact_storage.download_artifact(artifact_id)
+        if content is None:
+            raise HTTPException(status_code=404, detail="Artifact content not found")
+
+        return StreamingResponse(
+            iter([content]),
+            media_type=artifact.mime_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+                "Content-Length": str(len(content)),
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to download artifact: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================================================================
+# Image Generation Endpoint (Smart Routing)
+# =========================================================================
+
+@router.post("/generate-image", response_model=ImageGenerationResponse)
+async def generate_image(
+    body: ImageGenerationRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    model_registry: ModelRegistry = Depends(get_model_registry),
+) -> ImageGenerationResponse:
+    """
+    Generate images with smart routing based on current model provider.
+
+    Routing logic:
+    - DashScope models (Qwen) → Aliyun Wanx API
+    - Google models (Gemini) → Gemini Native Image (gemini-2.5-flash-image)
+    - Other providers → Fallback to DashScope Wanx
+    """
+    import time
+
+    start_time = time.time()
+
+    # Get model to determine provider
+    model = model_registry.get_model(body.model_id)
+    if not model:
+        # Default to DashScope if model not found
+        provider_name = "dashscope"
+    else:
+        provider_name = model.provider.value
+
+    # Determine which image generator to use
+    use_gemini = provider_name == "google"
+
+    logger.info(f"Image generation request - provider: {provider_name}, use_gemini: {use_gemini}, prompt: {body.prompt[:50]}...")
+
+    try:
+        if use_gemini:
+            # Use Gemini Native Image (Nano Banana)
+            from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
+
+            generator = get_gemini_image_generator()
+            if not generator.is_configured:
+                # Fallback to DashScope if Gemini not configured
+                logger.warning("Gemini API not configured, falling back to DashScope")
+                use_gemini = False
+            else:
+                result = await generator.generate(
+                    prompt=body.prompt,
+                    n=body.n,
+                )
+
+                if not result.success:
+                    return ImageGenerationResponse(
+                        success=False,
+                        images=[],
+                        provider="google",
+                        duration_ms=result.duration_ms,
+                        error=result.error,
+                    )
+
+                # Convert to response format
+                images = [
+                    GeneratedImage(
+                        url=f"data:{img.get('mime_type', 'image/png')};base64,{img.get('content_base64', '')}",
+                        width=1024,  # Gemini default
+                        height=1024,
+                    )
+                    for img in result.images
+                ]
+
+                return ImageGenerationResponse(
+                    success=True,
+                    images=images,
+                    provider="google",
+                    duration_ms=result.duration_ms,
+                )
+
+        # Use DashScope Wanx (default or fallback)
+        from ...services.assistant.tools.image_generator_tool import get_image_generator
+
+        generator = get_image_generator()
+        if not generator.is_configured:
+            return ImageGenerationResponse(
+                success=False,
+                images=[],
+                provider="dashscope",
+                duration_ms=(time.time() - start_time) * 1000,
+                error="DashScope API not configured",
+            )
+
+        # Map style
+        style_map = {
+            "default": "<auto>",
+            "auto": "<auto>",
+            "photography": "<photography>",
+            "portrait": "<portrait>",
+            "3d": "<3d cartoon>",
+            "anime": "<anime>",
+            "oil": "<oil painting>",
+            "watercolor": "<watercolor>",
+            "sketch": "<sketch>",
+            "flat": "<flat illustration>",
+        }
+        style = style_map.get(body.style or "default", "<auto>")
+
+        result = await generator.generate(
+            prompt=body.prompt,
+            size=body.size or "1024*1024",
+            style=style,
+            n=body.n,
+        )
+
+        if not result.success:
+            return ImageGenerationResponse(
+                success=False,
+                images=[],
+                provider="dashscope",
+                duration_ms=result.duration_ms,
+                error=result.error,
+            )
+
+        # Parse size to get dimensions
+        width, height = 1024, 1024
+        if body.size:
+            try:
+                parts = body.size.split("*")
+                if len(parts) == 2:
+                    width, height = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+
+        images = []
+        for img in result.images:
+            mime_type = img.get('mime_type', 'image/png')
+            content_base64 = img.get('content_base64', '')
+            size_bytes = img.get('size_bytes', 0)
+            data_url = f"data:{mime_type};base64,{content_base64}"
+
+            logger.debug(f"Image data: mime={mime_type}, base64_len={len(content_base64)}, size_bytes={size_bytes}")
+
+            images.append(GeneratedImage(
+                url=data_url,
+                width=width,
+                height=height,
+            ))
+
+        return ImageGenerationResponse(
+            success=True,
+            images=images,
+            provider="dashscope",
+            duration_ms=result.duration_ms,
+        )
+
+    except Exception as e:
+        logger.error(f"Image generation failed: {e}")
+        return ImageGenerationResponse(
+            success=False,
+            images=[],
+            provider=provider_name,
+            duration_ms=(time.time() - start_time) * 1000,
+            error=str(e),
+        )

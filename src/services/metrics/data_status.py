@@ -16,6 +16,10 @@ def compute_data_status(
     if last_ingested_at is None:
         return "delayed", 9999
 
+    # 确保时区一致：如果 last_ingested_at 是 offset-naive，假定为 UTC
+    if last_ingested_at.tzinfo is None:
+        last_ingested_at = last_ingested_at.replace(tzinfo=timezone.utc)
+
     age_minutes = int((now - last_ingested_at).total_seconds() / 60)
 
     if age_minutes > max_age_minutes:

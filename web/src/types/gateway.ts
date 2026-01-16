@@ -37,12 +37,14 @@ export interface StreamChunk {
 
 export type InvocationMode = "sync" | "async" | "stream" | "webhook";
 export type ServiceType =
+  | "assistant"
   | "conversational"
   | "generative"
   | "processing"
   | "embedding"
   | "classification"
   | "langgraph"
+  | "proxy"
   | "custom";
 
 export interface ContentItem {

@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, FileText, ChevronDown, ExternalLink } from "lucide-react";
+import { Database, FileText, ChevronDown, ExternalLink, Image as ImageIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { RetrievedContext } from "../types";
@@ -77,19 +77,30 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                         className="text-xs p-3 rounded-xl bg-white/80 dark:bg-slate-900/50 border border-slate-200/60 dark:border-slate-700/40 backdrop-blur-sm"
                       >
                         <div className="flex items-center justify-between mb-1.5">
-                          <Badge
-                            variant="secondary"
-                            className={cn(
-                              "text-[9px] px-1.5 py-0",
-                              chunk.score >= 0.8
-                                ? "bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300"
-                                : chunk.score >= 0.6
-                                  ? "bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300"
-                                  : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
+                          <div className="flex items-center gap-1.5">
+                            <Badge
+                              variant="secondary"
+                              className={cn(
+                                "text-[9px] px-1.5 py-0",
+                                chunk.score >= 0.8
+                                  ? "bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300"
+                                  : chunk.score >= 0.6
+                                    ? "bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300"
+                                    : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
+                              )}
+                            >
+                              {(chunk.score * 100).toFixed(0)}% match
+                            </Badge>
+                            {chunk.image_url && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[9px] px-1.5 py-0 bg-violet-100 dark:bg-violet-900/50 text-violet-700 dark:text-violet-300"
+                              >
+                                <ImageIcon className="h-2.5 w-2.5 mr-0.5" />
+                                Image
+                              </Badge>
                             )}
-                          >
-                            {(chunk.score * 100).toFixed(0)}% match
-                          </Badge>
+                          </div>
                           {chunk.source_url && (
                             <a
                               href={chunk.source_url}
@@ -102,7 +113,24 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                             </a>
                           )}
                         </div>
-                        <div className="line-clamp-2 text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {chunk.image_url && (
+                          <div className="mb-2">
+                            <a
+                              href={chunk.image_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="block"
+                            >
+                              <img
+                                src={chunk.image_url}
+                                alt="Knowledge base image"
+                                className="max-w-full max-h-48 rounded-lg border border-slate-200 dark:border-slate-700 hover:opacity-90 transition-opacity cursor-pointer"
+                                loading="lazy"
+                              />
+                            </a>
+                          </div>
+                        )}
+                        <div className="line-clamp-3 text-slate-600 dark:text-slate-400 leading-relaxed">
                           {chunk.content}
                         </div>
                       </motion.div>

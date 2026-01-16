@@ -1,0 +1,413 @@
+"""
+Image Generation Tool for Assistant Service
+
+Provides text-to-image generation using:
+- DashScope Wanx (通义万相)
+- OpenAI DALL-E (optional)
+"""
+
+from __future__ import annotations
+
+import base64
+import os
+import time
+import asyncio
+import httpx
+from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+
+from .tool_registry import (
+    ToolDefinition,
+    ToolParameter,
+    ToolExample,
+    ToolCategory,
+    ToolRiskLevel,
+    ToolExecutor,
+    ToolCallRequest,
+    ToolCallResult,
+    register_tool,
+)
+from ....core.observability.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+# =============================================================================
+# Image Generation Tool Definition
+# =============================================================================
+
+IMAGE_GENERATION_DEFINITION = ToolDefinition(
+    name="generate_image",
+    description="Generate images from text descriptions using AI. "
+                "Creates high-quality images based on the provided prompt.",
+    parameters=[
+        ToolParameter(
+            name="prompt",
+            type="string",
+            description="Detailed description of the image to generate. "
+                        "Be specific about style, content, colors, composition.",
+            required=True,
+        ),
+        ToolParameter(
+            name="negative_prompt",
+            type="string",
+            description="Things to avoid in the image (e.g., 'blurry, low quality, distorted').",
+            required=False,
+            default="",
+        ),
+        ToolParameter(
+            name="size",
+            type="string",
+            description="Image size: '1024*1024', '720*1280', '1280*720'.",
+            required=False,
+            default="1024*1024",
+            enum=["1024*1024", "720*1280", "1280*720"],
+        ),
+        ToolParameter(
+            name="style",
+            type="string",
+            description="Image style preset.",
+            required=False,
+            default="<auto>",
+            enum=["<auto>", "<photography>", "<portrait>", "<3d cartoon>",
+                  "<anime>", "<oil painting>", "<watercolor>", "<sketch>", "<flat illustration>"],
+        ),
+        ToolParameter(
+            name="n",
+            type="number",
+            description="Number of images to generate (1-4). Default is 1.",
+            required=False,
+            default=1,
+        ),
+    ],
+    category=ToolCategory.GENERATION,
+    risk_level=ToolRiskLevel.MEDIUM,
+    when_to_use="Use when the user asks to create, generate, draw, or design an image/picture/artwork. "
+                "Good for: illustrations, photos, artwork, logos, concept art, portraits, landscapes, "
+                "animals, objects, or any visual content that requires AI image generation.",
+    when_not_to_use="Do not use for data visualization or charts (use code execution with matplotlib instead). "
+                    "Do not use if the user just wants to analyze or describe existing images. "
+                    "Do not use for mathematical function plots - use code execution instead.",
+    examples=[
+        ToolExample(
+            description="Generate a logo",
+            input={"prompt": "A modern minimalist logo for a tech company, blue gradient, clean lines",
+                   "style": "<flat illustration>"},
+            expected_output="Returns a generated logo image",
+        ),
+        ToolExample(
+            description="Generate an illustration",
+            input={"prompt": "A cozy coffee shop interior with warm lighting, plants, and wooden furniture",
+                   "size": "1280*720", "style": "<watercolor>"},
+            expected_output="Returns a watercolor style illustration",
+        ),
+    ],
+    timeout_seconds=120,
+)
+
+
+# =============================================================================
+# DashScope Wanx Image Generator
+# =============================================================================
+
+@dataclass
+class ImageGenerationResult:
+    """Result of image generation."""
+    success: bool
+    images: list[Dict[str, Any]] = field(default_factory=list)  # [{filename, content_base64, mime_type, size_bytes}]
+    error: Optional[str] = None
+    task_id: Optional[str] = None
+    duration_ms: float = 0
+
+
+class DashScopeImageGenerator:
+    """Image generator using DashScope Wanx API."""
+
+    SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+    TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        self._client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key)
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=120.0)
+        return self._client
+
+    async def generate(
+        self,
+        prompt: str,
+        negative_prompt: str = "",
+        size: str = "1024*1024",
+        style: str = "<auto>",
+        n: int = 1,
+    ) -> ImageGenerationResult:
+        """Generate images from text prompt."""
+        if not self.is_configured:
+            return ImageGenerationResult(
+                success=False,
+                error="DashScope API key not configured"
+            )
+
+        start_time = time.time()
+
+        try:
+            client = await self._get_client()
+
+            # Submit task
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "X-DashScope-Async": "enable",
+            }
+
+            payload = {
+                "model": "wanx-v1",
+                "input": {
+                    "prompt": prompt,
+                },
+                "parameters": {
+                    "size": size,
+                    "n": min(n, 4),
+                    "style": style,
+                }
+            }
+
+            if negative_prompt:
+                payload["input"]["negative_prompt"] = negative_prompt
+
+            logger.info(f"Submitting image generation task: {prompt[:50]}...")
+
+            response = await client.post(
+                self.SUBMIT_URL,
+                headers=headers,
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                error_text = response.text
+                logger.error(f"Image generation submit failed: {error_text}")
+                return ImageGenerationResult(
+                    success=False,
+                    error=f"API error: {response.status_code} - {error_text}"
+                )
+
+            result = response.json()
+            task_id = result.get("output", {}).get("task_id")
+
+            if not task_id:
+                return ImageGenerationResult(
+                    success=False,
+                    error="No task_id returned from API"
+                )
+
+            logger.info(f"Image generation task submitted: {task_id}")
+
+            # Poll for completion
+            images = await self._poll_task(client, headers, task_id)
+
+            duration_ms = (time.time() - start_time) * 1000
+
+            return ImageGenerationResult(
+                success=True,
+                images=images,
+                task_id=task_id,
+                duration_ms=duration_ms,
+            )
+
+        except Exception as e:
+            logger.error(f"Image generation failed: {e}")
+            return ImageGenerationResult(
+                success=False,
+                error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
+            )
+
+    async def _poll_task(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        task_id: str,
+        max_wait: int = 120,
+        poll_interval: float = 2.0,
+    ) -> list[Dict[str, Any]]:
+        """Poll task until completion."""
+        url = self.TASK_URL.format(task_id=task_id)
+
+        elapsed = 0
+        while elapsed < max_wait:
+            response = await client.get(url, headers=headers)
+
+            if response.status_code != 200:
+                raise Exception(f"Task poll failed: {response.status_code}")
+
+            result = response.json()
+            output = result.get("output", {})
+            task_status = output.get("task_status")
+
+            logger.debug(f"Task {task_id} status: {task_status}")
+
+            if task_status == "SUCCEEDED":
+                return await self._download_images(client, output.get("results", []))
+            elif task_status == "FAILED":
+                raise Exception(f"Task failed: {output.get('message', 'Unknown error')}")
+            elif task_status in ("PENDING", "RUNNING"):
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+            else:
+                raise Exception(f"Unknown task status: {task_status}")
+
+        raise Exception(f"Task timed out after {max_wait}s")
+
+    async def _download_images(
+        self,
+        client: httpx.AsyncClient,
+        results: list[Dict[str, Any]],
+    ) -> list[Dict[str, Any]]:
+        """Download images from URLs and convert to base64."""
+        images = []
+
+        for i, result in enumerate(results):
+            url = result.get("url")
+            if not url:
+                continue
+
+            try:
+                response = await client.get(url)
+                if response.status_code == 200:
+                    content = response.content
+
+                    # Detect actual MIME type from response headers or content
+                    content_type = response.headers.get("content-type", "image/png")
+                    # Strip charset and other params
+                    mime_type = content_type.split(";")[0].strip()
+
+                    # Determine extension from mime type
+                    ext_map = {
+                        "image/png": "png",
+                        "image/jpeg": "jpg",
+                        "image/jpg": "jpg",
+                        "image/webp": "webp",
+                        "image/gif": "gif",
+                    }
+                    ext = ext_map.get(mime_type, "png")
+
+                    logger.info(f"Downloaded image {i+1}: {len(content)} bytes, type={mime_type}")
+
+                    images.append({
+                        "filename": f"generated_image_{i+1}.{ext}",
+                        "content_base64": base64.b64encode(content).decode("utf-8"),
+                        "mime_type": mime_type,
+                        "size_bytes": len(content),
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to download image {i}: {e}")
+
+        return images
+
+    async def close(self):
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+
+# =============================================================================
+# Image Generation Tool Executor
+# =============================================================================
+
+class ImageGeneratorExecutor(ToolExecutor):
+    """Executor for image generation tool."""
+
+    def __init__(self, generator: DashScopeImageGenerator):
+        self.generator = generator
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        """Execute image generation."""
+        prompt = request.arguments.get("prompt", "")
+        negative_prompt = request.arguments.get("negative_prompt", "")
+        size = request.arguments.get("size", "1024*1024")
+        style = request.arguments.get("style", "<auto>")
+        n = request.arguments.get("n", 1)
+
+        if not prompt:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="Prompt is required",
+            )
+
+        if not self.generator.is_configured:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="Image generation not configured (missing DASHSCOPE_API_KEY)",
+            )
+
+        result = await self.generator.generate(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            size=size,
+            style=style,
+            n=n,
+        )
+
+        if not result.success:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=result.error,
+            )
+
+        # Return success with images as output_files
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+            result=f"Successfully generated {len(result.images)} image(s) for: {prompt[:100]}",
+            output_files=result.images,
+            metadata={
+                "task_id": result.task_id,
+                "duration_ms": result.duration_ms,
+                "image_count": len(result.images),
+                "prompt": prompt,
+                "size": size,
+                "style": style,
+            },
+        )
+
+
+# =============================================================================
+# Registration Helper
+# =============================================================================
+
+_image_generator: Optional[DashScopeImageGenerator] = None
+
+
+def get_image_generator() -> DashScopeImageGenerator:
+    """Get or create the global image generator instance."""
+    global _image_generator
+    if _image_generator is None:
+        _image_generator = DashScopeImageGenerator()
+    return _image_generator
+
+
+def register_image_generation_tool() -> bool:
+    """Register image generation tool with the global registry."""
+    generator = get_image_generator()
+
+    if not generator.is_configured:
+        logger.warning("DashScope API key not configured, image generation tool not registered")
+        return False
+
+    register_tool(IMAGE_GENERATION_DEFINITION, ImageGeneratorExecutor(generator))
+    logger.info("Registered image generation tool")
+    return True

@@ -239,6 +239,9 @@ export interface ConfluencePageRecord {
   parent_page_id: string | null;
   depth: number;
   status: "pending" | "synced" | "error" | "deleted";
+  // Computed effective status: 'synced' | 'pending' | 'needs_resync' | 'error'
+  // When status='synced' but document is missing or has no segments, returns 'needs_resync'
+  effective_status?: "synced" | "pending" | "needs_resync" | "error";
   last_synced_at: string | null;
   confluence_updated_at: string | null;
   error: string | null;
@@ -271,6 +274,9 @@ export interface ConfluencePageListResponse {
   synced: number;
   pending: number;
   error: number;
+  // needs_resync: count of pages that need re-sync
+  // When page status='synced' but associated document is missing or has no segments
+  needs_resync: number;
 }
 
 // ============================================================

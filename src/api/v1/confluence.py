@@ -808,17 +808,28 @@ async def list_synced_pages(
             offset=offset,
         )
 
+        # Validate pages have required ID field
+        valid_pages = []
+        for p in pages:
+            if not p.get("id"):
+                logger.error(f"Page record missing 'id' field: {p.get('title', 'unknown')} (page_id={p.get('page_id')})")
+                continue
+            valid_pages.append(p)
+
         # Count by status
-        synced = sum(1 for p in pages if p.get("status") == "synced")
-        pending = sum(1 for p in pages if p.get("status") == "pending")
-        error = sum(1 for p in pages if p.get("status") == "error")
+        synced = sum(1 for p in valid_pages if p.get("status") == "synced")
+        pending = sum(1 for p in valid_pages if p.get("status") == "pending")
+        error = sum(1 for p in valid_pages if p.get("status") == "error")
+        # Count pages that need resync (effective_status = 'needs_resync')
+        needs_resync = sum(1 for p in valid_pages if p.get("effective_status") == "needs_resync")
 
         return {
-            "pages": pages,
+            "pages": valid_pages,
             "total": len(pages),
             "synced": synced,
             "pending": pending,
             "error": error,
+            "needs_resync": needs_resync,
         }
     except ConfluenceAccessDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))

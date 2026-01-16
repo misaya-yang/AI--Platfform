@@ -390,7 +390,33 @@
     "status": {
       "connected": "已连接",
       "disabled": "已禁用",
-      "error": "错误"
+      "error": "错误",
+      "synced": "已同步",
+      "pending": "待同步",
+      "needsResync": "需重新同步"
+    },
+    "syncStatus": {
+      "success": "同步成功",
+      "failed": "同步失败: {{error}}",
+      "triggered": "同步已触发",
+      "batchStarted": "批量同步已开始"
+    },
+    "binding": {
+      "title": "Confluence 绑定",
+      "subtitle": "同步 Confluence 空间到此知识库",
+      "addBinding": "添加绑定",
+      "unbind": "解除绑定",
+      "unbindConfirm": "确认解除绑定",
+      "unbindDescription": "确定要解除 \"{{name}}\" 的绑定吗？",
+      "deleteDocuments": "同时删除已同步的文档",
+      "deleteDocumentsHint": "如不勾选，已同步的文档将保留在知识库中",
+      "emptyTitle": "暂无 Confluence 绑定",
+      "emptyDescription": "添加 Confluence 空间绑定以同步文档到此知识库",
+      "syncConfig": "同步配置",
+      "refresh": "刷新",
+      "pagesCount": "{{count}} 页面",
+      "manual": "手动",
+      "everyMinutes": "每 {{minutes}} 分钟"
     },
     "bindingStatus": {
       "pending": "等待同步",
@@ -636,6 +662,7 @@
         "pending": "待同步",
         "processing": "处理中",
         "uploaded": "已上传",
+        "needsResync": "需要重新同步",
         "error": "错误",
         "deleted": "已删除"
       },
@@ -753,7 +780,17 @@
     "ragUsage": "利用率",
     "ragCitations": "引用",
     "ragGrounding": "{{percent}}% 有据可依",
-    "ragChunksUsed": "使用了 {{used}}/{{total}} 个片段"
+    "ragChunksUsed": "使用了 {{used}}/{{total}} 个片段",
+
+    "styleTitle": "自定义回复风格",
+    "styleHint": "从上面选择一个风格，定制 AI 的回复风格。",
+    "kb": "知识库",
+    "selectKB": "选择知识库",
+    "webSearchOn": "点击关闭联网搜索",
+    "webSearchOff": "点击开启联网搜索",
+    "addPhotosFiles": "添加照片和文件",
+    "companyKB": "公司知识库",
+    "webSearchMenu": "网页搜索"
   },
   "analytics": {
     "title": "使用量分析",

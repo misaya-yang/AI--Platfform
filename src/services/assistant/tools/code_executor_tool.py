@@ -57,11 +57,11 @@ CODE_EXECUTOR_TOOL = ToolDefinition(
     category=ToolCategory.ANALYSIS,
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
-    when_to_use="When the user asks to analyze data, create charts or visualizations, "
-                "perform mathematical calculations, process CSV/JSON files, "
+    when_to_use="When the user asks to analyze data, create data charts (bar, line, pie, etc.), "
+                "perform mathematical calculations, plot functions, process CSV/JSON files, "
                 "generate reports with data, or any task requiring code execution.",
-    when_not_to_use="Do not use for simple questions that can be answered directly, "
-                    "or for tasks that don't require computation or data processing.",
+    when_not_to_use="Do not use for generating AI images, artwork, or illustrations - use generate_image tool instead. "
+                    "Do not use for simple questions that can be answered directly.",
     examples=[
         ToolExample(
             description="Analyze data and create a chart",

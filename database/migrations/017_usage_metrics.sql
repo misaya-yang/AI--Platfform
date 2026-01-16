@@ -90,6 +90,43 @@ CREATE INDEX IF NOT EXISTS idx_usage_daily_user_date ON usage_daily_aggregates (
 CREATE INDEX IF NOT EXISTS idx_usage_daily_model_date ON usage_daily_aggregates (model, date);
 
 -- ============================================================================
+-- 每小时聚合表（用于小时粒度图表，保留7天）
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS usage_hourly_aggregates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64),
+    model VARCHAR(128),
+    assistant_id VARCHAR(64),
+    service_id VARCHAR(64),
+
+    bucket_start TIMESTAMP NOT NULL,  -- 小时起始时间
+    date DATE NOT NULL,               -- 日期（便于按日清理）
+
+    -- 聚合指标
+    request_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+
+    total_input_tokens BIGINT DEFAULT 0,
+    total_output_tokens BIGINT DEFAULT 0,
+    total_cost_cents BIGINT DEFAULT 0,
+
+    avg_latency_ms INTEGER DEFAULT 0,
+    avg_first_token_ms INTEGER DEFAULT 0,
+
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 复合唯一索引确保每小时每维度只有一条聚合记录
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_hourly_unique
+ON usage_hourly_aggregates (tenant_id, COALESCE(user_id, ''), COALESCE(model, ''), COALESCE(assistant_id, ''), COALESCE(service_id, ''), bucket_start);
+
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_tenant_date ON usage_hourly_aggregates (tenant_id, date);
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_bucket ON usage_hourly_aggregates (bucket_start);
+
+-- ============================================================================
 -- 用户配额表
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS user_quotas (
@@ -216,6 +253,19 @@ VALUES
     ('qwen-plus', 'dashscope', 'Qwen Plus', 0.004, 0.012, 32000, 2000, FALSE, TRUE),
     ('qwen-max', 'dashscope', 'Qwen Max', 0.02, 0.06, 8000, 2000, FALSE, TRUE),
     ('qwen-vl-plus', 'dashscope', 'Qwen VL Plus', 0.008, 0.008, 8000, 2000, TRUE, FALSE),
+
+    -- LangGraph Agent (for run tracking)
+    ('langgraph-agent', 'langgraph', 'LangGraph Agent', 0.001, 0.002, 128000, 8192, TRUE, TRUE),
+
+    -- Google Gemini Models (Gemini 3.0 - 2025/2026)
+    ('gemini-3.0-pro', 'google', 'Gemini 3.0 Pro', 0.002, 0.012, 1000000, 8192, TRUE, TRUE),
+    ('gemini-3.0-flash', 'google', 'Gemini 3.0 Flash', 0.0005, 0.003, 1000000, 8192, TRUE, TRUE),
+    -- Google Gemini Models (Gemini 2.x)
+    ('gemini-2.0-flash', 'google', 'Gemini 2.0 Flash', 0.0001, 0.0004, 1000000, 8192, TRUE, TRUE),
+    ('gemini-2.0-flash-thinking', 'google', 'Gemini 2.0 Flash Thinking', 0.0001, 0.0004, 1000000, 8192, TRUE, TRUE),
+    ('gemini-1.5-pro', 'google', 'Gemini 1.5 Pro', 0.00125, 0.005, 2000000, 8192, TRUE, TRUE),
+    ('gemini-1.5-flash', 'google', 'Gemini 1.5 Flash', 0.000075, 0.0003, 1000000, 8192, TRUE, TRUE),
+    ('gemini-1.5-flash-8b', 'google', 'Gemini 1.5 Flash 8B', 0.0000375, 0.00015, 1000000, 8192, TRUE, TRUE),
 
     -- Default fallback
     ('default', 'unknown', 'Default Model', 0.001, 0.002, 4096, 4096, FALSE, FALSE)

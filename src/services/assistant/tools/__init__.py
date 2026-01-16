@@ -36,6 +36,11 @@ from .code_executor_tool import (
     CodeExecutorToolExecutor,
     register_code_executor_tool,
 )
+from .document_generator_tool import (
+    DOCUMENT_GENERATION_DEFINITION,
+    DocumentGeneratorExecutor,
+    register_document_generation_tool,
+)
 
 __all__ = [
     # Tavily
@@ -62,4 +67,8 @@ __all__ = [
     "CODE_EXECUTOR_TOOL",
     "CodeExecutorToolExecutor",
     "register_code_executor_tool",
+    # Document generator tool
+    "DOCUMENT_GENERATION_DEFINITION",
+    "DocumentGeneratorExecutor",
+    "register_document_generation_tool",
 ]

@@ -26,6 +26,7 @@ import {
   FileTextOutlined,
   TableOutlined,
   PictureOutlined,
+  PlaySquareOutlined,
   MoreOutlined,
   EditOutlined,
   DeleteOutlined,
@@ -52,9 +53,55 @@ const typeOptions = [
   { value: "document", label: "文档", icon: <FileTextOutlined /> },
   { value: "data", label: "数据", icon: <TableOutlined /> },
   { value: "image", label: "图片", icon: <PictureOutlined /> },
+  { value: "audio_video", label: "音视频", icon: <PlaySquareOutlined /> },
 ];
 
-// 知识库卡片组件 - 扁平设计
+// 根据知识库类型获取图标
+function getKBTypeIcon(kbType?: string) {
+  switch (kbType) {
+    case "data":
+      return <TableOutlined />;
+    case "image":
+      return <PictureOutlined />;
+    case "audio_video":
+      return <PlaySquareOutlined />;
+    case "document":
+    default:
+      return <FileTextOutlined />;
+  }
+}
+
+// 根据知识库类型获取标签文字
+function getKBTypeLabel(kbType?: string) {
+  switch (kbType) {
+    case "data":
+      return "数据查询";
+    case "image":
+      return "图片问答";
+    case "audio_video":
+      return "音视频搜索";
+    case "document":
+    default:
+      return "文档搜索";
+  }
+}
+
+// 获取知识库类型的颜色
+function getKBTypeColor(kbType?: string) {
+  switch (kbType) {
+    case "data":
+      return { bg: "#e6f7e6", color: "#52c41a" };
+    case "image":
+      return { bg: "#f3e8ff", color: "#9333ea" };
+    case "audio_video":
+      return { bg: "#fff7e6", color: "#fa8c16" };
+    case "document":
+    default:
+      return { bg: "#e6f4ff", color: "#1677ff" };
+  }
+}
+
+// 知识库卡片组件 - 优化设计
 function DatasetCard({
   dataset,
   onViewDetail,
@@ -109,266 +156,205 @@ function DatasetCard({
     },
   ];
 
+  const kbTypeColor = getKBTypeColor(dataset.kb_type);
+  const docCount = dataset.statistics?.document_count ?? 0;
+  const segCount = dataset.statistics?.segment_count ?? 0;
+
   return (
     <Card
       hoverable
       onClick={onViewDetail}
       style={{
-        borderRadius: 8,
+        borderRadius: 12,
         border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
         background: darkMode ? colors.neutral[800] : "#ffffff",
         cursor: "pointer",
+        overflow: "hidden",
       }}
       styles={{
-        body: { padding: "20px" },
+        body: { padding: 0 },
       }}
     >
-      {/* 头部：图标 + 标题 + 更多操作 */}
+      {/* 顶部彩色条 */}
       <div
         style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          marginBottom: 16,
+          height: 4,
+          background: kbTypeColor.color,
         }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {/* 图标容器 - 扁平背景 */}
-          <div
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 8,
-              background: darkMode ? colors.neutral[700] : colors.neutral[100],
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-            }}
-          >
-            <DatabaseOutlined
-              style={{
-                fontSize: 18,
-                color: colors.primary[500],
-              }}
-            />
-          </div>
+      />
 
-          <div style={{ minWidth: 0 }}>
-            <Title
-              level={5}
-              style={{
-                margin: 0,
-                fontSize: 15,
-                fontWeight: 600,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {dataset.name}
-            </Title>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                marginTop: 4,
-              }}
-            >
-              <Text
-                type="secondary"
-                style={{
-                  fontSize: 12,
-                  fontFamily: "monospace",
-                }}
-              >
-                {dataset.dataset_id.slice(0, 8)}...
-              </Text>
-              <Tooltip title={copied ? "已复制" : "复制 ID"}>
-                <span
-                  onClick={copyId}
-                  style={{ cursor: "pointer", display: "flex" }}
-                >
-                  {copied ? (
-                    <CheckOutlined
-                      style={{ fontSize: 12, color: colors.primary[500] }}
-                    />
-                  ) : (
-                    <CopyOutlined
-                      style={{
-                        fontSize: 12,
-                        color: colors.neutral[400],
-                      }}
-                    />
-                  )}
-                </span>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
-
-        {/* 更多操作 */}
-        <Dropdown
-          menu={{ items: menuItems }}
-          trigger={["click"]}
-          placement="bottomRight"
+      <div style={{ padding: "16px 20px" }}>
+        {/* 头部：类型标签 + 更多操作 */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 12,
+          }}
         >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: 6,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-              background: darkMode
-                ? colors.neutral[700]
-                : colors.neutral[100],
-            }}
-          >
-            <MoreOutlined style={{ fontSize: 16 }} />
-          </div>
-        </Dropdown>
-      </div>
-
-      {/* 描述 */}
-      <Paragraph
-        type="secondary"
-        ellipsis={{ rows: 2 }}
-        style={{
-          fontSize: 13,
-          marginBottom: 16,
-          minHeight: 40,
-        }}
-      >
-        {dataset.description || "暂无描述"}
-      </Paragraph>
-
-      {/* 标签和统计 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          paddingTop: 12,
-          borderTop: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
-        }}
-      >
-        <Space size={6}>
           <Tag
-            color="blue"
             style={{
               borderRadius: 4,
               padding: "2px 8px",
               fontSize: 11,
               border: "none",
+              background: darkMode ? `${kbTypeColor.color}20` : kbTypeColor.bg,
+              color: kbTypeColor.color,
+              fontWeight: 500,
+            }}
+          >
+            {getKBTypeLabel(dataset.kb_type)}
+          </Tag>
+
+          <Dropdown
+            menu={{ items: menuItems }}
+            trigger={["click"]}
+            placement="bottomRight"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                background: "transparent",
+                transition: "background 0.2s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = darkMode
+                  ? colors.neutral[700]
+                  : colors.neutral[100];
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <MoreOutlined style={{ fontSize: 14, color: colors.neutral[400] }} />
+            </div>
+          </Dropdown>
+        </div>
+
+        {/* 标题和描述 */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <span
+              style={{
+                fontSize: 20,
+                color: kbTypeColor.color,
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
+              {getKBTypeIcon(dataset.kb_type)}
+            </span>
+            <Title
+              level={5}
+              style={{
+                margin: 0,
+                fontSize: 16,
+                fontWeight: 600,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                flex: 1,
+              }}
+            >
+              {dataset.name}
+            </Title>
+          </div>
+          <Paragraph
+            type="secondary"
+            ellipsis={{ rows: 2 }}
+            style={{
+              fontSize: 13,
+              margin: 0,
+              minHeight: 40,
+              lineHeight: "20px",
+            }}
+          >
+            {dataset.description || "暂无描述"}
+          </Paragraph>
+        </div>
+
+        {/* 统计数据 - 清晰的水平布局 */}
+        <div
+          style={{
+            display: "flex",
+            gap: 24,
+            padding: "12px 0",
+            borderTop: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
+            borderBottom: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <FileTextOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
+            <div>
+              <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{docCount}</Text>
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>文档</Text>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <NodeIndexOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
+            <div>
+              <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{segCount}</Text>
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>段落</Text>
+            </div>
+          </div>
+        </div>
+
+        {/* 底部：ID + 可见性 */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            paddingTop: 12,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <Text
+              type="secondary"
+              style={{
+                fontSize: 11,
+                fontFamily: "monospace",
+              }}
+            >
+              {dataset.dataset_id.slice(0, 10)}...
+            </Text>
+            <Tooltip title={copied ? "已复制" : "复制 ID"}>
+              <span
+                onClick={copyId}
+                style={{ cursor: "pointer", display: "flex" }}
+              >
+                {copied ? (
+                  <CheckOutlined style={{ fontSize: 11, color: colors.primary[500] }} />
+                ) : (
+                  <CopyOutlined style={{ fontSize: 11, color: colors.neutral[400] }} />
+                )}
+              </span>
+            </Tooltip>
+          </div>
+          <Tag
+            style={{
+              borderRadius: 4,
+              padding: "1px 6px",
+              fontSize: 10,
+              border: "none",
+              background: darkMode ? colors.neutral[700] : colors.neutral[100],
+              color: darkMode ? colors.neutral[300] : colors.neutral[500],
             }}
           >
             {dataset.visibility === "private"
               ? "私有"
               : dataset.visibility === "tenant"
-                ? "租户"
+                ? "团队"
                 : "公开"}
           </Tag>
-          <Tag
-            style={{
-              borderRadius: 4,
-              padding: "2px 8px",
-              fontSize: 11,
-              background: darkMode
-                ? colors.neutral[700]
-                : colors.neutral[100],
-              border: "none",
-              color: darkMode ? colors.neutral[300] : colors.neutral[600],
-            }}
-          >
-            {dataset.embedding_model || "默认模型"}
-          </Tag>
-        </Space>
-
-        <Space size={16}>
-          <Tooltip title="文档数量">
-            <Space size={4}>
-              <FileTextOutlined
-                style={{ color: colors.neutral[400], fontSize: 14 }}
-              />
-              <Text strong style={{ fontSize: 13 }}>
-                {dataset.statistics?.document_count ?? 0}
-              </Text>
-            </Space>
-          </Tooltip>
-          <Tooltip title="段落数量">
-            <Space size={4}>
-              <NodeIndexOutlined
-                style={{ color: colors.neutral[400], fontSize: 14 }}
-              />
-              <Text strong style={{ fontSize: 13 }}>
-                {dataset.statistics?.segment_count ?? 0}
-              </Text>
-            </Space>
-          </Tooltip>
-        </Space>
-      </div>
-
-      {/* 底部快捷操作 */}
-      <div
-        style={{
-          display: "flex",
-          marginTop: 16,
-          paddingTop: 12,
-          borderTop: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[100]}`,
-        }}
-      >
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onViewDetail();
-          }}
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            cursor: "pointer",
-            padding: "4px 0",
-          }}
-        >
-          <EyeOutlined style={{ fontSize: 14, color: colors.primary[500] }} />
-          <Text style={{ fontSize: 13, color: colors.primary[500] }}>
-            详情
-          </Text>
-        </div>
-
-        <div
-          style={{
-            width: 1,
-            background: darkMode ? colors.neutral[700] : colors.neutral[200],
-          }}
-        />
-
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onHitTest();
-          }}
-          style={{
-            flex: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            cursor: "pointer",
-            padding: "4px 0",
-          }}
-        >
-          <ExperimentOutlined
-            style={{ fontSize: 14, color: colors.primary[400] }}
-          />
-          <Text style={{ fontSize: 13, color: colors.primary[400] }}>测试</Text>
         </div>
       </div>
     </Card>
@@ -524,9 +510,11 @@ export function KnowledgeDatasetsPage() {
         d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         d.dataset_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (d.description || "").toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesSearch;
+      const matchesType =
+        typeFilter === "all" || (d.kb_type || "document") === typeFilter;
+      return matchesSearch && matchesType;
     });
-  }, [datasets, searchQuery]);
+  }, [datasets, searchQuery, typeFilter]);
 
   // 统计数据
   const stats = useMemo(() => {

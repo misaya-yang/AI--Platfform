@@ -115,6 +115,13 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             return await conn.fetch(query, *args)
 
+    async def execute(self, query: str, *args) -> str:
+        """执行 SQL 语句（INSERT/UPDATE/DELETE）并返回状态字符串"""
+        if not self._pool:
+            return ""
+        async with self._pool.acquire() as conn:
+            return await conn.execute(query, *args)
+
     async def execute_schema(self, schema_path: str) -> None:
         """执行 SQL 建表脚本"""
         if not self._pool:
@@ -844,6 +851,42 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
+    async def get_datasets_statistics_batch(
+        self, dataset_ids: List[str]
+    ) -> Dict[str, Dict[str, int]]:
+        """获取多个 Dataset 的统计数据（批量查询优化）"""
+        if not self._pool or not dataset_ids:
+            return {}
+
+        async with self._pool.acquire() as conn:
+            # Use a single query with LEFT JOINs and GROUP BY for efficiency
+            query = """
+                SELECT
+                    d.dataset_id,
+                    COUNT(DISTINCT doc.document_id) as document_count,
+                    COUNT(DISTINCT seg.segment_id) as segment_count
+                FROM datasets d
+                LEFT JOIN documents doc ON d.dataset_id = doc.dataset_id
+                LEFT JOIN segments seg ON d.dataset_id = seg.dataset_id
+                WHERE d.dataset_id = ANY($1)
+                GROUP BY d.dataset_id
+            """
+            rows = await conn.fetch(query, dataset_ids)
+
+            result: Dict[str, Dict[str, int]] = {}
+            for row in rows:
+                result[row["dataset_id"]] = {
+                    "document_count": row["document_count"] or 0,
+                    "segment_count": row["segment_count"] or 0,
+                }
+
+            # Ensure all requested dataset_ids have entries (even if empty)
+            for ds_id in dataset_ids:
+                if ds_id not in result:
+                    result[ds_id] = {"document_count": 0, "segment_count": 0}
+
+            return result
+
     async def grant_dataset_permission(
         self,
         dataset_id: str,
@@ -1104,7 +1147,7 @@ class DatabaseStorage:
             await conn.execute(query, *params)
 
     async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
-        """批量插入/更新 Segment (enhanced with Dify-style fields)"""
+        """批量插入/更新 Segment (enhanced with Dify-style fields + content_hash)"""
         if not self._pool or not segments:
             return
 
@@ -1127,6 +1170,8 @@ class DatabaseStorage:
                     json.dumps(seg.get("keywords", [])),
                     seg.get("answer"),
                     seg.get("created_by"),
+                    # Content hash for incremental updates
+                    seg.get("content_hash"),
                 )
             )
 
@@ -1136,12 +1181,12 @@ class DatabaseStorage:
                 INSERT INTO segments (
                     segment_id, dataset_id, document_id, position,
                     text, token_count, vector_id, metadata,
-                    enabled, status, word_count, keywords, answer, created_by
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                ON CONFLICT (segment_id) DO UPDATE SET
+                    enabled, status, word_count, keywords, answer, created_by,
+                    content_hash
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                ON CONFLICT (document_id, position) DO UPDATE SET
+                    segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
-                    document_id = EXCLUDED.document_id,
-                    position = EXCLUDED.position,
                     text = EXCLUDED.text,
                     token_count = EXCLUDED.token_count,
                     vector_id = EXCLUDED.vector_id,
@@ -1151,13 +1196,52 @@ class DatabaseStorage:
                     word_count = EXCLUDED.word_count,
                     keywords = EXCLUDED.keywords,
                     answer = EXCLUDED.answer,
+                    content_hash = EXCLUDED.content_hash,
                     updated_at = NOW()
                 """,
                 rows,
             )
 
+    async def get_segment_hashes_by_document(
+        self, document_id: str, content_type: str = "text"
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        获取文档现有 segments 的 hash 映射，用于增量更新比对
+
+        Args:
+            document_id: 文档 ID
+            content_type: 内容类型过滤 (text/image)
+
+        Returns:
+            position -> {segment_id, vector_id, content_hash} 的映射
+        """
+        if not self._pool:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT position, segment_id, vector_id, content_hash
+                FROM segments
+                WHERE document_id = $1 AND content_type = $2
+                ORDER BY position
+                """,
+                document_id,
+                content_type,
+            )
+            return {
+                row["position"]: {
+                    "segment_id": row["segment_id"],
+                    "vector_id": row["vector_id"],
+                    "content_hash": row["content_hash"],
+                }
+                for row in rows
+            }
+
     async def delete_segments_by_document(
-        self, document_id: str, exclude_ids: Optional[List[str]] = None
+        self,
+        document_id: str,
+        exclude_ids: Optional[List[str]] = None,
+        content_type: Optional[str] = None,
     ) -> int:
         """
         删除指定文档下的 Segment
@@ -1165,6 +1249,7 @@ class DatabaseStorage:
         Args:
             document_id: 文档 ID
             exclude_ids: 要排除的 segment ID 列表（用于无感更新：先插入新的，再删除旧的）
+            content_type: 可选的内容类型过滤（text/image）
 
         Returns:
             删除的记录数
@@ -1172,12 +1257,24 @@ class DatabaseStorage:
         if not self._pool:
             return 0
         async with self._pool.acquire() as conn:
-            if exclude_ids:
-                # 删除旧的 segments，保留新插入的
+            if exclude_ids and content_type:
+                result = await conn.execute(
+                    "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[]) AND content_type = $3",
+                    document_id,
+                    exclude_ids,
+                    content_type,
+                )
+            elif exclude_ids:
                 result = await conn.execute(
                     "DELETE FROM segments WHERE document_id = $1 AND segment_id != ALL($2::text[])",
                     document_id,
                     exclude_ids,
+                )
+            elif content_type:
+                result = await conn.execute(
+                    "DELETE FROM segments WHERE document_id = $1 AND content_type = $2",
+                    document_id,
+                    content_type,
                 )
             else:
                 result = await conn.execute(
@@ -1489,6 +1586,54 @@ class DatabaseStorage:
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
             return 0
+
+    async def count_segments_by_document(self, document_id: str) -> int:
+        """Count total segments for a document.
+
+        Args:
+            document_id: The document ID
+
+        Returns:
+            Total segment count for the document
+        """
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as cnt FROM segments WHERE document_id = $1",
+                document_id,
+            )
+            return int(row["cnt"]) if row else 0
+
+    async def refresh_document_segment_count(self, document_id: str) -> int:
+        """Recount segments and update the document's segment_count field.
+
+        This method counts all segments (text + image) for a document and updates
+        the documents.segment_count field atomically.
+
+        Args:
+            document_id: The document ID
+
+        Returns:
+            The new segment count
+        """
+        if not self._pool:
+            return 0
+        async with self._pool.acquire() as conn:
+            # Use a single atomic UPDATE with subquery for consistency
+            row = await conn.fetchrow(
+                """
+                UPDATE documents
+                SET segment_count = (
+                    SELECT COUNT(*) FROM segments WHERE document_id = $1
+                ),
+                updated_at = NOW()
+                WHERE document_id = $1
+                RETURNING segment_count
+                """,
+                document_id,
+            )
+            return int(row["segment_count"]) if row else 0
 
     # =========================================================================
     # Segment Image Associations (segment_images) - P3 Multimodal RAG
@@ -3258,16 +3403,27 @@ class DatabaseStorage:
         返回结果包含关联文档的处理状态:
         - document_status: 文档的实际处理状态 (uploaded/parsing/embedding/completed/failed)
         - document_progress: 文档处理进度 (0-100)
+        - effective_status: 计算后的有效状态，检测是否需要重新同步
+          当页面标记为 'synced' 但关联文档不存在或没有任何 segment 时，
+          返回 'needs_resync' 表示需要重新同步
         """
         if not self._pool:
             return []
 
         # JOIN documents 表获取关联文档的处理状态
+        # 计算 effective_status: 检测 synced 状态但实际无数据的情况
         query = """
             SELECT
                 cp.*,
                 d.status AS document_status,
-                d.progress AS document_progress
+                d.progress AS document_progress,
+                CASE
+                    WHEN cp.status = 'synced'
+                         AND cp.document_id IS NOT NULL
+                         AND (d.document_id IS NULL OR COALESCE(d.segment_count, 0) = 0)
+                    THEN 'needs_resync'
+                    ELSE cp.status
+                END AS effective_status
             FROM confluence_pages cp
             LEFT JOIN documents d ON cp.document_id = d.document_id
             WHERE cp.binding_id = $1
@@ -3335,6 +3491,36 @@ class DatabaseStorage:
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
+
+    async def update_confluence_page_image_count(
+        self,
+        binding_id: str,
+        page_id: str,
+        image_count: int,
+    ) -> None:
+        """更新 Confluence 页面的图片数量
+
+        Args:
+            binding_id: 绑定ID
+            page_id: Confluence页面ID
+            image_count: 图片数量（必须 >= 0）
+        """
+        if not self._pool:
+            return
+        # Ensure non-negative image count
+        if image_count < 0:
+            image_count = 0
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE confluence_pages
+                SET image_count = $1, images_synced_at = NOW()
+                WHERE binding_id = $2 AND page_id = $3
+                """,
+                image_count,
+                binding_id,
+                page_id,
+            )
 
     async def delete_confluence_page(self, id: str) -> bool:
         """删除 Confluence 页面记录"""
@@ -4516,7 +4702,7 @@ class DatabaseStorage:
 
         # JSON 字段列表 - 需要解析为 Python 对象（字典类型）
         json_dict_fields = {
-            "metadata", "embedding_config", "index_config", "result"
+            "metadata", "embedding_config", "index_config", "result", "config"
         }
 
         # JSON 字段列表 - 需要解析为 Python 对象（列表类型）

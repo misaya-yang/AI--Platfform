@@ -15,6 +15,8 @@ import {
   Wrench,
   Package,
   Settings,
+  Bot,
+  Globe,
 } from "lucide-react";
 
 // Simple icon components for service types
@@ -22,6 +24,8 @@ function ServiceIcon({ serviceType }: { serviceType: ServiceType }) {
   const iconProps = { className: "h-6 w-6" };
 
   switch (serviceType) {
+    case "assistant":
+      return <Bot {...iconProps} />;
     case "conversational":
       return <MessageSquare {...iconProps} />;
     case "generative":
@@ -34,12 +38,27 @@ function ServiceIcon({ serviceType }: { serviceType: ServiceType }) {
       return <Tag {...iconProps} />;
     case "langgraph":
       return <GitBranch {...iconProps} />;
+    case "proxy":
+      return <Globe {...iconProps} />;
     case "custom":
       return <Wrench {...iconProps} />;
     default:
       return <Package {...iconProps} />;
   }
 }
+
+// 服务类型中文标签
+const serviceTypeLabels: Record<string, string> = {
+  assistant: "AI 助手",
+  langgraph: "LangGraph",
+  proxy: "代理",
+  conversational: "对话",
+  generative: "生成",
+  processing: "处理",
+  embedding: "嵌入",
+  classification: "分类",
+  custom: "自定义",
+};
 
 export function ServiceCard({
   service,
@@ -54,6 +73,8 @@ export function ServiceCard({
 }) {
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
+  const isVirtual = service.metadata?.is_virtual === true;
+  const serviceTypeLabel = serviceTypeLabels[service.service_type] || service.service_type;
 
   return (
     <>
@@ -86,31 +107,39 @@ export function ServiceCard({
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Virtual service badge */}
+              {isVirtual && (
+                <Badge variant="outline" className="text-xs border-primary/50 text-primary">
+                  内置
+                </Badge>
+              )}
               {/* Status badge */}
               <Badge variant={isHealthy ? "default" : "destructive"}>
                 {isHealthy ? "Active" : "Inactive"}
               </Badge>
 
-              {/* Config button */}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-muted-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfigOpen(true);
-                }}
-                title="Config"
-              >
-                <Settings className="h-4 w-4" />
-              </Button>
+              {/* Config button - hidden for virtual services */}
+              {!isVirtual && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfigOpen(true);
+                  }}
+                  title="Config"
+                >
+                  <Settings className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
 
           {/* Service type and modes badges */}
           <div className="flex flex-wrap gap-2 mt-4">
             <Badge variant="secondary" className="text-xs">
-              {service.service_type}
+              {serviceTypeLabel}
             </Badge>
             {service.supported_modes?.slice(0, 2).map((m) => (
               <Badge key={m} variant="outline" className="text-xs">
@@ -121,12 +150,14 @@ export function ServiceCard({
         </CardContent>
       </Card>
 
-      <ServiceConfigDialog
-        serviceId={service.service_id}
-        serviceName={service.name}
-        open={configOpen}
-        onOpenChange={setConfigOpen}
-      />
+      {!isVirtual && (
+        <ServiceConfigDialog
+          serviceId={service.service_id}
+          serviceName={service.name}
+          open={configOpen}
+          onOpenChange={setConfigOpen}
+        />
+      )}
     </>
   );
 }

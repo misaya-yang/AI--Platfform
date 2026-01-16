@@ -31,6 +31,12 @@ export const SSEEventType = {
   CODE_EXECUTION_OUTPUT: "code_execution_output",
   CODE_EXECUTION_RESULT: "code_execution_result",
   ARTIFACT_CREATED: "artifact_created",
+  // Image generation events
+  IMAGE_GENERATION_START: "image_generation_start",
+  IMAGE_GENERATION_RESULT: "image_generation_result",
+  // Document generation events
+  DOCUMENT_GENERATION_START: "document_generation_start",
+  DOCUMENT_GENERATION_RESULT: "document_generation_result",
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -38,6 +44,8 @@ export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType]
 // =============================================================================
 // Model and Dataset Types
 // =============================================================================
+
+export type ModelAccessLevel = "public" | "premium" | "admin";
 
 export interface ModelInfo {
   id: string;
@@ -47,6 +55,9 @@ export interface ModelInfo {
   max_output_tokens: number;
   supports_vision: boolean;
   supports_tools: boolean;
+  access_level?: ModelAccessLevel;
+  input_price_per_1k?: number;
+  output_price_per_1k?: number;
 }
 
 export interface DatasetInfo {
@@ -354,6 +365,7 @@ export function getProviderDisplayName(provider: string): string {
     anthropic: "Anthropic",
     deepseek: "DeepSeek",
     dashscope: "Qwen/DashScope",
+    google: "Google Gemini",
   };
   return names[provider] || provider;
 }
@@ -442,4 +454,125 @@ export function groupSessionsByDate(sessions: AssistantSession[]): Record<string
   }
 
   return groups;
+}
+
+
+// =========================================================================
+// Artifacts API
+// =========================================================================
+
+export interface ArtifactInfo {
+  artifact_id: string;
+  session_id: string;
+  message_id?: string;
+  tenant_id: string;
+  user_id: string;
+  type: "image" | "document" | "chart" | "code" | "file";
+  format: string;
+  title: string;
+  filename: string;
+  storage_key: string;
+  size_bytes: number;
+  mime_type?: string;
+  source: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
+  metadata?: Record<string, unknown>;
+  download_url?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Get artifacts for a session.
+ */
+export async function getSessionArtifacts(sessionId: string): Promise<ArtifactInfo[]> {
+  const { data } = await api.get<{ artifacts: ArtifactInfo[]; total: number }>(
+    `/api/v1/assistant/sessions/${sessionId}/artifacts`
+  );
+  return data.artifacts;
+}
+
+/**
+ * Get a single artifact with fresh download URL.
+ */
+export async function getArtifact(artifactId: string): Promise<ArtifactInfo> {
+  const { data } = await api.get<ArtifactInfo>(
+    `/api/v1/assistant/artifacts/${artifactId}`
+  );
+  return data;
+}
+
+/**
+ * Delete an artifact.
+ */
+export async function deleteArtifact(artifactId: string): Promise<void> {
+  await api.delete(`/api/v1/assistant/artifacts/${artifactId}`);
+}
+
+/**
+ * Create an artifact from base64 content.
+ * Used for saving generated images, documents, etc.
+ */
+export interface CreateArtifactRequest {
+  session_id: string;
+  type: string;  // image, document, chart, code, file
+  format: string;  // png, jpg, pdf, json, etc.
+  title: string;
+  filename: string;
+  content_base64: string;
+  source?: string;  // ai | user | code_execution | image_generation
+  message_id?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export async function createArtifact(request: CreateArtifactRequest): Promise<ArtifactInfo> {
+  const { data } = await api.post<ArtifactInfo>("/api/v1/assistant/artifacts", request);
+  return data;
+}
+
+/**
+ * Get artifact download URL (redirects to presigned URL).
+ */
+export function getArtifactDownloadUrl(artifactId: string): string {
+  // This URL will redirect to the actual presigned URL
+  return `/api/v1/assistant/artifacts/${artifactId}/download`;
+}
+
+
+// =========================================================================
+// Image Generation API (Smart Routing)
+// =========================================================================
+
+export interface ImageGenerationRequest {
+  prompt: string;
+  model_id: string;
+  style?: string;
+  size?: string;
+  n?: number;
+}
+
+export interface GeneratedImage {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
+export interface ImageGenerationResponse {
+  success: boolean;
+  images: GeneratedImage[];
+  provider: string;
+  duration_ms: number;
+  error?: string;
+}
+
+/**
+ * Generate images with smart routing based on current model provider.
+ *
+ * Routes to:
+ * - DashScope Wanx for DashScope models (Qwen)
+ * - Gemini Native Image for Google models
+ * - Fallback to DashScope for other providers
+ */
+export async function generateImage(request: ImageGenerationRequest): Promise<ImageGenerationResponse> {
+  const { data } = await api.post<ImageGenerationResponse>("/api/v1/assistant/generate-image", request);
+  return data;
 }

@@ -259,16 +259,42 @@ class DatabaseSessionManager:
         session = await self.get(session_id)
         if not session:
             return False
-        
+
         session.metadata.update(metadata)
         session.updated_at = datetime.utcnow()
-        
+
         # 保存到数据库
         await self._save_to_db(session)
-        
+
         # 更新缓存
         await self._cache_session(session)
-        
+
+        return True
+
+    async def update_config(
+        self,
+        session_id: str,
+        config: Dict[str, Any],
+    ) -> bool:
+        """更新会话配置（知识库、模型等）"""
+        session = await self.get(session_id)
+        if not session:
+            return False
+
+        # 确保 session.config 是字典类型
+        existing_config = getattr(session, 'config', None)
+        if existing_config is None or not isinstance(existing_config, dict):
+            existing_config = {}
+        existing_config.update(config)
+        session.config = existing_config
+        session.updated_at = datetime.utcnow()
+
+        # 保存到数据库
+        await self._save_to_db(session)
+
+        # 更新缓存
+        await self._cache_session(session)
+
         return True
     
     async def extend_ttl(

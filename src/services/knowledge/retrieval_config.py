@@ -405,33 +405,47 @@ class DatasetIndexConfig:
 
 
 # Default configurations for common use cases
+# NOTE: "sota" is the recommended default for production (hybrid + rerank + threshold)
 DEFAULT_CONFIGS = {
     "fast": RetrievalConfig(
         mode=RetrievalMode.VECTOR,
         top_k=5,
+        score_threshold=0.2,
         rerank=RerankConfig(enabled=False),
         mmr=MMRConfig(enabled=False),
     ),
     "balanced": RetrievalConfig(
         mode=RetrievalMode.HYBRID,
         top_k=5,
-        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60),
-        rerank=RerankConfig(enabled=False),
+        score_threshold=0.3,
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
+        rerank=RerankConfig(enabled=True, model="gte-rerank"),  # CHANGED: enable rerank by default
         mmr=MMRConfig(enabled=False),
     ),
     "accurate": RetrievalConfig(
         mode=RetrievalMode.HYBRID,
         top_k=5,
-        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60),
+        score_threshold=0.35,
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
         rerank=RerankConfig(enabled=True, model="gte-rerank"),
         mmr=MMRConfig(enabled=False),
     ),
     "diverse": RetrievalConfig(
         mode=RetrievalMode.HYBRID,
         top_k=5,
-        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60),
+        score_threshold=0.3,
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
         rerank=RerankConfig(enabled=True, model="gte-rerank"),
         mmr=MMRConfig(enabled=True, lambda_mult=0.5),
+    ),
+    # SOTA: State-of-the-art configuration for best accuracy
+    "sota": RetrievalConfig(
+        mode=RetrievalMode.HYBRID,
+        top_k=5,
+        score_threshold=0.3,
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
+        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=10),
+        mmr=MMRConfig(enabled=True, lambda_mult=0.7),  # Slight diversity
     ),
 }
 
