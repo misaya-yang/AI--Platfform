@@ -138,12 +138,22 @@ class KnowledgeProviderSettings(BaseModel):
     base_url: Optional[str] = None
 
 
+class KnowledgeGeminiSettings(BaseModel):
+    """Gemini Embedding API 配置"""
+    api_key: str = ""
+    model: str = "gemini-embedding-001"
+    dimension: int = 1024
+    base_url: Optional[str] = None
+    timeout_seconds: float = 30.0
+
+
 class KnowledgeSettings(BaseModel):
     enabled: bool = True
     worker_concurrency: int = 2
     qdrant: KnowledgeQdrantSettings = Field(default_factory=KnowledgeQdrantSettings)
     openai: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
+    gemini: KnowledgeGeminiSettings = Field(default_factory=KnowledgeGeminiSettings)
 
 
 class ConfluenceSettings(BaseModel):

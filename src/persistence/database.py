@@ -4734,3 +4734,378 @@ class DatabaseStorage:
                 elif not isinstance(value, list):
                     result[key] = []
         return result
+
+    # =========================================================================
+    # Memory Storage Methods (Session and User Memory)
+    # =========================================================================
+
+    async def store_session_memory(
+        self,
+        tenant_id: str,
+        session_id: str,
+        key: str,
+        value: Any,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """
+        Store or update a session memory entry.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            session_id: Session ID the memory belongs to
+            key: Unique key for the memory entry within the session
+            value: Value to store (any JSON-serializable type)
+            metadata: Optional metadata about the stored value
+        """
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO session_memory (tenant_id, session_id, key, value, metadata)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (session_id, key)
+                DO UPDATE SET value = $4, metadata = COALESCE($5, session_memory.metadata)
+                """,
+                tenant_id,
+                session_id,
+                key,
+                json.dumps(value),
+                json.dumps(metadata) if metadata else None,
+            )
+
+    async def get_session_memory(
+        self,
+        tenant_id: str,
+        session_id: str,
+        key: str,
+    ) -> Optional[Any]:
+        """
+        Retrieve a session memory entry.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            session_id: Session ID the memory belongs to
+            key: Key to retrieve
+
+        Returns:
+            The stored value if found, None otherwise
+        """
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT value FROM session_memory
+                WHERE tenant_id = $1 AND session_id = $2 AND key = $3
+                """,
+                tenant_id,
+                session_id,
+                key,
+            )
+            if row:
+                value = row["value"]
+                return json.loads(value) if isinstance(value, str) else value
+            return None
+
+    async def search_session_memory(
+        self,
+        tenant_id: str,
+        session_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search session memory by key or value content.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            session_id: Session ID to search within
+            query: Search query string (case-insensitive)
+            limit: Maximum number of results to return
+
+        Returns:
+            List of matching memory entries with key, value, metadata, and timestamps
+        """
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT key, value, metadata, created_at, updated_at
+                FROM session_memory
+                WHERE tenant_id = $1 AND session_id = $2
+                  AND (key ILIKE $3 OR value::text ILIKE $3)
+                ORDER BY updated_at DESC
+                LIMIT $4
+                """,
+                tenant_id,
+                session_id,
+                f"%{query}%",
+                limit,
+            )
+            return [self._memory_row_to_dict(row) for row in rows]
+
+    async def delete_session_memory(
+        self,
+        tenant_id: str,
+        session_id: str,
+        key: str,
+    ) -> bool:
+        """
+        Delete a session memory entry.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            session_id: Session ID the memory belongs to
+            key: Key to delete
+
+        Returns:
+            True if the entry was deleted, False if not found
+        """
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM session_memory
+                WHERE tenant_id = $1 AND session_id = $2 AND key = $3
+                """,
+                tenant_id,
+                session_id,
+                key,
+            )
+            return result == "DELETE 1"
+
+    async def clear_session_memory(
+        self,
+        tenant_id: str,
+        session_id: str,
+    ) -> None:
+        """
+        Clear all memory for a session.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            session_id: Session ID to clear memory for
+        """
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                DELETE FROM session_memory
+                WHERE tenant_id = $1 AND session_id = $2
+                """,
+                tenant_id,
+                session_id,
+            )
+
+    async def store_user_memory(
+        self,
+        tenant_id: str,
+        user_id: str,
+        key: str,
+        value: Any,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """
+        Store or update a user memory entry.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            user_id: User ID the memory belongs to
+            key: Unique key for the memory entry within the user
+            value: Value to store (any JSON-serializable type)
+            metadata: Optional metadata about the stored value
+        """
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO user_memory (tenant_id, user_id, key, value, metadata)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (user_id, key)
+                DO UPDATE SET value = $4, metadata = COALESCE($5, user_memory.metadata)
+                """,
+                tenant_id,
+                user_id,
+                key,
+                json.dumps(value),
+                json.dumps(metadata) if metadata else None,
+            )
+
+    async def get_user_memory(
+        self,
+        tenant_id: str,
+        user_id: str,
+        key: str,
+    ) -> Optional[Any]:
+        """
+        Retrieve a user memory entry and increment access count.
+
+        This method also updates the access_count and last_accessed_at
+        fields for tracking frequently accessed memory.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            user_id: User ID the memory belongs to
+            key: Key to retrieve
+
+        Returns:
+            The stored value if found, None otherwise
+        """
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            # Update access tracking and retrieve in one operation
+            row = await conn.fetchrow(
+                """
+                UPDATE user_memory
+                SET access_count = access_count + 1,
+                    last_accessed_at = NOW()
+                WHERE tenant_id = $1 AND user_id = $2 AND key = $3
+                RETURNING value
+                """,
+                tenant_id,
+                user_id,
+                key,
+            )
+            if row:
+                value = row["value"]
+                return json.loads(value) if isinstance(value, str) else value
+            return None
+
+    async def search_user_memory(
+        self,
+        tenant_id: str,
+        user_id: str,
+        query: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search user memory by key or value content.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            user_id: User ID to search within
+            query: Search query string (case-insensitive)
+            limit: Maximum number of results to return
+
+        Returns:
+            List of matching memory entries with key, value, metadata, and timestamps
+        """
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT key, value, metadata, access_count, last_accessed_at, created_at, updated_at
+                FROM user_memory
+                WHERE tenant_id = $1 AND user_id = $2
+                  AND (key ILIKE $3 OR value::text ILIKE $3)
+                ORDER BY updated_at DESC
+                LIMIT $4
+                """,
+                tenant_id,
+                user_id,
+                f"%{query}%",
+                limit,
+            )
+            return [self._memory_row_to_dict(row) for row in rows]
+
+    async def delete_user_memory(
+        self,
+        tenant_id: str,
+        user_id: str,
+        key: str,
+    ) -> bool:
+        """
+        Delete a user memory entry.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            user_id: User ID the memory belongs to
+            key: Key to delete
+
+        Returns:
+            True if the entry was deleted, False if not found
+        """
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM user_memory
+                WHERE tenant_id = $1 AND user_id = $2 AND key = $3
+                """,
+                tenant_id,
+                user_id,
+                key,
+            )
+            return result == "DELETE 1"
+
+    async def get_frequently_accessed_user_memory(
+        self,
+        tenant_id: str,
+        user_id: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get the most frequently accessed user memory entries.
+
+        Args:
+            tenant_id: Tenant ID for multi-tenancy isolation
+            user_id: User ID to get frequently accessed memory for
+            limit: Maximum number of results to return
+
+        Returns:
+            List of memory entries sorted by access count (descending)
+        """
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT key, value, metadata, access_count, last_accessed_at, created_at, updated_at
+                FROM user_memory
+                WHERE tenant_id = $1 AND user_id = $2 AND access_count > 0
+                ORDER BY access_count DESC
+                LIMIT $3
+                """,
+                tenant_id,
+                user_id,
+                limit,
+            )
+            return [self._memory_row_to_dict(row) for row in rows]
+
+    def _memory_row_to_dict(self, row) -> Dict[str, Any]:
+        """
+        Convert a memory table row to a dictionary with proper JSON parsing.
+
+        Args:
+            row: Database row from session_memory or user_memory table
+
+        Returns:
+            Dictionary with parsed JSON fields and formatted timestamps
+        """
+        if not row:
+            return {}
+        result = dict(row)
+
+        # Parse JSON fields
+        for field in ("value", "metadata"):
+            if field in result and result[field] is not None:
+                if isinstance(result[field], str):
+                    try:
+                        result[field] = json.loads(result[field])
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Keep original value if parsing fails
+
+        # Convert datetime fields to ISO format strings
+        for field in ("created_at", "updated_at", "last_accessed_at"):
+            if field in result and isinstance(result[field], datetime):
+                result[field] = result[field].isoformat()
+
+        return result

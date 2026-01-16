@@ -1,15 +1,20 @@
 """
 Confluence Image Processor.
 
-Handles downloading, storing, and embedding images from Confluence pages.
-Integrates with storage service (S3/OSS), DashScope multimodal embedding,
-and VLM service for generating image descriptions.
+Handles downloading, storing, and processing images from Confluence pages.
+Integrates with storage service (S3/OSS) and VLM service for generating
+image descriptions.
 
 Key features:
 - Download images from Confluence attachments
 - Store images in S3/OSS/local storage
-- Generate multimodal embeddings for image-text retrieval
-- Generate VLM descriptions for enhanced RAG retrieval (hybrid approach)
+- Generate VLM descriptions for text-based RAG retrieval
+- Return ImageSegment with VLM description (embedding generated separately by sync_service)
+
+Architecture (Text-First RAG):
+- Images are stored in S3, VLM descriptions are embedded as text using Gemini
+- No multimodal embedding - all content uses the same text embedding model
+- Image retrieval via VLM description, original images served via presigned URL
 """
 
 from __future__ import annotations
@@ -26,7 +31,6 @@ from .parser import ImageReference, extract_embeddable_images
 if TYPE_CHECKING:
     from .client import ConfluenceClient
     from ...storage.image_storage import ImageStorageService
-    from ..embedding import DashScopeMultimodalEmbedding
     from ..vlm_service import DashScopeVLMService
 
 logger = logging.getLogger(__name__)
@@ -60,7 +64,7 @@ class ConfluenceImageProcessor:
     """
     Confluence 图片处理器
 
-    负责从 Confluence 页面下载图片、存储到对象存储、生成多模态嵌入和 VLM 描述。
+    负责从 Confluence 页面下载图片、存储到对象存储、生成 VLM 描述。
 
     Workflow:
     1. Get page attachments from Confluence API
@@ -68,27 +72,24 @@ class ConfluenceImageProcessor:
     3. Download images (respecting size limits)
     4. Upload to storage (S3/OSS/local)
     5. Generate VLM descriptions for RAG retrieval (if VLM service enabled)
-    6. Generate multimodal embeddings via DashScope (if embedding enabled)
-    7. Return ImageSegment objects for vector indexing
+    6. Return ImageSegment objects (embedding generated separately by sync_service)
 
-    Hybrid RAG Strategy:
-    - VLM descriptions provide searchable text for text-based retrieval
-    - Multimodal embeddings enable direct image-text similarity search
-    - Both approaches complement each other for best retrieval quality
+    Text-First RAG Strategy:
+    - VLM descriptions are embedded as text using Gemini embedding
+    - Images are stored in S3 and served via presigned URLs
+    - Unified text embedding space for both text and image descriptions
     """
 
     def __init__(
         self,
         confluence_client: "ConfluenceClient",
         storage_service: "ImageStorageService",
-        multimodal_embedding: Optional["BaseEmbedding"] = None,  # Accept any multimodal embedding
         vlm_service: Optional["DashScopeVLMService"] = None,
         max_image_size: int = MAX_IMAGE_SIZE_BYTES,
         max_images_per_page: int = 50,
         generate_vlm_descriptions: bool = True,
         max_concurrent_vlm: int = 5,
         max_concurrent_upload: int = 10,
-        max_concurrent_embed: int = 5,
     ):
         """
         初始化图片处理器
@@ -96,25 +97,21 @@ class ConfluenceImageProcessor:
         Args:
             confluence_client: Confluence API 客户端
             storage_service: 图片存储服务
-            multimodal_embedding: 多模态嵌入服务 (可选)
             vlm_service: VLM 图片描述服务 (可选)
             max_image_size: 单张图片最大大小 (bytes)
             max_images_per_page: 每页最大处理图片数
             generate_vlm_descriptions: 是否生成 VLM 描述
             max_concurrent_vlm: VLM 最大并发数 (默认5)
             max_concurrent_upload: 存储上传最大并发数 (默认10)
-            max_concurrent_embed: Embedding 最大并发数 (默认5)
         """
         self.client = confluence_client
         self.storage = storage_service
-        self.embedding = multimodal_embedding
         self.vlm_service = vlm_service
         self.max_image_size = max_image_size
         self.max_images_per_page = max_images_per_page
         self.generate_vlm_descriptions = generate_vlm_descriptions
         self.max_concurrent_vlm = max_concurrent_vlm
         self.max_concurrent_upload = max_concurrent_upload
-        self.max_concurrent_embed = max_concurrent_embed
 
         if vlm_service:
             logger.info(
@@ -129,7 +126,6 @@ class ConfluenceImageProcessor:
         tenant_id: str,
         page_content: Optional[str] = None,
         page_title: Optional[str] = None,
-        generate_embeddings: bool = True,
     ) -> ImageProcessingResult:
         """
         处理页面中的图片
@@ -140,10 +136,11 @@ class ConfluenceImageProcessor:
             tenant_id: 租户 ID
             page_content: 页面内容 (用于提取图片上下文)
             page_title: 页面标题 (用于 VLM 上下文)
-            generate_embeddings: 是否生成多模态嵌入
 
         Returns:
             ImageProcessingResult 包含处理结果
+            - segments: ImageSegment 列表，包含 VLM 描述但不包含 embedding
+            - embedding 将由 sync_service 统一使用 Gemini 生成
 
         Notes:
             On critical failure, uploaded images are rolled back (deleted)
@@ -205,7 +202,6 @@ class ConfluenceImageProcessor:
             # 4. Process images concurrently with semaphore-based rate limiting
             vlm_semaphore = asyncio.Semaphore(self.max_concurrent_vlm)
             upload_semaphore = asyncio.Semaphore(self.max_concurrent_upload)
-            embed_semaphore = asyncio.Semaphore(self.max_concurrent_embed)
 
             async def process_with_error_handling(
                 attachment: ConfluenceAttachment,
@@ -228,11 +224,9 @@ class ConfluenceImageProcessor:
                         context_index=context_info.get("context_index"),
                         context_alt=context_info.get("alt_text"),
                         context_title=context_info.get("title"),
-                        generate_embedding=generate_embeddings,
                         page_title=page_title,
                         vlm_semaphore=vlm_semaphore,
                         upload_semaphore=upload_semaphore,
-                        embed_semaphore=embed_semaphore,
                     )
                     # Track uploaded URL for potential rollback
                     if segment and segment.storage_url:
@@ -367,7 +361,6 @@ class ConfluenceImageProcessor:
         context_index: Optional[int] = None,
         context_alt: Optional[str] = None,
         context_title: Optional[str] = None,
-        generate_embedding: bool = True,
         page_title: Optional[str] = None,
     ) -> Optional[ImageSegment]:
         """
@@ -378,11 +371,14 @@ class ConfluenceImageProcessor:
             document_id: 文档 ID
             tenant_id: 租户 ID
             context: 图片上下文文本
-            generate_embedding: 是否生成嵌入
             page_title: 页面标题（用于 VLM 上下文）
 
         Returns:
             ImageSegment 或 None (如果跳过)
+
+        Note:
+            返回的 ImageSegment 包含 VLM 描述但不包含 embedding
+            embedding 由 sync_service 统一使用 Gemini 生成
         """
         # Check file size
         if attachment.file_size > self.max_image_size:
@@ -452,40 +448,6 @@ class ConfluenceImageProcessor:
                 logger.warning(f"Failed to generate VLM description for {attachment.filename}: {e}")
                 # Continue without VLM description - image still stored
 
-        # Generate embedding if requested
-        vector_id: Optional[str] = None
-        embedding_vector: Optional[List[float]] = None
-
-        if generate_embedding and self.embedding:
-            try:
-                # Use image + VLM description + context for combined embedding
-                combined_text = ""
-                if vlm_description:
-                    combined_text = vlm_description
-                if context:
-                    combined_text = f"{combined_text}\n{context}" if combined_text else context
-
-                if combined_text:
-                    embedding_vector = await self.embedding.embed_image_and_text(
-                        image_bytes=image_bytes,
-                        text=combined_text,
-                    )
-                else:
-                    vectors = await self.embedding.embed_images([image_bytes])
-                    if vectors:
-                        embedding_vector = vectors[0]
-
-                if embedding_vector:
-                    vector_id = segment_id  # Will be set when stored in Qdrant
-                    logger.debug(
-                        f"Generated embedding for {attachment.filename}, "
-                        f"dimension={len(embedding_vector)}"
-                    )
-
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for {attachment.filename}: {e}")
-                # Continue without embedding - image still stored
-
         metadata = {
             "confluence_attachment_id": attachment.attachment_id,
             "page_id": attachment.page_id,
@@ -500,7 +462,7 @@ class ConfluenceImageProcessor:
         if context_title:
             metadata["context_title"] = context_title
 
-        # Create segment with VLM description and attachment metadata for change detection
+        # Create segment with VLM description (no embedding - generated by sync_service)
         segment = ImageSegment(
             segment_id=segment_id,
             document_id=document_id,
@@ -509,10 +471,10 @@ class ConfluenceImageProcessor:
             media_type=attachment.media_type,
             file_size=len(image_bytes),
             storage_url=storage_url,
-            vector_id=vector_id,
+            vector_id=None,  # Will be set after Gemini embedding in sync_service
             context_text=context,
             vlm_description=vlm_description,
-            embedding=embedding_vector,
+            embedding=None,  # Generated by sync_service using Gemini
             metadata=metadata,
         )
 
@@ -528,11 +490,9 @@ class ConfluenceImageProcessor:
         context_index: Optional[int] = None,
         context_alt: Optional[str] = None,
         context_title: Optional[str] = None,
-        generate_embedding: bool = True,
         page_title: Optional[str] = None,
         vlm_semaphore: Optional[asyncio.Semaphore] = None,
         upload_semaphore: Optional[asyncio.Semaphore] = None,
-        embed_semaphore: Optional[asyncio.Semaphore] = None,
     ) -> Optional[ImageSegment]:
         """
         处理单张图片（并发版本，带信号量控制）
@@ -542,14 +502,16 @@ class ConfluenceImageProcessor:
             document_id: 文档 ID
             tenant_id: 租户 ID
             context: 图片上下文文本
-            generate_embedding: 是否生成嵌入
             page_title: 页面标题（用于 VLM 上下文）
             vlm_semaphore: VLM 调用信号量
             upload_semaphore: 上传操作信号量
-            embed_semaphore: Embedding 操作信号量
 
         Returns:
             ImageSegment 或 None (如果跳过)
+
+        Note:
+            返回的 ImageSegment 包含 VLM 描述但不包含 embedding
+            embedding 由 sync_service 统一使用 Gemini 生成
         """
         # Check file size
         if attachment.file_size > self.max_image_size:
@@ -648,55 +610,6 @@ class ConfluenceImageProcessor:
             except Exception as e:
                 logger.warning(f"Failed to generate VLM description for {attachment.filename}: {e}")
 
-        # Generate embedding with semaphore
-        vector_id: Optional[str] = None
-        embedding_vector: Optional[List[float]] = None
-
-        if generate_embedding and self.embedding:
-            async def embed_with_limit():
-                if embed_semaphore:
-                    async with embed_semaphore:
-                        combined_text = ""
-                        if vlm_description:
-                            combined_text = vlm_description
-                        if context:
-                            combined_text = f"{combined_text}\n{context}" if combined_text else context
-
-                        if combined_text:
-                            return await self.embedding.embed_image_and_text(
-                                image_bytes=image_bytes,
-                                text=combined_text,
-                            )
-                        else:
-                            vectors = await self.embedding.embed_images([image_bytes])
-                            return vectors[0] if vectors else None
-                else:
-                    combined_text = ""
-                    if vlm_description:
-                        combined_text = vlm_description
-                    if context:
-                        combined_text = f"{combined_text}\n{context}" if combined_text else context
-
-                    if combined_text:
-                        return await self.embedding.embed_image_and_text(
-                            image_bytes=image_bytes,
-                            text=combined_text,
-                        )
-                    else:
-                        vectors = await self.embedding.embed_images([image_bytes])
-                        return vectors[0] if vectors else None
-
-            try:
-                embedding_vector = await embed_with_limit()
-                if embedding_vector:
-                    vector_id = segment_id
-                    logger.debug(
-                        f"Generated embedding for {attachment.filename}, "
-                        f"dimension={len(embedding_vector)}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to generate embedding for {attachment.filename}: {e}")
-
         metadata = {
             "confluence_attachment_id": attachment.attachment_id,
             "page_id": attachment.page_id,
@@ -711,7 +624,7 @@ class ConfluenceImageProcessor:
         if context_title:
             metadata["context_title"] = context_title
 
-        # Create segment
+        # Create segment with VLM description (no embedding - generated by sync_service)
         segment = ImageSegment(
             segment_id=segment_id,
             document_id=document_id,
@@ -720,10 +633,10 @@ class ConfluenceImageProcessor:
             media_type=attachment.media_type,
             file_size=len(image_bytes),
             storage_url=storage_url,
-            vector_id=vector_id,
+            vector_id=None,  # Will be set after Gemini embedding in sync_service
             context_text=context,
             vlm_description=vlm_description,
-            embedding=embedding_vector,
+            embedding=None,  # Generated by sync_service using Gemini
             metadata=metadata,
         )
 
@@ -817,7 +730,6 @@ async def create_image_processor(
     confluence_client: "ConfluenceClient",
     storage_service: "ImageStorageService",
     dashscope_api_key: Optional[str] = None,
-    multimodal_model: str = "multimodal-embedding-v1",
     vlm_model: str = "qwen-vl-max",
     max_image_size: int = MAX_IMAGE_SIZE_BYTES,
     enable_vlm_descriptions: bool = True,
@@ -825,45 +737,35 @@ async def create_image_processor(
     """
     创建图片处理器实例
 
+    Text-First RAG 架构:
+    - 只初始化 VLM 服务用于生成图片描述
+    - 不再初始化多模态嵌入（embedding 由 sync_service 统一使用 Gemini 生成）
+
     Args:
         confluence_client: Confluence 客户端
         storage_service: 存储服务
-        dashscope_api_key: DashScope API key (可选)
-        multimodal_model: 多模态嵌入模型名称
-        vlm_model: VLM 图片描述模型名称
+        dashscope_api_key: DashScope API key (用于 VLM 服务)
+        vlm_model: VLM 图片描述模型名称 (default: qwen-vl-max)
         max_image_size: 最大图片大小
         enable_vlm_descriptions: 是否启用 VLM 描述生成
 
     Returns:
         ConfluenceImageProcessor 实例
     """
-    multimodal_embedding = None
     vlm_service = None
 
-    if dashscope_api_key:
-        # Initialize unified multimodal embedding for consistent text-image vector space
-        from ..embedding import UnifiedMultimodalEmbedding
-        # Use tongyi-embedding-vision-plus for best cross-modal search performance
-        unified_model = "tongyi-embedding-vision-plus"
-        multimodal_embedding = UnifiedMultimodalEmbedding(
-            model=unified_model,
+    # Initialize VLM service for image descriptions (if API key provided)
+    if dashscope_api_key and enable_vlm_descriptions:
+        from ..vlm_service import DashScopeVLMService
+        vlm_service = DashScopeVLMService(
             api_key=dashscope_api_key,
+            model=vlm_model,
         )
-        logger.info(f"Initialized UnifiedMultimodalEmbedding with model: {unified_model}")
-
-        # Initialize VLM service for image descriptions
-        if enable_vlm_descriptions:
-            from ..vlm_service import DashScopeVLMService
-            vlm_service = DashScopeVLMService(
-                api_key=dashscope_api_key,
-                model=vlm_model,
-            )
-            logger.info(f"Initialized VLM service with model: {vlm_model}")
+        logger.info(f"Initialized VLM service with model: {vlm_model}")
 
     return ConfluenceImageProcessor(
         confluence_client=confluence_client,
         storage_service=storage_service,
-        multimodal_embedding=multimodal_embedding,
         vlm_service=vlm_service,
         max_image_size=max_image_size,
         generate_vlm_descriptions=enable_vlm_descriptions,

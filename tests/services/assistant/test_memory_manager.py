@@ -228,10 +228,11 @@ class TestSessionMemoryLayerStore:
         mock_db = MagicMock()
         mock_db.store_session_memory = AsyncMock()
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="session_123")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="tenant_1", session_id="session_123")
         await layer.store("key1", {"data": "value"}, metadata={"source": "test"})
 
         mock_db.store_session_memory.assert_called_once_with(
+            tenant_id="tenant_1",
             session_id="session_123",
             key="key1",
             value={"data": "value"},
@@ -244,10 +245,11 @@ class TestSessionMemoryLayerStore:
         mock_db = MagicMock()
         mock_db.store_session_memory = AsyncMock()
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="s1")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         await layer.store("key1", "value1")
 
         mock_db.store_session_memory.assert_called_once_with(
+            tenant_id="t1",
             session_id="s1",
             key="key1",
             value="value1",
@@ -264,10 +266,11 @@ class TestSessionMemoryLayerRetrieve:
         mock_db = MagicMock()
         mock_db.get_session_memory = AsyncMock(return_value={"data": "value"})
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="session_123")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="tenant_1", session_id="session_123")
         result = await layer.retrieve("key1")
 
         mock_db.get_session_memory.assert_called_once_with(
+            tenant_id="tenant_1",
             session_id="session_123",
             key="key1",
         )
@@ -279,7 +282,7 @@ class TestSessionMemoryLayerRetrieve:
         mock_db = MagicMock()
         mock_db.get_session_memory = AsyncMock(return_value=None)
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="s1")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         result = await layer.retrieve("nonexistent")
 
         assert result is None
@@ -296,10 +299,11 @@ class TestSessionMemoryLayerSearch:
             return_value=[{"key": "task_1", "value": "data"}]
         )
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="s1")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         results = await layer.search("task", limit=5)
 
         mock_db.search_session_memory.assert_called_once_with(
+            tenant_id="t1",
             session_id="s1",
             query="task",
             limit=5,
@@ -316,10 +320,11 @@ class TestSessionMemoryLayerDelete:
         mock_db = MagicMock()
         mock_db.delete_session_memory = AsyncMock(return_value=True)
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="s1")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         result = await layer.delete("key1")
 
         mock_db.delete_session_memory.assert_called_once_with(
+            tenant_id="t1",
             session_id="s1",
             key="key1",
         )
@@ -331,10 +336,10 @@ class TestSessionMemoryLayerDelete:
         mock_db = MagicMock()
         mock_db.clear_session_memory = AsyncMock()
 
-        layer = SessionMemoryLayer(db=mock_db, session_id="s1")
+        layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         await layer.clear()
 
-        mock_db.clear_session_memory.assert_called_once_with(session_id="s1")
+        mock_db.clear_session_memory.assert_called_once_with(tenant_id="t1", session_id="s1")
 
 
 # =============================================================================
@@ -351,10 +356,11 @@ class TestLongTermMemoryLayerStore:
         mock_db = MagicMock()
         mock_db.store_user_memory = AsyncMock()
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="user_123")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="tenant_1", user_id="user_123")
         await layer.store("preference", {"theme": "dark"}, metadata={"type": "pref"})
 
         mock_db.store_user_memory.assert_called_once_with(
+            tenant_id="tenant_1",
             user_id="user_123",
             key="preference",
             value={"theme": "dark"},
@@ -371,10 +377,11 @@ class TestLongTermMemoryLayerRetrieve:
         mock_db = MagicMock()
         mock_db.get_user_memory = AsyncMock(return_value={"theme": "dark"})
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="user_123")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="tenant_1", user_id="user_123")
         result = await layer.retrieve("preference")
 
         mock_db.get_user_memory.assert_called_once_with(
+            tenant_id="tenant_1",
             user_id="user_123",
             key="preference",
         )
@@ -392,10 +399,11 @@ class TestLongTermMemoryLayerSearch:
             return_value=[{"key": "pref_1", "value": "dark"}]
         )
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         results = await layer.search("pref", limit=5)
 
         mock_db.search_user_memory.assert_called_once_with(
+            tenant_id="t1",
             user_id="u1",
             query="pref",
             limit=5,
@@ -418,7 +426,7 @@ class TestLongTermMemoryLayerPreferences:
         }
         mock_db.get_user_memory = AsyncMock(return_value=stored_prefs)
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         result = await layer.get_preferences()
 
         assert result["language"] == "en-US"
@@ -430,7 +438,7 @@ class TestLongTermMemoryLayerPreferences:
         mock_db = MagicMock()
         mock_db.get_user_memory = AsyncMock(return_value=None)
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         result = await layer.get_preferences()
 
         assert result == LongTermMemoryLayer.DEFAULT_PREFERENCES
@@ -442,7 +450,7 @@ class TestLongTermMemoryLayerPreferences:
         # Only has some preferences set
         mock_db.get_user_memory = AsyncMock(return_value={"language": "fr-FR"})
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         result = await layer.get_preferences()
 
         # Should have the stored language
@@ -459,7 +467,7 @@ class TestLongTermMemoryLayerPreferences:
         mock_db.get_user_memory = AsyncMock(return_value=None)
         mock_db.store_user_memory = AsyncMock()
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         result = await layer.update_preferences({"language": "ja-JP"})
 
         # Should return updated preferences
@@ -468,6 +476,7 @@ class TestLongTermMemoryLayerPreferences:
         # Should call store with correct parameters
         mock_db.store_user_memory.assert_called_once()
         call_args = mock_db.store_user_memory.call_args
+        assert call_args.kwargs["tenant_id"] == "t1"
         assert call_args.kwargs["user_id"] == "u1"
         assert call_args.kwargs["key"] == "user_preferences"
         assert call_args.kwargs["value"]["language"] == "ja-JP"
@@ -492,10 +501,11 @@ class TestLongTermMemoryLayerDelete:
         mock_db = MagicMock()
         mock_db.delete_user_memory = AsyncMock(return_value=True)
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         result = await layer.delete("key1")
 
         mock_db.delete_user_memory.assert_called_once_with(
+            tenant_id="t1",
             user_id="u1",
             key="key1",
         )
@@ -509,10 +519,11 @@ class TestLongTermMemoryLayerDelete:
             return_value=[{"key": "common_pref", "access_count": 50}]
         )
 
-        layer = LongTermMemoryLayer(db=mock_db, user_id="u1")
+        layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         results = await layer.get_frequently_accessed(limit=5)
 
         mock_db.get_frequently_accessed_user_memory.assert_called_once_with(
+            tenant_id="t1",
             user_id="u1",
             limit=5,
         )
@@ -531,18 +542,19 @@ class TestMemoryManagerInit:
         """Test initialization creates all three memory layers."""
         mock_db = MagicMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         assert isinstance(manager.working, WorkingMemoryLayer)
         assert isinstance(manager.session, SessionMemoryLayer)
         assert isinstance(manager.long_term, LongTermMemoryLayer)
 
     def test_init_sets_properties(self):
-        """Test initialization sets session_id and user_id properties."""
+        """Test initialization sets tenant_id, session_id and user_id properties."""
         mock_db = MagicMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
+        assert manager.tenant_id == "t1"
         assert manager.session_id == "s1"
         assert manager.user_id == "u1"
 
@@ -554,7 +566,7 @@ class TestMemoryManagerRemember:
     async def test_remember_default_layer(self):
         """Test remember stores in working memory by default."""
         mock_db = MagicMock()
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         await manager.remember("key1", "value1")
 
@@ -565,7 +577,7 @@ class TestMemoryManagerRemember:
     async def test_remember_working_layer(self):
         """Test remember with explicit working layer."""
         mock_db = MagicMock()
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         await manager.remember("key1", "value1", layer="working")
 
@@ -578,7 +590,7 @@ class TestMemoryManagerRemember:
         mock_db = MagicMock()
         mock_db.store_session_memory = AsyncMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.remember("key1", "value1", layer="session")
 
         mock_db.store_session_memory.assert_called_once()
@@ -589,7 +601,7 @@ class TestMemoryManagerRemember:
         mock_db = MagicMock()
         mock_db.store_user_memory = AsyncMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.remember("key1", "value1", layer="long_term")
 
         mock_db.store_user_memory.assert_called_once()
@@ -598,7 +610,7 @@ class TestMemoryManagerRemember:
     async def test_remember_with_metadata(self):
         """Test remember passes metadata correctly."""
         mock_db = MagicMock()
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         await manager.remember("key1", "value1", metadata={"type": "test"})
 
@@ -609,7 +621,7 @@ class TestMemoryManagerRemember:
     async def test_remember_invalid_layer_raises_error(self):
         """Test remember raises ValueError for invalid layer."""
         mock_db = MagicMock()
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         with pytest.raises(ValueError) as exc_info:
             await manager.remember("key1", "value1", layer="invalid")
@@ -627,7 +639,7 @@ class TestMemoryManagerRecall:
         mock_db.get_session_memory = AsyncMock(return_value=None)
         mock_db.get_user_memory = AsyncMock(return_value=None)
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.working.store("key1", "working_value")
 
         result = await manager.recall("key1")
@@ -640,7 +652,7 @@ class TestMemoryManagerRecall:
         mock_db.get_session_memory = AsyncMock(return_value="session_value")
         mock_db.get_user_memory = AsyncMock(return_value=None)
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         result = await manager.recall("key1")
         assert result == "session_value"
@@ -652,7 +664,7 @@ class TestMemoryManagerRecall:
         mock_db.get_session_memory = AsyncMock(return_value=None)
         mock_db.get_user_memory = AsyncMock(return_value="long_term_value")
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         result = await manager.recall("key1")
         assert result == "long_term_value"
@@ -664,7 +676,7 @@ class TestMemoryManagerRecall:
         mock_db.get_session_memory = AsyncMock(return_value=None)
         mock_db.get_user_memory = AsyncMock(return_value=None)
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         result = await manager.recall("nonexistent")
         assert result is None
@@ -676,7 +688,7 @@ class TestMemoryManagerRecall:
         mock_db.get_session_memory = AsyncMock(return_value="session_value")
         mock_db.get_user_memory = AsyncMock(return_value="long_term_value")
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.working.store("key1", "working_value")
 
         result = await manager.recall("key1")
@@ -702,7 +714,7 @@ class TestMemoryManagerSearchAll:
             return_value=[{"key": "user_task", "value": "u_data"}]
         )
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.working.store("working_task", "w_data")
 
         results = await manager.search_all("task")
@@ -721,7 +733,7 @@ class TestMemoryManagerSearchAll:
         mock_db.search_session_memory = AsyncMock(return_value=[])
         mock_db.search_user_memory = AsyncMock(return_value=[])
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.working.store("key1", "value1")
 
         results = await manager.search_all("key1")
@@ -739,7 +751,7 @@ class TestMemoryManagerSearchAll:
             return_value=[{"key": f"u_{i}", "value": f"v_{i}"} for i in range(5)]
         )
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         for i in range(5):
             await manager.working.store(f"w_{i}", f"v_{i}")
 
@@ -758,7 +770,7 @@ class TestMemoryManagerSearchAll:
             return_value=[{"key": "user_key", "value": "user_val"}]
         )
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.working.store("working_key", "working_val")
 
         results = await manager.search_all("key")
@@ -776,7 +788,7 @@ class TestMemoryManagerPreferences:
         mock_db = MagicMock()
         mock_db.get_user_memory = AsyncMock(return_value={"language": "en-US"})
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         result = await manager.get_user_preferences()
 
         assert result["language"] == "en-US"
@@ -788,7 +800,7 @@ class TestMemoryManagerPreferences:
         mock_db.get_user_memory = AsyncMock(return_value=None)
         mock_db.store_user_memory = AsyncMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         result = await manager.update_user_preferences({"language": "de-DE"})
 
         assert result["language"] == "de-DE"
@@ -801,7 +813,7 @@ class TestMemoryManagerClear:
     def test_clear_working_memory(self):
         """Test clear_working_memory clears only working memory."""
         mock_db = MagicMock()
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         manager.working._storage = {"key1": "value1"}
 
         manager.clear_working_memory()
@@ -814,10 +826,10 @@ class TestMemoryManagerClear:
         mock_db = MagicMock()
         mock_db.clear_session_memory = AsyncMock()
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
         await manager.clear_session_memory()
 
-        mock_db.clear_session_memory.assert_called_once_with(session_id="s1")
+        mock_db.clear_session_memory.assert_called_once_with(tenant_id="t1", session_id="s1")
 
 
 # =============================================================================
@@ -837,7 +849,7 @@ class TestMemoryManagerIntegration:
         mock_db.get_session_memory = AsyncMock(return_value=None)
         mock_db.get_user_memory = AsyncMock(return_value=None)
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         # Store current task in working memory
         await manager.remember("current_task", {"step": 1, "status": "in_progress"})
@@ -871,7 +883,7 @@ class TestMemoryManagerIntegration:
         mock_db.get_session_memory = AsyncMock(return_value=None)
         mock_db.get_user_memory = AsyncMock(return_value="default_format")
 
-        manager = MemoryManager(db=mock_db, session_id="s1", user_id="u1")
+        manager = MemoryManager(db=mock_db, tenant_id="t1", user_id="u1", session_id="s1")
 
         # No value in working or session, should find in long-term
         result = await manager.recall("output_format")

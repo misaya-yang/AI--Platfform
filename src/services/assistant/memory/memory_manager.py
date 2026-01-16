@@ -20,7 +20,9 @@ Architecture:
 
 Usage:
     ```python
-    manager = MemoryManager(db=database, session_id="s1", user_id="u1")
+    manager = MemoryManager(
+        db=database, tenant_id="tenant1", user_id="u1", session_id="s1"
+    )
 
     # Store in working memory (default)
     await manager.remember("current_task", {"step": 1, "status": "processing"})
@@ -55,47 +57,47 @@ class MemoryDatabase(Protocol):
     This protocol defines the methods that will be implemented in Task 3.4
     for session and user memory persistence.
 
-    Note: The database implementation will handle tenant_id internally by
-    looking up the tenant from session_id or user_id. The caller does not
-    need to provide tenant_id explicitly.
+    Multi-tenancy: All methods require tenant_id as the first parameter
+    to ensure proper data isolation between tenants. The caller must
+    provide the tenant_id explicitly for all database operations.
     """
 
     async def store_session_memory(
-        self, session_id: str, key: str, value: Any, metadata: Optional[dict]
+        self, tenant_id: str, session_id: str, key: str, value: Any, metadata: Optional[dict]
     ) -> None: ...
 
     async def get_session_memory(
-        self, session_id: str, key: str
+        self, tenant_id: str, session_id: str, key: str
     ) -> Optional[Any]: ...
 
     async def search_session_memory(
-        self, session_id: str, query: str, limit: int
+        self, tenant_id: str, session_id: str, query: str, limit: int
     ) -> List[Dict[str, Any]]: ...
 
     async def delete_session_memory(
-        self, session_id: str, key: str
+        self, tenant_id: str, session_id: str, key: str
     ) -> bool: ...
 
-    async def clear_session_memory(self, session_id: str) -> None: ...
+    async def clear_session_memory(self, tenant_id: str, session_id: str) -> None: ...
 
     async def store_user_memory(
-        self, user_id: str, key: str, value: Any, metadata: Optional[dict]
+        self, tenant_id: str, user_id: str, key: str, value: Any, metadata: Optional[dict]
     ) -> None: ...
 
     async def get_user_memory(
-        self, user_id: str, key: str
+        self, tenant_id: str, user_id: str, key: str
     ) -> Optional[Any]: ...
 
     async def search_user_memory(
-        self, user_id: str, query: str, limit: int
+        self, tenant_id: str, user_id: str, query: str, limit: int
     ) -> List[Dict[str, Any]]: ...
 
     async def delete_user_memory(
-        self, user_id: str, key: str
+        self, tenant_id: str, user_id: str, key: str
     ) -> bool: ...
 
     async def get_frequently_accessed_user_memory(
-        self, user_id: str, limit: int
+        self, tenant_id: str, user_id: str, limit: int
     ) -> List[Dict[str, Any]]: ...
 
 
@@ -257,18 +259,21 @@ class SessionMemoryLayer(MemoryLayer):
 
     Attributes:
         db: Database instance for persistence
+        tenant_id: The tenant ID for multi-tenancy isolation
         session_id: The session ID this memory belongs to
     """
 
-    def __init__(self, db: MemoryDatabase, session_id: str) -> None:
+    def __init__(self, db: MemoryDatabase, tenant_id: str, session_id: str) -> None:
         """
         Initialize session memory layer.
 
         Args:
             db: Database instance for persistence
+            tenant_id: The tenant ID for multi-tenancy isolation
             session_id: The session ID this memory belongs to
         """
         self.db = db
+        self.tenant_id = tenant_id
         self.session_id = session_id
 
     async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
@@ -281,6 +286,7 @@ class SessionMemoryLayer(MemoryLayer):
             metadata: Optional metadata about the stored value
         """
         await self.db.store_session_memory(
+            tenant_id=self.tenant_id,
             session_id=self.session_id,
             key=key,
             value=value,
@@ -298,6 +304,7 @@ class SessionMemoryLayer(MemoryLayer):
             The stored value if found, None otherwise
         """
         return await self.db.get_session_memory(
+            tenant_id=self.tenant_id,
             session_id=self.session_id,
             key=key,
         )
@@ -314,6 +321,7 @@ class SessionMemoryLayer(MemoryLayer):
             List of matching entries with key, value, and metadata
         """
         return await self.db.search_session_memory(
+            tenant_id=self.tenant_id,
             session_id=self.session_id,
             query=query,
             limit=limit,
@@ -330,13 +338,17 @@ class SessionMemoryLayer(MemoryLayer):
             True if deleted, False if key not found
         """
         return await self.db.delete_session_memory(
+            tenant_id=self.tenant_id,
             session_id=self.session_id,
             key=key,
         )
 
     async def clear(self) -> None:
         """Clear all session memory for this session."""
-        await self.db.clear_session_memory(session_id=self.session_id)
+        await self.db.clear_session_memory(
+            tenant_id=self.tenant_id,
+            session_id=self.session_id,
+        )
 
 
 class LongTermMemoryLayer(MemoryLayer):
@@ -349,6 +361,7 @@ class LongTermMemoryLayer(MemoryLayer):
 
     Attributes:
         db: Database instance for persistence
+        tenant_id: The tenant ID for multi-tenancy isolation
         user_id: The user ID this memory belongs to
     """
 
@@ -360,15 +373,17 @@ class LongTermMemoryLayer(MemoryLayer):
         "default_datasets": [],
     }
 
-    def __init__(self, db: MemoryDatabase, user_id: str) -> None:
+    def __init__(self, db: MemoryDatabase, tenant_id: str, user_id: str) -> None:
         """
         Initialize long-term memory layer.
 
         Args:
             db: Database instance for persistence
+            tenant_id: The tenant ID for multi-tenancy isolation
             user_id: The user ID this memory belongs to
         """
         self.db = db
+        self.tenant_id = tenant_id
         self.user_id = user_id
 
     async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
@@ -381,6 +396,7 @@ class LongTermMemoryLayer(MemoryLayer):
             metadata: Optional metadata about the stored value
         """
         await self.db.store_user_memory(
+            tenant_id=self.tenant_id,
             user_id=self.user_id,
             key=key,
             value=value,
@@ -400,6 +416,7 @@ class LongTermMemoryLayer(MemoryLayer):
             The stored value if found, None otherwise
         """
         return await self.db.get_user_memory(
+            tenant_id=self.tenant_id,
             user_id=self.user_id,
             key=key,
         )
@@ -416,6 +433,7 @@ class LongTermMemoryLayer(MemoryLayer):
             List of matching entries with key, value, and metadata
         """
         return await self.db.search_user_memory(
+            tenant_id=self.tenant_id,
             user_id=self.user_id,
             query=query,
             limit=limit,
@@ -432,6 +450,7 @@ class LongTermMemoryLayer(MemoryLayer):
             True if deleted, False if key not found
         """
         return await self.db.delete_user_memory(
+            tenant_id=self.tenant_id,
             user_id=self.user_id,
             key=key,
         )
@@ -477,6 +496,7 @@ class LongTermMemoryLayer(MemoryLayer):
             List of frequently accessed entries sorted by access count
         """
         return await self.db.get_frequently_accessed_user_memory(
+            tenant_id=self.tenant_id,
             user_id=self.user_id,
             limit=limit,
         )
@@ -500,20 +520,24 @@ class MemoryManager:
         long_term: LongTermMemoryLayer instance
     """
 
-    def __init__(self, db: MemoryDatabase, session_id: str, user_id: str) -> None:
+    def __init__(
+        self, db: MemoryDatabase, tenant_id: str, user_id: str, session_id: str
+    ) -> None:
         """
         Initialize the memory manager with all three layers.
 
         Args:
             db: Database instance for persistent storage
-            session_id: The current session ID
+            tenant_id: The tenant ID for multi-tenancy isolation
             user_id: The current user ID
+            session_id: The current session ID
         """
         self.working = WorkingMemoryLayer()
-        self.session = SessionMemoryLayer(db=db, session_id=session_id)
-        self.long_term = LongTermMemoryLayer(db=db, user_id=user_id)
+        self.session = SessionMemoryLayer(db=db, tenant_id=tenant_id, session_id=session_id)
+        self.long_term = LongTermMemoryLayer(db=db, tenant_id=tenant_id, user_id=user_id)
 
         self._db = db
+        self._tenant_id = tenant_id
         self._session_id = session_id
         self._user_id = user_id
 
@@ -652,6 +676,11 @@ class MemoryManager:
     async def clear_session_memory(self) -> None:
         """Clear all session memory data."""
         await self.session.clear()
+
+    @property
+    def tenant_id(self) -> str:
+        """Get the current tenant ID."""
+        return self._tenant_id
 
     @property
     def session_id(self) -> str:

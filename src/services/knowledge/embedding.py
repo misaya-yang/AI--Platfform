@@ -164,6 +164,230 @@ class OpenAIEmbedding(BaseEmbedding):
         return vectors  # type: ignore[return-value]
 
 
+class GeminiEmbedding(BaseEmbedding):
+    """
+    Google Gemini Embedding API adapter.
+
+    Features:
+    - Task type optimization (RETRIEVAL_DOCUMENT / RETRIEVAL_QUERY)
+    - Matryoshka variable dimensions (768/1024/1536/3072)
+    - Batch embedding support
+    - Connection pooling via httpx
+
+    API Reference: https://ai.google.dev/gemini-api/docs/embeddings
+
+    Usage:
+        embedder = GeminiEmbedding(api_key="your-key", dimension=1024)
+
+        # For indexing documents
+        doc_vectors = await embedder.embed_texts(texts, text_type="document")
+
+        # For search queries
+        query_vector = await embedder.embed_query("search query")
+    """
+
+    MODEL_DIMENSIONS: Dict[str, int] = {
+        "gemini-embedding-001": 768,  # Default, but configurable up to 3072
+        "text-embedding-004": 768,    # Vertex AI model
+    }
+
+    # Task types for retrieval optimization
+    TASK_TYPES: Dict[str, str] = {
+        "query": "RETRIEVAL_QUERY",
+        "document": "RETRIEVAL_DOCUMENT",
+        "similarity": "SEMANTIC_SIMILARITY",
+        "classification": "CLASSIFICATION",
+        "clustering": "CLUSTERING",
+    }
+
+    # Gemini API endpoint
+    GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    # API limits
+    MAX_BATCH_SIZE = 100  # Gemini supports up to 100 texts per batch
+    MAX_TOKENS_PER_TEXT = 2048
+    MAX_RETRIES = 3
+    RETRY_BASE_DELAY = 1.0
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-embedding-001",
+        dimension: int = 1024,
+        base_url: Optional[str] = None,
+        timeout_seconds: float = 30.0,
+    ):
+        """
+        Initialize Gemini Embedding.
+
+        Args:
+            api_key: Google AI API key
+            model: Model name (default: gemini-embedding-001)
+            dimension: Output dimension (768, 1024, 1536, or 3072)
+            base_url: Optional API base URL override
+            timeout_seconds: Request timeout
+        """
+        super().__init__(provider="gemini", model=model, dimension=dimension)
+        if not api_key:
+            raise EmbeddingError("Gemini API key is required")
+
+        self.api_key = api_key
+        self.base_url = base_url or self.GEMINI_API_URL
+        self.output_dimension = dimension
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds, connect=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
+
+    async def embed_query(self, query: str) -> List[float]:
+        """Embed a query using RETRIEVAL_QUERY task type."""
+        # Check cache first
+        cached = get_cached_query_embedding(self.provider, self.model, query)
+        if cached is not None:
+            return cached
+
+        vectors = await self.embed_texts([query], text_type="query")
+        result = vectors[0]
+
+        # Cache the result
+        set_cached_query_embedding(self.provider, self.model, query, result)
+        return result
+
+    async def embed_texts(
+        self,
+        texts: List[str],
+        text_type: Optional[str] = None,
+    ) -> List[List[float]]:
+        """
+        Embed texts using Gemini API.
+
+        Args:
+            texts: List of text strings to embed
+            text_type: "query" for RETRIEVAL_QUERY, "document" for RETRIEVAL_DOCUMENT
+
+        Returns:
+            List of embedding vectors
+        """
+        if not texts:
+            return []
+
+        # Determine task type
+        task_type = self.TASK_TYPES.get(text_type or "document", "RETRIEVAL_DOCUMENT")
+
+        # Process in batches
+        all_vectors: List[List[float]] = []
+
+        for i in range(0, len(texts), self.MAX_BATCH_SIZE):
+            batch = texts[i:i + self.MAX_BATCH_SIZE]
+            batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
+
+            vectors = await self._embed_batch_with_retry(batch, task_type, batch_info)
+            all_vectors.extend(vectors)
+
+        return all_vectors
+
+    async def _embed_batch_with_retry(
+        self,
+        texts: List[str],
+        task_type: str,
+        batch_info: str,
+    ) -> List[List[float]]:
+        """Embed a batch of texts with retry logic."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                return await self._embed_batch(texts, task_type)
+
+            except EmbeddingError as e:
+                if "429" in str(e) or "500" in str(e) or "503" in str(e):
+                    last_error = e
+                    logger.warning(
+                        f"Gemini embedding retryable error ({batch_info}) "
+                        f"attempt {attempt + 1}/{self.MAX_RETRIES}: {e}"
+                    )
+                else:
+                    raise
+
+            except Exception as exc:
+                last_error = EmbeddingError(f"Gemini embedding error ({batch_info}): {exc}")
+                logger.warning(
+                    f"Gemini embedding error ({batch_info}) "
+                    f"attempt {attempt + 1}/{self.MAX_RETRIES}: {exc}"
+                )
+
+            # Exponential backoff
+            if attempt < self.MAX_RETRIES - 1:
+                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+                await asyncio.sleep(delay)
+
+        raise last_error or EmbeddingError(
+            f"Gemini embedding failed after {self.MAX_RETRIES} attempts ({batch_info})"
+        )
+
+    async def _embed_batch(
+        self,
+        texts: List[str],
+        task_type: str,
+    ) -> List[List[float]]:
+        """Call Gemini embedContent API for a batch of texts."""
+        # Build request for batch embedding
+        # Gemini API: POST /v1beta/models/{model}:batchEmbedContents
+        url = f"{self.base_url}/{self.model}:batchEmbedContents"
+
+        # Build requests array
+        requests = []
+        for text in texts:
+            req = {
+                "model": f"models/{self.model}",
+                "content": {"parts": [{"text": text}]},
+                "taskType": task_type,
+            }
+            if self.output_dimension:
+                req["outputDimensionality"] = self.output_dimension
+            requests.append(req)
+
+        payload = {"requests": requests}
+
+        response = await self._client.post(
+            url,
+            json=payload,
+            params={"key": self.api_key},
+            headers={"Content-Type": "application/json"},
+        )
+
+        if response.status_code >= 400:
+            raise EmbeddingError(
+                f"Gemini API error: {response.status_code} - {response.text}"
+            )
+
+        data = response.json()
+
+        # Parse response
+        embeddings = data.get("embeddings", [])
+        if not embeddings:
+            raise EmbeddingError("Gemini API returned no embeddings")
+
+        vectors: List[List[float]] = []
+        for emb in embeddings:
+            values = emb.get("values", [])
+            if not values:
+                raise EmbeddingError("Gemini embedding missing values")
+            vectors.append(values)
+
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
+
+        return vectors
+
+
 class DashScopeEmbedding(BaseEmbedding):
     """DashScope text embeddings adapter.
 
@@ -878,6 +1102,14 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             dimension=dimension,
             base_url=config.base_url,
             max_concurrent=(config.extra or {}).get("max_concurrent", 5),
+        )
+    if provider in {"gemini", "google"}:
+        return GeminiEmbedding(
+            api_key=config.api_key or "",
+            model=config.model or "gemini-embedding-001",
+            dimension=dimension or 1024,
+            base_url=config.base_url,
+            timeout_seconds=config.timeout_seconds,
         )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
 
