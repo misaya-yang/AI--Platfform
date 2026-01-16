@@ -54,6 +54,8 @@ from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
 from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
 from .context_engine import ContextEngine, ContextStructure
 from .working_memory import WorkingMemory, TaskStatus
+from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType
+from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult
 from ..metrics.usage_recorder import get_usage_recorder
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..storage import get_artifact_storage, ArtifactStorageService
@@ -161,6 +163,10 @@ class AssistantConfig:
     use_context_engine: bool = False  # Enable Context Engine for optimized caching
     user_preferences: Optional[str] = None  # User-level preferences for context
     long_term_memory: Optional[str] = None  # Persistent user knowledge
+
+    # Task Planning settings (Phase 2.4: Multi-step task planning)
+    enable_task_planning: bool = False  # Enable task decomposition and parallel execution
+    max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
 
 
 @dataclass
@@ -305,6 +311,8 @@ Please use this web search context to inform your response when relevant."""
         context_config: Optional[ContextConfig] = None,
         enable_rag_evaluation: bool = True,
         code_executor: Optional[CodeExecutorService] = None,
+        task_planner: Optional[TaskPlanner] = None,
+        tool_orchestrator: Optional[ToolOrchestrator] = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -312,6 +320,11 @@ Please use this web search context to inform your response when relevant."""
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
+
+        # Task planning and orchestration (Phase 2.4)
+        # These are created on demand if not provided
+        self._task_planner = task_planner
+        self._tool_orchestrator = tool_orchestrator
 
         # Phase 3: RAG evaluation
         self.enable_rag_evaluation = enable_rag_evaluation
@@ -592,6 +605,35 @@ Please use this web search context to inform your response when relevant."""
                     event_type="error",
                     data={"message": f"File processing failed: {str(e)}", "recoverable": True}
                 )
+
+        # Step 2.6: Task Planning Mode (Phase 2.4)
+        # If task planning is enabled, use the planner and orchestrator
+        # for complex multi-step request execution
+        if config.enable_task_planning:
+            logger.info(f"[TASK PLANNING] Task planning enabled for session {session_id}")
+            async for event in self._execute_with_planning(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                history=processed_history,
+                retrieved_contexts=retrieved_contexts,
+                web_search_context=web_search_context,
+            ):
+                yield event
+
+            # After planning execution, we still need to generate the final response
+            # using the collected results. The working memory contains all results.
+            # Continue to normal model streaming with enhanced context from working memory
+            working_memory = self.get_working_memory(session_id)
+            if working_memory.collected_info:
+                # Inject execution results into web search context for model
+                results_summary = working_memory.to_markdown()
+                if web_search_context:
+                    web_search_context = web_search_context + "\n\n" + results_summary
+                else:
+                    web_search_context = results_summary
+                logger.info(f"[TASK PLANNING] Injected execution results into context")
 
         # Step 3: Build messages (use processed_history with context management applied)
         messages = self._build_messages(
@@ -1742,6 +1784,262 @@ Please use this web search context to inform your response when relevant."""
         """
         if session_id in self._working_memories:
             del self._working_memories[session_id]
+
+    @property
+    def task_planner(self) -> TaskPlanner:
+        """Get or create the task planner instance.
+
+        Returns:
+            TaskPlanner instance for task decomposition.
+        """
+        if self._task_planner is None:
+            self._task_planner = TaskPlanner()
+        return self._task_planner
+
+    def get_tool_orchestrator(self, max_parallel: int = 5) -> ToolOrchestrator:
+        """Get or create a tool orchestrator instance.
+
+        Args:
+            max_parallel: Maximum number of parallel tool executions.
+
+        Returns:
+            ToolOrchestrator instance for parallel tool execution.
+        """
+        if self._tool_orchestrator is None:
+            from .tools import get_tool_registry
+            registry = get_tool_registry()
+            self._tool_orchestrator = ToolOrchestrator(
+                tool_registry=registry,
+                max_parallel=max_parallel,
+            )
+        return self._tool_orchestrator
+
+    async def _execute_with_planning(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: List[Dict[str, str]],
+        retrieved_contexts: List[RetrievedContext],
+        web_search_context: Optional[str] = None,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        """
+        Execute a complex request using task planning and parallel tool execution.
+
+        This method implements Phase 2.4 of the Enterprise Assistant Optimization:
+        1. Creates an execution plan using TaskPlanner
+        2. Sets up WorkingMemory with goal and tasks
+        3. Uses ToolOrchestrator to execute the plan in parallel groups
+        4. Yields progress events (TASK_PLANNING, WORKING_MEMORY_UPDATE)
+        5. Collects results for final response generation
+
+        Args:
+            user: User context for authentication/authorization
+            session_id: Session ID for conversation tracking
+            message: User's message (the request to plan and execute)
+            config: Assistant configuration
+            history: Processed conversation history
+            retrieved_contexts: KB retrieval results
+            web_search_context: Web search results
+
+        Yields:
+            AssistantStreamEvent objects for planning progress and results
+        """
+        logger.info(f"[TASK PLANNING] Starting planning mode for session {session_id}")
+
+        # Get or create working memory for this session
+        working_memory = self.get_working_memory(session_id)
+        working_memory.clear()  # Clear any previous state
+
+        # Get available tools from registry
+        from .tools import get_tool_registry
+        registry = get_tool_registry()
+        available_tools = [tool.name for tool in registry.list_tools()]
+
+        # Add KB retrieval tool if KB service is available
+        if self.kb_service and config.kb_dataset_ids:
+            if "kb_search" not in available_tools:
+                available_tools.append("kb_search")
+
+        # Add web search tool if enabled
+        if config.web_search_enabled and self.tavily_tool.is_configured:
+            if "web_search" not in available_tools:
+                available_tools.append("web_search")
+
+        logger.info(f"[TASK PLANNING] Available tools: {available_tools}")
+
+        # Step 1: Create execution plan using TaskPlanner
+        try:
+            plan = await self.task_planner.create_plan(
+                user_request=message,
+                available_tools=available_tools,
+                context={
+                    "session_id": session_id,
+                    "has_kb_context": len(retrieved_contexts) > 0,
+                    "has_web_context": web_search_context is not None,
+                },
+                use_llm=False,  # Use rule-based planning for now
+            )
+
+            # Yield TASK_PLANNING event with plan details
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TASK_PLANNING.value,
+                data={
+                    "goal": plan.goal,
+                    "tasks": [task.to_dict() for task in plan.tasks],
+                    "parallel_groups": plan.parallel_groups,
+                    "metadata": plan.metadata,
+                    "estimated_duration_ms": plan.get_total_estimated_duration(),
+                }
+            )
+
+            logger.info(
+                f"[TASK PLANNING] Created plan with {len(plan.tasks)} tasks "
+                f"in {len(plan.parallel_groups)} parallel groups"
+            )
+
+        except Exception as e:
+            logger.error(f"[TASK PLANNING] Failed to create plan: {e}")
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.ERROR.value,
+                data={"message": f"Task planning failed: {str(e)}", "recoverable": True}
+            )
+            return
+
+        # Step 2: Set up WorkingMemory with goal and tasks
+        working_memory.set_goal(plan.goal)
+        for task in plan.tasks:
+            working_memory.add_task(task.id, task.description)
+
+        # Yield initial working memory state
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+            data={
+                "session_id": session_id,
+                "goal": working_memory.goal,
+                "tasks": [t.to_dict() for t in working_memory.tasks],
+                "progress": working_memory.get_progress(),
+            }
+        )
+
+        # Step 3: Execute plan using ToolOrchestrator
+        orchestrator = self.get_tool_orchestrator(max_parallel=config.max_parallel_tools)
+        collected_results: List[ToolExecutionResult] = []
+
+        try:
+            async for result in orchestrator.execute_plan(plan, working_memory):
+                # Store result for final response generation
+                collected_results.append(result)
+
+                # Yield working memory update for each task completion
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+                    data={
+                        "session_id": session_id,
+                        "goal": working_memory.goal,
+                        "tasks": [t.to_dict() for t in working_memory.tasks],
+                        "progress": working_memory.get_progress(),
+                        "last_completed_task": {
+                            "task_id": result.task_id,
+                            "tool": result.tool,
+                            "success": result.success,
+                            "duration_ms": result.duration_ms,
+                            "error": result.error,
+                        },
+                    }
+                )
+
+                # Also yield tool result event for frontend visualization
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TOOL_RESULT.value,
+                    data={
+                        "tool_call_id": result.task_id,
+                        "tool_name": result.tool,
+                        "success": result.success,
+                        "result": str(result.result)[:1000] if result.result else None,
+                        "error": result.error,
+                        "duration_ms": result.duration_ms,
+                    }
+                )
+
+                logger.info(
+                    f"[TASK PLANNING] Task {result.task_id} completed: "
+                    f"success={result.success}, duration={result.duration_ms:.1f}ms"
+                )
+
+        except Exception as e:
+            logger.error(f"[TASK PLANNING] Execution failed: {e}")
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.ERROR.value,
+                data={"message": f"Task execution failed: {str(e)}", "recoverable": True}
+            )
+
+        # Step 4: Generate final response using collected results
+        # Build a context message with all collected results
+        results_context = self._format_execution_results(collected_results)
+        if results_context:
+            working_memory.add_info(
+                key="execution_results",
+                value=results_context,
+                source="tool_orchestrator"
+            )
+
+        # Store collected results in working memory for downstream use
+        for result in collected_results:
+            if result.success and result.result:
+                working_memory.add_info(
+                    key=f"result_{result.task_id}",
+                    value=str(result.result)[:500],
+                    source=result.tool,
+                )
+
+        # Final working memory state
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+            data={
+                "session_id": session_id,
+                "goal": working_memory.goal,
+                "tasks": [t.to_dict() for t in working_memory.tasks],
+                "progress": working_memory.get_progress(),
+                "collected_info": [info.to_dict() for info in working_memory.collected_info],
+                "complete": True,
+            }
+        )
+
+        logger.info(
+            f"[TASK PLANNING] Execution complete: {working_memory.get_progress()}"
+        )
+
+    def _format_execution_results(self, results: List[ToolExecutionResult]) -> str:
+        """Format tool execution results for context injection.
+
+        Args:
+            results: List of tool execution results
+
+        Returns:
+            Formatted string summarizing execution results
+        """
+        if not results:
+            return ""
+
+        parts = ["## Task Execution Results\n"]
+        for result in results:
+            status = "SUCCESS" if result.success else "FAILED"
+            parts.append(f"### {result.task_id} ({result.tool}) - {status}")
+
+            if result.success and result.result:
+                # Truncate long results
+                result_str = str(result.result)
+                if len(result_str) > 500:
+                    result_str = result_str[:500] + "..."
+                parts.append(f"Result: {result_str}")
+            elif result.error:
+                parts.append(f"Error: {result.error}")
+
+            parts.append(f"Duration: {result.duration_ms:.1f}ms\n")
+
+        return "\n".join(parts)
 
     def _format_context(self, contexts: List[RetrievedContext]) -> str:
         """Format retrieved contexts for injection into the prompt."""
