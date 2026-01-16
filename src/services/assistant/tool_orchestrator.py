@@ -1,0 +1,581 @@
+"""
+Tool Orchestrator - Parallel Tool Execution with Dependency Coordination.
+
+This module provides the ToolOrchestrator class that executes tools with
+parallel support and dependency coordination. It works with TaskPlanner
+to execute planned tasks efficiently.
+
+Key Features:
+- Execute planned tasks in parallel groups
+- Respect dependencies between tasks
+- Yield results as they complete using async generators
+- Update working memory with task status
+- Limit concurrent executions with semaphore
+- Resolve parameter references between tasks
+
+Usage:
+    ```python
+    orchestrator = ToolOrchestrator(tool_registry, max_parallel=5)
+
+    async for result in orchestrator.execute_plan(plan, working_memory):
+        print(f"Task {result.task_id} completed: {result.success}")
+        if result.error:
+            print(f"Error: {result.error}")
+    ```
+
+References:
+- asyncio.as_completed: https://docs.python.org/3/library/asyncio-task.html#asyncio.as_completed
+- Semaphore pattern: https://docs.python.org/3/library/asyncio-sync.html#asyncio.Semaphore
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+
+from ...core.observability.logging import get_logger
+from .task_planner import ExecutionPlan, PlannedTask
+from .working_memory import TaskStatus, WorkingMemory
+
+if TYPE_CHECKING:
+    from .tools.tool_registry import ToolRegistry, ToolCallRequest
+
+logger = get_logger(__name__)
+
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+
+@dataclass
+class ToolExecutionResult:
+    """
+    Result of a single tool execution within the orchestrator.
+
+    This dataclass captures the outcome of executing a planned task,
+    including timing information for performance monitoring.
+
+    Attributes:
+        task_id: Unique identifier of the task that was executed
+        tool: Name of the tool that was called
+        success: Whether the execution completed successfully
+        result: The result returned by the tool (if successful)
+        error: Error message if the execution failed
+        duration_ms: Time taken to execute the tool in milliseconds
+
+    Example:
+        ```python
+        result = ToolExecutionResult(
+            task_id="search_1",
+            tool="kb_search",
+            success=True,
+            result={"documents": [...]},
+            duration_ms=150.5
+        )
+        ```
+    """
+
+    task_id: str
+    tool: str
+    success: bool
+    result: Any = None
+    error: Optional[str] = None
+    duration_ms: float = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize result to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary representation of the execution result
+        """
+        return {
+            "task_id": self.task_id,
+            "tool": self.tool,
+            "success": self.success,
+            "result": self.result,
+            "error": self.error,
+            "duration_ms": self.duration_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ToolExecutionResult":
+        """
+        Deserialize result from dictionary.
+
+        Args:
+            data: Dictionary containing result data
+
+        Returns:
+            ToolExecutionResult instance
+        """
+        return cls(
+            task_id=data["task_id"],
+            tool=data["tool"],
+            success=data["success"],
+            result=data.get("result"),
+            error=data.get("error"),
+            duration_ms=data.get("duration_ms", 0),
+        )
+
+
+# =============================================================================
+# Tool Orchestrator
+# =============================================================================
+
+
+class ToolOrchestrator:
+    """
+    Executes tools with parallel support and dependency coordination.
+
+    The ToolOrchestrator takes an ExecutionPlan from TaskPlanner and
+    executes the tasks respecting dependencies and parallelization.
+    It uses a semaphore to limit concurrent executions and yields
+    results as they complete for responsive feedback.
+
+    Key responsibilities:
+    1. Process parallel_groups sequentially (groups must complete in order)
+    2. Execute tasks within each group in parallel
+    3. Resolve parameter references like ${task_id.result}
+    4. Update WorkingMemory with task status
+    5. Track execution timing for performance monitoring
+
+    Usage:
+        ```python
+        from src.services.assistant.tools.tool_registry import get_tool_registry
+
+        orchestrator = ToolOrchestrator(
+            tool_registry=get_tool_registry(),
+            max_parallel=5
+        )
+
+        async for result in orchestrator.execute_plan(plan, working_memory):
+            if result.success:
+                print(f"Completed: {result.task_id}")
+            else:
+                print(f"Failed: {result.task_id} - {result.error}")
+        ```
+
+    Thread Safety:
+        The ToolOrchestrator uses asyncio primitives and is safe for
+        concurrent use within the same event loop. Each execute_plan
+        call operates independently.
+    """
+
+    # Pattern for matching parameter references like ${task_id.result} or ${task_id.field}
+    PARAM_REF_PATTERN = re.compile(r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}')
+
+    def __init__(
+        self,
+        tool_registry: "ToolRegistry",
+        max_parallel: int = 5,
+    ):
+        """
+        Initialize the ToolOrchestrator.
+
+        Args:
+            tool_registry: Registry containing tool definitions and executors
+            max_parallel: Maximum number of concurrent tool executions (default 5)
+        """
+        self.tool_registry = tool_registry
+        self.max_parallel = max_parallel
+        self.semaphore = asyncio.Semaphore(max_parallel)
+
+        logger.info(f"ToolOrchestrator initialized with max_parallel={max_parallel}")
+
+    async def execute_plan(
+        self,
+        plan: ExecutionPlan,
+        working_memory: WorkingMemory,
+    ) -> AsyncGenerator[ToolExecutionResult, None]:
+        """
+        Execute plan respecting dependencies, yielding results as they complete.
+
+        Processes parallel_groups sequentially - each group must complete
+        before the next group starts. Within each group, tasks are executed
+        in parallel up to max_parallel concurrent executions.
+
+        Args:
+            plan: The execution plan containing tasks and parallel groups
+            working_memory: Working memory to update with task status
+
+        Yields:
+            ToolExecutionResult for each completed task
+
+        Example:
+            ```python
+            async for result in orchestrator.execute_plan(plan, memory):
+                print(f"Task {result.task_id}: {'success' if result.success else 'failed'}")
+            ```
+        """
+        logger.info(
+            f"Starting plan execution: {plan.goal} "
+            f"({len(plan.tasks)} tasks in {len(plan.parallel_groups)} groups)"
+        )
+
+        # Track results from all completed tasks for parameter resolution
+        prior_results: Dict[str, ToolExecutionResult] = {}
+
+        # Set the goal in working memory
+        if plan.goal:
+            working_memory.set_goal(plan.goal)
+
+        # Add all tasks to working memory
+        for task in plan.tasks:
+            working_memory.add_task(task.id, task.description)
+
+        # Process each parallel group sequentially
+        for group_index, group_task_ids in enumerate(plan.parallel_groups):
+            logger.debug(
+                f"Processing group {group_index + 1}/{len(plan.parallel_groups)}: "
+                f"{group_task_ids}"
+            )
+
+            # Get the PlannedTask objects for this group
+            tasks_in_group = [
+                plan.get_task(task_id)
+                for task_id in group_task_ids
+                if plan.get_task(task_id) is not None
+            ]
+
+            if not tasks_in_group:
+                logger.warning(f"No valid tasks found in group {group_index + 1}")
+                continue
+
+            # Execute all tasks in this group in parallel and yield results
+            async for result in self._execute_parallel(
+                tasks_in_group,
+                prior_results,
+                working_memory,
+            ):
+                # Store result for parameter resolution in later groups
+                prior_results[result.task_id] = result
+
+                # Update working memory with completion status
+                status = TaskStatus.COMPLETED if result.success else TaskStatus.FAILED
+                result_summary = str(result.result)[:200] if result.result else None
+                working_memory.update_task(
+                    result.task_id,
+                    status,
+                    result=result_summary,
+                    error=result.error,
+                )
+
+                yield result
+
+        # Log summary
+        completed_count = sum(1 for r in prior_results.values() if r.success)
+        failed_count = sum(1 for r in prior_results.values() if not r.success)
+        logger.info(
+            f"Plan execution complete: {completed_count} succeeded, "
+            f"{failed_count} failed out of {len(prior_results)} tasks"
+        )
+
+    async def _execute_parallel(
+        self,
+        tasks: List[PlannedTask],
+        prior_results: Dict[str, ToolExecutionResult],
+        working_memory: WorkingMemory,
+    ) -> AsyncGenerator[ToolExecutionResult, None]:
+        """
+        Execute a group of tasks in parallel using asyncio.as_completed.
+
+        Uses the semaphore to limit concurrent executions and yields
+        results as soon as they complete (not in submission order).
+
+        Args:
+            tasks: List of tasks to execute in parallel
+            prior_results: Results from previously completed tasks (for param resolution)
+            working_memory: Working memory to update with task status
+
+        Yields:
+            ToolExecutionResult for each completed task
+        """
+        if not tasks:
+            return
+
+        # Create a task for each planned task
+        # We need to map asyncio.Task back to PlannedTask for result association
+        async_tasks: Dict[asyncio.Task, PlannedTask] = {}
+
+        for planned_task in tasks:
+            # Mark task as in progress
+            working_memory.update_task(planned_task.id, TaskStatus.IN_PROGRESS)
+
+            # Create the coroutine with semaphore protection
+            coro = self._execute_single_task(planned_task, prior_results)
+            async_task = asyncio.create_task(coro)
+            async_tasks[async_task] = planned_task
+
+        # Use as_completed to yield results as they finish
+        for completed_task in asyncio.as_completed(async_tasks.keys()):
+            try:
+                result = await completed_task
+                yield result
+            except Exception as e:
+                # Find which planned task this was for
+                planned_task = None
+                for task, pt in async_tasks.items():
+                    if task is completed_task:
+                        planned_task = pt
+                        break
+
+                # This shouldn't happen as _execute_single_task catches exceptions
+                # but handle it just in case
+                task_id = planned_task.id if planned_task else "unknown"
+                tool_name = planned_task.tool if planned_task else "unknown"
+
+                logger.error(f"Unexpected error in task {task_id}: {e}")
+                yield ToolExecutionResult(
+                    task_id=task_id,
+                    tool=tool_name,
+                    success=False,
+                    error=f"Unexpected error: {str(e)}",
+                    duration_ms=0,
+                )
+
+    async def _execute_single_task(
+        self,
+        task: PlannedTask,
+        prior_results: Dict[str, ToolExecutionResult],
+    ) -> ToolExecutionResult:
+        """
+        Execute a single task with semaphore protection.
+
+        Args:
+            task: The planned task to execute
+            prior_results: Results from previously completed tasks
+
+        Returns:
+            ToolExecutionResult with execution outcome
+        """
+        start_time = time.time()
+
+        async with self.semaphore:
+            try:
+                # Resolve parameter references
+                resolved_params = self._resolve_params(task.parameters, prior_results)
+
+                logger.debug(
+                    f"Executing task {task.id}: tool={task.tool}, "
+                    f"params={resolved_params}"
+                )
+
+                # Import here to avoid circular dependency
+                from .tools.tool_registry import ToolCallRequest
+
+                # Create tool call request
+                request = ToolCallRequest(
+                    call_id=str(uuid.uuid4()),
+                    tool_name=task.tool,
+                    arguments=resolved_params,
+                )
+
+                # Execute via tool registry
+                tool_result = await self.tool_registry.execute(request)
+
+                duration_ms = (time.time() - start_time) * 1000
+
+                return ToolExecutionResult(
+                    task_id=task.id,
+                    tool=task.tool,
+                    success=tool_result.success,
+                    result=tool_result.result,
+                    error=tool_result.error,
+                    duration_ms=duration_ms,
+                )
+
+            except Exception as e:
+                duration_ms = (time.time() - start_time) * 1000
+                logger.error(f"Task {task.id} failed with exception: {e}")
+
+                return ToolExecutionResult(
+                    task_id=task.id,
+                    tool=task.tool,
+                    success=False,
+                    error=str(e),
+                    duration_ms=duration_ms,
+                )
+
+    def _resolve_params(
+        self,
+        params: Dict[str, Any],
+        prior_results: Dict[str, ToolExecutionResult],
+    ) -> Dict[str, Any]:
+        """
+        Resolve parameter references like ${task_1.result} in task parameters.
+
+        Supports references to prior task results using the format:
+        - ${task_id.result} - Get the full result of a prior task
+        - ${task_id.error} - Get the error message (if any)
+        - ${task_id.success} - Get the success boolean
+        - ${task_id.result.field} - Get a nested field from the result
+
+        Args:
+            params: Dictionary of parameters that may contain references
+            prior_results: Results from previously completed tasks
+
+        Returns:
+            Dictionary with all references resolved to actual values
+
+        Example:
+            ```python
+            params = {
+                "query": "Analyze this: ${search_1.result}",
+                "context": "${search_2.result.documents}"
+            }
+            resolved = orchestrator._resolve_params(params, prior_results)
+            # Returns params with ${...} replaced by actual values
+            ```
+        """
+        resolved: Dict[str, Any] = {}
+
+        for key, value in params.items():
+            resolved[key] = self._resolve_value(value, prior_results)
+
+        return resolved
+
+    def _resolve_value(
+        self,
+        value: Any,
+        prior_results: Dict[str, ToolExecutionResult],
+    ) -> Any:
+        """
+        Recursively resolve references in a value.
+
+        Args:
+            value: The value to resolve (can be string, dict, list, or other)
+            prior_results: Results from previously completed tasks
+
+        Returns:
+            The resolved value
+        """
+        if isinstance(value, str):
+            return self._resolve_string(value, prior_results)
+        elif isinstance(value, dict):
+            return {k: self._resolve_value(v, prior_results) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [self._resolve_value(item, prior_results) for item in value]
+        else:
+            # For non-string primitives (int, float, bool, None), return as-is
+            return value
+
+    def _resolve_string(
+        self,
+        value: str,
+        prior_results: Dict[str, ToolExecutionResult],
+    ) -> Any:
+        """
+        Resolve parameter references in a string value.
+
+        If the entire string is a single reference (e.g., "${task_1.result}"),
+        returns the actual value (which may not be a string).
+
+        If the string contains embedded references (e.g., "Query: ${task_1.result}"),
+        returns a string with references replaced by their string representations.
+
+        Args:
+            value: String that may contain references
+            prior_results: Results from previously completed tasks
+
+        Returns:
+            The resolved value (may be any type if entire string is a reference)
+        """
+        # Check if the entire string is a single reference
+        single_ref_match = re.fullmatch(r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}', value)
+        if single_ref_match:
+            task_id = single_ref_match.group(1)
+            field_path = single_ref_match.group(2)
+            resolved = self._get_reference_value(task_id, field_path, prior_results)
+            # Return the actual value (may not be a string)
+            return resolved if resolved is not None else value
+
+        # Replace all references in the string with their string representations
+        def replace_ref(match: re.Match) -> str:
+            task_id = match.group(1)
+            field_path = match.group(2)
+            resolved = self._get_reference_value(task_id, field_path, prior_results)
+            if resolved is None:
+                return match.group(0)  # Keep original if not found
+            return str(resolved)
+
+        return self.PARAM_REF_PATTERN.sub(replace_ref, value)
+
+    def _get_reference_value(
+        self,
+        task_id: str,
+        field_path: str,
+        prior_results: Dict[str, ToolExecutionResult],
+    ) -> Any:
+        """
+        Get the value for a reference like task_id.field_path.
+
+        Args:
+            task_id: ID of the task to get the result from
+            field_path: Path to the field (e.g., "result", "result.documents")
+            prior_results: Results from previously completed tasks
+
+        Returns:
+            The referenced value, or None if not found
+        """
+        result = prior_results.get(task_id)
+        if result is None:
+            logger.warning(f"Reference to unknown task: {task_id}")
+            return None
+
+        # Split field path and navigate
+        fields = field_path.split('.')
+        current = result
+
+        for field in fields:
+            if hasattr(current, field):
+                current = getattr(current, field)
+            elif isinstance(current, dict) and field in current:
+                current = current[field]
+            else:
+                logger.warning(
+                    f"Cannot resolve field '{field}' in reference "
+                    f"${{{task_id}.{field_path}}}"
+                )
+                return None
+
+        return current
+
+
+# =============================================================================
+# Factory Function
+# =============================================================================
+
+
+def create_tool_orchestrator(
+    tool_registry: Optional["ToolRegistry"] = None,
+    max_parallel: int = 5,
+) -> ToolOrchestrator:
+    """
+    Factory function to create a ToolOrchestrator instance.
+
+    Args:
+        tool_registry: Tool registry to use. If None, uses global registry.
+        max_parallel: Maximum concurrent tool executions (default 5)
+
+    Returns:
+        Configured ToolOrchestrator instance
+
+    Example:
+        ```python
+        orchestrator = create_tool_orchestrator(max_parallel=10)
+        ```
+    """
+    if tool_registry is None:
+        from .tools.tool_registry import get_tool_registry
+        tool_registry = get_tool_registry()
+
+    return ToolOrchestrator(
+        tool_registry=tool_registry,
+        max_parallel=max_parallel,
+    )
