@@ -12,11 +12,27 @@ import {
   Image as ImageIcon,
   FileType,
   ExternalLink,
+  Maximize2,
+  Minimize2,
+  History,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ExecutionStatus, type ExecutionStatusType } from "./ExecutionStatus";
+
+export interface ArtifactVersion {
+  id: string;
+  version: number;
+  createdAt: Date;
+  preview?: string;
+}
 
 export interface Artifact {
   id: string;
@@ -31,6 +47,9 @@ export interface Artifact {
   mimeType?: string;
   sizeBytes?: number;
   source?: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
+  // Version history support
+  versions?: ArtifactVersion[];
+  currentVersion?: number;
 }
 
 export interface OutputFile {
@@ -52,6 +71,11 @@ interface ArtifactsPanelProps {
   outputFiles?: OutputFile[];
   onRerun?: () => void;
   className?: string;
+  // New props for enhanced functionality
+  isExpanded?: boolean;
+  onToggleExpand?: () => void;
+  onRefine?: (artifact: Artifact) => void;
+  onVersionSelect?: (artifactId: string, versionId: string) => void;
 }
 
 // Helper to format file size
@@ -108,6 +132,10 @@ export function ArtifactsPanel({
   outputFiles = [],
   onRerun,
   className,
+  isExpanded,
+  onToggleExpand,
+  onRefine,
+  onVersionSelect,
 }: ArtifactsPanelProps) {
   const [copiedCode, setCopiedCode] = React.useState(false);
 
@@ -156,7 +184,8 @@ export function ArtifactsPanel({
   return (
     <div
       className={cn(
-        "flex flex-col h-full bg-background border-l border-border",
+        "flex flex-col h-full bg-background border-l border-border transition-all duration-200",
+        isExpanded ? "w-[800px]" : "w-96",
         className
       )}
     >
@@ -178,6 +207,20 @@ export function ArtifactsPanel({
               title="Re-run code"
             >
               <RefreshCw className="h-4 w-4" />
+            </Button>
+          )}
+          {onToggleExpand && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onToggleExpand}
+              title={isExpanded ? "Collapse" : "Expand"}
+            >
+              {isExpanded ? (
+                <Minimize2 className="h-4 w-4" />
+              ) : (
+                <Maximize2 className="h-4 w-4" />
+              )}
             </Button>
           )}
           <Button variant="ghost" size="icon" onClick={onClose} title="Close">
@@ -332,19 +375,54 @@ export function ArtifactsPanel({
                         </div>
                         {getSourceBadge(image.source)}
                       </div>
-                      {image.url && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="gap-1.5"
-                          asChild
-                        >
-                          <a href={image.url} download={image.filename || image.title} target="_blank" rel="noopener noreferrer">
-                            <Download className="h-3.5 w-3.5" />
-                            Download
-                          </a>
-                        </Button>
-                      )}
+                      <div className="flex items-center gap-1">
+                        {/* Version History dropdown */}
+                        {image.versions && image.versions.length > 1 && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="sm" className="gap-1.5">
+                                <History className="h-3 w-3" />
+                                v{image.currentVersion || 1}
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              {image.versions.map((v) => (
+                                <DropdownMenuItem
+                                  key={v.id}
+                                  onClick={() => onVersionSelect?.(image.id, v.id)}
+                                >
+                                  Version {v.version} - {v.createdAt.toLocaleString()}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                        {/* Refine button */}
+                        {onRefine && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => onRefine(image)}
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            Refine
+                          </Button>
+                        )}
+                        {image.url && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="gap-1.5"
+                            asChild
+                          >
+                            <a href={image.url} download={image.filename || image.title} target="_blank" rel="noopener noreferrer">
+                              <Download className="h-3.5 w-3.5" />
+                              Download
+                            </a>
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     <div className="p-4 flex justify-center bg-muted/20">
                       {image.url ? (
@@ -427,8 +505,41 @@ export function ArtifactsPanel({
                         </p>
                       </div>
                     </div>
-                    {doc.url && (
-                      <div className="flex items-center gap-1 flex-shrink-0">
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {/* Version History dropdown */}
+                      {doc.versions && doc.versions.length > 1 && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm" className="gap-1.5">
+                              <History className="h-3 w-3" />
+                              v{doc.currentVersion || 1}
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {doc.versions.map((v) => (
+                              <DropdownMenuItem
+                                key={v.id}
+                                onClick={() => onVersionSelect?.(doc.id, v.id)}
+                              >
+                                Version {v.version} - {v.createdAt.toLocaleString()}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                      {/* Refine button */}
+                      {onRefine && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={() => onRefine(doc)}
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          Refine
+                        </Button>
+                      )}
+                      {doc.url && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -445,8 +556,8 @@ export function ArtifactsPanel({
                             Download
                           </a>
                         </Button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 ))}
 
