@@ -56,6 +56,7 @@ from .context_engine import ContextEngine, ContextStructure
 from .working_memory import WorkingMemory, TaskStatus
 from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType
 from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult
+from .memory import MemoryManager
 from ..metrics.usage_recorder import get_usage_recorder
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..storage import get_artifact_storage, ArtifactStorageService
@@ -120,6 +121,9 @@ class StreamEventType(str, Enum):
     # Working memory events (Context Engine)
     WORKING_MEMORY_UPDATE = "working_memory_update"
     TASK_PLANNING = "task_planning"
+
+    # Memory manager events
+    MEMORY_LOADED = "memory_loaded"
 
     # Tool execution error event (for error preservation)
     TOOL_ERROR = "tool_error"
@@ -313,6 +317,7 @@ Please use this web search context to inform your response when relevant."""
         code_executor: Optional[CodeExecutorService] = None,
         task_planner: Optional[TaskPlanner] = None,
         tool_orchestrator: Optional[ToolOrchestrator] = None,
+        db: Optional[Any] = None,  # DatabaseStorage for MemoryManager
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -320,6 +325,7 @@ Please use this web search context to inform your response when relevant."""
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
+        self.db = db  # Database storage for MemoryManager
 
         # Task planning and orchestration (Phase 2.4)
         # These are created on demand if not provided
@@ -512,6 +518,37 @@ Please use this web search context to inform your response when relevant."""
             except Exception as e:
                 logger.warning(f"Failed to persist user message: {e}")
 
+        # Step 0.7: Create MemoryManager and load user preferences
+        memory_manager: Optional[MemoryManager] = None
+        user_preferences: Optional[str] = None
+        if self.db:
+            try:
+                memory_manager = MemoryManager(
+                    db=self.db,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session_id,
+                )
+                # Load user preferences from long-term memory
+                prefs = await memory_manager.get_user_preferences()
+                if prefs:
+                    # Format preferences for context
+                    pref_lines = []
+                    if prefs.get("language"):
+                        pref_lines.append(f"- Preferred language: {prefs['language']}")
+                    if prefs.get("response_style"):
+                        pref_lines.append(f"- Response style: {prefs['response_style']}")
+                    if pref_lines:
+                        user_preferences = "\n".join(pref_lines)
+                        # Emit memory loaded event
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.MEMORY_LOADED.value,
+                            data={"preferences_loaded": True, "preferences": prefs}
+                        )
+                        logger.info(f"Loaded user preferences for {user.user_id}: {list(prefs.keys())}")
+            except Exception as e:
+                logger.warning(f"Failed to load user preferences: {e}")
+
         # Step 1: Retrieve KB context if enabled
         retrieved_contexts: List[RetrievedContext] = []
         logger.info(
@@ -645,6 +682,7 @@ Please use this web search context to inform your response when relevant."""
             processed_files=processed_files,
             model_supports_vision=model_supports_vision,
             session_id=session_id,
+            user_preferences=user_preferences,
         )
 
         # Step 4: Stream from model
@@ -1226,6 +1264,19 @@ Please use this web search context to inform your response when relevant."""
                     data={"warnings": output_warnings}
                 )
 
+        # Step 6.7: Store session memory for future context
+        if memory_manager and total_content:
+            try:
+                # Store last query topic for context continuity
+                await memory_manager.remember(
+                    key="last_query_topic",
+                    value={"query": message[:100], "timestamp": datetime.utcnow().isoformat()},
+                    layer="session"
+                )
+                logger.debug(f"Stored session memory for query: {message[:50]}...")
+            except Exception as e:
+                logger.debug(f"Failed to store session memory: {e}")
+
         # Step 7: Emit final events
         elapsed_ms = (time.time() - start_time) * 1000
 
@@ -1508,6 +1559,7 @@ Please use this web search context to inform your response when relevant."""
         processed_files: Optional[ProcessedFiles] = None,
         model_supports_vision: bool = False,
         session_id: Optional[str] = None,
+        user_preferences: Optional[str] = None,
     ) -> List[ChatMessage]:
         """Build the message list for the model.
 
@@ -1520,6 +1572,7 @@ Please use this web search context to inform your response when relevant."""
             processed_files: Processed file contents (images, text, descriptions).
             model_supports_vision: Whether the model supports vision/multimodal input.
             session_id: Session ID for working memory lookup (Context Engine mode).
+            user_preferences: User preferences loaded from MemoryManager (formatted string).
 
         Returns:
             List of ChatMessage objects ready to send to the model.
@@ -1535,6 +1588,7 @@ Please use this web search context to inform your response when relevant."""
                 processed_files=processed_files,
                 model_supports_vision=model_supports_vision,
                 session_id=session_id,
+                user_preferences=user_preferences,
             )
 
         # Legacy message building (original implementation)
@@ -1615,6 +1669,7 @@ Please use this web search context to inform your response when relevant."""
         processed_files: Optional[ProcessedFiles] = None,
         model_supports_vision: bool = False,
         session_id: Optional[str] = None,
+        user_preferences: Optional[str] = None,
     ) -> List[ChatMessage]:
         """Build messages using Context Engine for KV-Cache optimization.
 
@@ -1636,6 +1691,7 @@ Please use this web search context to inform your response when relevant."""
             processed_files: Processed file contents.
             model_supports_vision: Whether the model supports vision.
             session_id: Session ID for working memory lookup.
+            user_preferences: User preferences loaded from MemoryManager (formatted string).
 
         Returns:
             List of ChatMessage objects with optimized structure.
@@ -1662,11 +1718,17 @@ Please use this web search context to inform your response when relevant."""
             task_state = working_memory.to_markdown()
             logger.info(f"[CONTEXT ENGINE] Task state injected: {len(task_state)} chars")
 
+        # Determine user_preferences: prefer loaded preferences from MemoryManager,
+        # fallback to config.user_preferences
+        effective_user_preferences = user_preferences or config.user_preferences
+        if effective_user_preferences:
+            logger.info(f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars")
+
         # Build ContextStructure with layered content
         context_structure = ContextStructure(
             system_prompt=config.system_prompt or self.DEFAULT_SYSTEM_PROMPT,
             tool_definitions=[],  # Tool definitions handled separately
-            user_preferences=config.user_preferences,
+            user_preferences=effective_user_preferences,
             long_term_memory=config.long_term_memory,
             task_state=task_state,
             conversation_history=[
