@@ -80,9 +80,12 @@ async def _validate_document_access(
     """
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False):
-        # If database is not available, allow access (backward compatibility)
-        logger.warning("Database not available for document access validation")
-        return True
+        # Fail closed to avoid issuing presigned URLs without ownership validation
+        logger.error("Database not available for document access validation")
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable for document access validation",
+        )
 
     try:
         # Get document

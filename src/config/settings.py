@@ -84,6 +84,20 @@ class RateLimitSettings(BaseModel):
     ip_limits: Optional[Dict[str, Any]] = None
 
 
+class CORSSettings(BaseModel):
+    """CORS configuration."""
+
+    allow_origins: List[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+    )
+    allow_credentials: bool = True
+    allow_methods: List[str] = Field(default_factory=lambda: ["*"])
+    allow_headers: List[str] = Field(default_factory=lambda: ["*"])
+    expose_headers: List[str] = Field(default_factory=list)
+    max_age: int = 600
+    allow_origin_regex: Optional[str] = None
+
+
 class LoadBalancerSettings(BaseModel):
     """负载均衡配置"""
     strategy: str = "round_robin"  # round_robin, random, weighted, consistent_hash
@@ -277,6 +291,7 @@ class Settings(BaseSettings):
     authentication: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     rbac: RBACSettings = Field(default_factory=RBACSettings)
     rate_limits: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    cors: CORSSettings = Field(default_factory=CORSSettings)
 
     # Anonymous identity + session policy
     anonymous: AnonymousIdentitySettings = Field(default_factory=AnonymousIdentitySettings)

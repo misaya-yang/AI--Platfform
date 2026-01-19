@@ -500,6 +500,8 @@ class S3StorageBackend(BaseStorageBackend):
         Returns:
             Presigned download URL or None if failed
         """
+        import urllib.parse
+
         client = await self._get_client()
 
         params = {
@@ -508,7 +510,23 @@ class S3StorageBackend(BaseStorageBackend):
         }
 
         if filename:
-            params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+            # RFC 5987: Use URL-encoded filename for non-ASCII characters
+            # Format: filename="ascii_fallback"; filename*=UTF-8''url_encoded_name
+            try:
+                # Check if filename contains non-ASCII characters
+                filename.encode('ascii')
+                # Pure ASCII filename - use simple format
+                params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+            except UnicodeEncodeError:
+                # Non-ASCII filename - use RFC 5987 format with UTF-8 encoding
+                # Create ASCII fallback (replace non-ASCII with underscore)
+                ascii_fallback = filename.encode('ascii', 'replace').decode('ascii').replace('?', '_')
+                # URL-encode the UTF-8 filename
+                encoded_filename = urllib.parse.quote(filename, safe='')
+                params["ResponseContentDisposition"] = (
+                    f'attachment; filename="{ascii_fallback}"; '
+                    f"filename*=UTF-8''{encoded_filename}"
+                )
 
         try:
             presigned_url = await client.generate_presigned_url(

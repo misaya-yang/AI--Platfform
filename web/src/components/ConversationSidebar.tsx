@@ -50,19 +50,23 @@ function getSessionTitle(session: SessionSummary): string {
 }
 
 function groupSessionsByDate(sessions: SessionSummary[]): GroupedSessions {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const lastWeek = new Date(today);
-  lastWeek.setDate(lastWeek.getDate() - 7);
-
   const groups: GroupedSessions = {
     today: [],
     yesterday: [],
     lastWeek: [],
     older: [],
   };
+
+  if (!Array.isArray(sessions)) {
+    return groups;
+  }
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const lastWeek = new Date(today);
+  lastWeek.setDate(lastWeek.getDate() - 7);
 
   for (const session of sessions) {
     const sessionDate = new Date(session.updated_at || session.created_at);
@@ -193,6 +197,7 @@ export function ConversationSidebar({
 
   // Filter sessions by search query
   const filteredSessions = useMemo(() => {
+    if (!Array.isArray(sessions)) return [];
     if (!searchQuery.trim()) return sessions;
     const query = searchQuery.toLowerCase();
     return sessions.filter((session) => {

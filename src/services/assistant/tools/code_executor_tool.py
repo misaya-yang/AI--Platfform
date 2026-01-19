@@ -39,65 +39,144 @@ logger = get_logger(__name__)
 
 CODE_EXECUTOR_TOOL = ToolDefinition(
     name="execute_python_code",
-    description="Execute Python code to perform data analysis, generate charts, process files, "
-                "or perform complex calculations. Code runs in a sandboxed Docker container with "
-                "access to numpy, pandas, and matplotlib.",
+    description="""Execute Python code in a secure sandbox for data analysis and visualization.
+
+## When to Use (MUST use for these scenarios)
+- Analyzing Excel/CSV data files (calculations, statistics, growth rates, trends)
+- Creating charts and visualizations (line, bar, pie, scatter, heatmap)
+- Complex mathematical computations that require precision
+- Data transformation, cleaning, and aggregation
+- Processing uploaded files (Excel, CSV, JSON, text)
+- Generating reports with computed metrics
+
+## Available Files
+- User uploads: /workspace/input/ (Excel, CSV, PDF, etc. - use os.listdir() to check)
+- KB documents: /workspace/kb_docs/ (reference materials as text files)
+- Output directory: /workspace/output/ (save all generated files here)
+
+## Pre-installed Libraries
+numpy, pandas, matplotlib, seaborn, openpyxl, xlrd, scipy, plotly
+
+## Best Practices
+1. Always list input directory first: os.listdir('/workspace/input/')
+2. Use pandas.read_excel() or read_csv() for data files
+3. Save all charts to /workspace/output/ with descriptive names
+4. Print key metrics and analysis results to stdout
+5. Use Chinese labels for charts when user speaks Chinese
+
+## Example: Analyze uploaded Excel
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+# Check available input files
+print("Available files:", os.listdir('/workspace/input/'))
+
+# Read uploaded Excel file
+df = pd.read_excel('/workspace/input/sales_data.xlsx')
+print(f"Data shape: {df.shape}")
+print(df.head())
+
+# Calculate growth rate
+df['growth'] = df['revenue'].pct_change() * 100
+avg_growth = df['growth'].mean()
+print(f"Average growth rate: {avg_growth:.2f}%")
+
+# Create trend visualization
+plt.figure(figsize=(12, 6))
+plt.plot(df['month'], df['revenue'], marker='o', linewidth=2)
+plt.title('Revenue Trend Analysis', fontsize=14)
+plt.xlabel('Month')
+plt.ylabel('Revenue')
+plt.grid(True, alpha=0.3)
+plt.savefig('/workspace/output/revenue_trend.png', dpi=150, bbox_inches='tight')
+print("Chart saved to /workspace/output/revenue_trend.png")
+```
+""",
     parameters=[
         ToolParameter(
             name="code",
             type="string",
-            description="Python code to execute. The code has access to:\n"
-                       "- numpy, pandas, matplotlib (pre-installed)\n"
-                       "- Input files in /workspace/input/\n"
-                       "- KB documents in /workspace/kb_docs/\n"
-                       "- Output files should be saved to /workspace/output/",
+            description="Python code to execute. Has access to data analysis libraries (numpy, pandas, matplotlib, etc.), "
+                       "user uploads in /workspace/input/, and should save outputs to /workspace/output/.",
             required=True,
         ),
     ],
     category=ToolCategory.ANALYSIS,
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
-    when_to_use="When the user asks to analyze data, create data charts (bar, line, pie, etc.), "
-                "perform mathematical calculations, plot functions, process CSV/JSON files, "
-                "generate reports with data, or any task requiring code execution.",
-    when_not_to_use="Do not use for generating AI images, artwork, or illustrations - use generate_image tool instead. "
-                    "Do not use for simple questions that can be answered directly.",
+    when_to_use="ALWAYS use when user uploads Excel/CSV files and asks about data analysis, trends, growth rates, "
+                "statistics, or visualization. Use for any data computation that requires precision beyond LLM estimation. "
+                "Use for creating charts, graphs, or any data visualization.",
+    when_not_to_use="Do not use for generating AI images/artwork (use generate_image instead). "
+                    "Do not use for simple factual questions that don't require computation.",
     examples=[
         ToolExample(
-            description="Analyze data and create a chart",
+            description="Analyze uploaded Excel and calculate growth rate",
             input={
                 "code": """
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
-# Sample data analysis
-data = {'Month': ['Jan', 'Feb', 'Mar'], 'Sales': [100, 150, 200]}
-df = pd.DataFrame(data)
+# List input files
+files = os.listdir('/workspace/input/')
+print(f"Found files: {files}")
 
-# Create bar chart
+# Read Excel file
+df = pd.read_excel('/workspace/input/' + files[0])
+print(f"Columns: {df.columns.tolist()}")
+
+# Calculate key metrics
+total = df['销售额'].sum()
+avg = df['销售额'].mean()
+growth = df['销售额'].pct_change().mean() * 100
+print(f"总销售额: {total:,.0f}")
+print(f"平均销售额: {avg:,.0f}")
+print(f"平均增长率: {growth:.2f}%")
+
+# Visualize
 plt.figure(figsize=(10, 6))
-plt.bar(df['Month'], df['Sales'])
-plt.title('Monthly Sales')
-plt.savefig('/workspace/output/sales_chart.png')
-print(f"Total sales: {df['Sales'].sum()}")
+df.plot(x='月份', y='销售额', kind='bar', ax=plt.gca())
+plt.title('月度销售额分析')
+plt.ylabel('销售额')
+plt.tight_layout()
+plt.savefig('/workspace/output/analysis.png', dpi=150)
 """
             },
-            expected_output="Generates a bar chart and prints total sales",
+            expected_output="Analyzes Excel data, calculates growth rate, and generates bar chart",
         ),
         ToolExample(
-            description="Perform calculations",
+            description="Statistical analysis with visualization",
             input={
                 "code": """
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-# Calculate statistics
+# Statistical analysis
 data = [23, 45, 67, 89, 12, 34, 56, 78, 90, 11]
-mean = np.mean(data)
-std = np.std(data)
-print(f"Mean: {mean:.2f}, Std: {std:.2f}")
+stats = {
+    'Mean': np.mean(data),
+    'Median': np.median(data),
+    'Std': np.std(data),
+    'Min': np.min(data),
+    'Max': np.max(data),
+}
+for k, v in stats.items():
+    print(f"{k}: {v:.2f}")
+
+# Create histogram
+plt.figure(figsize=(8, 5))
+plt.hist(data, bins=5, edgecolor='black', alpha=0.7)
+plt.title('Data Distribution')
+plt.xlabel('Value')
+plt.ylabel('Frequency')
+plt.savefig('/workspace/output/histogram.png', dpi=150)
 """
             },
-            expected_output="Prints statistical calculations",
+            expected_output="Prints statistical metrics and generates histogram",
         ),
     ],
     timeout_seconds=60,

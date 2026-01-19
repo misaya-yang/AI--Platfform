@@ -1,10 +1,10 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { marked } from "marked";
-import { ImageIcon, Download, ExternalLink } from "lucide-react";
+import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import "katex/dist/katex.min.css";
 
 /**
@@ -34,6 +34,62 @@ interface ParsedBlocks {
   blocks: string[];
   /** Global definitions (link references, footnotes) to prepend to each block */
   definitions: string;
+}
+
+/**
+ * Custom link renderer that handles download links and external links properly.
+ * - Download links (files like .docx, .pdf, artifact URLs) open in new tab with download
+ * - External links open in new tab
+ * - Anchor links (#) work normally
+ */
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  // Check if this is a downloadable file
+  const isDownloadLink = href && (
+    // Common document extensions
+    /\.(docx?|xlsx?|pptx?|pdf|csv|zip|rar|txt|md)$/i.test(href) ||
+    // Artifact download URLs
+    href.includes("/artifacts/") ||
+    href.includes("/download")
+  );
+
+  // Check if external link
+  const isExternal = href && (href.startsWith("http://") || href.startsWith("https://"));
+  const isAnchor = href && href.startsWith("#");
+
+  const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!href) return;
+
+    // For download links, always open in new tab to trigger download
+    if (isDownloadLink) {
+      e.preventDefault();
+      window.open(href, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    // For external links, open in new tab
+    if (isExternal && !isAnchor) {
+      e.preventDefault();
+      window.open(href, "_blank", "noopener,noreferrer");
+    }
+    // Anchor links use default behavior
+  };
+
+  return (
+    <a
+      href={href}
+      onClick={handleClick}
+      className={`
+        inline-flex items-center gap-1 text-primary hover:text-primary/80
+        underline underline-offset-2 decoration-primary/30 hover:decoration-primary/60
+        transition-colors
+      `}
+      rel={isExternal ? "noopener noreferrer" : undefined}
+    >
+      {children}
+      {isDownloadLink && <FileDown className="h-3 w-3 inline-block" />}
+      {isExternal && !isDownloadLink && <ExternalLink className="h-3 w-3 inline-block" />}
+    </a>
+  );
 }
 
 /**
@@ -192,6 +248,8 @@ const MemoizedMarkdownBlock = memo(
         components={{
           // Custom image renderer with base64 support
           img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
+          // Custom link renderer for download/external links
+          a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
         }}
       >
         {fullContent}

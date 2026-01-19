@@ -15,6 +15,7 @@ import type { FileUploadResponse } from "@/api/files";
 
 export const SSEEventType = {
   TEXT_DELTA: "text_delta",
+  STATUS: "status",  // Added for agent thinking status
   THINKING_DELTA: "thinking_delta",
   TOOL_CALL: "tool_call",
   TOOL_RESULT: "tool_result",
@@ -31,6 +32,17 @@ export const SSEEventType = {
   ERROR: "error",
   // Output validation
   OUTPUT_WARNINGS: "output_warnings",
+  // Code execution events
+  CODE_EXECUTION_START: "code_execution_start",
+  CODE_EXECUTION_OUTPUT: "code_execution_output",
+  CODE_EXECUTION_RESULT: "code_execution_result",
+  // Document/Image generation events
+  IMAGE_GENERATION_START: "image_generation_start",
+  IMAGE_GENERATION_RESULT: "image_generation_result",
+  DOCUMENT_GENERATION_START: "document_generation_start",
+  DOCUMENT_GENERATION_RESULT: "document_generation_result",
+  // Artifact events
+  ARTIFACT_CREATED: "artifact_created",
   // Agentic workflow events
   WORKING_MEMORY_UPDATE: "working_memory_update",
   TASK_PLANNING: "task_planning",

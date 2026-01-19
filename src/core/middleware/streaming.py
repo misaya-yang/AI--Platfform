@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.responses import JSONResponse
+
+from .rate_limit_http import SlidingWindowRateLimiter, RateLimitInfo
 
 from ..observability.logging import get_logger
 from ...services.metrics import get_metrics_recorder
@@ -374,12 +377,80 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
     def __init__(self, app: ASGIApp, config: StreamingRateLimitConfig):
         super().__init__(app)
         self.config = config
+        # Use sliding window limiter with in-memory fallback.
+        self.limiter = SlidingWindowRateLimiter(redis_client=None)
 
-    async def process_streaming_request(self, scope: Scope, receive: Receive) -> None:
-        """流式请求跳过限流或使用轻量检查"""
-        # 对于流式请求，可以在这里进行异步限流检查
-        # 但为了不阻塞流式响应，这里仅记录
-        pass
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if not self.config.enabled:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if self._is_whitelisted(path):
+            await self.app(scope, receive, send)
+            return
+
+        # Skip rate limiting for streaming endpoints to avoid blocking streams.
+        if is_streaming_path(path):
+            await self.app(scope, receive, send)
+            return
+
+        # Bind redis client if available.
+        self._bind_redis_client(scope)
+
+        user_info = scope.get("state", {}).get("user_info")
+        user_type = self._get_user_field(user_info, "user_type", "")
+        user_id = self._get_user_field(user_info, "user_id", "")
+        client_ip = self._get_client_ip(scope)
+
+        checks = [
+            ("global", "ratelimit:global", self.config.global_limit, self.config.global_window),
+        ]
+
+        if user_info:
+            if user_type == "user":
+                checks.append((
+                    "user",
+                    f"ratelimit:user:{user_id}",
+                    self.config.user_limit,
+                    self.config.user_window,
+                ))
+            elif user_type in ("guest", "anonymous"):
+                checks.append((
+                    "guest",
+                    f"ratelimit:guest:{user_id}",
+                    self.config.guest_limit,
+                    self.config.guest_window,
+                ))
+
+        checks.append((
+            "ip",
+            f"ratelimit:ip:{client_ip}",
+            self.config.ip_limit,
+            self.config.ip_window,
+        ))
+
+        for dimension, key, limit, window in checks:
+            result = await self.limiter.check(key, limit, window)
+            if not result.allowed:
+                result.dimension = dimension
+                response = self._build_rate_limit_response(result)
+                await response(scope, receive, send)
+                return
+
+        async def rate_limit_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-ratelimit-limit", str(self.config.user_limit).encode()))
+                headers.append((b"x-ratelimit-window", str(self.config.user_window).encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, rate_limit_send)
 
     async def process_request(self, scope: Scope, receive: Receive) -> bool:
         """非流式请求执行限流检查"""
@@ -400,6 +471,74 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
             if path == wp or path.startswith(wp + "/"):
                 return True
         return False
+
+    def _get_user_field(self, user_info: Any, field: str, default: Any = None) -> Any:
+        if not user_info:
+            return default
+        if isinstance(user_info, dict):
+            return user_info.get(field, default)
+        return getattr(user_info, field, default)
+
+    def _get_client_ip(self, scope: Scope) -> str:
+        headers = dict(scope.get("headers", []))
+
+        forwarded = headers.get(b"x-forwarded-for", b"").decode()
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+        real_ip = headers.get(b"x-real-ip", b"").decode()
+        if real_ip:
+            return real_ip
+
+        client = scope.get("client")
+        if client:
+            return client[0]
+
+        return "unknown"
+
+    def _bind_redis_client(self, scope: Scope) -> None:
+        if getattr(self.limiter, "redis", None) is not None:
+            return
+
+        app = scope.get("app")
+        if not app:
+            return
+
+        redis = getattr(getattr(app, "state", None), "redis", None)
+        if not redis:
+            return
+
+        redis_client = None
+        if hasattr(redis, "get_native_client"):
+            redis_client = redis.get_native_client()
+        elif hasattr(redis, "pipeline"):
+            redis_client = redis
+
+        if redis_client:
+            self.limiter.redis = redis_client
+
+    def _build_rate_limit_response(self, info: RateLimitInfo) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "Too many requests",
+                    "dimension": info.dimension,
+                    "limit": info.limit,
+                    "remaining": 0,
+                    "reset_at": info.reset_at,
+                    "retry_after": info.retry_after,
+                },
+            },
+            headers={
+                "X-RateLimit-Limit": str(info.limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(info.reset_at),
+                "X-RateLimit-Dimension": info.dimension,
+                "Retry-After": str(info.retry_after),
+            },
+        )
 
 
 # ============ 流式友好的请求日志中间件 ============

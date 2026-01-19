@@ -94,6 +94,7 @@ class DatabaseStorage:
             await self._auto_initialize_schema()
             await self._auto_apply_account_permission_migration()
             await self._auto_apply_user_extra_permissions_migration()
+            await self._auto_apply_api_keys_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -239,6 +240,49 @@ class DatabaseStorage:
                 logger.info("Migration 006 already applied (user_permissions table exists)")
             else:
                 logger.error(f"Failed to apply migration 006: {e}")
+
+    async def _api_keys_needs_migration(self) -> bool:
+        """Check if api_keys table needs migration (missing key_id column)."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            # Check if key_id column exists
+            col_exists = await conn.fetchval("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'api_keys' AND column_name = 'key_id'
+            """)
+            return col_exists is None
+
+    async def _auto_apply_api_keys_migration(self) -> None:
+        """Apply api_keys migration (020) when required."""
+        if not self._pool:
+            return
+        try:
+            needs_migration = await self._api_keys_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check api_keys schema: {e}")
+            return
+        if not needs_migration:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "020_api_keys.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 020 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 020_api_keys.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 020 already applied")
+            else:
+                logger.error(f"Failed to apply migration 020: {e}")
 
     # =========================================================================
     # 服务定义表 (services)
@@ -1054,6 +1098,27 @@ class DatabaseStorage:
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
+    async def find_stuck_documents(
+        self,
+        stuck_threshold_minutes: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """查找长时间未完成处理的文档"""
+        if not self._pool:
+            return []
+
+        query = """
+            SELECT document_id, dataset_id, title, status, started_at, updated_at
+            FROM documents
+            WHERE status IN ('parsing', 'segmenting', 'embedding')
+              AND COALESCE(started_at, updated_at, created_at)
+                  < NOW() - make_interval(mins => $1)
+            ORDER BY updated_at ASC
+        """
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, stuck_threshold_minutes)
             return [self._row_to_dict(row) for row in rows]
 
     async def update_document_status(
@@ -2548,10 +2613,14 @@ class DatabaseStorage:
         if not self._pool:
             return []
 
-        dimension_column = {
+        # Whitelist of valid dimension -> column mappings (SQL injection prevention)
+        dimension_mapping = {
             "user": "user_id",
             "service": "service_id",
-        }.get(dimension, "user_id")
+        }
+        if dimension not in dimension_mapping:
+            return []  # Invalid dimension, return empty result
+        dimension_column = dimension_mapping[dimension]
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(

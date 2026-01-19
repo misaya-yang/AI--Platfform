@@ -1,14 +1,18 @@
 // web/src/pages/dashboard/index.tsx
+// Enterprise Dashboard - Unified Layout System
 
 import { useEffect, useRef, useState } from "react";
 import { DashboardProvider } from "./DashboardContext";
 import { DashboardHeader } from "./components/DashboardHeader";
 import { KPICards } from "./components/KPICards";
 import { DashboardLayout } from "./DashboardLayout";
+import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { useAppStore } from "@/store/useAppStore";
+import { LAYOUT, getColors } from "./styles";
 
 function DashboardContent() {
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
 
@@ -35,18 +39,27 @@ function DashboardContent() {
       ref={containerRef}
       style={{
         minHeight: "100%",
-        padding: 24,
-        background: darkMode ? "#0f172a" : "#f8fafc",
+        padding: `${LAYOUT.PAGE_PADDING}px 0`, // Vertical padding only
+        background: colors.pageBg,
       }}
     >
       {/* Header with controls */}
-      <DashboardHeader />
+      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
+        <DashboardHeader />
+      </div>
 
       {/* KPI Summary Cards */}
-      <KPICards />
+      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
+        <KPICards />
+      </div>
+
+      {/* Provider Status */}
+      <ProviderStatusCard />
 
       {/* Draggable Panel Grid */}
-      <DashboardLayout width={containerWidth} />
+      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING - LAYOUT.GRID_GAP}px` }}>
+        <DashboardLayout width={containerWidth - (LAYOUT.PAGE_PADDING * 2) + (LAYOUT.GRID_GAP * 2)} />
+      </div>
     </div>
   );
 }

@@ -563,7 +563,7 @@ class TaskPlanner:
     async def create_plan(
         self,
         user_request: str,
-        available_tools: Optional[List[str]] = None,
+        available_tools: Optional[Union[List[str], List[Dict[str, Any]]]] = None,
         context: Optional[Dict[str, Any]] = None,
         use_llm: bool = True,
     ) -> ExecutionPlan:
@@ -577,32 +577,25 @@ class TaskPlanner:
 
         Args:
             user_request: Natural language description of what the user wants
-            available_tools: List of tool names that can be used in the plan
+            available_tools: List of tool names or tool definitions
             context: Additional context (e.g., session info, user preferences)
             use_llm: Whether to use LLM for intent understanding (requires model_client)
 
         Returns:
             ExecutionPlan with tasks and parallel execution groups
-
-        Raises:
-            CircularDependencyError: If the generated plan has circular dependencies
-
-        Example:
-            ```python
-            plan = await planner.create_plan(
-                user_request="Compare Tesla Model 3 and BMW i4",
-                available_tools=["kb_search", "analyze", "generate_text"]
-            )
-            # Returns plan with:
-            # - Two parallel kb_search tasks
-            # - One analyze task (depends on both searches)
-            # - One generate_text task (depends on analyze)
-            ```
         """
         available_tools = available_tools or []
         context = context or {}
 
         logger.info(f"Creating plan for request: {user_request[:100]}...")
+
+        # Extract tool names for rule-based logic and validation
+        available_tool_names = []
+        for tool in available_tools:
+            if isinstance(tool, str):
+                available_tool_names.append(tool)
+            elif isinstance(tool, dict):
+                available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
 
         # Step 1: Detect workflow pattern from keywords
         detected_pattern = self._detect_pattern(user_request)
@@ -614,7 +607,7 @@ class TaskPlanner:
             )
         else:
             tasks = self._create_plan_rule_based(
-                user_request, available_tools, context, detected_pattern
+                user_request, available_tool_names, context, detected_pattern
             )
 
         # Step 3: Analyze dependencies and create parallel groups
@@ -879,7 +872,7 @@ class TaskPlanner:
     async def _create_plan_with_llm(
         self,
         user_request: str,
-        available_tools: List[str],
+        available_tools: List[Any],
         context: Dict[str, Any],
         pattern: Optional[WorkflowPattern],
     ) -> List[PlannedTask]:
@@ -906,7 +899,16 @@ class TaskPlanner:
         try:
             # Call LLM for task decomposition
             response = await self._call_llm(prompt)
-            tasks = self._parse_llm_response(response, available_tools)
+            
+            # Extract tool names for validation
+            available_tool_names = []
+            for tool in available_tools:
+                if isinstance(tool, str):
+                    available_tool_names.append(tool)
+                elif isinstance(tool, dict):
+                    available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
+            
+            tasks = self._parse_llm_response(response, available_tool_names)
 
             if tasks:
                 return tasks
@@ -914,20 +916,28 @@ class TaskPlanner:
                 # Fall back to rule-based if LLM response parsing fails
                 logger.warning("LLM response parsing failed, falling back to rule-based")
                 return self._create_plan_rule_based(
-                    user_request, available_tools, context, pattern
+                    user_request, available_tool_names, context, pattern
                 )
 
         except Exception as e:
             logger.error(f"LLM planning failed: {e}")
             # Fall back to rule-based planning
+            # Extract tool names for rule-based logic
+            available_tool_names = []
+            for tool in available_tools:
+                if isinstance(tool, str):
+                    available_tool_names.append(tool)
+                elif isinstance(tool, dict):
+                    available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
+                    
             return self._create_plan_rule_based(
-                user_request, available_tools, context, pattern
+                user_request, available_tool_names, context, pattern
             )
 
     def _build_decomposition_prompt(
         self,
         user_request: str,
-        available_tools: List[str],
+        available_tools: List[Any],
         pattern: Optional[WorkflowPattern],
     ) -> str:
         """
@@ -941,7 +951,29 @@ class TaskPlanner:
         Returns:
             Prompt string for the LLM
         """
-        tool_info = "\n".join([f"- {tool}" for tool in available_tools]) if available_tools else "No specific tools required"
+        tool_descriptions = []
+        for tool in available_tools:
+            if isinstance(tool, str):
+                tool_descriptions.append(f"- {tool}")
+            elif isinstance(tool, dict):
+                # Format OpenAI tool definition
+                name = tool.get("function", {}).get("name", tool.get("name", "unknown"))
+                desc = tool.get("function", {}).get("description", tool.get("description", ""))
+                # Extract parameters schema
+                params_schema = tool.get("function", {}).get("parameters", tool.get("parameters", {}))
+                
+                # Format parameters for prompt
+                params_desc = []
+                if "properties" in params_schema:
+                    for param_name, param_info in params_schema["properties"].items():
+                        req = " (required)" if param_name in params_schema.get("required", []) else ""
+                        p_desc = param_info.get("description", "")
+                        params_desc.append(f"    - {param_name}: {p_desc}{req}")
+                
+                params_str = "\n".join(params_desc)
+                tool_descriptions.append(f"- {name}: {desc}\n  Parameters:\n{params_str}")
+        
+        tool_info = "\n".join(tool_descriptions) if tool_descriptions else "No specific tools required"
 
         pattern_hint = ""
         if pattern:
@@ -960,12 +992,13 @@ For each task, provide:
 2. type: One of "retrieve", "generate", "analyze", "transform"
 3. tool: The tool to use (from available tools)
 4. description: What this task does
-5. dependencies: List of task IDs this depends on (empty if none)
+5. parameters: Arguments for the tool (MUST match tool parameters schema)
+6. dependencies: List of task IDs this depends on (empty if none)
 
 Output as JSON array:
 ```json
 [
-  {{"id": "task_id", "type": "retrieve", "tool": "kb_search", "description": "...", "dependencies": []}}
+  {{"id": "task_id", "type": "retrieve", "tool": "kb_search", "description": "...", "parameters": {{...}}, "dependencies": []}}
 ]
 ```
 
@@ -974,6 +1007,7 @@ Rules:
 - A task can only depend on tasks defined before it
 - Use the most appropriate tool for each task
 - Keep tasks atomic and focused
+- CRITICAL: Provide all required parameters for tools. For example, if using 'execute_python_code', you MUST provide the 'code' parameter.
 """
 
     async def _call_llm(self, prompt: str) -> str:

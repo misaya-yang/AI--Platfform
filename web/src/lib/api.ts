@@ -1,7 +1,12 @@
 import axios, { AxiosError } from "axios";
+import { toast } from "@/hooks/use-toast";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || "";
 const AUTH_STORAGE_KEY = "agent-gateway-auth";
+
+// Rate limit state tracking to avoid toast spam
+let lastRateLimitToast = 0;
+const RATE_LIMIT_TOAST_COOLDOWN = 5000; // Only show toast once per 5 seconds
 
 export const api = axios.create({
   baseURL,
@@ -60,7 +65,7 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor to handle auth errors
+// Response interceptor to handle auth and rate limit errors
 api.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
@@ -72,6 +77,35 @@ api.interceptors.response.use(
         window.location.href = "/login";
       }
     }
+
+    // Handle rate limit errors gracefully
+    if (error.response?.status === 429) {
+      const now = Date.now();
+      // Only show toast if cooldown has passed (prevent toast spam)
+      if (now - lastRateLimitToast > RATE_LIMIT_TOAST_COOLDOWN) {
+        lastRateLimitToast = now;
+
+        // Extract retry info from response
+        const retryAfter = error.response.headers["retry-after"];
+        const errorData = error.response.data as {
+          error?: { retry_after?: number; dimension?: string };
+        };
+        const dimension = errorData?.error?.dimension || "unknown";
+        const retrySeconds = retryAfter
+          ? parseInt(retryAfter, 10)
+          : errorData?.error?.retry_after || 60;
+
+        toast.warning(
+          "请求过于频繁",
+          `请等待 ${retrySeconds} 秒后重试 (${dimension})`
+        );
+      }
+
+      // Attach retry info to error for react-query retry logic
+      (error as AxiosError & { retryAfter?: number }).retryAfter =
+        parseInt(error.response.headers["retry-after"] || "5", 10) * 1000;
+    }
+
     return Promise.reject(error);
   }
 );

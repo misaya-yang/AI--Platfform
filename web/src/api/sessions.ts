@@ -65,6 +65,12 @@ export interface SessionMessageMetadata {
     completion_tokens?: number;
     total_tokens?: number;
   };
+  // User message attachments (files uploaded with the message)
+  attachments?: Array<{
+    type: "image" | "file";
+    url: string;
+    filename: string;
+  }>;
 }
 
 export interface SessionMessage {
@@ -78,6 +84,7 @@ export async function listSessions(params?: {
   service_id?: string;
   limit?: number;
 }): Promise<SessionSummary[]> {
+  // Use generic sessions endpoint which returns an array
   const { data } = await api.get<SessionSummary[]>("/api/v1/sessions", { params });
   return data;
 }
@@ -87,6 +94,7 @@ export async function createSession(body?: {
   metadata?: Record<string, unknown>;
   config?: SessionConfig;
 }): Promise<{ session_id: string }> {
+  // Use generic sessions endpoint
   const { data } = await api.post<{ session_id: string }>("/api/v1/sessions", body || {});
   return data;
 }

@@ -154,6 +154,11 @@ class Container:
         self._providers["task_worker"] = Provider(
             self._create_task_worker, singleton=True
         )
+
+        # 记忆服务
+        self._providers["memory_service"] = Provider(
+            self._create_memory_service, singleton=True
+        )
         
         # ========== 核心层 ==========
         
@@ -342,6 +347,12 @@ class Container:
         dispatcher = self._providers["dispatcher"].get_sync()
         task_manager = self._providers["task_manager"].get_sync()
         return TaskWorker(queue, storage, dispatcher, task_manager)
+    
+    def _create_memory_service(self):
+        """创建记忆服务"""
+        from .services.assistant.memory_service import MemoryService
+        database = self._providers["database"].get_sync()
+        return MemoryService(database)
     
     def _create_rbac(self):
         """创建 RBAC"""
@@ -693,6 +704,11 @@ class Container:
     def task_worker(self):
         """获取任务工作者"""
         return self._providers["task_worker"].get_sync()
+    
+    @property
+    def memory_service(self):
+        """获取记忆服务"""
+        return self._providers["memory_service"].get_sync()
     
     @property
     def load_balancer(self):

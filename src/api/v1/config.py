@@ -1,11 +1,16 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import secrets
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...core.observability.logging import get_logger
 from ..deps import AuthContext, get_auth_context, get_settings
+
+logger = get_logger(__name__)
 
 
 router = APIRouter(prefix="/config", tags=["config"])
@@ -222,9 +227,13 @@ async def list_api_keys(
 
     db = getattr(request.app.state, "database", None)
     if db and db.enabled:
-        keys = await db.list_api_keys()
-        return {"keys": keys}
-    
+        try:
+            keys = await db.list_api_keys()
+            return {"keys": keys}
+        except Exception as e:
+            logger.error(f"Failed to list API keys: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"数据库查询失败: {str(e)}")
+
     # 返回运行时配置中的 keys
     return {
         "keys": [
@@ -244,16 +253,22 @@ async def create_api_key(
     # 权限检查：仅管理员可创建 API Key
     request.app.state.dispatcher.rbac.require(auth.roles, "admin")
 
-    import secrets
-    import hashlib
-
     # 生成 API Key
     api_key = f"gw_{secrets.token_urlsafe(32)}"
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     db = getattr(request.app.state, "database", None)
     if db and db.enabled:
-        await db.save_api_key(key_hash, body.name, body.tenant_id or "", body.roles)
+        try:
+            await db.save_api_key(
+                key_hash=key_hash,
+                name=body.name,
+                tenant_id=body.tenant_id or "default",
+                roles=body.roles,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save API key: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"数据库保存失败: {str(e)}")
     else:
         # 运行时存储
         _runtime_config["api_keys"].append({

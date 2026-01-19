@@ -302,6 +302,8 @@ class GuestSessionManager:
             if not data:
                 return None
             try:
+                if isinstance(data, dict):
+                    return GuestSession.from_dict(data)
                 return GuestSession.from_dict(json.loads(data))
             except Exception:
                 return None
@@ -313,11 +315,19 @@ class GuestSessionManager:
         key = self._session_key(session.session_id)
 
         if self.redis:
-            await self.redis.setex(
-                key,
-                self.config.session_ttl,
-                json.dumps(session.to_dict()),
-            )
+            data = json.dumps(session.to_dict())
+            if hasattr(self.redis, "save"):
+                await self.redis.save(
+                    key,
+                    data,
+                    self.config.session_ttl,
+                )
+            else:
+                await self.redis.setex(
+                    key,
+                    self.config.session_ttl,
+                    data,
+                )
         else:
             self._sessions[session.session_id] = session
 

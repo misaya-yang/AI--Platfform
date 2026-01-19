@@ -22,6 +22,7 @@ References:
 
 from __future__ import annotations
 
+from ...core.observability.logging import get_logger
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -29,7 +30,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Optional, TYPE_CHECKING
 
-from ...core.observability.logging import get_logger
+if TYPE_CHECKING:
+    from .memory_service import MemoryService
+    from ...services.session.database_session_manager import DatabaseSessionManager
 from ...core.auth.user_resolver import UserContext
 from ..knowledge.knowledge_service import KnowledgeService
 from .model_registry import ChatMessage, ModelProvider, ModelRegistry, StreamDelta
@@ -54,12 +57,12 @@ from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
 from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
 from .context_engine import ContextEngine, ContextStructure
 from .working_memory import WorkingMemory, TaskStatus
-from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType
-from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult
+from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType, create_task_planner
+from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult, create_tool_orchestrator
 from .memory import MemoryManager
 from ..metrics.usage_recorder import get_usage_recorder
 from ..metrics.realtime_metrics import get_realtime_metrics
-from ..storage import get_artifact_storage, ArtifactStorageService
+from ..storage import get_artifact_storage, get_file_storage, ArtifactStorageService
 
 if TYPE_CHECKING:
     from ..session.database_session_manager import DatabaseSessionManager
@@ -92,6 +95,7 @@ class StreamEventType(str, Enum):
     SESSION_UPDATED = "session_updated"
 
     # Status events
+    STATUS = "status"
     USAGE = "usage"
     FINISH = "finish"
     DONE = "done"
@@ -169,7 +173,7 @@ class AssistantConfig:
     long_term_memory: Optional[str] = None  # Persistent user knowledge
 
     # Task Planning settings (Phase 2.4: Multi-step task planning)
-    enable_task_planning: bool = False  # Enable task decomposition and parallel execution
+    enable_task_planning: bool = True  # Enable task decomposition and parallel execution
     max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
 
 
@@ -318,6 +322,9 @@ Please use this web search context to inform your response when relevant."""
         task_planner: Optional[TaskPlanner] = None,
         tool_orchestrator: Optional[ToolOrchestrator] = None,
         db: Optional[Any] = None,  # DatabaseStorage for MemoryManager
+        vlm_service: Optional[Any] = None,  # DashScopeVLMService for image descriptions
+        redis_client: Optional[Any] = None,  # Redis client for caching
+        memory_service: Optional["MemoryService"] = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -326,6 +333,8 @@ Please use this web search context to inform your response when relevant."""
         self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
         self.db = db  # Database storage for MemoryManager
+        self.redis = redis_client
+        self.memory_service = memory_service
 
         # Task planning and orchestration (Phase 2.4)
         # These are created on demand if not provided
@@ -351,14 +360,21 @@ Please use this web search context to inform your response when relevant."""
         # Artifact storage (for persisting output files)
         self.artifact_storage = get_artifact_storage()
 
+        # File storage (for accessing user uploads from S3/OSS)
+        try:
+            self.file_storage = get_file_storage()
+        except RuntimeError:
+            self.file_storage = None  # Not initialized, local storage only
+
         # KV-Cache optimization
         self.cache_optimizer = ContextCacheOptimizer(CacheConfig())
 
         # File processor for upload analysis
-        # Note: VLM service can be injected later if needed for text-only model image descriptions
         self.file_processor = create_file_processor(
-            vlm_service=None,  # Lazy initialization or inject via setter
+            vlm_service=vlm_service,
             knowledge_service=kb_service,
+            file_storage=self.file_storage,  # Pass file storage for remote access
+            redis_client=redis_client,
         )
 
         # Context Engine for KV-Cache optimization (Phase 5)
@@ -424,11 +440,22 @@ Please use this web search context to inform your response when relevant."""
                     source=source,
                 )
 
-                # Add artifact_id to file info
-                updated_file = {**file_info, "artifact_id": artifact.artifact_id}
+                # Generate presigned download URL (valid for 1 hour)
+                download_url = await self.artifact_storage.get_presigned_download_url(
+                    artifact, expiry_seconds=3600
+                )
+
+                # Add artifact_id and download_url to file info
+                updated_file = {
+                    **file_info,
+                    "artifact_id": artifact.artifact_id,
+                    "download_url": download_url,
+                    "type": artifact_type,
+                    "format": artifact_format,
+                }
                 persisted_files.append(updated_file)
 
-                logger.debug(f"Persisted artifact: {artifact.artifact_id} ({filename})")
+                logger.debug(f"Persisted artifact: {artifact.artifact_id} ({filename}) -> {download_url}")
 
             except Exception as e:
                 logger.warning(f"Failed to persist artifact {file_info.get('filename')}: {e}")
@@ -492,6 +519,11 @@ Please use this web search context to inform your response when relevant."""
         # Step 0.5: Apply context management (sliding window + token truncation)
         model_info = self.model_registry.get_model(config.model_id)
         model_context_window = model_info.context_window if model_info else 128000
+        logger.info(
+            f"[MODEL INFO] model_id={config.model_id}, "
+            f"found={model_info is not None}, "
+            f"supports_vision={model_info.supports_vision if model_info else 'N/A'}"
+        )
 
         context_result = self.context_manager.process_history(
             history=history,
@@ -506,67 +538,99 @@ Please use this web search context to inform your response when relevant."""
                 f"{len(processed_history)} messages (tokens: {context_result.total_tokens})"
             )
 
-        # Step 0.6: Persist user message to session
+        # Step 0.6: Persist user message to session (fire-and-forget for lower latency)
         if persist_messages and self.session_manager:
             try:
-                await self.session_manager.add_message(
-                    session_id=session_id,
-                    role="user",
-                    content=message,
-                    metadata={"timestamp": datetime.utcnow().isoformat()},
+                # Build metadata with file attachments if present
+                user_msg_metadata: Dict[str, Any] = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                # Save file paths as attachments for UI restoration
+                if config.file_paths:
+                    user_msg_metadata["attachments"] = [
+                        {
+                            "type": "image" if any(fp.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]) else "file",
+                            "url": fp,
+                            "filename": fp.split("/")[-1] if "/" in fp else fp,
+                        }
+                        for fp in config.file_paths
+                    ]
+
+                # Fire-and-forget: don't await, let it run in background
+                # This saves 0.5-1s of latency by not blocking on DB write
+                import asyncio
+                asyncio.create_task(
+                    self.session_manager.add_message(
+                        session_id=session_id,
+                        role="user",
+                        content=message,
+                        metadata=user_msg_metadata,
+                    )
                 )
             except Exception as e:
                 logger.warning(f"Failed to persist user message: {e}")
 
-        # Step 0.7: Create MemoryManager and load user preferences
-        memory_manager: Optional[MemoryManager] = None
-        user_preferences: Optional[str] = None
-        if self.db:
-            try:
-                memory_manager = MemoryManager(
-                    db=self.db,
-                    tenant_id=user.tenant_id,
-                    user_id=user.user_id,
-                    session_id=session_id,
-                )
-                # Load user preferences from long-term memory
-                prefs = await memory_manager.get_user_preferences()
-                if prefs:
-                    # Format preferences for context
-                    pref_lines = []
-                    if prefs.get("language"):
-                        pref_lines.append(f"- Preferred language: {prefs['language']}")
-                    if prefs.get("response_style"):
-                        pref_lines.append(f"- Response style: {prefs['response_style']}")
-                    if pref_lines:
-                        user_preferences = "\n".join(pref_lines)
-                        # Emit memory loaded event
-                        yield AssistantStreamEvent(
-                            event_type=StreamEventType.MEMORY_LOADED.value,
-                            data={"preferences_loaded": True, "preferences": prefs}
-                        )
-                        logger.info(f"Loaded user preferences for {user.user_id}: {list(prefs.keys())}")
-            except Exception as e:
-                logger.warning(f"Failed to load user preferences: {e}")
+        # ==========================================================================
+        # PARALLEL EXECUTION: Memory Loading + KB Retrieval (latency optimization)
+        # This reduces first-token latency by running these operations concurrently
+        # ==========================================================================
+        import asyncio
 
-        # Step 1: Retrieve KB context if enabled
+        user_preferences: Optional[str] = None
         retrieved_contexts: List[RetrievedContext] = []
+
+        # Prepare coroutines for parallel execution
+        memory_task = self._load_user_memory(user=user, session_id=session_id)
+
+        kb_task = None
+        kb_enabled = config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service
         logger.info(
             f"KB retrieval check - mode: {config.kb_mode}, "
             f"datasets: {config.kb_dataset_ids}, "
             f"kb_service: {self.kb_service is not None}"
         )
-        if config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service:
+        if kb_enabled:
+            # Emit status event before starting parallel tasks
+            yield AssistantStreamEvent(
+                event_type="status",
+                data={"status": "searching_kb", "message": "Searching knowledge base..."}
+            )
             logger.info(f"Starting KB retrieval for {len(config.kb_dataset_ids)} datasets")
-            try:
-                retrieved_contexts = await self._retrieve_context(
-                    user=user,
-                    query=message,
-                    dataset_ids=config.kb_dataset_ids,
-                    top_k=config.kb_top_k,
-                    score_threshold=config.kb_score_threshold,
-                    include_images=config.kb_include_images,
+            kb_task = self._retrieve_context(
+                user=user,
+                query=message,
+                dataset_ids=config.kb_dataset_ids,
+                top_k=config.kb_top_k,
+                score_threshold=config.kb_score_threshold,
+                include_images=config.kb_include_images,
+            )
+
+        # Run memory loading and KB retrieval in PARALLEL
+        if kb_task:
+            memory_result, kb_result = await asyncio.gather(
+                memory_task,
+                kb_task,
+                return_exceptions=True
+            )
+        else:
+            memory_result = await memory_task
+            kb_result = None
+
+        # Process memory result
+        if not isinstance(memory_result, Exception):
+            user_preferences, memory_data = memory_result
+            if memory_data:
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.MEMORY_LOADED.value,
+                    data={"preferences_loaded": True, "preferences": memory_data}
                 )
+        else:
+            logger.warning(f"Memory loading failed: {memory_result}")
+
+        # Process KB result
+        if kb_result is not None:
+            if not isinstance(kb_result, Exception):
+                retrieved_contexts = kb_result
                 for ctx in retrieved_contexts:
                     yield AssistantStreamEvent(
                         event_type="context_retrieved",
@@ -578,16 +642,20 @@ Please use this web search context to inform your response when relevant."""
                             "took_ms": ctx.took_ms,
                         }
                     )
-            except Exception as e:
-                logger.warning(f"KB retrieval failed: {e}")
+            else:
+                logger.warning(f"KB retrieval failed: {kb_result}")
                 yield AssistantStreamEvent(
                     event_type="error",
-                    data={"message": f"KB retrieval failed: {str(e)}", "recoverable": True}
+                    data={"message": f"KB retrieval failed: {str(kb_result)}", "recoverable": True}
                 )
 
         # Step 2: Web search if enabled
         web_search_context: Optional[str] = None
         if config.web_search_enabled and self.tavily_tool.is_configured:
+            yield AssistantStreamEvent(
+                event_type="status",
+                data={"status": "searching_web", "message": "Searching the web..."}
+            )
             try:
                 search_response = await self.tavily_tool.search(
                     query=message,
@@ -610,6 +678,10 @@ Please use this web search context to inform your response when relevant."""
         model_supports_vision = model_info.supports_vision if model_info else False
 
         if config.file_paths:
+            yield AssistantStreamEvent(
+                event_type="status",
+                data={"status": "processing_files", "message": "Analyzing uploaded files..."}
+            )
             try:
                 processed_files = await self.file_processor.process_files(
                     file_paths=config.file_paths,
@@ -789,7 +861,17 @@ Please use this web search context to inform your response when relevant."""
                     )
 
                     try:
-                        result = await self.code_executor.execute(code=code)
+                        # Prepare input files and KB documents for code execution
+                        input_files, kb_documents = await self._prepare_code_execution_files(
+                            file_paths=config.file_paths if hasattr(config, 'file_paths') else None,
+                            retrieved_contexts=retrieved_contexts if 'retrieved_contexts' in dir() else None,
+                        )
+
+                        result = await self.code_executor.execute(
+                            code=code,
+                            input_files=input_files,
+                            kb_documents=kb_documents,
+                        )
                         success = result.is_success()
                         output = result.stdout if success else f"Error: {result.stderr or result.error_message}"
 
@@ -832,13 +914,14 @@ Please use this web search context to inform your response when relevant."""
                                     event_type=StreamEventType.ARTIFACT_CREATED,
                                     data={
                                         "artifact_id": file_info["artifact_id"],
-                                        "type": "image" if file_info.get("mime_type", "").startswith("image/") else "file",
-                                        "format": file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "bin",
+                                        "type": file_info.get("type", "image" if file_info.get("mime_type", "").startswith("image/") else "file"),
+                                        "format": file_info.get("format", file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "bin"),
                                         "title": file_info.get("filename", "output"),
                                         "filename": file_info.get("filename"),
                                         "mime_type": file_info.get("mime_type"),
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "code_execution",
+                                        "download_url": file_info.get("download_url"),
                                     }
                                 )
 
@@ -924,12 +1007,13 @@ Please use this web search context to inform your response when relevant."""
                                     data={
                                         "artifact_id": file_info["artifact_id"],
                                         "type": "image",
-                                        "format": file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "png",
+                                        "format": file_info.get("format", file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "png"),
                                         "title": file_info.get("filename", "generated_image"),
                                         "filename": file_info.get("filename"),
                                         "mime_type": file_info.get("mime_type"),
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "image_generation",
+                                        "download_url": file_info.get("download_url"),
                                     }
                                 )
 
@@ -1014,7 +1098,7 @@ Please use this web search context to inform your response when relevant."""
                         for file_info in output_files:
                             if file_info.get("artifact_id"):
                                 mime_type = file_info.get("mime_type", "")
-                                doc_format = format_type  # docx, pdf, md
+                                doc_format = file_info.get("format", format_type)  # docx, pdf, md
                                 yield AssistantStreamEvent(
                                     event_type=StreamEventType.ARTIFACT_CREATED,
                                     data={
@@ -1026,6 +1110,7 @@ Please use this web search context to inform your response when relevant."""
                                         "mime_type": mime_type,
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "document_generation",
+                                        "download_url": file_info.get("download_url"),
                                     }
                                 )
 
@@ -1468,18 +1553,16 @@ Please use this web search context to inform your response when relevant."""
         score_threshold: float,
         include_images: bool,
     ) -> List[RetrievedContext]:
-        """Retrieve context from knowledge bases."""
-        contexts = []
+        """Retrieve context from knowledge bases - PARALLEL retrieval for performance."""
         logger.info(f"_retrieve_context called with datasets={dataset_ids}, query='{query[:50]}...'")
 
-        for dataset_id in dataset_ids:
+        async def retrieve_single_dataset(dataset_id: str) -> Optional[RetrievedContext]:
+            """Retrieve from a single dataset - designed for parallel execution."""
             start = time.time()
             logger.info(f"Retrieving from dataset '{dataset_id}'")
             try:
                 # Use retrieve_with_images if available and requested
                 if include_images and hasattr(self.kb_service, 'retrieve_with_images'):
-                    # Pass original top_k - internal expansion is handled by retrieve_with_images
-                    # (knowledge_service applies its own expansion factor for multimodal retrieval)
                     results, meta = await self.kb_service.retrieve_with_images(
                         user=user,
                         dataset_id=dataset_id,
@@ -1487,11 +1570,9 @@ Please use this web search context to inform your response when relevant."""
                         top_k=top_k,
                         score_threshold=score_threshold,
                         include_images=True,
-                        # Multimodal optimization: boost image results and use lower threshold
-                        # Image vectors naturally score lower (~0.5) vs text (~0.8), so we boost aggressively
-                        image_boost=3.0,  # Boost image results to improve their ranking (was 1.5)
+                        image_boost=3.0,
                         use_separate_thresholds=True,
-                        image_score_threshold=0.3,  # Lower threshold for images
+                        image_score_threshold=0.3,
                     )
                 else:
                     results, meta = await self.kb_service.retrieve(
@@ -1516,38 +1597,213 @@ Please use this web search context to inform your response when relevant."""
                 # Convert results to serializable format
                 chunks = []
                 for r in results:
-                    # RetrieveResult has 'text' field, not 'content'
                     chunk = {
-                        "content": r.text,  # Fixed: was r.content, but RetrieveResult has 'text'
+                        "content": r.text,
                         "score": r.score,
                         "metadata": r.metadata or {},
                         "segment_id": r.segment_id,
                         "document_id": r.document_id,
                     }
-                    # source_url may be in metadata
                     source_url = (r.metadata or {}).get("source_url") or (r.metadata or {}).get("source_uri")
                     if source_url:
                         chunk["source_url"] = source_url
-                    # image_url is a direct field on RetrieveResult
                     if r.image_url:
                         chunk["image_url"] = r.image_url
                     chunks.append(chunk)
 
                 if chunks:
-                    contexts.append(RetrievedContext(
+                    return RetrievedContext(
                         dataset_id=dataset_id,
                         dataset_name=meta.get("dataset_name", dataset_id),
                         chunks=chunks,
                         query=query,
                         took_ms=took_ms,
-                    ))
+                    )
+                return None
 
             except Exception as e:
                 logger.error(f"Failed to retrieve from dataset {dataset_id}: {e}", exc_info=True)
-                continue
+                return None
 
-        logger.info(f"[KB RETRIEVE] Total: {len(contexts)} contexts with chunks")
+        # PARALLEL retrieval using asyncio.gather - significant latency improvement
+        import asyncio
+        results = await asyncio.gather(
+            *[retrieve_single_dataset(ds_id) for ds_id in dataset_ids],
+            return_exceptions=True
+        )
+
+        # Filter out None results and exceptions
+        contexts = [r for r in results if r is not None and not isinstance(r, Exception)]
+
+        logger.info(f"[KB RETRIEVE] Total: {len(contexts)} contexts with chunks (parallel retrieval)")
         return contexts
+
+    async def _load_user_memory(
+        self,
+        user: UserContext,
+        session_id: str,
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """
+        Load user memory/preferences - designed for parallel execution.
+
+        Returns:
+            tuple of (user_preferences_text, memory_dict_for_event)
+        """
+        user_preferences: Optional[str] = None
+        memory_data: Optional[Dict[str, Any]] = None
+
+        # Use MemoryService if available (preferred)
+        if self.memory_service:
+            try:
+                memories = await self.memory_service.list_user_memories(user.user_id, limit=20)
+                if memories:
+                    # Format as bullet points
+                    memory_lines = []
+                    for k, v in memories.items():
+                        val_str = str(v)
+                        if len(val_str) > 500:
+                            val_str = val_str[:500] + "..."
+                        memory_lines.append(f"- {k}: {val_str}")
+
+                    if memory_lines:
+                        user_preferences = "## User Memories (Facts & Preferences)\n\n" + "\n".join(memory_lines)
+                        memory_data = memories
+                        logger.info(f"Loaded {len(memories)} user memories for {user.user_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load user memories: {e}")
+
+        # Fallback to legacy MemoryManager
+        elif self.db:
+            try:
+                memory_manager = MemoryManager(
+                    db=self.db,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    session_id=session_id,
+                )
+                prefs = await memory_manager.get_user_preferences()
+                if prefs:
+                    pref_lines = []
+                    if prefs.get("language"):
+                        pref_lines.append(f"- Preferred language: {prefs['language']}")
+                    if prefs.get("response_style"):
+                        pref_lines.append(f"- Response style: {prefs['response_style']}")
+                    if pref_lines:
+                        user_preferences = "\n".join(pref_lines)
+                        memory_data = prefs
+                        logger.info(f"Loaded user preferences for {user.user_id}: {list(prefs.keys())}")
+            except Exception as e:
+                logger.warning(f"Failed to load user preferences: {e}")
+
+        return user_preferences, memory_data
+
+    def _get_task_planner(self) -> TaskPlanner:
+        """Lazy load task planner."""
+        if not self._task_planner:
+            # We need a model client for the planner
+            # Use the same model as the assistant
+            provider = config.model_provider if 'config' in locals() else ModelProvider.OPENAI
+            model_client = self.model_registry.get_client(provider)
+            self._task_planner = create_task_planner(model_client=model_client)
+        return self._task_planner
+
+    def _get_tool_orchestrator(self) -> ToolOrchestrator:
+        """Lazy load tool orchestrator."""
+        if not self._tool_orchestrator:
+            from .tools import get_tool_registry
+            self._tool_orchestrator = create_tool_orchestrator(
+                tool_registry=get_tool_registry()
+            )
+        return self._tool_orchestrator
+
+    def get_working_memory(self, session_id: str) -> WorkingMemory:
+        """Get or create working memory for a session."""
+        if not hasattr(self, "_working_memories"):
+            self._working_memories = {}
+        
+        if session_id not in self._working_memories:
+            self._working_memories[session_id] = WorkingMemory(session_id=session_id)
+            
+        return self._working_memories[session_id]
+
+    async def _execute_with_planning(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: List[Dict[str, str]],
+        retrieved_contexts: List[RetrievedContext],
+        web_search_context: Optional[str] = None,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        """
+        Execute user request using Task Planning (Phase 2.5).
+        """
+        try:
+            planner = self._get_task_planner()
+            orchestrator = self._get_tool_orchestrator()
+            working_memory = self.get_working_memory(session_id)
+            
+            # Clear previous task state for new request
+            working_memory.clear()
+            # Restore goal (optional, but for now we set new goal from plan)
+            
+            # Context for planner
+            planner_context = {
+                "history_summary": history[-3:] if history else [],
+                "retrieved_context_count": len(retrieved_contexts),
+            }
+            
+            # Create plan
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS.value,
+                data={"status": "planning", "message": "Analyzing request and creating plan..."}
+            )
+            
+            # Get available tools (full definitions for better planning)
+            tools = self.model_registry.get_tools()
+            
+            plan = await planner.create_plan(
+                user_request=message,
+                available_tools=tools,
+                context=planner_context
+            )
+            
+            # Emit plan event
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TASK_PLANNING.value,
+                data=plan.to_dict()
+            )
+            
+            # Execute plan
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS.value,
+                data={"status": "executing_plan", "message": f"Executing {len(plan.tasks)} tasks..."}
+            )
+            
+            async for result in orchestrator.execute_plan(plan, working_memory):
+                # Emit result update
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+                    data=working_memory.to_dict()
+                )
+                
+                # Emit tool result event
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TOOL_RESULT.value,
+                    data={
+                        "tool_call_id": result.task_id,
+                        "name": result.tool,
+                        "result": str(result.result)[:1000], # Truncate for display
+                        "success": result.success
+                    }
+                )
+        except Exception as e:
+            logger.error(f"Task planning execution failed: {e}", exc_info=True)
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.ERROR.value,
+                data={"message": f"Planning execution failed: {str(e)}", "recoverable": True}
+            )
 
     def _build_messages(
         self,
@@ -1597,6 +1853,11 @@ Please use this web search context to inform your response when relevant."""
         # System prompt
         system_content = config.system_prompt or self.DEFAULT_SYSTEM_PROMPT
 
+        # Inject user preferences (Long-term Memory)
+        if user_preferences:
+            system_content = f"{system_content}\n\n{user_preferences}"
+            logger.info(f"[MEMORY INJECT] Injected user preferences, length: {len(user_preferences)}")
+
         # Inject KB context if available
         if retrieved_contexts:
             context_text = self._format_context(retrieved_contexts)
@@ -1632,11 +1893,20 @@ Please use this web search context to inform your response when relevant."""
                 # Vision model: pass images as base64 data URLs
                 # ChatMessage.images field will be converted to OpenAI Vision API format
                 # in _build_openai_body (already handles data URL format)
-                user_images = [
-                    f"data:{img.media_type};base64,{img.base64_data}"
-                    for img in processed_files.images
-                ]
-                logger.info(f"[FILE INJECT] Added {len(user_images)} images for vision model")
+                user_images = []
+
+                # Add regular images
+                for img in processed_files.images:
+                    user_images.append(f"data:{img.media_type};base64,{img.base64_data}")
+
+                # Add PDF page images (converted from PDF)
+                for pdf_page in processed_files.pdf_pages:
+                    user_images.append(f"data:{pdf_page.media_type};base64,{pdf_page.base64_data}")
+
+                logger.info(
+                    f"[FILE INJECT] Added {len(processed_files.images)} images + "
+                    f"{len(processed_files.pdf_pages)} PDF pages for vision model"
+                )
 
             # For text-only models OR additional text content from documents
             # Inject text content and image descriptions into the user message
@@ -1782,11 +2052,20 @@ Please use this web search context to inform your response when relevant."""
         user_images: Optional[List[str]] = None
 
         if model_supports_vision and processed_files.has_images:
-            user_images = [
-                f"data:{img.media_type};base64,{img.base64_data}"
-                for img in processed_files.images
-            ]
-            logger.info(f"[CONTEXT ENGINE] Added {len(user_images)} images")
+            user_images = []
+
+            # Add regular images
+            for img in processed_files.images:
+                user_images.append(f"data:{img.media_type};base64,{img.base64_data}")
+
+            # Add PDF page images (converted from PDF)
+            for pdf_page in processed_files.pdf_pages:
+                user_images.append(f"data:{pdf_page.media_type};base64,{pdf_page.base64_data}")
+
+            logger.info(
+                f"[CONTEXT ENGINE] Added {len(processed_files.images)} images + "
+                f"{len(processed_files.pdf_pages)} PDF pages"
+            )
 
         if processed_files.text_content:
             content += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
@@ -2268,3 +2547,76 @@ Please use this web search context to inform your response when relevant."""
             elif "dashscope" in provider or "qwen" in provider:
                 return "dashscope"
         return "dashscope"  # Default fallback
+
+    async def _prepare_code_execution_files(
+        self,
+        file_paths: Optional[List[str]],
+        retrieved_contexts: Optional[List["RetrievedContext"]],
+    ) -> tuple[Optional[List["InputFile"]], Optional[List["KBDocument"]]]:
+        """
+        Prepare files for code execution in Docker container.
+
+        Converts uploaded files and KB contexts into formats accessible by the code executor.
+
+        Args:
+            file_paths: List of storage keys for uploaded files
+            retrieved_contexts: List of KB retrieval results
+
+        Returns:
+            Tuple of (input_files, kb_documents) for code executor
+        """
+        from .code_executor import InputFile, KBDocument
+        import mimetypes
+
+        input_files: Optional[List[InputFile]] = None
+        kb_documents: Optional[List[KBDocument]] = None
+
+        # Convert uploaded files to InputFile objects
+        if file_paths and self.file_storage:
+            input_files = []
+            for path in file_paths:
+                try:
+                    # Extract filename from path
+                    filename = path.split('/')[-1] if '/' in path else path
+
+                    # Download file content from storage
+                    content = await self.file_storage.download_file(path)
+
+                    # Guess MIME type
+                    mime_type, _ = mimetypes.guess_type(filename)
+
+                    input_files.append(InputFile(
+                        filename=filename,
+                        content=content,
+                        mime_type=mime_type,
+                    ))
+                    logger.debug(f"Prepared input file for code execution: {filename}")
+                except Exception as e:
+                    logger.warning(f"Failed to load file {path} for code execution: {e}")
+
+            if not input_files:
+                input_files = None
+
+        # Convert KB contexts to KBDocument objects
+        if retrieved_contexts:
+            kb_documents = []
+            for ctx in retrieved_contexts:
+                for i, chunk in enumerate(ctx.chunks):
+                    try:
+                        chunk_text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                        doc_id = chunk.get("document_id", "") if isinstance(chunk, dict) else None
+                        metadata = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+
+                        kb_documents.append(KBDocument(
+                            filename=f"{ctx.dataset_id}_chunk_{i}.txt",
+                            content=chunk_text,
+                            document_id=doc_id,
+                            metadata=metadata,
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Failed to convert KB chunk: {e}")
+
+            if not kb_documents:
+                kb_documents = None
+
+        return input_files, kb_documents

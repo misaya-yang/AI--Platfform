@@ -273,7 +273,7 @@ export function TaskPanel({ goal, tasks, collectedInfo, isVisible }: TaskPanelPr
           <span>{t("assistant.taskList", "Tasks")}</span>
         </div>
         <AnimatePresence mode="popLayout">
-          {tasks.map((task, index) => (
+          {Array.from(new Map(tasks.map(task => [task.id, task])).values()).map((task, index) => (
             <TaskItem key={task.id || `task-${index}`} task={task} />
           ))}
         </AnimatePresence>

@@ -155,7 +155,30 @@
     "password": "Password",
     "submit": "Sign In",
     "forgotPassword": "Forgot Password",
-    "rememberMe": "Remember me"
+    "rememberMe": "Remember me",
+    "emailLabel": "Email",
+    "passwordLabel": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "rememberMeDays": "Stay logged in for 30 days",
+    "loggingIn": "Signing in...",
+    "loginButton": "Sign In",
+    "enterpriseOnly": "Only @{{domain}} enterprise email",
+    "loginWith": "Sign in with enterprise email to AI Platform",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "errors": {
+      "emailRequired": "Email is required",
+      "invalidCredentials": "Invalid email or password",
+      "accountLocked": "Account is locked",
+      "accountDisabled": "Account is disabled",
+      "loginFailed": "Login failed"
+    },
+    "forgotPasswordModal": {
+      "title": "Forgot Password",
+      "content": "Please contact your system administrator to reset your password.",
+      "adminEmail": "Admin email: {{email}}",
+      "ok": "OK"
+    }
   },
   "dashboard": {
     "title": "Dashboard",
@@ -270,13 +293,62 @@
   },
   "settings": {
     "title": "System Settings",
+    "subtitle": "Manage global gateway configuration",
+    "configLevels": {
+      "title": "Configuration Levels",
+      "description": "The gateway supports two configuration levels:",
+      "globalConfig": "Global Config (this page): Default configuration for all services",
+      "serviceConfig": "Service Config (Services page): Click the gear icon on a service card to configure independent auth, rate limiting, caching, etc.",
+      "priority": "Service-level configuration takes priority over global configuration"
+    },
+    "systemStatus": {
+      "title": "System Status",
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "notEnabled": "Not Enabled",
+      "loadBalancer": "Load Balancer"
+    },
+    "tabs": {
+      "auth": "Authentication",
+      "rateLimit": "Rate Limiting",
+      "loadBalancer": "Load Balancer",
+      "apiKeys": "API Keys"
+    },
+    "auth": {
+      "jwt": {
+        "title": "JWT Authentication",
+        "description": "Authenticate using JWT Token",
+        "enable": "Enable JWT",
+        "enableDesc": "Authenticate via Bearer Token",
+        "secret": "JWT Secret",
+        "secretPlaceholder": "your-secret-key",
+        "issuer": "Issuer (optional)",
+        "issuerPlaceholder": "your-app"
+      },
+      "apiKey": {
+        "title": "API Key Authentication",
+        "description": "Authenticate using API Key",
+        "enable": "Enable API Key",
+        "enableDesc": "Authenticate via API Key in Header",
+        "headerName": "Header Name",
+        "headerPlaceholder": "X-API-Key"
+      },
+      "save": "Save Auth Configuration",
+      "saving": "Saving..."
+    },
     "rateLimit": {
       "title": "Rate Limiting",
-      "scope": "Scope",
-      "global": "Global",
-      "service": "Per Service",
-      "tenant": "Per Tenant",
+      "addTitle": "Add Rate Limit Rule",
+      "addDescription": "Configure request frequency limits",
+      "scope": "Rate Limit Scope",
       "scopeId": "Scope ID",
+      "scopeIdPlaceholder": "Leave empty (applies to all)",
+      "serviceIdPlaceholder": "service-id",
+      "global": "Global",
+      "ip": "IP Address",
+      "user": "User",
+      "tenant": "Tenant",
+      "service": "Service",
       "requests": "Requests",
       "requestsRange": "Range: 1 - 100,000",
       "window": "Time Window (seconds)",
@@ -285,7 +357,40 @@
       "burstRange": "Range: 0 - 1,000",
       "addRule": "Add Rule",
       "currentRules": "Current Rules",
-      "noRules": "No rate limit rules"
+      "noRules": "No rate limit rules",
+      "tableHeaders": {
+        "scope": "Scope",
+        "scopeId": "Scope ID",
+        "requests": "Requests",
+        "window": "Window",
+        "burst": "Burst",
+        "status": "Status"
+      }
+    },
+    "loadBalancer": {
+      "title": "Load Balancer Strategy",
+      "description": "Configure request distribution strategy for service instances",
+      "save": "Save Load Balancer Configuration",
+      "saving": "Saving..."
+    },
+    "apiKeys": {
+      "createTitle": "Create API Key",
+      "createDescription": "Generate new API key",
+      "name": "Name",
+      "namePlaceholder": "My App",
+      "tenantId": "Tenant ID (optional)",
+      "tenantIdPlaceholder": "tenant-123",
+      "generate": "Generate API Key",
+      "listTitle": "Created API Keys",
+      "noKeys": "No API Keys",
+      "newKeyWarning": "Please save this API Key, it won't be shown again!",
+      "tableHeaders": {
+        "name": "Name",
+        "tenant": "Tenant",
+        "roles": "Roles",
+        "status": "Status",
+        "createdAt": "Created At"
+      }
     }
   },
   "knowledge": {
@@ -713,7 +818,7 @@
     "kbActive": "knowledge base(s) active",
     "welcomeTitle": "How can I help you today?",
     "welcomeDesc": "Select a model and knowledge bases to start chatting",
-    "placeholder": "Type your message... (Shift+Enter for new line)",
+    "placeholder": "Type your message... (Ctrl+V to paste images)",
     "noModelsPlaceholder": "No models available",
     "disclaimer": "AI responses may be inaccurate",
     "you": "You",
@@ -817,6 +922,90 @@
     "noData": "No data available",
     "export": "Export",
     "dateRange": "Date Range"
+  },
+  "services": {
+    "title": "Services",
+    "addService": "Add Service",
+    "registerService": "Register Service",
+    "tabs": {
+      "simple": "Quick Setup",
+      "advanced": "Advanced (YAML)"
+    },
+    "langgraph": {
+      "title": "LangGraph Quick Registration",
+      "description": "Fill in only two required fields, gateway will auto-configure transparent proxy",
+      "deploymentUrl": "Deployment URL",
+      "deploymentUrlDesc": "LangGraph service deployment address, local or cloud",
+      "graphId": "Assistant / Graph ID",
+      "graphIdDesc": "Graph name or Assistant ID, auto-injected when calling",
+      "langsmithApiKey": "LangSmith API Key",
+      "langsmithApiKeyDesc": "Not required for local deployment, only needed for cloud LangGraph"
+    },
+    "errors": {
+      "requiredFields": "Please fill in Deployment URL and Assistant ID",
+      "registerFailed": "Registration failed"
+    },
+    "register": "Register Service",
+    "registering": "Registering..."
+  },
+  "llm": {
+    "provider": {
+      "addTitle": "Add Provider",
+      "editTitle": "Edit Provider",
+      "addDescription": "Add new LLM provider configuration",
+      "editDescription": "Modify LLM provider configuration",
+      "providerId": "Provider ID",
+      "providerIdPlaceholder": "e.g., openai, anthropic, my-provider",
+      "providerIdRequired": "Provider ID is required",
+      "providerIdPattern": "Only lowercase letters, numbers, and hyphens allowed",
+      "displayName": "Display Name",
+      "displayNamePlaceholder": "e.g., OpenAI, Anthropic",
+      "displayNameRequired": "Display name is required",
+      "apiType": "API Type",
+      "apiTypePlaceholder": "Select API type",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.openai.com",
+      "baseUrlHint": "Custom API endpoint URL, leave empty for default",
+      "apiKey": "API Key",
+      "apiKeyHint": "Leave empty to keep unchanged",
+      "enableProvider": "Enable Provider"
+    },
+    "model": {
+      "addTitle": "Add Model",
+      "editTitle": "Edit Model",
+      "addDescription": "Add new LLM model",
+      "editDescription": "Modify model configuration",
+      "modelId": "Model ID",
+      "modelIdPlaceholder": "e.g., gpt-4o, claude-3-sonnet",
+      "modelIdRequired": "Model ID is required",
+      "modelIdHint": "Model identifier used in API calls",
+      "provider": "Provider",
+      "providerPlaceholder": "Select provider",
+      "displayName": "Display Name",
+      "displayNamePlaceholder": "e.g., GPT-4o, Claude 3 Sonnet",
+      "displayNameRequired": "Display name is required",
+      "contextWindow": "Context Window",
+      "maxOutputTokens": "Max Output",
+      "tokenCount": "Tokens",
+      "inputPrice": "Input Price",
+      "outputPrice": "Output Price",
+      "priceUnit": "USD / 1K tokens",
+      "accessLevel": "Access Level",
+      "accessLevelPlaceholder": "Select access level",
+      "accessLevels": {
+        "public": "Public (all users)",
+        "premium": "Premium (paid users)",
+        "admin": "Admin"
+      },
+      "sortOrder": "Sort Order",
+      "sortOrderHint": "Lower value = higher priority",
+      "supportsVision": "Supports Vision",
+      "supportsVisionHint": "Model can process image input",
+      "supportsTools": "Supports Tools",
+      "supportsToolsHint": "Model can call functions/tools",
+      "enableModel": "Enable Model",
+      "enableModelHint": "When disabled, users cannot select this model"
+    }
   },
   "quota": {
     "title": "Quota Management",

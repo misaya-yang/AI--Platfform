@@ -16,11 +16,11 @@ function formatTokens(num: number): string {
 
 export function UserQuotaPanel() {
   const { darkMode } = useAppStore();
-  const { dateRange, lastRefresh } = useDashboardContext();
+  const { dateRange, serviceId, lastRefresh } = useDashboardContext();
   const [sortBy, setSortBy] = useState<"usage" | "cost">("usage");
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ["dashboard-user-quota", dateRange, lastRefresh.getTime()],
+    queryKey: ["dashboard-user-quota", dateRange, serviceId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "user",
@@ -67,21 +67,31 @@ export function UserQuotaPanel() {
 
   const warningCount = users.filter((u) => u.status === "warning" || u.status === "exceeded").length;
 
+  // Format user display name
+  const formatUserName = (user: string) => {
+    if (user.startsWith("anon:")) {
+      return `匿名-${user.slice(-6)}`;
+    }
+    return user;
+  };
+
   const columns = [
     {
       title: "用户",
       dataIndex: "user",
       key: "user",
-      width: 120,
+      width: 100,
       ellipsis: true,
       render: (text: string) => (
-        <span style={{ fontWeight: 500, color: darkMode ? "#f1f5f9" : "#1e293b" }}>{text}</span>
+        <span style={{ fontWeight: 500, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+          {formatUserName(text)}
+        </span>
       ),
     },
     {
-      title: "日配额",
+      title: "Token 用量",
       key: "daily",
-      width: 150,
+      width: 130,
       render: (_: unknown, record: (typeof users)[0]) => (
         <div>
           <Progress
@@ -97,28 +107,21 @@ export function UserQuotaPanel() {
       ),
     },
     {
-      title: "月配额",
-      key: "monthly",
-      width: 150,
-      render: (_: unknown, record: (typeof users)[0]) => (
-        <div>
-          <Progress
-            percent={Math.min(record.monthlyPercent, 100)}
-            size="small"
-            strokeColor={record.monthlyPercent >= 80 ? "#f59e0b" : "#10b981"}
-            showInfo={false}
-          />
-          <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
-            {formatTokens(record.monthlyUsed)}/{formatTokens(record.monthlyLimit)}
-          </div>
-        </div>
+      title: "成本",
+      dataIndex: "cost",
+      key: "cost",
+      width: 80,
+      render: (cost: number) => (
+        <span style={{ fontWeight: 500, color: "#10b981" }}>
+          ${cost >= 1 ? cost.toFixed(2) : cost.toFixed(4)}
+        </span>
       ),
     },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 80,
+      width: 70,
       render: (status: string) => {
         const config = {
           normal: { color: "success", text: "正常" },

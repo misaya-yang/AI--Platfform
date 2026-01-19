@@ -6,6 +6,7 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { useServices, useHealth } from "@/hooks/useServices";
+import { LAYOUT, getColors, commonStyles } from "../../styles";
 
 interface ServiceCardProps {
   name: string;
@@ -17,11 +18,12 @@ interface ServiceCardProps {
 
 function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCardProps) {
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
 
   const statusConfig = {
-    healthy: { color: "#10b981", icon: <CheckCircleOutlined />, text: "正常" },
-    degraded: { color: "#f59e0b", icon: <WarningOutlined />, text: "降级" },
-    down: { color: "#ef4444", icon: <CloseCircleOutlined />, text: "异常" },
+    healthy: { color: colors.success, bg: `${colors.success}10`, icon: <CheckCircleOutlined />, text: "运行正常" },
+    degraded: { color: colors.warning, bg: `${colors.warning}10`, icon: <WarningOutlined />, text: "性能下降" },
+    down: { color: colors.error, bg: `${colors.error}10`, icon: <CloseCircleOutlined />, text: "服务异常" },
   };
 
   const config = statusConfig[status];
@@ -29,52 +31,90 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
   return (
     <div
       style={{
-        padding: 16,
-        borderRadius: 8,
-        background: darkMode ? "#0f172a" : "#f8fafc",
-        border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+        padding: "18px",
+        borderRadius: 12,
+        background: colors.innerBg,
+        border: `1px solid ${colors.border}`,
+        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        position: "relative",
+        overflow: "hidden",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.borderColor = colors.accent;
+        e.currentTarget.style.boxShadow = colors.shadowMd;
+        e.currentTarget.style.transform = "translateY(-2px)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.borderColor = colors.border;
+        e.currentTarget.style.boxShadow = "none";
+        e.currentTarget.style.transform = "translateY(0)";
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
-          {name}
-        </span>
-        <Tag color={config.color} icon={config.icon}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ 
+            width: 8, 
+            height: 8, 
+            borderRadius: "50%", 
+            background: config.color,
+            boxShadow: `0 0 6px ${config.color}`,
+          }} />
+          <span style={{ fontSize: 15, fontWeight: 700, color: colors.textPrimary }}>
+            {name}
+          </span>
+        </div>
+        <div style={{ 
+          fontSize: 11, 
+          fontWeight: 600, 
+          color: config.color, 
+          padding: "2px 8px", 
+          borderRadius: 20, 
+          background: config.bg,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+        }}>
+          {config.icon}
           {config.text}
-        </Tag>
+        </div>
       </div>
-      <Row gutter={8}>
-        <Col span={8}>
-          <div style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>QPS</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+      
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>QPS</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: colors.textPrimary, letterSpacing: "-0.02em" }}>
             {qps.toFixed(1)}
           </div>
-        </Col>
-        <Col span={8}>
-          <div style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>延迟</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
-            {latency}ms
+        </div>
+        <div style={{ width: 1, background: colors.border, alignSelf: "stretch" }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>延迟</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: colors.textPrimary, letterSpacing: "-0.02em" }}>
+            {latency}<span style={{ fontSize: 11, fontWeight: 500, marginLeft: 1 }}>ms</span>
           </div>
-        </Col>
-        <Col span={8}>
-          <div style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>错误率</div>
+        </div>
+        <div style={{ width: 1, background: colors.border, alignSelf: "stretch" }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>错误率</div>
           <div
             style={{
-              fontSize: 16,
-              fontWeight: 600,
-              color: errorRate > 5 ? "#ef4444" : errorRate > 1 ? "#f59e0b" : "#10b981",
+              fontSize: 18,
+              fontWeight: 800,
+              letterSpacing: "-0.02em",
+              color: errorRate > 5 ? colors.error : errorRate > 1 ? colors.warning : colors.success,
             }}
           >
-            {errorRate.toFixed(1)}%
+            {errorRate.toFixed(1)}<span style={{ fontSize: 11, fontWeight: 500, marginLeft: 1 }}>%</span>
           </div>
-        </Col>
-      </Row>
+        </div>
+      </div>
     </div>
   );
 }
 
 export function ServiceHealthPanel() {
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const servicesQuery = useServices();
   const healthQuery = useHealth();
 
@@ -113,39 +153,46 @@ export function ServiceHealthPanel() {
       loading={servicesQuery.isLoading || healthQuery.isLoading}
     >
       {/* Summary row */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}>
-          <Statistic
-            title={<span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>可用性</span>}
-            value={totalServices > 0 ? ((healthyCount / totalServices) * 100).toFixed(1) : 0}
-            suffix="%"
-            valueStyle={{ color: "#10b981", fontSize: 20 }}
-          />
-        </Col>
-        <Col span={8}>
-          <Statistic
-            title={<span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>错误率</span>}
-            value={avgErrorRate.toFixed(2)}
-            suffix="%"
-            valueStyle={{
-              color: avgErrorRate > 5 ? "#ef4444" : avgErrorRate > 1 ? "#f59e0b" : "#10b981",
-              fontSize: 20,
-            }}
-          />
-        </Col>
-        <Col span={8}>
-          <Statistic
-            title={<span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>服务数</span>}
-            value={totalServices}
-            valueStyle={{ fontSize: 20, color: darkMode ? "#f1f5f9" : "#1e293b" }}
-          />
-        </Col>
-      </Row>
+      <div
+        style={{
+          display: "flex",
+          gap: 24,
+          marginBottom: 20,
+          padding: "12px 16px",
+          background: colors.innerBg,
+          borderRadius: 8,
+          border: `1px solid ${colors.border}`,
+        }}
+      >
+        <Statistic
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>可用性</span>}
+          value={totalServices > 0 ? ((healthyCount / totalServices) * 100).toFixed(1) : 0}
+          suffix="%"
+          valueStyle={{ color: colors.success, fontSize: 24, fontWeight: 700 }}
+        />
+        <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
+        <Statistic
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>错误率</span>}
+          value={avgErrorRate.toFixed(2)}
+          suffix="%"
+          valueStyle={{
+            color: avgErrorRate > 5 ? colors.error : avgErrorRate > 1 ? colors.warning : colors.success,
+            fontSize: 24,
+            fontWeight: 700,
+          }}
+        />
+        <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
+        <Statistic
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>服务数</span>}
+          value={totalServices}
+          valueStyle={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}
+        />
+      </div>
 
       {/* Service cards */}
       <Row gutter={[12, 12]}>
         {serviceCards.map((service, index) => (
-          <Col xs={24} sm={12} lg={8} key={index}>
+          <Col xs={24} sm={12} lg={12} xl={8} key={index}>
             <ServiceStatusCard {...service} />
           </Col>
         ))}

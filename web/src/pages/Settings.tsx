@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
@@ -124,6 +125,7 @@ async function updateLoadBalancerConfig(config: LoadBalancerConfig) {
 }
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [newApiKey, setNewApiKey] = useState<string | null>(null);
 
@@ -228,8 +230,8 @@ export function SettingsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">系统设置</h1>
-          <p className="text-muted-foreground">管理网关的全局配置</p>
+          <h1 className="text-2xl font-bold">{t("settings.title")}</h1>
+          <p className="text-muted-foreground">{t("settings.subtitle")}</p>
         </div>
       </div>
 
@@ -245,16 +247,16 @@ export function SettingsPage() {
               </svg>
             </div>
             <div className="space-y-1">
-              <h4 className="text-sm font-medium text-primary dark:text-primary/90">配置层级说明</h4>
+              <h4 className="text-sm font-medium text-primary dark:text-primary/90">{t("settings.configLevels.title")}</h4>
               <p className="text-sm text-primary/90 dark:text-primary/70">
-                网关支持<strong>两个配置层级</strong>：
+                {t("settings.configLevels.description")}
               </p>
               <ul className="text-sm text-primary dark:text-primary/70 list-disc list-inside space-y-0.5">
-                <li><strong>全局配置</strong>（此页面）：对所有服务生效的默认配置</li>
-                <li><strong>服务配置</strong>（服务管理页面）：点击服务卡片上的齿轮图标，为单个服务配置独立的鉴权、限流、缓存等</li>
+                <li>{t("settings.configLevels.globalConfig")}</li>
+                <li>{t("settings.configLevels.serviceConfig")}</li>
               </ul>
               <p className="text-xs text-primary dark:text-primary mt-2">
-                服务级别配置优先级高于全局配置
+                {t("settings.configLevels.priority")}
               </p>
             </div>
           </div>
@@ -264,7 +266,7 @@ export function SettingsPage() {
       {/* 系统状态 */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">系统状态</CardTitle>
+          <CardTitle className="text-lg">{t("settings.systemStatus.title")}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-6">
@@ -279,7 +281,7 @@ export function SettingsPage() {
                     : "bg-muted text-muted-foreground"
                 }
               >
-                {status.database?.enabled ? (status.database?.connected ? "已连接" : "未连接") : "未启用"}
+                {status.database?.enabled ? (status.database?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
               </Badge>
             </div>
             <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
@@ -293,11 +295,11 @@ export function SettingsPage() {
                     : "bg-muted text-muted-foreground"
                 }
               >
-                {status.redis?.enabled ? (status.redis?.connected ? "已连接" : "未连接") : "未启用"}
+                {status.redis?.enabled ? (status.redis?.connected ? t("settings.systemStatus.connected") : t("settings.systemStatus.disconnected")) : t("settings.systemStatus.notEnabled")}
               </Badge>
             </div>
             <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
-              <span className="text-sm font-medium">负载均衡</span>
+              <span className="text-sm font-medium">{t("settings.systemStatus.loadBalancer")}</span>
               <Badge variant="outline" className="bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30">
                 {status.load_balancer?.strategy || "round_robin"}
               </Badge>
@@ -308,24 +310,24 @@ export function SettingsPage() {
 
       <Tabs defaultValue="auth" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="auth">鉴权配置</TabsTrigger>
-          <TabsTrigger value="rate-limit">限流配置</TabsTrigger>
-          <TabsTrigger value="load-balancer">负载均衡</TabsTrigger>
-          <TabsTrigger value="api-keys">API Keys</TabsTrigger>
+          <TabsTrigger value="auth">{t("settings.tabs.auth")}</TabsTrigger>
+          <TabsTrigger value="rate-limit">{t("settings.tabs.rateLimit")}</TabsTrigger>
+          <TabsTrigger value="load-balancer">{t("settings.tabs.loadBalancer")}</TabsTrigger>
+          <TabsTrigger value="api-keys">{t("settings.tabs.apiKeys")}</TabsTrigger>
         </TabsList>
 
         {/* 鉴权配置 */}
         <TabsContent value="auth" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>JWT 认证</CardTitle>
-              <CardDescription>使用 JWT Token 进行身份验证</CardDescription>
+              <CardTitle>{t("settings.auth.jwt.title")}</CardTitle>
+              <CardDescription>{t("settings.auth.jwt.description")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label>启用 JWT</Label>
-                  <p className="text-xs text-muted-foreground">通过 Bearer Token 进行认证</p>
+                  <Label>{t("settings.auth.jwt.enable")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.auth.jwt.enableDesc")}</p>
                 </div>
                 <Switch
                   checked={authForm.jwt_enabled}
@@ -338,18 +340,18 @@ export function SettingsPage() {
               {authForm.jwt_enabled && (
                 <>
                   <div className="space-y-2">
-                    <Label>JWT Secret</Label>
+                    <Label>{t("settings.auth.jwt.secret")}</Label>
                     <Input
                       type="password"
-                      placeholder="your-secret-key"
+                      placeholder={t("settings.auth.jwt.secretPlaceholder")}
                       value={authForm.jwt_secret}
                       onChange={(e) => setAuthForm({ ...authForm, jwt_secret: e.target.value })}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>Issuer（可选）</Label>
+                    <Label>{t("settings.auth.jwt.issuer")}</Label>
                     <Input
-                      placeholder="your-app"
+                      placeholder={t("settings.auth.jwt.issuerPlaceholder")}
                       value={authForm.jwt_issuer}
                       onChange={(e) => setAuthForm({ ...authForm, jwt_issuer: e.target.value })}
                     />
@@ -361,14 +363,14 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>API Key 认证</CardTitle>
-              <CardDescription>使用 API Key 进行身份验证</CardDescription>
+              <CardTitle>{t("settings.auth.apiKey.title")}</CardTitle>
+              <CardDescription>{t("settings.auth.apiKey.description")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label>启用 API Key</Label>
-                  <p className="text-xs text-muted-foreground">通过 Header 中的 API Key 进行认证</p>
+                  <Label>{t("settings.auth.apiKey.enable")}</Label>
+                  <p className="text-xs text-muted-foreground">{t("settings.auth.apiKey.enableDesc")}</p>
                 </div>
                 <Switch
                   checked={authForm.api_key_enabled}
@@ -380,9 +382,9 @@ export function SettingsPage() {
 
               {authForm.api_key_enabled && (
                 <div className="space-y-2">
-                  <Label>Header 名称</Label>
+                  <Label>{t("settings.auth.apiKey.headerName")}</Label>
                   <Input
-                    placeholder="X-API-Key"
+                    placeholder={t("settings.auth.apiKey.headerPlaceholder")}
                     value={authForm.api_key_header}
                     onChange={(e) => setAuthForm({ ...authForm, api_key_header: e.target.value })}
                   />
@@ -397,7 +399,7 @@ export function SettingsPage() {
               disabled={updateAuthMutation.isPending}
               className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
             >
-              {updateAuthMutation.isPending ? "保存中..." : "保存鉴权配置"}
+              {updateAuthMutation.isPending ? t("settings.auth.saving") : t("settings.auth.save")}
             </Button>
           </div>
         </TabsContent>
@@ -406,13 +408,13 @@ export function SettingsPage() {
         <TabsContent value="rate-limit" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>添加限流规则</CardTitle>
-              <CardDescription>配置请求频率限制</CardDescription>
+              <CardTitle>{t("settings.rateLimit.addTitle")}</CardTitle>
+              <CardDescription>{t("settings.rateLimit.addDescription")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>限流范围</Label>
+                  <Label>{t("settings.rateLimit.scope")}</Label>
                   <Select
                     value={rateLimitForm.scope}
                     onValueChange={(value) => setRateLimitForm({ ...rateLimitForm, scope: value })}
@@ -421,20 +423,20 @@ export function SettingsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="global">全局</SelectItem>
-                      <SelectItem value="ip">IP 地址</SelectItem>
-                      <SelectItem value="user">用户</SelectItem>
-                      <SelectItem value="tenant">租户</SelectItem>
-                      <SelectItem value="service">服务</SelectItem>
+                      <SelectItem value="global">{t("settings.rateLimit.global")}</SelectItem>
+                      <SelectItem value="ip">{t("settings.rateLimit.ip")}</SelectItem>
+                      <SelectItem value="user">{t("settings.rateLimit.user")}</SelectItem>
+                      <SelectItem value="tenant">{t("settings.rateLimit.tenant")}</SelectItem>
+                      <SelectItem value="service">{t("settings.rateLimit.service")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
                 {rateLimitForm.scope !== "global" && (
                   <div className="space-y-2">
-                    <Label>范围 ID</Label>
+                    <Label>{t("settings.rateLimit.scopeId")}</Label>
                     <Input
-                      placeholder={rateLimitForm.scope === "service" ? "service-id" : "可留空（应用于所有）"}
+                      placeholder={rateLimitForm.scope === "service" ? t("settings.rateLimit.serviceIdPlaceholder") : t("settings.rateLimit.scopeIdPlaceholder")}
                       value={rateLimitForm.scope_id}
                       onChange={(e) => setRateLimitForm({ ...rateLimitForm, scope_id: e.target.value })}
                     />
@@ -444,7 +446,7 @@ export function SettingsPage() {
 
               <div className="grid grid-cols-3 gap-4">
                 <div className="space-y-2">
-                  <Label>请求数</Label>
+                  <Label>{t("settings.rateLimit.requests")}</Label>
                   <Input
                     type="number"
                     min={1}
@@ -455,10 +457,10 @@ export function SettingsPage() {
                       setRateLimitForm({ ...rateLimitForm, requests: Math.max(1, Math.min(100000, val)) });
                     }}
                   />
-                  <p className="text-xs text-muted-foreground">范围: 1 - 100,000</p>
+                  <p className="text-xs text-muted-foreground">{t("settings.rateLimit.requestsRange")}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label>时间窗口（秒）</Label>
+                  <Label>{t("settings.rateLimit.window")}</Label>
                   <Input
                     type="number"
                     min={1}
@@ -469,10 +471,10 @@ export function SettingsPage() {
                       setRateLimitForm({ ...rateLimitForm, window: Math.max(1, Math.min(86400, val)) });
                     }}
                   />
-                  <p className="text-xs text-muted-foreground">范围: 1 - 86,400 (1天)</p>
+                  <p className="text-xs text-muted-foreground">{t("settings.rateLimit.windowRange")}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label>突发允许</Label>
+                  <Label>{t("settings.rateLimit.burst")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -483,7 +485,7 @@ export function SettingsPage() {
                       setRateLimitForm({ ...rateLimitForm, burst: Math.max(0, Math.min(1000, val)) });
                     }}
                   />
-                  <p className="text-xs text-muted-foreground">范围: 0 - 1,000</p>
+                  <p className="text-xs text-muted-foreground">{t("settings.rateLimit.burstRange")}</p>
                 </div>
               </div>
 
@@ -492,28 +494,28 @@ export function SettingsPage() {
                 disabled={createRateLimitMutation.isPending}
                 className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
               >
-                添加规则
+                {t("settings.rateLimit.addRule")}
               </Button>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>当前规则</CardTitle>
+              <CardTitle>{t("settings.rateLimit.currentRules")}</CardTitle>
             </CardHeader>
             <CardContent>
               {rateLimits.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无限流规则</p>
+                <p className="text-sm text-muted-foreground">{t("settings.rateLimit.noRules")}</p>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>范围</TableHead>
-                      <TableHead>范围 ID</TableHead>
-                      <TableHead>请求数</TableHead>
-                      <TableHead>时间窗口</TableHead>
-                      <TableHead>突发</TableHead>
-                      <TableHead>状态</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.scope")}</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.scopeId")}</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.requests")}</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.window")}</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.burst")}</TableHead>
+                      <TableHead>{t("settings.rateLimit.tableHeaders.status")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -526,7 +528,7 @@ export function SettingsPage() {
                         <TableCell>{rule.burst}</TableCell>
                         <TableCell>
                           <Badge variant={rule.enabled ? "default" : "secondary"}>
-                            {rule.enabled ? "启用" : "禁用"}
+                            {rule.enabled ? t("common.active") : t("common.disabled")}
                           </Badge>
                         </TableCell>
                       </TableRow>
@@ -542,8 +544,8 @@ export function SettingsPage() {
         <TabsContent value="load-balancer" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>负载均衡策略</CardTitle>
-              <CardDescription>配置服务实例的请求分配策略</CardDescription>
+              <CardTitle>{t("settings.loadBalancer.title")}</CardTitle>
+              <CardDescription>{t("settings.loadBalancer.description")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-3">
@@ -584,7 +586,7 @@ export function SettingsPage() {
                   disabled={updateLbMutation.isPending}
                   className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
                 >
-                  {updateLbMutation.isPending ? "保存中..." : "保存负载均衡配置"}
+                  {updateLbMutation.isPending ? t("settings.loadBalancer.saving") : t("settings.loadBalancer.save")}
                 </Button>
               </div>
             </CardContent>
@@ -595,23 +597,23 @@ export function SettingsPage() {
         <TabsContent value="api-keys" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>创建 API Key</CardTitle>
-              <CardDescription>生成新的 API 密钥</CardDescription>
+              <CardTitle>{t("settings.apiKeys.createTitle")}</CardTitle>
+              <CardDescription>{t("settings.apiKeys.createDescription")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>名称</Label>
+                  <Label>{t("settings.apiKeys.name")}</Label>
                   <Input
-                    placeholder="My App"
+                    placeholder={t("settings.apiKeys.namePlaceholder")}
                     value={apiKeyForm.name}
                     onChange={(e) => setApiKeyForm({ ...apiKeyForm, name: e.target.value })}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>租户 ID（可选）</Label>
+                  <Label>{t("settings.apiKeys.tenantId")}</Label>
                   <Input
-                    placeholder="tenant-123"
+                    placeholder={t("settings.apiKeys.tenantIdPlaceholder")}
                     value={apiKeyForm.tenant_id}
                     onChange={(e) => setApiKeyForm({ ...apiKeyForm, tenant_id: e.target.value })}
                   />
@@ -623,13 +625,13 @@ export function SettingsPage() {
                 disabled={createApiKeyMutation.isPending || !apiKeyForm.name}
                 className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
               >
-                生成 API Key
+                {t("settings.apiKeys.generate")}
               </Button>
 
               {newApiKey && (
                 <div className="rounded-lg border border-green-500 bg-green-50 dark:bg-green-950 p-4">
                   <p className="text-sm font-medium text-green-800 dark:text-green-200 mb-2">
-                    ⚠️ 请保存此 API Key，它不会再次显示！
+                    ⚠️ {t("settings.apiKeys.newKeyWarning")}
                   </p>
                   <code className="block bg-white dark:bg-gray-900 rounded p-2 text-sm break-all">
                     {newApiKey}
@@ -642,7 +644,7 @@ export function SettingsPage() {
                       navigator.clipboard.writeText(newApiKey);
                     }}
                   >
-                    复制
+                    {t("common.copy")}
                   </Button>
       </div>
               )}
@@ -651,20 +653,20 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>已创建的 API Keys</CardTitle>
+              <CardTitle>{t("settings.apiKeys.listTitle")}</CardTitle>
             </CardHeader>
             <CardContent>
               {apiKeys.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无 API Keys</p>
+                <p className="text-sm text-muted-foreground">{t("settings.apiKeys.noKeys")}</p>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>名称</TableHead>
-                      <TableHead>租户</TableHead>
-                      <TableHead>角色</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>创建时间</TableHead>
+                      <TableHead>{t("settings.apiKeys.tableHeaders.name")}</TableHead>
+                      <TableHead>{t("settings.apiKeys.tableHeaders.tenant")}</TableHead>
+                      <TableHead>{t("settings.apiKeys.tableHeaders.roles")}</TableHead>
+                      <TableHead>{t("settings.apiKeys.tableHeaders.status")}</TableHead>
+                      <TableHead>{t("settings.apiKeys.tableHeaders.createdAt")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -681,7 +683,7 @@ export function SettingsPage() {
                         </TableCell>
                         <TableCell>
                           <Badge variant={key.enabled ? "default" : "secondary"}>
-                            {key.enabled ? "启用" : "禁用"}
+                            {key.enabled ? t("common.active") : t("common.disabled")}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">

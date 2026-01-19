@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import YAML from "yaml";
 
 import {
@@ -57,6 +58,7 @@ interface LangGraphFormData {
 }
 
 export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<string>("simple");
   const [yamlText, setYamlText] = useState(defaultYaml);
   const [saving, setSaving] = useState(false);
@@ -72,7 +74,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
 
   async function handleSimpleRegister() {
     if (!formData.deploymentUrl || !formData.graphId) {
-      setError("请填写 Deployment URL 和 Assistant ID");
+      setError(t("services.errors.requiredFields"));
       return;
     }
 
@@ -117,7 +119,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
         langsmithApiKey: "",
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "注册失败";
+      const message = err instanceof Error ? err.message : t("services.errors.registerFailed");
       setError(message);
     } finally {
       setSaving(false);
@@ -133,7 +135,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
       onRegistered?.();
       setOpen(false);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "注册失败";
+      const message = err instanceof Error ? err.message : t("services.errors.registerFailed");
       setError(message);
     } finally {
       setSaving(false);
@@ -143,17 +145,17 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm">添加服务</Button>
+        <Button size="sm">{t("services.addService")}</Button>
       </DialogTrigger>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>注册服务</DialogTitle>
+          <DialogTitle>{t("services.registerService")}</DialogTitle>
         </DialogHeader>
 
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="simple">快速配置</TabsTrigger>
-            <TabsTrigger value="advanced">高级 (YAML)</TabsTrigger>
+            <TabsTrigger value="simple">{t("services.tabs.simple")}</TabsTrigger>
+            <TabsTrigger value="advanced">{t("services.tabs.advanced")}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="simple" className="space-y-4 pt-4">
@@ -162,16 +164,16 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
-                LangGraph 服务快速注册
+                {t("services.langgraph.title")}
               </div>
               <p className="text-xs text-muted-foreground mb-4">
-                只需填写两个必填项，网关将自动为您配置透明代理转发
+                {t("services.langgraph.description")}
               </p>
 
               <div className="grid gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="deploymentUrl">
-                    Deployment URL <span className="text-red-500">*</span>
+                    {t("services.langgraph.deploymentUrl")} <span className="text-red-500">*</span>
                   </Label>
                   <Input
                     id="deploymentUrl"
@@ -180,13 +182,13 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     onChange={(e) => setFormData({ ...formData, deploymentUrl: e.target.value })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    LangGraph 服务的部署地址，本地或云端均可
+                    {t("services.langgraph.deploymentUrlDesc")}
                   </p>
                 </div>
 
                 <div className="space-y-2">
                   <Label htmlFor="graphId">
-                    Assistant / Graph ID <span className="text-red-500">*</span>
+                    {t("services.langgraph.graphId")} <span className="text-red-500">*</span>
                   </Label>
                   <Input
                     id="graphId"
@@ -195,12 +197,12 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     onChange={(e) => setFormData({ ...formData, graphId: e.target.value })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    Graph 名称或 Assistant ID，用于调用时自动注入
+                    {t("services.langgraph.graphIdDesc")}
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="langsmithApiKey">LangSmith API Key</Label>
+                  <Label htmlFor="langsmithApiKey">{t("services.langgraph.langsmithApiKey")}</Label>
                   <Input
                     id="langsmithApiKey"
                     type="password"
@@ -209,7 +211,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
                     onChange={(e) => setFormData({ ...formData, langsmithApiKey: e.target.value })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    <strong>本地部署无需填写</strong>，仅云端 LangGraph 需要
+                    {t("services.langgraph.langsmithApiKeyDesc")}
                   </p>
                 </div>
               </div>
@@ -219,10 +221,10 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
 
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setOpen(false)}>
-                取消
+                {t("common.cancel")}
               </Button>
               <Button onClick={handleSimpleRegister} disabled={saving}>
-                {saving ? "注册中..." : "注册服务"}
+                {saving ? t("services.registering") : t("services.register")}
               </Button>
             </div>
           </TabsContent>
@@ -232,10 +234,10 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
             {error && <div className="text-sm text-destructive">{error}</div>}
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setOpen(false)}>
-                取消
+                {t("common.cancel")}
               </Button>
               <Button onClick={handleYamlRegister} disabled={saving}>
-                {saving ? "注册中..." : "注册"}
+                {saving ? t("services.registering") : t("services.register")}
               </Button>
             </div>
           </TabsContent>

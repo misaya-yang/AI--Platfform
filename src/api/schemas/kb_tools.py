@@ -42,18 +42,17 @@ class KBSearchRequest(BaseModel):
         description="Retrieval mode. 'auto' selects best mode based on query characteristics"
     )
 
-    # Advanced options - SOTA defaults for production quality
+    # Advanced options
     rerank: bool = Field(
-        default=True,
-        description="Enable cross-encoder reranking for improved relevance (15-30% accuracy boost)"
+        default=False,
+        description="Enable cross-encoder reranking for improved relevance"
     )
     mmr: bool = Field(default=False, description="Enable MMR for result diversity")
     score_threshold: Optional[float] = Field(
-        default=0.3,
+        default=None,
         ge=0.0,
         le=1.0,
-        description="Minimum score threshold (0.0-1.0). Results below this are filtered out. "
-                    "Default 0.3 filters low-quality matches."
+        description="Minimum score threshold (0.0-1.0). Results below this are filtered out."
     )
 
     # Multimodal options

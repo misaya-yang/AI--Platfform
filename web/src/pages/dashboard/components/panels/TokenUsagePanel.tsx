@@ -25,37 +25,43 @@ function formatTokens(num: number): string {
 
 export function TokenUsagePanel() {
   const { darkMode } = useAppStore();
-  const { dateRange, granularity, lastRefresh } = useDashboardContext();
+  const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
 
   const summaryQuery = useQuery({
-    queryKey: ["dashboard-token-summary", dateRange, lastRefresh.getTime()],
+    queryKey: ["dashboard-token-summary", dateRange, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageSummary({
         start_date: dateRange[0],
         end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
 
   const breakdownQuery = useQuery({
-    queryKey: ["dashboard-token-breakdown", dateRange, lastRefresh.getTime()],
+    queryKey: ["dashboard-token-breakdown", dateRange, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "model",
         start_date: dateRange[0],
         end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
         limit: 5,
       }),
     staleTime: 30000,
   });
 
   const timeseriesQuery = useQuery({
-    queryKey: ["dashboard-token-timeseries", dateRange, granularity, lastRefresh.getTime()],
+    queryKey: ["dashboard-token-timeseries", dateRange, granularity, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: dateRange[0],
         end_date: dateRange[1],
         granularity,
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
@@ -163,7 +169,7 @@ export function TokenUsagePanel() {
 
       {/* Trend chart */}
       <div style={{ width: "100%", height: 100 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer minWidth={100} minHeight={80}>
           <LineChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
             <CartesianGrid stroke={gridColor} strokeDasharray="3 3" vertical={false} />
             <XAxis dataKey="date" hide />

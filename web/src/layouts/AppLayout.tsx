@@ -83,29 +83,37 @@ const navItems = [
   },
 ];
 
-// Logo component - simple static version
+// Logo component - refined version
 function Logo({ collapsed }: { collapsed: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex-shrink-0">
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-          <rect x="2" y="2" width="28" height="28" rx="8" fill="#6366F1" opacity="0.1"/>
+      <div className="flex-shrink-0 relative">
+        <div className="absolute inset-0 bg-indigo-500 blur-md opacity-20 animate-pulse"></div>
+        <svg width="34" height="34" viewBox="0 0 32 32" fill="none" className="relative z-10">
+          <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#logoGradient)" />
           <path
-            d="M16 6L26 12V20L16 26L6 20V12L16 6Z"
-            stroke="#6366F1"
-            strokeWidth="2"
+            d="M16 7L25 12.5V20.5L16 26L7 20.5V12.5L16 7Z"
+            stroke="white"
+            strokeWidth="1.5"
+            strokeOpacity="0.8"
             fill="none"
           />
-          <circle cx="16" cy="16" r="4" fill="#6366F1" />
+          <circle cx="16" cy="16" r="4" fill="white" />
+          <defs>
+            <linearGradient id="logoGradient" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stopColor="#6366F1" />
+              <stop offset="1" stopColor="#8B5CF6" />
+            </linearGradient>
+          </defs>
         </svg>
       </div>
       {!collapsed && (
         <div className="flex flex-col">
-          <span className="text-base font-semibold text-foreground">
+          <span className="text-base font-bold text-foreground leading-tight tracking-tight">
             AI Platform
           </span>
-          <span className="text-xs text-muted-foreground">
-            Unified AI Services
+          <span className="text-[10px] uppercase font-bold text-muted-foreground/60 tracking-widest mt-0.5">
+            Gateway Console
           </span>
         </div>
       )}
@@ -399,24 +407,51 @@ export function AppLayout() {
       {/* Global styles */}
       <style>{`
         .app-sider .ant-menu-item {
-          margin: 4px 8px !important;
-          border-radius: 6px !important;
-          height: 40px !important;
-          line-height: 40px !important;
+          margin: 4px 12px !important;
+          border-radius: 10px !important;
+          height: 44px !important;
+          line-height: 44px !important;
+          width: calc(100% - 24px) !important;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+
+        .app-sider .ant-menu-item .ant-menu-item-icon {
+          font-size: 16px !important;
+          transition: transform 0.2s !important;
+        }
+
+        .app-sider .ant-menu-item:hover .ant-menu-item-icon {
+          transform: scale(1.1);
         }
 
         .app-sider .ant-menu-item:hover {
-          background: ${darkMode ? 'rgba(255,255,255,0.05)' : '#F3F4F6'} !important;
+          background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)'} !important;
+          color: ${darkMode ? '#ffffff' : '#000000'} !important;
         }
 
         .app-sider .ant-menu-item-selected {
-          background: ${darkMode ? 'rgba(99, 102, 241, 0.15)' : '#EEF2FF'} !important;
-          border-left: 3px solid #6366F1 !important;
+          background: ${darkMode 
+            ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.1) 100%)' 
+            : 'linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)'} !important;
+          color: #6366F1 !important;
+          font-weight: 600 !important;
+          box-shadow: ${darkMode ? '0 4px 12px rgba(0,0,0,0.2)' : '0 2px 8px rgba(99, 102, 241, 0.08)'};
         }
 
-        .app-sider .ant-menu-item-selected::before,
+        .app-sider .ant-menu-item-selected .ant-menu-item-icon {
+          color: #6366F1 !important;
+        }
+
         .app-sider .ant-menu-item-selected::after {
-          display: none !important;
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 12px;
+          bottom: 12px;
+          width: 3px;
+          background: #6366F1;
+          border-radius: 0 4px 4px 0;
+          display: block !important;
         }
 
         /* Scrollbar styling */

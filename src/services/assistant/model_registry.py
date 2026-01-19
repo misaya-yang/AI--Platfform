@@ -232,8 +232,8 @@ DEFAULT_MODELS: Dict[ModelProvider, List[ModelInfo]] = {
             context_window=32768,
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.004,
-            output_price_per_1k=0.012,
+            input_price_per_1k=0.0012,
+            output_price_per_1k=0.006,
         ),
         ModelInfo(
             id="qwen-vl-max",
@@ -242,8 +242,8 @@ DEFAULT_MODELS: Dict[ModelProvider, List[ModelInfo]] = {
             context_window=32768,
             max_output_tokens=8192,
             supports_vision=True,
-            input_price_per_1k=0.003,
-            output_price_per_1k=0.009,
+            input_price_per_1k=0.00023,
+            output_price_per_1k=0.000574,
         ),
     ],
     ModelProvider.GOOGLE: [
@@ -530,12 +530,14 @@ class ModelRegistry:
             if msg.images and msg.role == "user":
                 content_parts = [{"type": "text", "text": msg.content}]
                 for img in msg.images:
-                    if img.startswith("http"):
+                    if img.startswith("http") or img.startswith("data:"):
+                        # URL or data URL - use as-is
                         content_parts.append({
                             "type": "image_url",
                             "image_url": {"url": img}
                         })
                     else:
+                        # Raw base64 - assume jpeg
                         content_parts.append({
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{img}"}
@@ -582,8 +584,7 @@ class ModelRegistry:
                 content_parts = []
                 for img in msg.images:
                     if img.startswith("http"):
-                        # Anthropic requires base64 for images
-                        # For URLs, we'd need to fetch and convert
+                        # Anthropic supports URL source
                         content_parts.append({
                             "type": "image",
                             "source": {
@@ -591,7 +592,24 @@ class ModelRegistry:
                                 "url": img,
                             }
                         })
+                    elif img.startswith("data:"):
+                        # Parse data URL: data:{mime_type};base64,{base64_data}
+                        try:
+                            header, base64_data = img.split(",", 1)
+                            media_type = header.split(":")[1].split(";")[0]
+                        except (ValueError, IndexError):
+                            media_type = "image/jpeg"
+                            base64_data = img
+                        content_parts.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64_data,
+                            }
+                        })
                     else:
+                        # Raw base64 - assume jpeg
                         content_parts.append({
                             "type": "image",
                             "source": {
@@ -656,16 +674,40 @@ class ModelRegistry:
             if msg.images and msg.role == "user":
                 for img in msg.images:
                     if img.startswith("http"):
+                        # Infer mime type from URL extension
+                        mime_type = "image/jpeg"
+                        if ".png" in img.lower():
+                            mime_type = "image/png"
+                        elif ".gif" in img.lower():
+                            mime_type = "image/gif"
+                        elif ".webp" in img.lower():
+                            mime_type = "image/webp"
                         parts.append({
-                            "file_data": {
-                                "file_uri": img,
-                                "mime_type": "image/jpeg"
+                            "fileData": {
+                                "fileUri": img,
+                                "mimeType": mime_type
+                            }
+                        })
+                    elif img.startswith("data:"):
+                        # Parse data URL: data:{mime_type};base64,{base64_data}
+                        try:
+                            header, base64_data = img.split(",", 1)
+                            mime_type = header.split(":")[1].split(";")[0]
+                        except (ValueError, IndexError):
+                            mime_type = "image/jpeg"
+                            base64_data = img
+                        # Gemini REST API uses camelCase
+                        parts.append({
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": base64_data
                             }
                         })
                     else:
+                        # Raw base64 data, assume jpeg
                         parts.append({
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
+                            "inlineData": {
+                                "mimeType": "image/jpeg",
                                 "data": img
                             }
                         })

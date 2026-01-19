@@ -8,11 +8,19 @@ export type SourceFilter = "all" | "internal" | "external";
 // Refresh interval options
 export type RefreshInterval = 0 | 30 | 60 | 300; // 0 = manual, 30s, 1min, 5min
 
+// Service filter - "all" or specific service_id
+export type ServiceFilter = "all" | string;
+
+// User filter - "all" or specific user_id
+export type UserFilter = "all" | string;
+
 // Dashboard context shared across panels
 export interface DashboardContext {
   dateRange: [string, string]; // [startDate, endDate] in YYYY-MM-DD
   granularity: "hour" | "day";
   source: SourceFilter;
+  serviceId: ServiceFilter;
+  userId: UserFilter;
   refreshInterval: RefreshInterval;
   lastRefresh: Date;
 }

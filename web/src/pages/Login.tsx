@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ import { Modal } from "antd";
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const { setAuth, setLoading, isLoading } = useAuthStore();
   const allowedDomain = "hejazfs.com.au";
 
@@ -30,7 +32,7 @@ export function LoginPage() {
     try {
       const trimmedEmail = email.trim();
       if (!trimmedEmail) {
-        setError("Email is required");
+        setError(t("login.errors.emailRequired"));
         setLoading(false);
         return;
       }
@@ -54,13 +56,13 @@ export function LoginPage() {
     } catch (err: unknown) {
       const axiosError = err as { response?: { data?: { detail?: string }; status?: number } };
       if (axiosError.response?.status === 423) {
-        setError(axiosError.response.data?.detail || "Account is locked");
+        setError(axiosError.response.data?.detail || t("login.errors.accountLocked"));
       } else if (axiosError.response?.status === 401) {
-        setError("Invalid email or password");
+        setError(t("login.errors.invalidCredentials"));
       } else if (axiosError.response?.status === 403) {
-        setError("Account is disabled");
+        setError(t("login.errors.accountDisabled"));
       } else {
-        setError(axiosError.response?.data?.detail || "Login failed");
+        setError(axiosError.response?.data?.detail || t("login.errors.loginFailed"));
       }
       setLoading(false);
     }
@@ -73,16 +75,16 @@ export function LoginPage() {
 
   const handleForgotPassword = () => {
     Modal.info({
-      title: "忘记密码",
+      title: t("login.forgotPasswordModal.title"),
       content: (
         <div className="py-2">
-          <p>请联系系统管理员重置密码。</p>
+          <p>{t("login.forgotPasswordModal.content")}</p>
           <p className="mt-2 text-sm text-gray-500">
-            管理员邮箱：admin@hejazfs.com.au
+            {t("login.forgotPasswordModal.adminEmail", { email: "admin@hejazfs.com.au" })}
           </p>
         </div>
       ),
-      okText: "知道了",
+      okText: t("login.forgotPasswordModal.ok"),
     });
   };
 
@@ -104,16 +106,16 @@ export function LoginPage() {
             <div className="corner-fold" />
 
             <div className="text-center">
-              <h1 className="login-title text-2xl font-semibold text-slate-800">账号登录</h1>
+              <h1 className="login-title text-2xl font-semibold text-slate-800">{t("login.title")}</h1>
               <p className="mt-2 text-sm text-slate-500">
-                使用企业邮箱登录 AI Platform
+                {t("login.loginWith")}
               </p>
             </div>
 
             <form onSubmit={handleSubmit} className="mt-8 space-y-5">
               <div className="space-y-2">
                 <Label htmlFor="email" className="text-sm text-slate-600">
-                  邮箱账号
+                  {t("login.emailLabel")}
                 </Label>
                 <div className="relative">
                   <Input
@@ -132,13 +134,13 @@ export function LoginPage() {
 
               <div className="space-y-2">
                 <Label htmlFor="password" className="text-sm text-slate-600">
-                  密码
+                  {t("login.passwordLabel")}
                 </Label>
                 <div className="relative">
                   <Input
                     id="password"
                     type={showPassword ? "text" : "password"}
-                    placeholder="请输入密码"
+                    placeholder={t("login.passwordPlaceholder")}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
@@ -147,7 +149,7 @@ export function LoginPage() {
                   />
                   <button
                     type="button"
-                    aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                    aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
                     onClick={() => setShowPassword((prev) => !prev)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 transition hover:text-slate-600"
                   >
@@ -162,14 +164,14 @@ export function LoginPage() {
                     checked={rememberMe}
                     onCheckedChange={(checked) => setRememberMe(checked === true)}
                   />
-                  30天内免登录
+                  {t("login.rememberMeDays")}
                 </label>
                 <button
                   type="button"
                   onClick={handleForgotPassword}
                   className="text-blue-500 hover:text-blue-600 transition"
                 >
-                  忘记密码
+                  {t("login.forgotPassword")}
                 </button>
               </div>
 
@@ -184,11 +186,11 @@ export function LoginPage() {
                 className="h-12 w-full rounded-xl bg-[#3b6cff] text-base font-medium text-white shadow-[0_8px_24px_rgba(59,108,255,0.25)] transition hover:bg-[#325be6]"
                 disabled={isLoading}
               >
-                {isLoading ? "登录中..." : "登 录"}
+                {isLoading ? t("login.loggingIn") : t("login.loginButton")}
               </Button>
 
               <div className="text-center text-xs text-slate-400 pt-2">
-                仅限 @{allowedDomain} 企业邮箱
+                {t("login.enterpriseOnly", { domain: allowedDomain })}
               </div>
             </form>
           </div>

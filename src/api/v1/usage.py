@@ -160,6 +160,8 @@ async def get_usage_breakdown(
     dimension: str = Query("model", description="Breakdown dimension: model, user, assistant, service"),
     start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    service_id: Optional[str] = Query(None, description="Filter by service ID"),
     limit: int = Query(20, ge=1, le=100, description="Maximum items to return"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageBreakdownResponse:
@@ -189,6 +191,8 @@ async def get_usage_breakdown(
         dimension=dimension,
         start_date=start_date,
         end_date=end_date,
+        user_id=user_id,
+        service_id=service_id,
         limit=limit,
     )
 

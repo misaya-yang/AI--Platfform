@@ -611,6 +611,8 @@ class UsageRecorder:
         dimension: str,  # model, user, assistant, service
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
+        user_id: Optional[str] = None,
+        service_id: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """Get usage breakdown by dimension."""
@@ -622,17 +624,21 @@ class UsageRecorder:
         if not end_date:
             end_date = date.today()
 
-        dimension_column = {
+        # Whitelist of valid dimension -> column mappings (SQL injection prevention)
+        dimension_mapping = {
             "model": "model",
             "user": "user_id",
             "assistant": "assistant_id",
             "service": "service_id",
-        }.get(dimension, "model")
+        }
+        if dimension not in dimension_mapping:
+            logger.warning(f"Invalid dimension requested: {dimension}")
+            return []
+        dimension_column = dimension_mapping[dimension]
 
         try:
             async with self.database._pool.acquire() as conn:
-                rows = await conn.fetch(
-                    f"""
+                query = f"""
                     SELECT
                         {dimension_column} as dimension_value,
                         SUM(request_count) as total_requests,
@@ -644,15 +650,20 @@ class UsageRecorder:
                       AND date >= $2
                       AND date <= $3
                       AND {dimension_column} IS NOT NULL
-                    GROUP BY {dimension_column}
-                    ORDER BY total_cost_cents DESC
-                    LIMIT $4
-                    """,
-                    tenant_id,
-                    start_date,
-                    end_date,
-                    limit,
-                )
+                """
+                params: List[Any] = [tenant_id, start_date, end_date]
+
+                if user_id:
+                    query += " AND user_id = $" + str(len(params) + 1)
+                    params.append(user_id)
+                if service_id:
+                    query += " AND service_id = $" + str(len(params) + 1)
+                    params.append(service_id)
+
+                query += f" GROUP BY {dimension_column} ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                params.append(limit)
+
+                rows = await conn.fetch(query, *params)
 
                 total_cost = sum(int(row["total_cost_cents"]) for row in rows)
 

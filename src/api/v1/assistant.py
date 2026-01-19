@@ -363,7 +363,15 @@ async def chat(
     elif body.kb_mode == "off":
         kb_mode = RAGMode.DISABLED
 
+    # Get model provider from registry
+    model_provider = ModelProvider.OPENAI  # default fallback
+    if model_registry:
+        model_info = model_registry.get_model(body.model_id)
+        if model_info:
+            model_provider = model_info.provider
+
     config = AssistantConfig(
+        model_provider=model_provider,
         model_id=body.model_id,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
@@ -443,7 +451,15 @@ async def chat_stream(
     elif body.kb_mode == "off":
         kb_mode = RAGMode.DISABLED
 
+    # Get model provider from registry
+    model_provider = ModelProvider.OPENAI  # default fallback
+    if model_registry:
+        model_info = model_registry.get_model(body.model_id)
+        if model_info:
+            model_provider = model_info.provider
+
     config = AssistantConfig(
+        model_provider=model_provider,
         model_id=body.model_id,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
@@ -905,7 +921,8 @@ async def create_artifact(
         )
 
         # Generate download URL
-        download_url = await artifact_storage.get_download_url(artifact.artifact_id)
+        # Use presigned URL if available (S3), otherwise standard URL
+        download_url = await artifact_storage.get_presigned_download_url(artifact)
 
         return ArtifactInfo(
             artifact_id=artifact.artifact_id,

@@ -1,44 +1,367 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { useProvidersHealth } from "@/hooks/useServices";
-import { useTranslation } from "react-i18next";
-import {
-  Cloud,
-  Brain,
-  Zap,
-  Globe,
-  Sparkles,
-  CheckCircle2,
-  XCircle,
-} from "lucide-react";
+// web/src/components/ProviderStatusCard.tsx
+// Provider Status Card - Uses Dashboard Unified Layout System
 
-// 供应商图标映射
-const providerIcons: Record<string, React.ReactNode> = {
-  openai: <Brain className="h-5 w-5" />,
-  anthropic: <Sparkles className="h-5 w-5" />,
-  deepseek: <Zap className="h-5 w-5" />,
-  dashscope: <Cloud className="h-5 w-5" />,
-  google: <Globe className="h-5 w-5" />,
+import { useState } from "react";
+import { Spin, Modal, Table, Tag, Tooltip } from "antd";
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  CloudOutlined,
+  RobotOutlined,
+  ThunderboltOutlined,
+  GlobalOutlined,
+  ExperimentOutlined,
+  EyeOutlined,
+  InfoCircleOutlined,
+} from "@ant-design/icons";
+import { useQuery } from "@tanstack/react-query";
+import { useProvidersHealth } from "@/hooks/useServices";
+import { useAppStore } from "@/store/useAppStore";
+import { api } from "@/lib/api";
+
+// Import unified layout from dashboard styles
+import { LAYOUT, getColors, gridStyles, commonStyles } from "@/pages/dashboard/styles";
+import { PanelWrapper } from "@/pages/dashboard/components/PanelWrapper";
+
+// Provider configuration
+// ... (keep PROVIDER_CONFIG)
+const PROVIDER_CONFIG: Record<
+  string,
+  {
+    icon: React.ReactNode;
+    color: string;
+    gradient: string;
+  }
+> = {
+  openai: {
+    icon: <RobotOutlined />,
+    color: "#10a37f",
+    gradient: "linear-gradient(135deg, #10a37f 0%, #1a7f64 100%)",
+  },
+  anthropic: {
+    icon: <ExperimentOutlined />,
+    color: "#d97706",
+    gradient: "linear-gradient(135deg, #d97706 0%, #b45309 100%)",
+  },
+  deepseek: {
+    icon: <ThunderboltOutlined />,
+    color: "#6366f1",
+    gradient: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+  },
+  dashscope: {
+    icon: <CloudOutlined />,
+    color: "#ff6a00",
+    gradient: "linear-gradient(135deg, #ff6a00 0%, #ee0979 100%)",
+  },
+  google: {
+    icon: <GlobalOutlined />,
+    color: "#4285f4",
+    gradient: "linear-gradient(135deg, #4285f4 0%, #34a853 50%, #fbbc04 100%)",
+  },
 };
 
+// ... (keep Model and ProviderCardProps interfaces)
+
+interface Model {
+  model_id: string;
+  display_name: string;
+  context_window: number;
+  max_output_tokens: number;
+  supports_vision: boolean;
+  supports_tools: boolean;
+  input_price_per_1k: string;
+  output_price_per_1k: string;
+  is_enabled: boolean;
+}
+
+interface ProviderCardProps {
+  providerKey: string;
+  name: string;
+  configured: boolean;
+  modelCount: number;
+  onClick: () => void;
+}
+
+function ProviderCard({
+  providerKey,
+  name,
+  configured,
+  modelCount,
+  onClick,
+}: ProviderCardProps) {
+  const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
+
+  const config = PROVIDER_CONFIG[providerKey] || {
+    icon: <CloudOutlined />,
+    color: "#64748b",
+    gradient: "linear-gradient(135deg, #64748b 0%, #475569 100%)",
+  };
+
+  const borderColor = configured
+    ? darkMode
+      ? `${config.color}40`
+      : `${config.color}30`
+    : colors.border;
+
+  return (
+    <div
+      onClick={configured ? onClick : undefined}
+      style={{
+        padding: "18px",
+        borderRadius: 14,
+        background: configured ? colors.cardBg : colors.innerBg,
+        border: `1.5px solid ${borderColor}`,
+        position: "relative",
+        overflow: "hidden",
+        cursor: configured ? "pointer" : "default",
+        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        minWidth: 0,
+        boxShadow: colors.shadowSm,
+      }}
+      onMouseEnter={(e) => {
+        if (configured) {
+          e.currentTarget.style.transform = "translateY(-4px)";
+          e.currentTarget.style.boxShadow = colors.shadowLg;
+          e.currentTarget.style.borderColor = `${config.color}60`;
+        }
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateY(0)";
+        e.currentTarget.style.boxShadow = colors.shadowSm;
+        e.currentTarget.style.borderColor = borderColor;
+      }}
+    >
+      {/* Decorative accent blob */}
+      {configured && (
+        <div 
+          style={{
+            position: "absolute",
+            bottom: -15,
+            right: -15,
+            width: 60,
+            height: 60,
+            background: config.gradient,
+            opacity: 0.08,
+            filter: "blur(15px)",
+            borderRadius: "50%",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: 12,
+            background: configured ? config.gradient : colors.border,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 20,
+            color: configured ? "#ffffff" : colors.textMuted,
+            flexShrink: 0,
+            boxShadow: configured ? `0 4px 10px ${config.color}30` : "none",
+          }}
+        >
+          {config.icon}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+            <span
+              style={{
+                fontSize: 15,
+                fontWeight: 700,
+                color: colors.textPrimary,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {name}
+            </span>
+            {configured ? (
+              <CheckCircleOutlined style={{ color: colors.success, fontSize: 14 }} />
+            ) : (
+              <CloseCircleOutlined style={{ color: colors.textMuted, fontSize: 14 }} />
+            )}
+          </div>
+
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 500,
+              color: configured ? colors.textSecondary : colors.textMuted,
+              marginTop: 2,
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            {configured && modelCount > 0 ? (
+              <>
+                <span>{modelCount} 个模型</span>
+                <span style={{ fontSize: 10, opacity: 0.5 }}>•</span>
+                <span style={{ color: config.color, fontSize: 11 }}>查看详情</span>
+              </>
+            ) : (
+              "未配置"
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ... (keep ProviderDetailModal)
+function ProviderDetailModal({
+  open,
+  onClose,
+  providerKey,
+  providerName,
+}: {
+  open: boolean;
+  onClose: () => void;
+  providerKey: string;
+  providerName: string;
+}) {
+  const config = PROVIDER_CONFIG[providerKey] || PROVIDER_CONFIG.openai;
+
+  const { data: models, isLoading } = useQuery({
+    queryKey: ["models", providerKey],
+    queryFn: async () => {
+      const { data } = await api.get<Model[]>("/api/v1/models", {
+        params: { provider_id: providerKey },
+      });
+      return data;
+    },
+    enabled: open,
+  });
+
+  const columns = [
+    {
+      title: "模型名称",
+      dataIndex: "display_name",
+      key: "display_name",
+      render: (text: string, record: Model) => (
+        <div>
+          <div style={{ fontWeight: 500 }}>{text}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8" }}>{record.model_id}</div>
+        </div>
+      ),
+    },
+    {
+      title: "上下文",
+      dataIndex: "context_window",
+      key: "context_window",
+      width: 100,
+      render: (val: number) => `${(val / 1000).toFixed(0)}K`,
+    },
+    {
+      title: "能力",
+      key: "capabilities",
+      width: 120,
+      render: (_: unknown, record: Model) => (
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {record.supports_vision && (
+            <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>
+              视觉
+            </Tag>
+          )}
+          {record.supports_tools && (
+            <Tag color="green" style={{ margin: 0, fontSize: 10 }}>
+              工具
+            </Tag>
+          )}
+        </div>
+      ),
+    },
+    {
+      title: "价格 ($/1K tokens)",
+      key: "price",
+      width: 140,
+      render: (_: unknown, record: Model) => (
+        <div style={{ fontSize: 12 }}>
+          <div>输入: ${record.input_price_per_1k}</div>
+          <div>输出: ${record.output_price_per_1k}</div>
+        </div>
+      ),
+    },
+    {
+      title: "状态",
+      dataIndex: "is_enabled",
+      key: "is_enabled",
+      width: 80,
+      render: (enabled: boolean) => (
+        <Tag color={enabled ? "success" : "default"}>{enabled ? "启用" : "禁用"}</Tag>
+      ),
+    },
+  ];
+
+  return (
+    <Modal
+      title={
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              background: `${config.color}15`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: config.color,
+            }}
+          >
+            {config.icon}
+          </div>
+          <span>{providerName} 模型列表</span>
+        </div>
+      }
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width={800}
+      styles={{
+        body: { padding: "16px 0" },
+      }}
+    >
+      <Table
+        dataSource={models || []}
+        columns={columns}
+        rowKey="model_id"
+        loading={isLoading}
+        pagination={false}
+        size="small"
+        scroll={{ y: 400 }}
+      />
+    </Modal>
+  );
+}
+
 export function ProviderStatusCard() {
-  const { t } = useTranslation();
-  const { data: providers, isLoading } = useProvidersHealth();
+  const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
+  const { data: providers, isLoading, refetch } = useProvidersHealth();
+  const [selectedProvider, setSelectedProvider] = useState<{
+    key: string;
+    name: string;
+  } | null>(null);
 
   if (isLoading) {
     return (
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base font-medium">
-            {t("dashboard.providerStatus", "模型供应商状态")}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="text-sm text-muted-foreground">
-            {t("common.loading", "加载中...")}
+      <div style={{ marginBottom: LAYOUT.SECTION_GAP }}>
+        <PanelWrapper title="模型供应商状态" loading={true}>
+          <div style={{ textAlign: "center", padding: "40px 0" }}>
+            <Spin />
           </div>
-        </CardContent>
-      </Card>
+        </PanelWrapper>
+      </div>
     );
   }
 
@@ -46,62 +369,71 @@ export function ProviderStatusCard() {
     return null;
   }
 
-  const providerList = Object.entries(providers);
+  const providerList = Object.entries(providers).sort(([, a], [, b]) => {
+    if (a.configured && !b.configured) return -1;
+    if (!a.configured && b.configured) return 1;
+    return 0;
+  });
+
   const configuredCount = providerList.filter(([, p]) => p.configured).length;
+  const totalModels = providerList.reduce((sum, [, p]) => sum + (p.model_count || 0), 0);
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-base font-medium">
-            {t("dashboard.providerStatus", "模型供应商状态")}
-          </CardTitle>
-          <Badge variant="outline" className="text-xs">
-            {configuredCount}/{providerList.length} {t("dashboard.configured", "已配置")}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {providerList.map(([key, provider]) => (
-            <div
-              key={key}
-              className={`flex items-center gap-3 rounded-lg border p-3 ${
-                provider.configured
-                  ? "border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950"
-                  : "border-muted bg-muted/30"
-              }`}
+    <div style={{ marginBottom: LAYOUT.SECTION_GAP, padding: `0 ${LAYOUT.GRID_GAP}px` }}>
+      <PanelWrapper
+        title="模型供应商状态"
+        onRefresh={refetch}
+        extra={
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span
+              style={{
+                padding: "2px 8px",
+                borderRadius: 4,
+                background: colors.innerBg,
+                color: colors.textSecondary,
+                fontSize: 11,
+                fontWeight: 500,
+              }}
             >
+              {configuredCount}/{providerList.length} 已配置
+            </span>
+            <Tooltip title="点击已配置的供应商查看模型详情">
               <div
-                className={`${
-                  provider.configured
-                    ? "text-green-600 dark:text-green-400"
-                    : "text-muted-foreground"
-                }`}
+                style={{
+                  fontSize: 12,
+                  color: colors.textSecondary,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                }}
               >
-                {providerIcons[key] || <Cloud className="h-5 w-5" />}
+                <InfoCircleOutlined />
+                共 {totalModels} 个模型
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-sm truncate">
-                    {provider.name}
-                  </span>
-                  {provider.configured ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 shrink-0" />
-                  ) : (
-                    <XCircle className="h-4 w-4 text-muted-foreground shrink-0" />
-                  )}
-                </div>
-                {provider.configured && provider.model_count > 0 && (
-                  <div className="text-xs text-muted-foreground">
-                    {provider.model_count} {t("dashboard.models", "个模型")}
-                  </div>
-                )}
-              </div>
-            </div>
+            </Tooltip>
+          </div>
+        }
+      >
+        <div style={gridStyles.fiveColumnResponsive}>
+          {providerList.map(([key, provider]) => (
+            <ProviderCard
+              key={key}
+              providerKey={key}
+              name={provider.name}
+              configured={provider.configured}
+              modelCount={provider.model_count}
+              onClick={() => setSelectedProvider({ key, name: provider.name })}
+            />
           ))}
         </div>
-      </CardContent>
-    </Card>
+      </PanelWrapper>
+
+      <ProviderDetailModal
+        open={!!selectedProvider}
+        onClose={() => setSelectedProvider(null)}
+        providerKey={selectedProvider?.key || ""}
+        providerName={selectedProvider?.name || ""}
+      />
+    </div>
   );
 }

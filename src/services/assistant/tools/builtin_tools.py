@@ -28,6 +28,7 @@ from ....core.observability.logging import get_logger
 if TYPE_CHECKING:
     from ....services.knowledge.knowledge_service import KnowledgeService
     from ....core.auth.user_resolver import UserContext
+    from ...memory_service import MemoryService
 
 logger = get_logger(__name__)
 
@@ -341,6 +342,7 @@ class WebSearchExecutor(ToolExecutor):
 def register_builtin_tools(
     kb_service: Optional["KnowledgeService"] = None,
     tavily_tool=None,
+    memory_service: Optional["MemoryService"] = None,
 ) -> None:
     """Register all built-in tools with the global registry."""
 
@@ -357,3 +359,9 @@ def register_builtin_tools(
         logger.info("Registered web search tool")
     else:
         logger.warning("Tavily not configured, web search tool not registered")
+
+    # Register memory tool if service available
+    if memory_service:
+        from .memory_tool import UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor
+        register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
+        logger.info("Registered memory tool")

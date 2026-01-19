@@ -118,17 +118,27 @@ def create_app() -> FastAPI:
     app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
     # HTTP 级别限流中间件 - 纯 ASGI
+    # Note: Limits should be generous enough for frontend usage patterns
+    # (multiple concurrent API calls on page load)
     rate_limit_config = StreamingRateLimitConfig(
         enabled=True,
-        global_limit=1000,
+        global_limit=5000,       # High global limit for overall traffic
         global_window=60,
-        user_limit=100,
+        user_limit=300,          # Authenticated users: 300/min
         user_window=60,
-        guest_limit=20,
+        guest_limit=200,         # Guests: 200/min (frontend makes many calls)
         guest_window=60,
-        ip_limit=50,
+        ip_limit=500,            # Per-IP: 500/min (shared IPs, proxies)
         ip_window=60,
-        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics"],
+        whitelist_paths=[
+            "/health", "/health/live", "/health/ready", "/metrics",
+            "/docs", "/openapi.json",
+            # Frontend metadata endpoints (high frequency, low cost)
+            "/api/v1/services",
+            "/api/v1/assistant/config",
+            "/api/v1/assistant/models",
+            "/api/v1/assistant/datasets",
+        ],
     )
     app.add_middleware(StreamingRateLimitMiddleware, config=rate_limit_config)
 
@@ -142,12 +152,24 @@ def create_app() -> FastAPI:
     app.add_middleware(StreamingLoggingMiddleware, config=request_log_config)
 
     # CORS 中间件（Starlette 内置，已经是纯 ASGI）
+    cors = getattr(settings, "cors", None)
+    allow_origins = cors.allow_origins if cors else ["*"]
+    allow_credentials = cors.allow_credentials if cors else True
+    if allow_credentials and "*" in allow_origins:
+        logger.warning(
+            "CORS allow_origins includes '*' while allow_credentials is enabled; "
+            "disabling credentials to avoid unsafe wildcard usage."
+        )
+        allow_credentials = False
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=allow_origins,
+        allow_credentials=allow_credentials,
+        allow_methods=cors.allow_methods if cors else ["*"],
+        allow_headers=cors.allow_headers if cors else ["*"],
+        expose_headers=cors.expose_headers if cors else None,
+        max_age=cors.max_age if cors else 600,
+        allow_origin_regex=cors.allow_origin_regex if cors else None,
     )
 
     # 追踪中间件 - 纯 ASGI
@@ -257,6 +279,25 @@ def create_app() -> FastAPI:
         await container.health_monitor.start()
         await container.task_worker.start(settings.task_worker_concurrency)
 
+        # 初始化 Redis 任务队列
+        if settings.redis.enabled:
+            from .core.tasks.queue import TaskQueue
+            # Use native client for TaskQueue as it requires raw commands like brpop/lpush
+            task_queue = TaskQueue(container.redis.get_native_client())
+
+            # 注册任务处理器
+            task_queue.register_handler(
+                "process_file",
+                _make_process_file_handler(app),
+            )
+
+            await task_queue.start_worker()
+            app.state.task_queue = task_queue
+            logger.info("Redis 任务队列已启动 (worker active)")
+        else:
+            app.state.task_queue = None
+            logger.warning("Redis 未启用，异步文件预处理功能不可用")
+
         # 启动计费拦截器（如果启用）
         if settings.proxy.enabled and settings.proxy.billing_enabled:
             billing_interceptor = container.billing_interceptor
@@ -332,6 +373,12 @@ def create_app() -> FastAPI:
                     artifact_storage = init_artifact_storage(storage_config, container.database)
                     app.state.artifact_storage = artifact_storage
                     logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
+
+                    # Initialize file storage service for user uploads (reuse same storage config)
+                    from .services.storage import init_file_storage
+                    file_storage = init_file_storage(storage_config)
+                    app.state.file_storage = file_storage
+                    logger.info(f"文件存储服务已初始化 (backend={storage_backend.value})")
                 except Exception as e:
                     logger.warning(f"图片存储服务初始化失败: {e}")
 
@@ -514,10 +561,20 @@ def create_app() -> FastAPI:
         if usage_recorder is not None:
             await usage_recorder.stop()
 
+        # Stop task queue
+        task_queue = getattr(app.state, "task_queue", None)
+        if task_queue is not None:
+            await task_queue.stop_worker()
+
         # Stop Assistant Service
         assistant_service = getattr(app.state, "assistant_service", None)
         if assistant_service is not None:
             await assistant_service.close()
+
+        # Close file storage service
+        file_storage = getattr(app.state, "file_storage", None)
+        if file_storage is not None:
+            await file_storage.close()
 
         await container.shutdown()
         logger.info("AI Gateway 已关闭")
@@ -551,6 +608,23 @@ def create_app() -> FastAPI:
     return app
 
 
+def _make_process_file_handler(app: FastAPI, process_file_task=None):
+    """Create a task handler that resolves assistant_service from app.state at runtime."""
+    if process_file_task is None:
+        from .services.assistant.tasks import process_file_task as _process_file_task
+        process_file_task = _process_file_task
+
+    async def _process_file_wrapper(payload):
+        assistant_service = getattr(app.state, "assistant_service", None)
+        file_processor = getattr(assistant_service, "file_processor", None)
+        if not file_processor:
+            logger.error("Assistant service not initialized; skipping process_file task")
+            return
+        await process_file_task(payload, file_processor)
+
+    return _process_file_wrapper
+
+
 def _setup_app_state(app: FastAPI, container: Container) -> None:
     """
     设置 app.state 属性
@@ -566,6 +640,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.task_worker = container.task_worker
     app.state.database = container.database
     app.state.redis = container.redis
+    app.state.memory_service = container.memory_service
 
     # LangGraph 相关
     app.state.langgraph_proxy = container.langgraph_proxy
@@ -831,19 +906,41 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         logger.warning(f"Failed to initialize code executor: {e}")
 
     # Create assistant service with session persistence
+    assistant_vlm_service = getattr(kb_service, "vlm_service", None) if kb_service else knowledge_vlm_service
+    
+    # If no VLM service but DashScope is configured for assistant, try to initialize it
+    if not assistant_vlm_service:
+        dashscope_config = model_registry._configs.get(ModelProvider.DASHSCOPE)
+        if dashscope_config and dashscope_config.api_key:
+            try:
+                from .services.knowledge.vlm_service import DashScopeVLMService
+                assistant_vlm_service = DashScopeVLMService(
+                    api_key=dashscope_config.api_key,
+                    model="qwen-vl-max",
+                )
+                logger.info("Assistant VLM 服务已独立初始化 (qwen-vl-max)")
+            except Exception as e:
+                logger.warning(f"Assistant VLM 服务初始化失败: {e}")
+
+    # Get memory service for long-term memory
+    memory_service = getattr(app.state, "memory_service", None)
+
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=kb_service,
         tavily_api_key=tavily_api_key or None,
         session_manager=session_manager,
         code_executor=code_executor,
+        vlm_service=assistant_vlm_service,
+        redis_client=app.state.redis,
+        memory_service=memory_service,
     )
 
     # Initialize Tool Registry (Phase 2)
     from .services.assistant.tools import get_tool_registry, register_builtin_tools, register_code_executor_tool, register_document_generation_tool
     from .services.assistant.tools.image_generator_tool import register_image_generation_tool
     tool_registry = get_tool_registry()
-    register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool)
+    register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool, memory_service=memory_service)
 
     # Register code executor tool if available
     if code_executor:

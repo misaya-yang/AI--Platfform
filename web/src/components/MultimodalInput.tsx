@@ -21,6 +21,7 @@ import {
   formatFileSize,
   type FileUploadResponse,
 } from "@/api/files";
+import { usePasteImage } from "@/hooks/usePasteImage";
 
 interface UploadedFile {
   file: File;
@@ -88,6 +89,9 @@ export function MultimodalInput({
     },
     []
   );
+
+  // Handle paste event for images (shared hook)
+  const handlePaste = usePasteImage(handleFileSelect);
 
   // Upload files asynchronously with compression and progress
   const uploadFiles = useCallback(async (filesToUpload: UploadedFile[]) => {
@@ -351,7 +355,7 @@ export function MultimodalInput({
         {/* Text Input */}
         <Textarea
           placeholder={
-            files.length > 0 ? "Add a message about the files..." : "Type a message..."
+            files.length > 0 ? "Add a message about the files..." : "输入消息... (Shift+Enter 换行)"
           }
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -364,6 +368,7 @@ export function MultimodalInput({
               handleSend();
             }
           }}
+          onPaste={includeFiles ? handlePaste : undefined}
         />
 
         {/* Send Button */}

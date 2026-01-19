@@ -27,49 +27,57 @@ function formatCost(value: number): string {
 
 export function CostAnalysisPanel() {
   const { darkMode } = useAppStore();
-  const { dateRange, granularity, lastRefresh } = useDashboardContext();
+  const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
 
   // Today's data
   const todayQuery = useQuery({
-    queryKey: ["dashboard-cost-today", lastRefresh.getTime()],
+    queryKey: ["dashboard-cost-today", serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageSummary({
         start_date: dayjs().format("YYYY-MM-DD"),
         end_date: dayjs().format("YYYY-MM-DD"),
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
 
   // This week's data
   const weekQuery = useQuery({
-    queryKey: ["dashboard-cost-week", lastRefresh.getTime()],
+    queryKey: ["dashboard-cost-week", serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageSummary({
         start_date: dayjs().startOf("week").format("YYYY-MM-DD"),
         end_date: dayjs().format("YYYY-MM-DD"),
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
 
   // This month's data
   const monthQuery = useQuery({
-    queryKey: ["dashboard-cost-month", lastRefresh.getTime()],
+    queryKey: ["dashboard-cost-month", serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageSummary({
         start_date: dayjs().startOf("month").format("YYYY-MM-DD"),
         end_date: dayjs().format("YYYY-MM-DD"),
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
 
   // Service breakdown for pie chart
   const breakdownQuery = useQuery({
-    queryKey: ["dashboard-cost-breakdown", dateRange, lastRefresh.getTime()],
+    queryKey: ["dashboard-cost-breakdown", dateRange, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageBreakdown({
         dimension: "service",
         start_date: dateRange[0],
         end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
         limit: 5,
       }),
     staleTime: 30000,
@@ -77,12 +85,14 @@ export function CostAnalysisPanel() {
 
   // Time series for trend
   const timeseriesQuery = useQuery({
-    queryKey: ["dashboard-cost-timeseries", dateRange, granularity, lastRefresh.getTime()],
+    queryKey: ["dashboard-cost-timeseries", dateRange, granularity, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: dateRange[0],
         end_date: dateRange[1],
         granularity,
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
       }),
     staleTime: 30000,
   });
@@ -170,7 +180,7 @@ export function CostAnalysisPanel() {
             服务分布
           </div>
           <div style={{ width: "100%", height: 120 }}>
-            <ResponsiveContainer>
+            <ResponsiveContainer minWidth={80} minHeight={80}>
               <PieChart>
                 <Pie
                   data={pieData}
@@ -214,7 +224,7 @@ export function CostAnalysisPanel() {
             成本趋势
           </div>
           <div style={{ width: "100%", height: 150 }}>
-            <ResponsiveContainer>
+            <ResponsiveContainer minWidth={100} minHeight={100}>
               <AreaChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
                 <XAxis

@@ -155,7 +155,30 @@
     "password": "密码",
     "submit": "登录",
     "forgotPassword": "忘记密码",
-    "rememberMe": "记住我"
+    "rememberMe": "记住我",
+    "emailLabel": "邮箱账号",
+    "passwordLabel": "密码",
+    "passwordPlaceholder": "请输入密码",
+    "rememberMeDays": "30天内免登录",
+    "loggingIn": "登录中...",
+    "loginButton": "登 录",
+    "enterpriseOnly": "仅限 @{{domain}} 企业邮箱",
+    "loginWith": "使用企业邮箱登录 AI Platform",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码",
+    "errors": {
+      "emailRequired": "请输入邮箱",
+      "invalidCredentials": "邮箱或密码错误",
+      "accountLocked": "账号已被锁定",
+      "accountDisabled": "账号已被禁用",
+      "loginFailed": "登录失败"
+    },
+    "forgotPasswordModal": {
+      "title": "忘记密码",
+      "content": "请联系系统管理员重置密码。",
+      "adminEmail": "管理员邮箱：{{email}}",
+      "ok": "知道了"
+    }
   },
   "dashboard": {
     "title": "仪表盘",
@@ -270,13 +293,62 @@
   },
   "settings": {
     "title": "系统设置",
+    "subtitle": "管理网关的全局配置",
+    "configLevels": {
+      "title": "配置层级说明",
+      "description": "网关支持两个配置层级：",
+      "globalConfig": "全局配置（此页面）：对所有服务生效的默认配置",
+      "serviceConfig": "服务配置（服务管理页面）：点击服务卡片上的齿轮图标，为单个服务配置独立的鉴权、限流、缓存等",
+      "priority": "服务级别配置优先级高于全局配置"
+    },
+    "systemStatus": {
+      "title": "系统状态",
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "notEnabled": "未启用",
+      "loadBalancer": "负载均衡"
+    },
+    "tabs": {
+      "auth": "鉴权配置",
+      "rateLimit": "限流配置",
+      "loadBalancer": "负载均衡",
+      "apiKeys": "API Keys"
+    },
+    "auth": {
+      "jwt": {
+        "title": "JWT 认证",
+        "description": "使用 JWT Token 进行身份验证",
+        "enable": "启用 JWT",
+        "enableDesc": "通过 Bearer Token 进行认证",
+        "secret": "JWT Secret",
+        "secretPlaceholder": "your-secret-key",
+        "issuer": "Issuer（可选）",
+        "issuerPlaceholder": "your-app"
+      },
+      "apiKey": {
+        "title": "API Key 认证",
+        "description": "使用 API Key 进行身份验证",
+        "enable": "启用 API Key",
+        "enableDesc": "通过 Header 中的 API Key 进行认证",
+        "headerName": "Header 名称",
+        "headerPlaceholder": "X-API-Key"
+      },
+      "save": "保存鉴权配置",
+      "saving": "保存中..."
+    },
     "rateLimit": {
       "title": "限流配置",
-      "scope": "作用域",
+      "addTitle": "添加限流规则",
+      "addDescription": "配置请求频率限制",
+      "scope": "限流范围",
+      "scopeId": "范围 ID",
+      "scopeIdPlaceholder": "可留空（应用于所有）",
+      "serviceIdPlaceholder": "service-id",
       "global": "全局",
-      "service": "按服务",
-      "tenant": "按租户",
-      "scopeId": "作用域ID",
+      "ip": "IP 地址",
+      "user": "用户",
+      "tenant": "租户",
+      "service": "服务",
       "requests": "请求数",
       "requestsRange": "范围: 1 - 100,000",
       "window": "时间窗口（秒）",
@@ -285,7 +357,40 @@
       "burstRange": "范围: 0 - 1,000",
       "addRule": "添加规则",
       "currentRules": "当前规则",
-      "noRules": "暂无限流规则"
+      "noRules": "暂无限流规则",
+      "tableHeaders": {
+        "scope": "范围",
+        "scopeId": "范围 ID",
+        "requests": "请求数",
+        "window": "时间窗口",
+        "burst": "突发",
+        "status": "状态"
+      }
+    },
+    "loadBalancer": {
+      "title": "负载均衡策略",
+      "description": "配置服务实例的请求分配策略",
+      "save": "保存负载均衡配置",
+      "saving": "保存中..."
+    },
+    "apiKeys": {
+      "createTitle": "创建 API Key",
+      "createDescription": "生成新的 API 密钥",
+      "name": "名称",
+      "namePlaceholder": "My App",
+      "tenantId": "租户 ID（可选）",
+      "tenantIdPlaceholder": "tenant-123",
+      "generate": "生成 API Key",
+      "listTitle": "已创建的 API Keys",
+      "noKeys": "暂无 API Keys",
+      "newKeyWarning": "请保存此 API Key，它不会再次显示！",
+      "tableHeaders": {
+        "name": "名称",
+        "tenant": "租户",
+        "roles": "角色",
+        "status": "状态",
+        "createdAt": "创建时间"
+      }
     }
   },
   "knowledge": {
@@ -713,7 +818,7 @@
     "kbActive": "个知识库已启用",
     "welcomeTitle": "今天有什么可以帮您？",
     "welcomeDesc": "选择模型和知识库，开始智能对话",
-    "placeholder": "输入消息... (Shift+Enter 换行)",
+    "placeholder": "输入消息... (Ctrl+V 粘贴图片)",
     "noModelsPlaceholder": "暂无可用模型",
     "disclaimer": "AI 回答可能不准确",
     "you": "你",
@@ -817,6 +922,90 @@
     "noData": "暂无数据",
     "export": "导出",
     "dateRange": "日期范围"
+  },
+  "services": {
+    "title": "服务管理",
+    "addService": "添加服务",
+    "registerService": "注册服务",
+    "tabs": {
+      "simple": "快速配置",
+      "advanced": "高级 (YAML)"
+    },
+    "langgraph": {
+      "title": "LangGraph 服务快速注册",
+      "description": "只需填写两个必填项，网关将自动为您配置透明代理转发",
+      "deploymentUrl": "Deployment URL",
+      "deploymentUrlDesc": "LangGraph 服务的部署地址，本地或云端均可",
+      "graphId": "Assistant / Graph ID",
+      "graphIdDesc": "Graph 名称或 Assistant ID，用于调用时自动注入",
+      "langsmithApiKey": "LangSmith API Key",
+      "langsmithApiKeyDesc": "本地部署无需填写，仅云端 LangGraph 需要"
+    },
+    "errors": {
+      "requiredFields": "请填写 Deployment URL 和 Assistant ID",
+      "registerFailed": "注册失败"
+    },
+    "register": "注册服务",
+    "registering": "注册中..."
+  },
+  "llm": {
+    "provider": {
+      "addTitle": "添加厂商",
+      "editTitle": "编辑厂商",
+      "addDescription": "添加新的 LLM 厂商配置",
+      "editDescription": "修改 LLM 厂商配置",
+      "providerId": "厂商 ID",
+      "providerIdPlaceholder": "例如: openai, anthropic, my-provider",
+      "providerIdRequired": "厂商 ID 为必填项",
+      "providerIdPattern": "只允许小写字母、数字和连字符",
+      "displayName": "显示名称",
+      "displayNamePlaceholder": "例如: OpenAI, Anthropic",
+      "displayNameRequired": "显示名称为必填项",
+      "apiType": "API 类型",
+      "apiTypePlaceholder": "选择 API 类型",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.openai.com",
+      "baseUrlHint": "自定义 API 端点 URL，留空使用默认值",
+      "apiKey": "API Key",
+      "apiKeyHint": "留空保持不变",
+      "enableProvider": "启用厂商"
+    },
+    "model": {
+      "addTitle": "添加模型",
+      "editTitle": "编辑模型",
+      "addDescription": "添加新的 LLM 模型",
+      "editDescription": "修改模型配置参数",
+      "modelId": "模型 ID",
+      "modelIdPlaceholder": "例如: gpt-4o, claude-3-sonnet",
+      "modelIdRequired": "模型 ID 为必填项",
+      "modelIdHint": "API 调用时使用的模型标识符",
+      "provider": "所属厂商",
+      "providerPlaceholder": "选择厂商",
+      "displayName": "显示名称",
+      "displayNamePlaceholder": "例如: GPT-4o, Claude 3 Sonnet",
+      "displayNameRequired": "显示名称为必填项",
+      "contextWindow": "上下文窗口",
+      "maxOutputTokens": "最大输出",
+      "tokenCount": "Token 数",
+      "inputPrice": "输入价格",
+      "outputPrice": "输出价格",
+      "priceUnit": "USD / 1K tokens",
+      "accessLevel": "访问权限",
+      "accessLevelPlaceholder": "选择访问权限",
+      "accessLevels": {
+        "public": "公开 (所有用户)",
+        "premium": "高级 (付费用户)",
+        "admin": "管理员"
+      },
+      "sortOrder": "排序顺序",
+      "sortOrderHint": "数值越小越靠前",
+      "supportsVision": "支持视觉",
+      "supportsVisionHint": "模型可以处理图片输入",
+      "supportsTools": "支持工具",
+      "supportsToolsHint": "模型可以调用函数/工具",
+      "enableModel": "启用模型",
+      "enableModelHint": "禁用后用户无法选择此模型"
+    }
   },
   "quota": {
     "title": "配额管理",

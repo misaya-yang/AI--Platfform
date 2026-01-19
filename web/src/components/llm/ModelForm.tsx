@@ -5,6 +5,7 @@
  */
 
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
   Dialog,
@@ -52,12 +53,6 @@ interface FormData {
   sort_order: number;
 }
 
-const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
-  { value: "public", label: "公开 (所有用户)" },
-  { value: "premium", label: "高级 (付费用户)" },
-  { value: "admin", label: "管理员" },
-];
-
 export function ModelForm({
   open,
   onOpenChange,
@@ -66,7 +61,14 @@ export function ModelForm({
   onSubmit,
   loading,
 }: ModelFormProps) {
+  const { t } = useTranslation();
   const isEdit = !!model;
+
+  const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
+    { value: "public", label: t("llm.model.accessLevels.public") },
+    { value: "premium", label: t("llm.model.accessLevels.premium") },
+    { value: "admin", label: t("llm.model.accessLevels.admin") },
+  ];
 
   const {
     register,
@@ -166,9 +168,9 @@ export function ModelForm({
       <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
         <form onSubmit={handleSubmit(onFormSubmit)}>
           <DialogHeader>
-            <DialogTitle>{isEdit ? "编辑模型" : "添加模型"}</DialogTitle>
+            <DialogTitle>{isEdit ? t("llm.model.editTitle") : t("llm.model.addTitle")}</DialogTitle>
             <DialogDescription>
-              {isEdit ? "修改模型配置参数" : "添加新的 LLM 模型"}
+              {isEdit ? t("llm.model.editDescription") : t("llm.model.addDescription")}
             </DialogDescription>
           </DialogHeader>
 
@@ -177,30 +179,30 @@ export function ModelForm({
             {!isEdit && (
               <>
                 <div className="grid gap-2">
-                  <Label htmlFor="model_id">模型 ID</Label>
+                  <Label htmlFor="model_id">{t("llm.model.modelId")}</Label>
                   <Input
                     id="model_id"
-                    placeholder="例如: gpt-4o, claude-3-sonnet"
+                    placeholder={t("llm.model.modelIdPlaceholder")}
                     {...register("model_id", {
-                      required: "模型 ID 为必填项",
+                      required: t("llm.model.modelIdRequired"),
                     })}
                   />
                   {errors.model_id && (
                     <p className="text-sm text-destructive">{errors.model_id.message}</p>
                   )}
                   <p className="text-xs text-muted-foreground">
-                    API 调用时使用的模型标识符
+                    {t("llm.model.modelIdHint")}
                   </p>
                 </div>
 
                 <div className="grid gap-2">
-                  <Label htmlFor="provider_id">所属厂商</Label>
+                  <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
                   <Select
                     value={providerId}
                     onValueChange={(value) => setValue("provider_id", value)}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="选择厂商" />
+                      <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
                       {providers.map((p) => (
@@ -216,11 +218,11 @@ export function ModelForm({
 
             {/* Display Name */}
             <div className="grid gap-2">
-              <Label htmlFor="display_name">显示名称</Label>
+              <Label htmlFor="display_name">{t("llm.model.displayName")}</Label>
               <Input
                 id="display_name"
-                placeholder="例如: GPT-4o, Claude 3 Sonnet"
-                {...register("display_name", { required: "显示名称为必填项" })}
+                placeholder={t("llm.model.displayNamePlaceholder")}
+                {...register("display_name", { required: t("llm.model.displayNameRequired") })}
               />
               {errors.display_name && (
                 <p className="text-sm text-destructive">{errors.display_name.message}</p>
@@ -230,58 +232,58 @@ export function ModelForm({
             {/* Context Window & Max Output */}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
-                <Label htmlFor="context_window">上下文窗口</Label>
+                <Label htmlFor="context_window">{t("llm.model.contextWindow")}</Label>
                 <Input
                   id="context_window"
                   type="number"
                   {...register("context_window", { valueAsNumber: true })}
                 />
-                <p className="text-xs text-muted-foreground">Token 数</p>
+                <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="max_output_tokens">最大输出</Label>
+                <Label htmlFor="max_output_tokens">{t("llm.model.maxOutputTokens")}</Label>
                 <Input
                   id="max_output_tokens"
                   type="number"
                   {...register("max_output_tokens", { valueAsNumber: true })}
                 />
-                <p className="text-xs text-muted-foreground">Token 数</p>
+                <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
               </div>
             </div>
 
             {/* Pricing */}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
-                <Label htmlFor="input_price_per_1k">输入价格</Label>
+                <Label htmlFor="input_price_per_1k">{t("llm.model.inputPrice")}</Label>
                 <Input
                   id="input_price_per_1k"
                   type="number"
                   step="0.000001"
                   {...register("input_price_per_1k", { valueAsNumber: true })}
                 />
-                <p className="text-xs text-muted-foreground">USD / 1K tokens</p>
+                <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="output_price_per_1k">输出价格</Label>
+                <Label htmlFor="output_price_per_1k">{t("llm.model.outputPrice")}</Label>
                 <Input
                   id="output_price_per_1k"
                   type="number"
                   step="0.000001"
                   {...register("output_price_per_1k", { valueAsNumber: true })}
                 />
-                <p className="text-xs text-muted-foreground">USD / 1K tokens</p>
+                <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
               </div>
             </div>
 
             {/* Access Level */}
             <div className="grid gap-2">
-              <Label htmlFor="access_level">访问权限</Label>
+              <Label htmlFor="access_level">{t("llm.model.accessLevel")}</Label>
               <Select
                 value={accessLevel}
                 onValueChange={(value) => setValue("access_level", value as ModelAccessLevel)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="选择访问权限" />
+                  <SelectValue placeholder={t("llm.model.accessLevelPlaceholder")} />
                 </SelectTrigger>
                 <SelectContent>
                   {ACCESS_LEVELS.map((level) => (
@@ -295,22 +297,22 @@ export function ModelForm({
 
             {/* Sort Order */}
             <div className="grid gap-2">
-              <Label htmlFor="sort_order">排序顺序</Label>
+              <Label htmlFor="sort_order">{t("llm.model.sortOrder")}</Label>
               <Input
                 id="sort_order"
                 type="number"
                 {...register("sort_order", { valueAsNumber: true })}
               />
-              <p className="text-xs text-muted-foreground">数值越小越靠前</p>
+              <p className="text-xs text-muted-foreground">{t("llm.model.sortOrderHint")}</p>
             </div>
 
             {/* Feature Switches */}
             <div className="space-y-4 pt-2">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label htmlFor="supports_vision">支持视觉</Label>
+                  <Label htmlFor="supports_vision">{t("llm.model.supportsVision")}</Label>
                   <p className="text-xs text-muted-foreground">
-                    模型可以处理图片输入
+                    {t("llm.model.supportsVisionHint")}
                   </p>
                 </div>
                 <Switch
@@ -322,9 +324,9 @@ export function ModelForm({
 
               <div className="flex items-center justify-between">
                 <div>
-                  <Label htmlFor="supports_tools">支持工具</Label>
+                  <Label htmlFor="supports_tools">{t("llm.model.supportsTools")}</Label>
                   <p className="text-xs text-muted-foreground">
-                    模型可以调用函数/工具
+                    {t("llm.model.supportsToolsHint")}
                   </p>
                 </div>
                 <Switch
@@ -336,9 +338,9 @@ export function ModelForm({
 
               <div className="flex items-center justify-between">
                 <div>
-                  <Label htmlFor="is_enabled">启用模型</Label>
+                  <Label htmlFor="is_enabled">{t("llm.model.enableModel")}</Label>
                   <p className="text-xs text-muted-foreground">
-                    禁用后用户无法选择此模型
+                    {t("llm.model.enableModelHint")}
                   </p>
                 </div>
                 <Switch
@@ -352,10 +354,10 @@ export function ModelForm({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? "保存中..." : "保存"}
+              {loading ? t("common.loading") : t("common.save")}
             </Button>
           </DialogFooter>
         </form>

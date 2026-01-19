@@ -99,7 +99,13 @@ VALUES
     ('gpt-4o-mini', 'default', 'openai', 'GPT-4o Mini', 128000, 16384, true, true, 0.00015, 0.0006, 'public', 2),
     ('o1', 'default', 'openai', 'O1', 200000, 100000, true, true, 0.015, 0.06, 'admin', 3),
     ('o1-mini', 'default', 'openai', 'O1 Mini', 128000, 65536, false, true, 0.003, 0.012, 'premium', 4)
-ON CONFLICT (tenant_id, model_id) DO NOTHING;
+ON CONFLICT (tenant_id, model_id) 
+DO UPDATE SET
+    input_price_per_1k = EXCLUDED.input_price_per_1k,
+    output_price_per_1k = EXCLUDED.output_price_per_1k,
+    context_window = EXCLUDED.context_window,
+    max_output_tokens = EXCLUDED.max_output_tokens,
+    supports_vision = EXCLUDED.supports_vision;
 
 -- Anthropic models
 INSERT INTO llm_models (model_id, tenant_id, provider_id, display_name, context_window, max_output_tokens, supports_vision, supports_tools, input_price_per_1k, output_price_per_1k, access_level, sort_order)
@@ -107,23 +113,41 @@ VALUES
     ('claude-sonnet-4-20250514', 'default', 'anthropic', 'Claude Sonnet 4', 200000, 64000, true, true, 0.003, 0.015, 'public', 1),
     ('claude-3-5-sonnet-20241022', 'default', 'anthropic', 'Claude 3.5 Sonnet', 200000, 8192, true, true, 0.003, 0.015, 'public', 2),
     ('claude-3-5-haiku-20241022', 'default', 'anthropic', 'Claude 3.5 Haiku', 200000, 8192, true, true, 0.0008, 0.004, 'public', 3)
-ON CONFLICT (tenant_id, model_id) DO NOTHING;
+ON CONFLICT (tenant_id, model_id) 
+DO UPDATE SET
+    input_price_per_1k = EXCLUDED.input_price_per_1k,
+    output_price_per_1k = EXCLUDED.output_price_per_1k,
+    context_window = EXCLUDED.context_window,
+    max_output_tokens = EXCLUDED.max_output_tokens,
+    supports_vision = EXCLUDED.supports_vision;
 
 -- DeepSeek models
 INSERT INTO llm_models (model_id, tenant_id, provider_id, display_name, context_window, max_output_tokens, supports_vision, supports_tools, input_price_per_1k, output_price_per_1k, access_level, sort_order)
 VALUES
     ('deepseek-chat', 'default', 'deepseek', 'DeepSeek Chat', 64000, 8192, false, true, 0.00014, 0.00028, 'public', 1),
     ('deepseek-reasoner', 'default', 'deepseek', 'DeepSeek Reasoner (R1)', 64000, 8192, false, true, 0.00055, 0.00219, 'public', 2)
-ON CONFLICT (tenant_id, model_id) DO NOTHING;
+ON CONFLICT (tenant_id, model_id) 
+DO UPDATE SET
+    input_price_per_1k = EXCLUDED.input_price_per_1k,
+    output_price_per_1k = EXCLUDED.output_price_per_1k,
+    context_window = EXCLUDED.context_window,
+    max_output_tokens = EXCLUDED.max_output_tokens,
+    supports_vision = EXCLUDED.supports_vision;
 
 -- DashScope/Qwen models
 INSERT INTO llm_models (model_id, tenant_id, provider_id, display_name, context_window, max_output_tokens, supports_vision, supports_tools, input_price_per_1k, output_price_per_1k, access_level, sort_order)
 VALUES
     ('qwen-turbo', 'default', 'dashscope', 'Qwen Turbo', 131072, 8192, false, true, 0.0003, 0.0006, 'public', 1),
     ('qwen-plus', 'default', 'dashscope', 'Qwen Plus', 131072, 8192, false, true, 0.0004, 0.0012, 'public', 2),
-    ('qwen-max', 'default', 'dashscope', 'Qwen Max', 32768, 8192, false, true, 0.004, 0.012, 'premium', 3),
-    ('qwen-vl-max', 'default', 'dashscope', 'Qwen VL Max', 32768, 8192, true, true, 0.003, 0.009, 'premium', 4)
-ON CONFLICT (tenant_id, model_id) DO NOTHING;
+    ('qwen-max', 'default', 'dashscope', 'Qwen Max', 32768, 8192, false, true, 0.0012, 0.006, 'premium', 3),
+    ('qwen-vl-max', 'default', 'dashscope', 'Qwen VL Max', 32768, 8192, true, true, 0.00023, 0.000574, 'premium', 4)
+ON CONFLICT (tenant_id, model_id) 
+DO UPDATE SET
+    input_price_per_1k = EXCLUDED.input_price_per_1k,
+    output_price_per_1k = EXCLUDED.output_price_per_1k,
+    context_window = EXCLUDED.context_window,
+    max_output_tokens = EXCLUDED.max_output_tokens,
+    supports_vision = EXCLUDED.supports_vision;
 
 -- Google Gemini models
 INSERT INTO llm_models (model_id, tenant_id, provider_id, display_name, context_window, max_output_tokens, supports_vision, supports_tools, input_price_per_1k, output_price_per_1k, access_level, sort_order)
@@ -133,4 +157,10 @@ VALUES
     ('gemini-2.5-pro', 'default', 'google', 'Gemini 2.5 Pro', 1000000, 65536, true, true, 0.00125, 0.005, 'admin', 3),
     ('gemini-2.5-flash', 'default', 'google', 'Gemini 2.5 Flash', 1000000, 65536, true, true, 0.000075, 0.0003, 'premium', 4),
     ('gemini-2.5-flash-lite', 'default', 'google', 'Gemini 2.5 Flash Lite', 1000000, 65536, true, true, 0.00005, 0.0002, 'public', 5)
-ON CONFLICT (tenant_id, model_id) DO NOTHING;
+ON CONFLICT (tenant_id, model_id) 
+DO UPDATE SET
+    input_price_per_1k = EXCLUDED.input_price_per_1k,
+    output_price_per_1k = EXCLUDED.output_price_per_1k,
+    context_window = EXCLUDED.context_window,
+    max_output_tokens = EXCLUDED.max_output_tokens,
+    supports_vision = EXCLUDED.supports_vision;

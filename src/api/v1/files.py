@@ -8,6 +8,11 @@ Provides:
 - DELETE /files/{file_id} - Delete uploaded file
 - GET /files/admin/stats - Get storage statistics (admin only)
 - POST /files/admin/cleanup - Trigger manual cleanup (admin only)
+
+Storage backends:
+- S3: When FILE_STORAGE_BACKEND=s3
+- OSS: When FILE_STORAGE_BACKEND=oss
+- Local: Default fallback
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import AsyncIterator, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query, Request
 from fastapi.responses import StreamingResponse
@@ -27,6 +32,7 @@ from ..deps import get_user_context
 from ...core.auth.user_resolver import UserContext
 from ...core.observability.logging import get_logger
 from ...core.file_cleanup import get_cleanup_service
+from ...services.storage import get_file_storage, FileStorageService
 
 logger = get_logger(__name__)
 
@@ -93,6 +99,27 @@ class FilesListResponse(BaseModel):
 
 
 # ============ Helper Functions ============
+
+def _get_storage_service() -> Optional[FileStorageService]:
+    """
+    Get the file storage service if available.
+
+    Returns None if the service isn't initialized (falls back to local storage).
+    """
+    try:
+        return get_file_storage()
+    except RuntimeError:
+        return None
+
+
+async def _stream_upload_file(upload_file: UploadFile, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]:
+    """Convert UploadFile to async iterator for streaming upload."""
+    while True:
+        chunk = await upload_file.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
 
 def validate_user_id(user_id: str) -> str:
     """
@@ -240,9 +267,12 @@ def generate_file_id() -> str:
 
     After upload, use the returned `file_path` in your message to the agent:
     "Please analyze this file: /uploads/user123/abc123_document.pdf"
+
+    Storage backend is configurable via FILE_STORAGE_BACKEND env var (s3/oss/local).
     """,
 )
 async def upload_file(
+    request: Request,
     file: UploadFile = File(..., description="File to upload"),
     user: UserContext = Depends(get_user_context),
 ) -> FileUploadResponse:
@@ -254,7 +284,63 @@ async def upload_file(
 
     ext = validate_file_extension(file.filename)
 
-    # Generate file ID and path
+    # Try to use storage service (S3/OSS)
+    storage_service = _get_storage_service()
+
+    if storage_service:
+        # Use unified storage service (S3/OSS/Local)
+        try:
+            file_info = await storage_service.upload_file_streaming(
+                user_id=user.user_id,
+                filename=file.filename,
+                content_iterator=_stream_upload_file(file),
+                content_type=get_mime_type(ext),
+                max_size_bytes=MAX_FILE_SIZE_BYTES,
+            )
+
+            # Build response path (API-facing path format)
+            relative_path = f"/uploads/{user.user_id}/{file_info.filename}"
+            size_mb = file_info.size_bytes / (1024 * 1024)
+
+            logger.info(
+                f"[FileUpload] user={user.user_id} file={file.filename} "
+                f"size={size_mb:.2f}MB backend={storage_service.config.backend.value} "
+                f"key={file_info.storage_key}"
+            )
+
+            # Trigger async processing
+            try:
+                task_queue = getattr(request.app.state, "task_queue", None)
+                if task_queue:
+                    await task_queue.enqueue(
+                        "process_file",
+                        {
+                            "file_path": relative_path,
+                            "user_id": user.user_id,
+                            "tenant_id": user.tenant_id,
+                        }
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to trigger async processing: {e}")
+
+            return FileUploadResponse(
+                file_id=file_info.file_id,
+                file_path=relative_path,
+                filename=file.filename,
+                size_bytes=file_info.size_bytes,
+                mime_type=file_info.content_type,
+                uploaded_at=file_info.uploaded_at.isoformat(),
+                message=f"File uploaded successfully. Use this path in your message: {relative_path}",
+            )
+
+        except ValueError as e:
+            # Size limit exceeded
+            raise HTTPException(status_code=413, detail=str(e))
+        except Exception as e:
+            logger.error(f"Storage service upload failed: {e}")
+            raise HTTPException(status_code=500, detail="Failed to save file")
+
+    # Fallback to direct local storage (when storage service not initialized)
     file_id = generate_file_id()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_filename = f"{file_id}_{timestamp}{ext}"
@@ -306,8 +392,23 @@ async def upload_file(
 
     logger.info(
         f"[FileUpload] user={user.user_id} file={file.filename} "
-        f"size={size_mb:.2f}MB path={relative_path}"
+        f"size={size_mb:.2f}MB path={relative_path} (local fallback)"
     )
+
+    # Trigger async processing
+    try:
+        task_queue = getattr(request.app.state, "task_queue", None)
+        if task_queue:
+            await task_queue.enqueue(
+                "process_file",
+                {
+                    "file_path": relative_path,
+                    "user_id": user.user_id,
+                    "tenant_id": user.tenant_id,
+                }
+            )
+    except Exception as e:
+        logger.warning(f"Failed to trigger async processing: {e}")
 
     return FileUploadResponse(
         file_id=file_id,
@@ -326,6 +427,7 @@ async def upload_file(
     summary="Upload multiple files",
 )
 async def upload_multiple_files(
+    request: Request,
     files: List[UploadFile] = File(..., max_length=5),
     user: UserContext = Depends(get_user_context),
 ) -> List[FileUploadResponse]:
@@ -336,7 +438,7 @@ async def upload_multiple_files(
 
     results = []
     for f in files:
-        result = await upload_file(file=f, user=user)
+        result = await upload_file(request=request, file=f, user=user)
         results.append(result)
 
     return results
@@ -420,6 +522,28 @@ async def delete_file(
 
     # Validate file_id format (exactly 8 hex chars)
     validated_file_id = validate_file_id(file_id)
+
+    # Try to use storage service
+    storage_service = _get_storage_service()
+
+    if storage_service:
+        # Build storage key pattern to find the file
+        # Key format: uploads/{user_id}/{file_id}_{timestamp}.{ext}
+        prefix = f"uploads/{user.user_id}/{validated_file_id}_"
+
+        # Use public delete_by_prefix API to delete matching files
+        deleted = await storage_service.delete_by_prefix(prefix)
+
+        if deleted > 0:
+            logger.info(
+                f"[FileDelete] user={user.user_id} file_id={validated_file_id} "
+                f"backend={storage_service.config.backend.value}"
+            )
+            return {"status": "deleted", "file_id": validated_file_id}
+
+        raise HTTPException(status_code=404, detail="File not found")
+
+    # Fallback to direct local storage
     user_dir = get_user_uploads_path(user.user_id)
 
     # Find file by exact ID match (file_id followed by underscore)

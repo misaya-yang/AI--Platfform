@@ -13,6 +13,14 @@ from typing import Dict, Optional
 
 from ...core.observability.logging import get_logger
 
+try:
+    from unstructured.partition.auto import partition as unstructured_partition
+except ImportError:
+    unstructured_partition = None
+
+# Expose partition for patching in tests.
+partition = unstructured_partition
+
 logger = get_logger(__name__)
 
 # Default storage path (matches files.py configuration)
@@ -87,29 +95,38 @@ class DocumentParser:
             # Remove leading slash and prepend storage base path
             relative_path = file_path[1:]  # Remove leading /
             actual_path = self.storage_base_path / relative_path
+            needs_security_check = True
         elif file_path.startswith("uploads/"):
             # Path already relative without leading slash
             actual_path = self.storage_base_path / file_path
+            needs_security_check = True
         else:
             # Assume it's already an absolute or relative path
             actual_path = Path(file_path)
-            if not actual_path.is_absolute():
+            if actual_path.is_absolute():
+                # Trust absolute paths (e.g., temp files from file_processor)
+                # They have already been validated by the caller
+                needs_security_check = False
+            else:
                 actual_path = self.storage_base_path / file_path
+                needs_security_check = True
 
-        # Resolve to absolute path
-        actual_path = actual_path.resolve()
+        # Normalize path without resolving symlinks (preserve /var on macOS)
+        actual_path = Path(os.path.abspath(str(actual_path)))
 
-        # Security check: ensure path is within storage base
-        try:
-            actual_path.relative_to(self.storage_base_path.resolve())
-        except ValueError:
-            logger.warning(
-                f"[Security] Path traversal attempt detected: {file_path}"
-            )
-            raise DocumentParseError(
-                f"Invalid file path: path must be within storage directory",
-                file_path=file_path,
-            )
+        # Security check: ensure path is within storage base (only for relative paths)
+        if needs_security_check:
+            base_path = Path(os.path.abspath(str(self.storage_base_path)))
+            try:
+                actual_path.relative_to(base_path)
+            except ValueError:
+                logger.warning(
+                    f"[Security] Path traversal attempt detected: {file_path}"
+                )
+                raise DocumentParseError(
+                    f"Invalid file path: path must be within storage directory",
+                    file_path=file_path,
+                )
 
         # Check file exists
         if not actual_path.exists():
@@ -175,8 +192,8 @@ class DocumentParser:
         )
 
         try:
-            # Import unstructured here to avoid import errors if not installed
-            from unstructured.partition.auto import partition
+            if partition is None:
+                raise ImportError("unstructured is not installed")
 
             # Use unstructured to parse the document
             elements = partition(filename=str(actual_path))

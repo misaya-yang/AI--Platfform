@@ -653,25 +653,6 @@ export function KnowledgeDatasetDetailPage() {
     try {
       // Build chunking config based on mode
       const chunkingConfig = buildChunkingConfig();
-      
-      console.log("Updating config:", {
-        chunking: chunkingConfig,
-        rerank: { enabled: rerankEnabled, model: rerankModel },
-        metadata_enhancement: uploadMetadataEnabled ? {
-          enabled: true,
-          extract_title: uploadExtractTitle,
-          extract_summary: uploadExtractSummary,
-          extract_keywords: uploadExtractKeywords,
-          extract_entities: uploadExtractEntities,
-          detect_language: uploadDetectLanguage,
-        } : { enabled: false },
-        table_processing: uploadTableEnabled ? {
-          enabled: true,
-          mode: uploadTableMode,
-          include_headers: uploadTableIncludeHeaders,
-          generate_summary: uploadTableGenerateSummary,
-        } : { enabled: false },
-      });
 
       await updateDatasetConfig(datasetId, {
         chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
@@ -688,7 +669,6 @@ export function KnowledgeDatasetDetailPage() {
 
       // Upload files one by one
       for (const file of pendingFiles) {
-        console.log("Uploading file:", file.name);
         await uploadDocument(datasetId, file);
       }
 
@@ -927,14 +907,9 @@ export function KnowledgeDatasetDetailPage() {
         mmr,
         mmr_lambda: 0.5,
       });
-      console.log("[HitTest] Response:", res);
       setHitResults(res.results || []);
       setHitMeta(res.metadata || {});
-      if (!res.results || res.results.length === 0) {
-        console.warn("[HitTest] No results returned. Metadata:", res.metadata);
-      }
     } catch (err: unknown) {
-      console.error("[HitTest] Error:", err);
       const message = err instanceof Error ? err.message : String(err);
       setHitMeta({ error: message });
     } finally {

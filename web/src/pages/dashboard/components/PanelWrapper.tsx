@@ -4,6 +4,7 @@ import { type ReactNode } from "react";
 import { Card, Tooltip } from "antd";
 import { SyncOutlined } from "@ant-design/icons";
 import { useAppStore } from "@/store/useAppStore";
+import { LAYOUT, getColors, commonStyles } from "../styles";
 
 interface PanelWrapperProps {
   title: string;
@@ -12,6 +13,7 @@ interface PanelWrapperProps {
   onRefresh?: () => void;
   extra?: ReactNode;
   className?: string;
+  noPadding?: boolean;
 }
 
 export function PanelWrapper({
@@ -21,76 +23,97 @@ export function PanelWrapper({
   onRefresh,
   extra,
   className = "",
+  noPadding = false,
 }: PanelWrapperProps) {
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
 
   return (
-    <Card
-      className={`h-full ${className}`}
+    <div
+      className={`h-full flex flex-col ${className}`}
       style={{
-        borderRadius: 12,
-        border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
-        background: darkMode ? "#1e293b" : "#ffffff",
+        borderRadius: LAYOUT.CARD_RADIUS,
+        border: `1px solid ${colors.border}`,
+        background: colors.cardBg,
+        boxShadow: colors.shadowSm,
+        overflow: "hidden",
         height: "100%",
-        display: "flex",
-        flexDirection: "column",
       }}
-      styles={{
-        header: {
-          borderBottom: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
-          padding: "12px 16px",
-          minHeight: "auto",
-        },
-        body: {
-          padding: 16,
-          flex: 1,
-          overflow: "auto",
-        },
-      }}
-      title={
+    >
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "0 20px",
+          height: 56, // Increased header height
+          borderBottom: `1px solid ${colors.border}`,
+          background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.015)",
+          flexShrink: 0,
+        }}
+      >
         <span
           style={{
-            fontSize: 14,
-            fontWeight: 600,
-            color: darkMode ? "#f1f5f9" : "#1e293b",
+            fontSize: 15, // Slightly larger
+            fontWeight: 700, // Bolder
+            color: colors.textPrimary,
+            letterSpacing: "-0.01em",
           }}
         >
           {title}
         </span>
-      }
-      extra={
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {extra}
           {onRefresh && (
             <Tooltip title="刷新">
               <div
                 onClick={onRefresh}
                 style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: 6,
+                  width: 32, // Slightly larger
+                  height: 32,
+                  borderRadius: 8,
                   background: darkMode ? "#334155" : "#f1f5f9",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   cursor: "pointer",
-                  transition: "all 0.2s",
+                  transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                  border: `1px solid ${colors.border}`,
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = darkMode ? "#475569" : "#e2e8f0";
+                  e.currentTarget.style.transform = "rotate(180deg)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = darkMode ? "#334155" : "#f1f5f9";
+                  e.currentTarget.style.transform = "rotate(0deg)";
                 }}
               >
                 <SyncOutlined
                   spin={loading}
                   style={{
-                    fontSize: 12,
-                    color: darkMode ? "#94a3b8" : "#64748b",
+                    fontSize: 14,
+                    color: colors.textPrimary,
                   }}
                 />
               </div>
             </Tooltip>
           )}
         </div>
-      }
-    >
-      {children}
-    </Card>
+      </div>
+
+      {/* Body */}
+      <div
+        style={{
+          padding: noPadding ? 0 : 20, // Match header padding
+          flex: 1,
+          overflow: "auto",
+        }}
+      >
+        {children}
+      </div>
+    </div>
   );
 }

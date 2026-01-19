@@ -6,6 +6,7 @@ import type { Layout } from "react-grid-layout";
 import { useAppStore } from "@/store/useAppStore";
 import { DEFAULT_LAYOUTS, DEFAULT_PANELS } from "./types";
 import type { PanelType } from "./types";
+import { LAYOUT, getColors } from "./styles";
 import {
   ServiceHealthPanel,
   PerformancePanel,
@@ -58,6 +59,7 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const [layouts, setLayouts] = useState<Layout[]>(loadSavedLayout);
 
   const onLayoutChange = useCallback((newLayout: Layout[]) => {
@@ -65,9 +67,9 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
     saveLayout(newLayout);
   }, []);
 
-  // Calculate actual grid width (subtract padding)
+  // Calculate actual grid width
   const gridWidth = useMemo(() => {
-    return Math.max(width - 48, 600); // 24px padding on each side, min 600px
+    return Math.max(width, 600); // min 600px
   }, [width]);
 
   // Row height based on container
@@ -76,7 +78,6 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
   return (
     <div
       style={{
-        padding: "0 24px",
         minHeight: "100%",
       }}
     >
@@ -90,7 +91,7 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
         draggableHandle=".panel-drag-handle"
         isDraggable
         isResizable
-        margin={[16, 16]}
+        margin={[LAYOUT.GRID_GAP, LAYOUT.GRID_GAP]}
         containerPadding={[0, 0]}
         useCSSTransforms
       >
@@ -99,11 +100,9 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
           return (
             <div
               key={panel.id}
+              className="panel-container"
               style={{
-                background: darkMode ? "#1e293b" : "#ffffff",
-                borderRadius: 12,
-                border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
-                overflow: "hidden",
+                background: "transparent",
               }}
             >
               <PanelComponent />

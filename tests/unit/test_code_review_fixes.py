@@ -10,6 +10,7 @@ Code Review 修复验证测试
 
 import asyncio
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -196,6 +197,48 @@ class TestEmbeddingRetryMechanism:
         assert DashScopeEmbedding.MAX_RETRIES == 3
         assert DashScopeEmbedding.RETRY_BASE_DELAY == 1.0
         assert DashScopeEmbedding.REQUEST_TIMEOUT == 60
+
+
+class TestTaskQueueHandlerBinding:
+    """任务队列处理器绑定测试"""
+
+    @pytest.mark.asyncio
+    async def test_process_file_handler_uses_app_state_assistant_service(self):
+        """处理器应从 app.state 获取 assistant_service"""
+        from fastapi import FastAPI
+        from src import main as main_module
+
+        app = FastAPI()
+        file_processor = MagicMock()
+        app.state.assistant_service = SimpleNamespace(file_processor=file_processor)
+
+        mock_task = AsyncMock()
+        handler = main_module._make_process_file_handler(
+            app,
+            process_file_task=mock_task,
+        )
+
+        payload = {"file_path": "test.txt", "user_id": "user-1"}
+        await handler(payload)
+
+        mock_task.assert_awaited_once_with(payload, file_processor)
+
+    @pytest.mark.asyncio
+    async def test_process_file_handler_skips_when_assistant_missing(self):
+        """assistant_service 未初始化时不应调用处理函数"""
+        from fastapi import FastAPI
+        from src import main as main_module
+
+        app = FastAPI()
+        mock_task = AsyncMock()
+        handler = main_module._make_process_file_handler(
+            app,
+            process_file_task=mock_task,
+        )
+
+        await handler({"file_path": "test.txt", "user_id": "user-1"})
+
+        mock_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_call_with_retry_method_exists(self):

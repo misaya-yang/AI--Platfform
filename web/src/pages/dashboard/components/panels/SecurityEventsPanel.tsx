@@ -186,8 +186,8 @@ export function SecurityEventsPanel() {
       </Row>
 
       {/* Chart */}
-      <div style={{ width: "100%", height: 120, marginBottom: 12 }}>
-        <ResponsiveContainer>
+      <div style={{ width: "100%", height: 120, marginBottom: 12, minWidth: 100 }}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
           <BarChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
             <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
             <XAxis

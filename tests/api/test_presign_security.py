@@ -125,12 +125,15 @@ class TestValidateDocumentAccess:
         )
 
     @pytest.mark.asyncio
-    async def test_allows_access_when_db_unavailable(self, mock_request, authenticated_user):
-        """Should allow access when database is not available (backward compatibility)."""
+    async def test_denies_access_when_db_unavailable(self, mock_request, authenticated_user):
+        """Should deny access when database is not available (fail-closed)."""
         mock_request.app.state.database = None
 
-        result = await _validate_document_access(mock_request, "doc123", authenticated_user)
-        assert result is True
+        with pytest.raises(HTTPException) as exc_info:
+            await _validate_document_access(mock_request, "doc123", authenticated_user)
+
+        assert exc_info.value.status_code == 503
+        assert "Database" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_raises_404_when_document_not_found(self, mock_request, authenticated_user):

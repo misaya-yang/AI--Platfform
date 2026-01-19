@@ -99,12 +99,16 @@ export async function getUsageBreakdown(params: {
   dimension: "model" | "user" | "assistant" | "service";
   start_date?: string;
   end_date?: string;
+  user_id?: string;
+  service_id?: string;
   limit?: number;
 }): Promise<UsageBreakdownResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set("dimension", params.dimension);
   if (params.start_date) searchParams.set("start_date", params.start_date);
   if (params.end_date) searchParams.set("end_date", params.end_date);
+  if (params.user_id) searchParams.set("user_id", params.user_id);
+  if (params.service_id) searchParams.set("service_id", params.service_id);
   if (params.limit) searchParams.set("limit", params.limit.toString());
 
   const response = await api.get<UsageBreakdownResponse>(`/api/v1/usage/breakdown?${searchParams}`);

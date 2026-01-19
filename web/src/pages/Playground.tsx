@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState, useCallback, startTransition } from "react";
+import { useEffect, useRef, useState, useCallback, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useServices } from "@/hooks/useServices";
@@ -504,16 +504,13 @@ export function PlaygroundPage() {
         setTimeout(() => reject(new Error("History load timeout")), timeoutMs)
       );
       const history = await Promise.race([historyPromise, timeoutPromise]);
-      console.log("[History] Raw history:", history);
 
       // 妫€鏌ユ槸鍚︿粛鐒舵槸褰撳墠閫変腑鐨勪細璇濓紙闃叉绔炴€佹潯浠讹級
       if (loadingHistorySessionRef.current !== id) {
-        console.log("Session changed during history load, discarding result for:", id);
         return;
       }
 
       const normalizedHistory = dedupeHistory(history);
-      console.log("[History] After dedupe:", normalizedHistory);
 
       const nextMessages: ChatMessage[] = normalizedHistory.map((m) => {
         const role = m.role === "user" ? "user" : "assistant";
@@ -521,7 +518,6 @@ export function PlaygroundPage() {
 
         // Extract tool calls and stats from metadata for assistant messages
         if (role === "assistant" && m.metadata) {
-          console.log("[History] Assistant metadata:", m.metadata);
           const toolCalls = convertToolCallsFromMetadata(m.metadata.tool_calls);
           const stats = m.metadata.stats ? {
             durationMs: m.metadata.stats.duration_ms,
@@ -530,7 +526,6 @@ export function PlaygroundPage() {
             outputTokens: m.metadata.stats.output_tokens,
             totalTokens: m.metadata.stats.total_tokens,
           } : undefined;
-          console.log("[History] Extracted stats:", stats);
 
           return {
             role,
@@ -662,7 +657,6 @@ export function PlaygroundPage() {
       // Safety: Check URL params for reset flag to recover from stuck sessions
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.get("reset") === "true") {
-        console.log("[Playground] Reset flag detected, clearing session state");
         setActiveSessionId(undefined);
         setMessages([]);
         // Remove the reset param from URL without reload
@@ -676,9 +670,23 @@ export function PlaygroundPage() {
       }
 
       if (serviceId) {
-        await refreshSessions();
-        if (activeSessionId) {
-          await handleSelectSession(activeSessionId);
+        // 获取当前服务的会话列表
+        const data = await listSessions({ service_id: serviceId, limit: 100 });
+        setSessions(data);
+        
+        // 安全检查：验证 activeSessionId 是否属于当前服务
+        // 如果 activeSessionId 不在当前服务的会话列表中，说明它属于其他服务或 AI助手
+        // 这种情况下应该清除它，避免加载错误的会话
+        const sessionBelongsToCurrentService = activeSessionId && 
+          data.some(s => s.session_id === activeSessionId);
+        
+        if (sessionBelongsToCurrentService) {
+          await handleSelectSession(activeSessionId!);
+        } else if (activeSessionId) {
+          // 会话不属于当前服务，清除它
+          console.warn("[Playground] activeSessionId doesn't belong to current service, clearing");
+          setActiveSessionId(undefined);
+          setMessages([]);
         }
       }
       isInitialMount.current = false;
@@ -1053,7 +1061,6 @@ export function PlaygroundPage() {
         }
 
         if (eventType === "stream_end") {
-          console.log("[STREAM] Received stream_end event with metadata:", chunk?.metadata);
           const streamEndUsage = chunk?.metadata?.usage;
           if (streamEndUsage && typeof streamEndUsage === "object") {
             const normalized = normalizeUsage(streamEndUsage as Record<string, unknown>);
@@ -1067,7 +1074,6 @@ export function PlaygroundPage() {
                 durationMs: timing.durationMs,
                 firstTokenMs: finalFirstTokenMs,
               };
-              console.log("[STREAM END] Captured timing stats:", streamEndTiming, "usage:", usageStats);
             }
           }
           return true;
@@ -1296,7 +1302,6 @@ export function PlaygroundPage() {
             signal: abortController.signal,
           })) {
             if (!isRequestValid()) {
-              console.log("Request cancelled or session changed, stopping stream processing");
               break;
             }
 
@@ -1308,11 +1313,9 @@ export function PlaygroundPage() {
       } catch (streamErr) {
         // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
         if (streamErr instanceof Error && streamErr.name === 'AbortError') {
-          console.log("Stream aborted");
           cancelFlush();
           return;
         }
-        console.error("Stream error:", streamErr);
         if (!acc && !toolCallsMap.size) {
           streamed = false;
         }
@@ -1344,7 +1347,6 @@ export function PlaygroundPage() {
       });
 
       if (!streamed) {
-        console.log("Falling back to sync invoke");
         try {
           if (useTransparentProxy) {
             const waitPath = threadId
@@ -1520,11 +1522,19 @@ export function PlaygroundPage() {
                 ];
                 const variant = colorVariants[index % colorVariants.length];
                 return (
-                  <button
+                  <div
                     key={s.session_id}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => void handleSelectSession(s.session_id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void handleSelectSession(s.session_id);
+                      }
+                    }}
                     className={cn(
-                      "group w-full rounded-lg px-3 py-2.5 text-left transition-all duration-200 border-l-2",
+                      "group w-full rounded-lg px-3 py-2.5 text-left transition-all duration-200 border-l-2 cursor-pointer",
                       active
                         ? `${variant.bg} ${variant.border} shadow-sm`
                         : "border-l-transparent hover:bg-muted/60 hover:border-l-muted-foreground/30"
@@ -1562,7 +1572,7 @@ export function PlaygroundPage() {
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>

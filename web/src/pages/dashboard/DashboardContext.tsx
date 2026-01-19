@@ -2,12 +2,14 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
 import dayjs from "dayjs";
-import type { DashboardContext, SourceFilter, RefreshInterval } from "./types";
+import type { DashboardContext, SourceFilter, ServiceFilter, UserFilter, RefreshInterval } from "./types";
 
 interface DashboardContextValue extends DashboardContext {
   setDateRange: (range: [string, string]) => void;
   setGranularity: (granularity: "hour" | "day") => void;
   setSource: (source: SourceFilter) => void;
+  setServiceId: (serviceId: ServiceFilter) => void;
+  setUserId: (userId: UserFilter) => void;
   setRefreshInterval: (interval: RefreshInterval) => void;
   triggerRefresh: () => void;
 }
@@ -21,6 +23,8 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   ]);
   const [granularity, setGranularity] = useState<"hour" | "day">("day");
   const [source, setSource] = useState<SourceFilter>("all");
+  const [serviceId, setServiceId] = useState<ServiceFilter>("all");
+  const [userId, setUserId] = useState<UserFilter>("all");
   const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>(60);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 
@@ -43,11 +47,15 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     dateRange,
     granularity,
     source,
+    serviceId,
+    userId,
     refreshInterval,
     lastRefresh,
     setDateRange,
     setGranularity,
     setSource,
+    setServiceId,
+    setUserId,
     setRefreshInterval,
     triggerRefresh,
   };

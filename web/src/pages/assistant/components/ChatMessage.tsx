@@ -36,6 +36,8 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
       <AnimatePresence mode="popLayout">
         {searchStatus.map((item, index) => {
           const isKB = item.type === "kb";
+          const isWeb = item.type === "web";
+          const isFiles = item.type === "files";
           const isSearching = item.state === "searching";
           const isCompleted = item.state === "completed";
 
@@ -59,16 +61,18 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
                 {isSearching ? (
                   <Loader2 className={cn(
                     "h-4 w-4 animate-spin",
-                    isKB ? "text-emerald-500" : "text-blue-500"
+                    isKB ? "text-emerald-500" : isFiles ? "text-violet-500" : "text-blue-500"
                   )} />
                 ) : isCompleted ? (
                   <CheckCircle2 className={cn(
                     "h-4 w-4",
-                    isKB ? "text-emerald-500" : "text-blue-500"
+                    isKB ? "text-emerald-500" : isFiles ? "text-violet-500" : "text-blue-500"
                   )} />
                 ) : (
                   isKB ? (
                     <Database className="h-4 w-4 text-red-500" />
+                  ) : isFiles ? (
+                    <FileText className="h-4 w-4 text-red-500" />
                   ) : (
                     <Globe className="h-4 w-4 text-red-500" />
                   )
@@ -88,11 +92,15 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
                   {isSearching ? (
                     isKB
                       ? t("assistant.searchingKB", "Searching knowledge base...")
-                      : t("assistant.searchingWeb", "Searching the web...")
+                      : isFiles
+                        ? t("assistant.processingFiles", "Analyzing uploaded files...")
+                        : t("assistant.searchingWeb", "Searching the web...")
                   ) : isCompleted ? (
                     isKB
                       ? t("assistant.kbResultsFound", "Found {{count}} sources", { count: item.resultCount || 0 })
-                      : t("assistant.webResultsFound", "Found {{count}} results", { count: item.resultCount || 0 })
+                      : isFiles
+                        ? t("assistant.filesProcessed", "Analyzed {{count}} files", { count: item.resultCount || 0 })
+                        : t("assistant.webResultsFound", "Found {{count}} results", { count: item.resultCount || 0 })
                   ) : (
                     item.error || t("assistant.searchError", "Search failed")
                   )}

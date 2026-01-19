@@ -107,7 +107,7 @@ export function PerformancePanel() {
 
       {/* Chart */}
       <div style={{ width: "100%", height: 200 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer minWidth={100} minHeight={100}>
           <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
             <XAxis

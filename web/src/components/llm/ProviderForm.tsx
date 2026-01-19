@@ -5,6 +5,7 @@
  */
 
 import { useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
   Dialog,
@@ -58,6 +59,7 @@ export function ProviderForm({
   onSubmit,
   loading,
 }: ProviderFormProps) {
+  const { t } = useTranslation();
   const isEdit = !!provider;
 
   const {
@@ -135,9 +137,9 @@ export function ProviderForm({
       <DialogContent className="sm:max-w-[500px]">
         <form onSubmit={handleSubmit(onFormSubmit)}>
           <DialogHeader>
-            <DialogTitle>{isEdit ? "编辑厂商" : "添加厂商"}</DialogTitle>
+            <DialogTitle>{isEdit ? t("llm.provider.editTitle") : t("llm.provider.addTitle")}</DialogTitle>
             <DialogDescription>
-              {isEdit ? "修改 LLM 厂商配置" : "添加新的 LLM 厂商配置"}
+              {isEdit ? t("llm.provider.editDescription") : t("llm.provider.addDescription")}
             </DialogDescription>
           </DialogHeader>
 
@@ -145,15 +147,15 @@ export function ProviderForm({
             {/* Provider ID (only for create) */}
             {!isEdit && (
               <div className="grid gap-2">
-                <Label htmlFor="provider_id">厂商 ID</Label>
+                <Label htmlFor="provider_id">{t("llm.provider.providerId")}</Label>
                 <Input
                   id="provider_id"
-                  placeholder="例如: openai, anthropic, my-provider"
+                  placeholder={t("llm.provider.providerIdPlaceholder")}
                   {...register("provider_id", {
-                    required: "厂商 ID 为必填项",
+                    required: t("llm.provider.providerIdRequired"),
                     pattern: {
                       value: /^[a-z0-9-]+$/,
-                      message: "只允许小写字母、数字和连字符",
+                      message: t("llm.provider.providerIdPattern"),
                     },
                   })}
                 />
@@ -165,11 +167,11 @@ export function ProviderForm({
 
             {/* Display Name */}
             <div className="grid gap-2">
-              <Label htmlFor="display_name">显示名称</Label>
+              <Label htmlFor="display_name">{t("llm.provider.displayName")}</Label>
               <Input
                 id="display_name"
-                placeholder="例如: OpenAI, Anthropic"
-                {...register("display_name", { required: "显示名称为必填项" })}
+                placeholder={t("llm.provider.displayNamePlaceholder")}
+                {...register("display_name", { required: t("llm.provider.displayNameRequired") })}
               />
               {errors.display_name && (
                 <p className="text-sm text-destructive">{errors.display_name.message}</p>
@@ -178,13 +180,13 @@ export function ProviderForm({
 
             {/* API Type */}
             <div className="grid gap-2">
-              <Label htmlFor="api_type">API 类型</Label>
+              <Label htmlFor="api_type">{t("llm.provider.apiType")}</Label>
               <Select
                 value={apiType}
                 onValueChange={(value) => setValue("api_type", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="选择 API 类型" />
+                  <SelectValue placeholder={t("llm.provider.apiTypePlaceholder")} />
                 </SelectTrigger>
                 <SelectContent>
                   {API_TYPES.map((type) => (
@@ -198,24 +200,24 @@ export function ProviderForm({
 
             {/* Base URL */}
             <div className="grid gap-2">
-              <Label htmlFor="base_url">Base URL</Label>
+              <Label htmlFor="base_url">{t("llm.provider.baseUrl")}</Label>
               <Input
                 id="base_url"
-                placeholder="https://api.openai.com"
+                placeholder={t("llm.provider.baseUrlPlaceholder")}
                 {...register("base_url")}
               />
               <p className="text-xs text-muted-foreground">
-                自定义 API 端点 URL，留空使用默认值
+                {t("llm.provider.baseUrlHint")}
               </p>
             </div>
 
             {/* API Key */}
             <div className="grid gap-2">
               <Label htmlFor="api_key">
-                API Key
+                {t("llm.provider.apiKey")}
                 {isEdit && provider?.has_api_key && (
                   <span className="text-muted-foreground font-normal ml-2">
-                    (留空保持不变)
+                    ({t("llm.provider.apiKeyHint")})
                   </span>
                 )}
               </Label>
@@ -229,7 +231,7 @@ export function ProviderForm({
 
             {/* Is Enabled */}
             <div className="flex items-center justify-between">
-              <Label htmlFor="is_enabled">启用厂商</Label>
+              <Label htmlFor="is_enabled">{t("llm.provider.enableProvider")}</Label>
               <Switch
                 id="is_enabled"
                 checked={watch("is_enabled")}
@@ -240,10 +242,10 @@ export function ProviderForm({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? "保存中..." : "保存"}
+              {loading ? t("common.loading") : t("common.save")}
             </Button>
           </DialogFooter>
         </form>
