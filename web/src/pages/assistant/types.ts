@@ -14,6 +14,7 @@ import type { FileUploadResponse } from "@/api/files";
 // =============================================================================
 
 export const SSEEventType = {
+  STARTED: "started",  // Immediate response to reduce first-token latency
   TEXT_DELTA: "text_delta",
   STATUS: "status",  // Added for agent thinking status
   THINKING_DELTA: "thinking_delta",

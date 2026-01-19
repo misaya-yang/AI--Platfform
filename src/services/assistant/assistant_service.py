@@ -499,7 +499,11 @@ Please use this web search context to inform your response when relevant."""
         """
         start_time = time.time()
 
+        # ========== LATENCY DEBUG: Track timing for each step ==========
+        logger.info(f"[LATENCY] chat_stream started at {start_time}")
+
         # Step 0: Load history from session if not provided
+        step_start = time.time()
         if history is None and self.session_manager:
             try:
                 session = await self.session_manager.get(session_id)
@@ -515,8 +519,10 @@ Please use this web search context to inform your response when relevant."""
                 history = []
         else:
             history = history or []
+        logger.info(f"[LATENCY] Step 0 (history load): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 0.5: Apply context management (sliding window + token truncation)
+        step_start = time.time()
         model_info = self.model_registry.get_model(config.model_id)
         model_context_window = model_info.context_window if model_info else 128000
         logger.info(
@@ -537,6 +543,7 @@ Please use this web search context to inform your response when relevant."""
                 f"Session {session_id}: Context truncated {context_result.original_count} -> "
                 f"{len(processed_history)} messages (tokens: {context_result.total_tokens})"
             )
+        logger.info(f"[LATENCY] Step 0.5 (context mgmt): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 0.6: Persist user message to session (fire-and-forget for lower latency)
         if persist_messages and self.session_manager:
@@ -575,6 +582,7 @@ Please use this web search context to inform your response when relevant."""
         # This reduces first-token latency by running these operations concurrently
         # ==========================================================================
         import asyncio
+        step_start = time.time()
 
         user_preferences: Optional[str] = None
         retrieved_contexts: List[RetrievedContext] = []
@@ -648,8 +656,10 @@ Please use this web search context to inform your response when relevant."""
                     event_type="error",
                     data={"message": f"KB retrieval failed: {str(kb_result)}", "recoverable": True}
                 )
+        logger.info(f"[LATENCY] Step 1 (memory + KB parallel): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 2: Web search if enabled
+        step_start = time.time()
         web_search_context: Optional[str] = None
         if config.web_search_enabled and self.tavily_tool.is_configured:
             yield AssistantStreamEvent(
@@ -672,8 +682,10 @@ Please use this web search context to inform your response when relevant."""
                     event_type="error",
                     data={"message": f"Web search failed: {str(e)}", "recoverable": True}
                 )
+        logger.info(f"[LATENCY] Step 2 (web search): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 2.5: Process uploaded files if any
+        step_start = time.time()
         processed_files: Optional[ProcessedFiles] = None
         model_supports_vision = model_info.supports_vision if model_info else False
 
@@ -714,6 +726,7 @@ Please use this web search context to inform your response when relevant."""
                     event_type="error",
                     data={"message": f"File processing failed: {str(e)}", "recoverable": True}
                 )
+        logger.info(f"[LATENCY] Step 2.5 (file processing): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 2.6: Task Planning Mode (Phase 2.4)
         # If task planning is enabled, use the planner and orchestrator
@@ -773,6 +786,9 @@ Please use this web search context to inform your response when relevant."""
         max_tool_iterations = 5
         current_messages = messages.copy()
         iteration = 0
+
+        total_prep_time = (time.time() - start_time) * 1000
+        logger.info(f"[LATENCY] Total preprocessing time: {total_prep_time:.1f}ms, starting LLM stream now")
 
         while iteration < max_tool_iterations:
             iteration += 1
@@ -1406,7 +1422,7 @@ Please use this web search context to inform your response when relevant."""
                     model=config.model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    service_id="assistant",
+                    service_id="__builtin_assistant__",
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
                     metadata={
@@ -1508,7 +1524,7 @@ Please use this web search context to inform your response when relevant."""
                     model=config.model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
-                    service_id="assistant",
+                    service_id="__builtin_assistant__",
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
                     metadata={

@@ -361,6 +361,7 @@ class ModelRegistry:
                 return 0
 
             # Clear existing models and load from database
+            self._models.clear()
             loaded_count = 0
             for row in db_models:
                 try:

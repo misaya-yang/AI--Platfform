@@ -8,6 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.core.middleware.streaming import (
+    StreamingAuthConfig,
+    StreamingAuthMiddleware,
+    StreamingAnonymousConfig,
+    StreamingAnonymousMiddleware,
     StreamingRateLimitConfig,
     StreamingRateLimitMiddleware,
 )
@@ -16,6 +20,23 @@ from src.core.middleware.streaming import (
 def _build_app(config: StreamingRateLimitConfig) -> FastAPI:
     app = FastAPI()
     app.add_middleware(StreamingRateLimitMiddleware, config=config)
+
+    @app.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    return app
+
+
+def _build_app_with_auth_and_rate_limit(
+    rate_config: StreamingRateLimitConfig,
+    auth_config: StreamingAuthConfig,
+) -> FastAPI:
+    app = FastAPI()
+    # Auth must execute before rate limiting to enforce user/guest limits.
+    app.add_middleware(StreamingAnonymousMiddleware, config=StreamingAnonymousConfig())
+    app.add_middleware(StreamingRateLimitMiddleware, config=rate_config)
+    app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
     @app.get("/ping")
     async def ping():
@@ -44,3 +65,32 @@ def test_streaming_rate_limit_blocks_after_limit():
     assert response.status_code == 429
     payload = response.json()
     assert payload["error"]["dimension"] == "global"
+
+
+def test_rate_limit_uses_user_dimension_when_api_key_present():
+    rate_config = StreamingRateLimitConfig(
+        enabled=True,
+        global_limit=1000,
+        global_window=60,
+        user_limit=1,
+        user_window=60,
+        guest_limit=1000,
+        guest_window=60,
+        ip_limit=1000,
+        ip_window=60,
+        whitelist_paths=[],
+    )
+    auth_config = StreamingAuthConfig(
+        jwt_enabled=False,
+        api_key_enabled=True,
+    )
+    app = _build_app_with_auth_and_rate_limit(rate_config, auth_config)
+    client = TestClient(app)
+
+    headers = {"X-API-Key": "test-key"}
+    assert client.get("/ping", headers=headers).status_code == 200
+
+    response = client.get("/ping", headers=headers)
+    assert response.status_code == 429
+    payload = response.json()
+    assert payload["error"]["dimension"] == "user"

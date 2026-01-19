@@ -410,7 +410,11 @@ function convertToolCallsFromMetadata(toolCalls?: SessionMessageToolCall[]): Too
 export function PlaygroundPage() {
   const { t } = useTranslation();
   const servicesQuery = useServices();
-  const services = servicesQuery.data || [];
+  // 过滤掉内置的 "AI助手" 服务 (service_id: "assistant")
+  // 该服务应该只在 AI助手 页面使用，不应该出现在智能对话的服务选择器中
+  const services = (servicesQuery.data || []).filter(
+    (s) => s.service_id !== "assistant"
+  );
 
   const {
     selectedServiceId: serviceId,
@@ -1362,7 +1366,11 @@ export function PlaygroundPage() {
               signal: abortController.signal,
             });
             if (!resp.ok) {
-              throw new Error(`Run wait failed: ${resp.status}`);
+              const errorText = await resp.text().catch(() => "");
+              if (resp.status === 401) {
+                throw new Error(`Run wait failed: 401 Unauthorized. Server response: ${errorText}`);
+              }
+              throw new Error(`Run wait failed: ${resp.status} ${errorText}`);
             }
             const data = await resp.json();
             acc = extractRunWaitContent(data);

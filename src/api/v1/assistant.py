@@ -549,7 +549,7 @@ async def create_session(
         session = await session_manager.create(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
-            service_id="assistant",
+            service_id="__builtin_assistant__",  # 保留的 service_id，避免与用户注册的服务冲突
             metadata=body.metadata if body else None,
         )
 
@@ -586,7 +586,7 @@ async def list_sessions(
         sessions = await session_manager.list_sessions(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
-            service_id="assistant",
+            service_id="__builtin_assistant__",  # 保留的 service_id
             limit=limit,
         )
 

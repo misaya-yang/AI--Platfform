@@ -13,12 +13,15 @@ import { sseFetch } from "@/lib/sse";
 // =============================================================================
 
 export const SSEEventType = {
+  STARTED: "started",  // Immediate response to reduce first-token latency
+  STATUS: "status",  // Added for agent thinking status
   TEXT_DELTA: "text_delta",
   THINKING_DELTA: "thinking_delta",
   TOOL_CALL: "tool_call",
   TOOL_RESULT: "tool_result",
   CONTEXT_RETRIEVED: "context_retrieved",
   WEB_SEARCH_RESULTS: "web_search_results",
+  FILE_PROCESSED: "file_processed",
   RAG_EVALUATION: "rag_evaluation",  // Phase 3: RAG quality metrics
   SESSION_CREATED: "session_created",
   SESSION_UPDATED: "session_updated",

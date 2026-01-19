@@ -161,6 +161,12 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
           {(message.durationMs / 1000).toFixed(2)}s
         </span>
       )}
+      {message.firstTokenMs != null && (
+        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
+          <Zap className="h-3 w-3" />
+          {t("playground.stats.ttft", "TTFT")}: {message.firstTokenMs}ms
+        </span>
+      )}
       {totalTokens > 0 && (
         <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
           <MessageSquare className="h-3 w-3" />
@@ -336,8 +342,10 @@ export function ChatMessage({ message }: ChatMessageProps) {
       {/* Content */}
       <div
         className={cn(
-          "flex flex-col gap-1",
-          isUser ? "max-w-[85%] items-end" : "max-w-[85%] items-start"
+          "flex flex-col gap-1 min-w-0",
+          isUser 
+            ? "max-w-[85%] items-end" 
+            : "max-w-[90%] lg:max-w-[80%] xl:max-w-[70%] items-start w-full"
         )}
       >
         <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 ml-1 mb-1">

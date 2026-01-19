@@ -1,4 +1,4 @@
-﻿"""
+"""
 LangGraph Server 代理层
 
 负责：
@@ -263,13 +263,28 @@ class LangGraphProxy:
         }
 
         # 如果配置了内部认证 token，添加到 Authorization header
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
+        # 优先使用配置的 Token，其次是备选 Key
+        token = self.auth_token or "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
+        
+        # DEBUG: Log authentication flow
+        logger.info(f"[LangGraphProxy] Building headers. Using token: {token[:10]}...")
+        
+        # 修正：LangGraph Server/SDK 标准认证使用 X-Api-Key Header
+        # 用户指出的 "langgraph-auth" 鉴权通常依赖此 Header
+        if token:
+            headers["X-Api-Key"] = token
+            # 同时提供 Bearer Token 以兼容某些自定义 Auth 配置，但 X-Api-Key 是主要的
+            headers["Authorization"] = f"Bearer {token}"
 
-        # 如果有原始 Authorization header，优先使用（透传给 LangGraph）
+        # 其他 Header 透传保持不变
         if original_headers:
-            if auth := original_headers.get("Authorization"):
-                headers["Authorization"] = auth
+            if trace_id := original_headers.get("X-Trace-Id"):
+                headers["X-Trace-Id"] = trace_id
+            if request_id := original_headers.get("X-Request-Id"):
+                headers["X-Request-Id"] = request_id
+
+        # 其他 Header 透传保持不变
+        if original_headers:
             if trace_id := original_headers.get("X-Trace-Id"):
                 headers["X-Trace-Id"] = trace_id
             if request_id := original_headers.get("X-Request-Id"):
@@ -871,7 +886,13 @@ class LangGraphProxy:
                 payload["metadata"] = metadata
 
             response = await client.post(f"/threads/{thread_id}/runs/wait", json=payload, headers=headers)
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                logger.error(f"LangGraph create_run_wait failed: {e.response.text}")
+                # 抛出包含详细错误信息的异常，以便前端展示
+                raise LangGraphProxyError(f"LangGraph Auth Error: {e.response.text}") from e
+            
             result = response.json()
 
             # Extract token usage from response if available

@@ -17,8 +17,20 @@ from ..schemas.providers import (
 )
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_service import ModelService
+from ...services.assistant.model_registry import ModelRegistry
 
 router = APIRouter()
+
+
+def get_model_registry(request: Request) -> ModelRegistry:
+    """Get ModelRegistry from app state."""
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model registry is not initialized.",
+        )
+    return registry
 
 
 def get_model_service(request: Request) -> ModelService:
@@ -65,6 +77,7 @@ async def list_models(
 async def create_model(
     body: ModelCreate,
     model_service: ModelService = Depends(get_model_service),
+    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Create a new model."""
@@ -88,6 +101,13 @@ async def create_model(
             is_enabled=body.is_enabled,
             sort_order=body.sort_order,
         )
+
+        # Refresh model registry to reflect changes in assistant
+        await model_registry.load_models_from_database(
+            model_service,
+            tenant_id=user.tenant_id or "default"
+        )
+
         return model
     except Exception as e:
         if "duplicate key" in str(e).lower():
@@ -116,6 +136,7 @@ async def update_model(
     model_id: str,
     body: ModelUpdate,
     model_service: ModelService = Depends(get_model_service),
+    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Update a model."""
@@ -143,6 +164,13 @@ async def update_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Refresh model registry to reflect changes in assistant
+    await model_registry.load_models_from_database(
+        model_service,
+        tenant_id=user.tenant_id or "default"
+    )
+
     return model
 
 
@@ -150,6 +178,7 @@ async def update_model(
 async def delete_model(
     model_id: str,
     model_service: ModelService = Depends(get_model_service),
+    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Delete a model."""
@@ -163,6 +192,13 @@ async def delete_model(
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Refresh model registry to reflect changes in assistant
+    await model_registry.load_models_from_database(
+        model_service,
+        tenant_id=user.tenant_id or "default"
+    )
+
     return {"model_id": model_id, "status": "deleted"}
 
 
@@ -171,6 +207,7 @@ async def toggle_model(
     model_id: str,
     is_enabled: bool = Query(..., description="Enable or disable the model"),
     model_service: ModelService = Depends(get_model_service),
+    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Toggle model enabled state."""
@@ -185,4 +222,11 @@ async def toggle_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Refresh model registry to reflect changes in assistant
+    await model_registry.load_models_from_database(
+        model_service,
+        tenant_id=user.tenant_id or "default"
+    )
+
     return model

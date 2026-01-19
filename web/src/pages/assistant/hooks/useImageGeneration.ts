@@ -43,7 +43,7 @@ export function useImageGeneration(
     if (!sessionId) {
       try {
         const { session_id } = await createSession({
-          service_id: "assistant",
+          service_id: "__builtin_assistant__",  // 保留的 service_id
           metadata: { title: `🎨 ${prompt.slice(0, 40)}...` },
           config: {
             selected_model: selectedModel,
@@ -53,7 +53,7 @@ export function useImageGeneration(
         });
         sessionId = session_id;
         setActiveSessionId(sessionId);
-        const updatedSessions = await listSessions({ service_id: "assistant", limit: 100 });
+        const updatedSessions = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
         setSessions(updatedSessions);
       } catch (error) {
         console.error("Failed to create session:", error);

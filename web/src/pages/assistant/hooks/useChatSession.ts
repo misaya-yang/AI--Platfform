@@ -127,7 +127,8 @@ export function useChatSession() {
     
     async function loadSessionsAndRestore() {
       try {
-        const data = await listSessions({ service_id: "assistant", limit: 100 });
+        // 使用保留的 service_id，避免与用户在服务管理中注册的服务冲突
+        const data = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
         setSessions(data);
         
         // 从服务器返回的 metadata.title 初始化 assistantLocalTitles
@@ -327,7 +328,7 @@ export function useChatSession() {
       try {
         const sessionTitle = messageContent.slice(0, 50);
         const { session_id } = await createSession({
-          service_id: "assistant",
+          service_id: "__builtin_assistant__",  // 保留的 service_id
           metadata: { title: sessionTitle },
           config,
         });
@@ -335,7 +336,7 @@ export function useChatSession() {
         setActiveSessionId(sessionId);
         
         // 更新会话列表和标题缓存
-        const updatedSessions = await listSessions({ service_id: "assistant", limit: 100 });
+        const updatedSessions = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
         setSessions(updatedSessions);
         setAssistantLocalTitles((prev: Record<string, string>) => ({
           ...prev,
@@ -350,6 +351,8 @@ export function useChatSession() {
 
     // 3. Start Stream
     abortControllerRef.current = new AbortController();
+    const startTime = Date.now();
+    let firstTokenMs: number | undefined;
     let content = "";
     let contexts: RetrievedContext[] = [];
     let webSearchResults: WebSearchResult[] = [];
@@ -384,12 +387,26 @@ export function useChatSession() {
       }, abortControllerRef.current.signal);
 
       for await (const event of stream) {
+        // Track TTFT on ANY first meaningful event
+        if (firstTokenMs === undefined && 
+            event.event_type !== "error" && 
+            event.event_type !== "done" &&
+            event.event_type !== "finish") {
+           firstTokenMs = Date.now() - startTime;
+        }
+
         // Event Handling
         switch (event.event_type) {
+          case SSEEventType.STARTED:
+            // Immediate response received - stream connection established
+            // This reduces perceived first-token latency
+            console.debug("[SSE] Stream started, processing request...");
+            break;
+
           case "text_delta":
             if (typeof event.data === "string") {
               content += event.data;
-              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content } : m));
+              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content, firstTokenMs } : m));
             }
             break;
 
@@ -409,7 +426,7 @@ export function useChatSession() {
                    state: "searching",
                    query: statusData.message
                  }];
-                 setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, searchStatus } : m));
+                 setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, searchStatus, firstTokenMs } : m));
                }
             }
             break;
@@ -612,17 +629,17 @@ export function useChatSession() {
 
       // Final update
       setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-        ...m, content, contexts, webSearchResults, usage, durationMs, isStreaming: false 
+        ...m, content, contexts, webSearchResults, usage, durationMs, firstTokenMs, isStreaming: false 
       } : m));
 
     } catch (error: any) {
       if (error.name !== "AbortError") {
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m, content: `**Error:** ${error.message}`, isStreaming: false 
+          ...m, content: `**Error:** ${error.message}`, isStreaming: false, firstTokenMs 
         } : m));
       } else {
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m, content: content || "(Cancelled)", isStreaming: false 
+          ...m, content: content || "(Cancelled)", isStreaming: false, firstTokenMs 
         } : m));
       }
     } finally {

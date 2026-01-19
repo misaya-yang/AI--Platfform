@@ -90,7 +90,7 @@ def create_app() -> FastAPI:
     
     # ========== 中间件配置 ==========
     # 注意：中间件执行顺序与添加顺序相反（后添加的先执行）
-    # 执行顺序：Tracing -> CORS -> RequestLogging -> RateLimit -> Auth -> AnonymousIdentity
+    # 执行顺序：Tracing -> CORS -> RequestLogging -> Auth -> RateLimit -> AnonymousIdentity
     #
     # 重要：使用纯 ASGI 中间件替换 BaseHTTPMiddleware，避免缓冲 StreamingResponse
     # 这是解决首 token 延迟问题的关键
@@ -104,18 +104,6 @@ def create_app() -> FastAPI:
         same_site=getattr(settings.anonymous, 'same_site', 'lax'),
     )
     app.add_middleware(StreamingAnonymousMiddleware, config=anon_config)
-
-    # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI
-    auth_config = StreamingAuthConfig(
-        jwt_enabled=settings.authentication.jwt.enabled if hasattr(settings, 'authentication') else False,
-        jwt_secret=settings.authentication.jwt.secret if hasattr(settings, 'authentication') else "",
-        jwt_algorithms=settings.authentication.jwt.algorithms if hasattr(settings, 'authentication') else ["HS256"],
-        api_key_enabled=settings.authentication.api_key.enabled if hasattr(settings, 'authentication') else False,
-        guest_session_enabled=True,
-        anonymous_enabled=True,
-        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"],
-    )
-    app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
     # HTTP 级别限流中间件 - 纯 ASGI
     # Note: Limits should be generous enough for frontend usage patterns
@@ -141,6 +129,18 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_middleware(StreamingRateLimitMiddleware, config=rate_limit_config)
+
+    # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI
+    auth_config = StreamingAuthConfig(
+        jwt_enabled=settings.authentication.jwt.enabled if hasattr(settings, 'authentication') else False,
+        jwt_secret=settings.authentication.jwt.secret if hasattr(settings, 'authentication') else "",
+        jwt_algorithms=settings.authentication.jwt.algorithms if hasattr(settings, 'authentication') else ["HS256"],
+        api_key_enabled=settings.authentication.api_key.enabled if hasattr(settings, 'authentication') else False,
+        guest_session_enabled=True,
+        anonymous_enabled=True,
+        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"],
+    )
+    app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
     # 请求日志中间件 - 纯 ASGI
     request_log_config = StreamingLogConfig(
