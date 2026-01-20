@@ -236,20 +236,29 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         headers = dict(scope.get("headers", []))
         client_ip = self._get_client_ip(scope)
 
-        # Try to extract JWT user if present (don't validate here, just extract claims)
+        # Try to extract and VERIFY JWT user if present
+        # CRITICAL: Must verify signature before trusting claims
         auth_header = headers.get(b"authorization", b"").decode()
-        if auth_header.lower().startswith("bearer "):
-            try:
-                import base64
-                import json
-                token = auth_header.split(" ", 1)[1]
-                # Decode JWT payload without verification (middleware doesn't verify)
-                parts = token.split(".")
-                if len(parts) >= 2:
-                    payload_b64 = parts[1]
-                    # Add padding if needed
-                    payload_b64 += "=" * (4 - len(payload_b64) % 4)
-                    payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        if auth_header.lower().startswith("bearer ") and getattr(self.config, 'jwt_enabled', True):
+            jwt_secret = getattr(self.config, 'jwt_secret', '')
+            jwt_algorithms = getattr(self.config, 'jwt_algorithms', ['HS256'])
+
+            # Skip JWT auth if no secret configured
+            if not jwt_secret:
+                logger.debug("JWT secret not configured, skipping JWT authentication")
+            else:
+                try:
+                    import jwt
+                    token = auth_header.split(" ", 1)[1]
+
+                    # CRITICAL FIX: Verify signature using PyJWT
+                    payload = jwt.decode(
+                        token,
+                        key=jwt_secret,
+                        algorithms=jwt_algorithms,
+                        options={"verify_signature": True, "verify_exp": True}
+                    )
+
                     user_id = str(payload.get("sub") or payload.get("user_id") or "")
                     if user_id:
                         return {
@@ -261,8 +270,15 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                             "ip": client_ip,
                             "roles": payload.get("roles", ["user"]),
                         }
-            except Exception:
-                pass  # Fall through to anonymous
+                except jwt.InvalidSignatureError:
+                    logger.warning(f"Invalid JWT signature from {client_ip}")
+                except jwt.ExpiredSignatureError:
+                    logger.warning(f"Expired JWT token from {client_ip}")
+                except jwt.DecodeError as e:
+                    logger.warning(f"JWT decode error from {client_ip}: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected JWT error from {client_ip}: {e}")
+                # Fall through to other auth methods or anonymous
 
         # Try API key
         api_key = headers.get(self.config.api_key_header.lower().encode(), b"").decode()
