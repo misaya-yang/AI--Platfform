@@ -801,7 +801,7 @@ def _is_valid_uuid(value: str) -> bool:
     try:
         uuid.UUID(str(value))
         return True
-    except Exception:
+    except (ValueError, AttributeError):
         return False
 
 
