@@ -56,6 +56,18 @@ from .file_processor import (
     FileProcessError,
     create_file_processor,
 )
+from .guardrails import (
+    DocumentType,
+    IssueSeverity,
+    QualityIssue,
+    ValidationResult,
+    QualityGuardrails,
+    ToolCallValidation,
+    ToolConstraintValidator,
+    QUALITY_THRESHOLDS,
+    BANNED_PHRASES,
+    TOOL_CONSTRAINTS,
+)
 
 __all__ = [
     "AssistantService",
@@ -106,4 +118,15 @@ __all__ = [
     "StreamingWriter",
     "create_streaming_writer",
     "DEFAULT_VERIFICATION_TRIGGERS",
+    # Guardrails (Quality Control)
+    "DocumentType",
+    "IssueSeverity",
+    "QualityIssue",
+    "ValidationResult",
+    "QualityGuardrails",
+    "ToolCallValidation",
+    "ToolConstraintValidator",
+    "QUALITY_THRESHOLDS",
+    "BANNED_PHRASES",
+    "TOOL_CONSTRAINTS",
 ]

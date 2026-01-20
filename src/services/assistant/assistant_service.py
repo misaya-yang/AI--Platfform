@@ -61,6 +61,13 @@ from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType, cre
 from .react_executor import ReActExecutor, ReActPhase, create_react_executor
 from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult, create_tool_orchestrator
 from .memory import MemoryManager
+from .guardrails import (
+    QualityGuardrails,
+    ToolConstraintValidator,
+    DocumentType,
+    ValidationResult,
+    ToolCallValidation,
+)
 from ..metrics.usage_recorder import get_usage_recorder
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..storage import get_artifact_storage, get_file_storage, ArtifactStorageService
@@ -367,6 +374,8 @@ Please use this web search context to inform your response when relevant."""
         vlm_service: Optional[Any] = None,  # DashScopeVLMService for image descriptions
         redis_client: Optional[Any] = None,  # Redis client for caching
         memory_service: Optional["MemoryService"] = None,
+        quality_guardrails: Optional[QualityGuardrails] = None,
+        tool_constraint_validator: Optional[ToolConstraintValidator] = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -422,6 +431,48 @@ Please use this web search context to inform your response when relevant."""
         # Context Engine for KV-Cache optimization (Phase 5)
         # Per-session working memory for task tracking
         self._working_memories: Dict[str, WorkingMemory] = {}
+
+        # Quality Guardrails (ensure content meets minimum quality standards)
+        self.quality_guardrails = quality_guardrails or QualityGuardrails()
+        self.tool_constraint_validator = tool_constraint_validator or ToolConstraintValidator()
+
+    def validate_generated_content(
+        self,
+        content: str,
+        doc_type: DocumentType,
+    ) -> ValidationResult:
+        """
+        Validate generated content against quality guardrails.
+
+        Args:
+            content: The generated content
+            doc_type: Type of document
+
+        Returns:
+            ValidationResult with issues if any
+        """
+        return self.quality_guardrails.validate(content, doc_type)
+
+    def validate_tool_call(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> ToolCallValidation:
+        """
+        Validate a tool call against constraints.
+
+        Args:
+            tool_name: Name of the tool
+            arguments: Tool arguments
+            context: Current execution context
+
+        Returns:
+            ToolCallValidation with allowed status
+        """
+        return self.tool_constraint_validator.validate_tool_call(
+            tool_name, arguments, context
+        )
 
     async def _persist_artifacts(
         self,
