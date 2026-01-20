@@ -78,6 +78,18 @@ from .content_generator import (
     create_content_generator,
 )
 from .task_planner import IntentType, TaskStrategy
+from .agui_protocol import (
+    AGUIEventEmitter,
+    BaseEvent,
+    RunLifecycleEvent,
+    StepEvent,
+    TextMessageEvent,
+    ToolCallEvent,
+    StateEvent,
+    ArtifactEvent,
+    StatusEvent,
+    create_agui_emitter,
+)
 
 __all__ = [
     "AssistantService",
@@ -150,4 +162,15 @@ __all__ = [
     # Intent Analysis (Phase 2)
     "IntentType",
     "TaskStrategy",
+    # AG-UI Protocol (Phase 3)
+    "AGUIEventEmitter",
+    "BaseEvent",
+    "RunLifecycleEvent",
+    "StepEvent",
+    "TextMessageEvent",
+    "ToolCallEvent",
+    "StateEvent",
+    "ArtifactEvent",
+    "StatusEvent",
+    "create_agui_emitter",
 ]

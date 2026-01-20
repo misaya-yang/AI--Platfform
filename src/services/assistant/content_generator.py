@@ -19,6 +19,7 @@ References:
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
@@ -30,6 +31,7 @@ from .guardrails import (
     QualityIssue,
     ValidationResult,
 )
+from .agui_protocol import AGUIEventEmitter, create_agui_emitter
 
 logger = get_logger(__name__)
 
@@ -299,6 +301,207 @@ class DeepContentGenerator:
             },
             phase=GenerationPhase.COMPLETE,
         )
+
+    async def generate_agui(
+        self,
+        request: str,
+        doc_type: DocumentType,
+        request_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Generate content with AG-UI protocol events.
+
+        This method produces SSE-formatted strings following the AG-UI protocol,
+        suitable for direct streaming to frontend clients.
+
+        Args:
+            request: User's content request
+            doc_type: Type of document to generate
+            request_id: Request identifier for event correlation
+            context: Additional context
+
+        Yields:
+            SSE-formatted event strings
+        """
+        context = context or {}
+        request_id = request_id or str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+
+        # Create AG-UI emitter
+        emitter = create_agui_emitter(request_id=request_id, run_id=run_id)
+
+        # Emit run started
+        yield emitter.run_started(metadata={"doc_type": doc_type.value})
+
+        # Step 1: Planning
+        step_id_planning = str(uuid.uuid4())
+        yield emitter.step_started(
+            step_name="规划内容结构",
+            step_type="planning",
+            step_id=step_id_planning,
+        )
+        yield emitter.status("planning", "正在规划内容结构...", phase="planning")
+
+        # Step 2: Outline Generation
+        step_id_outline = str(uuid.uuid4())
+        yield emitter.step_finished(step_id=step_id_planning)
+        yield emitter.step_started(
+            step_name="生成内容大纲",
+            step_type="outline",
+            step_id=step_id_outline,
+        )
+        yield emitter.status("outline", "生成内容大纲...", phase="outline")
+
+        outline = await self._generate_outline(request, doc_type, context)
+
+        # Emit outline ready event
+        yield emitter.outline_ready(
+            title=outline.title,
+            sections=outline.sections,
+            metadata={"doc_type": doc_type.value},
+        )
+        yield emitter.step_finished(step_id=step_id_outline)
+
+        # Step 3: Generate sections
+        step_id_generating = str(uuid.uuid4())
+        yield emitter.step_started(
+            step_name="生成详细内容",
+            step_type="generating",
+            step_id=step_id_generating,
+        )
+        yield emitter.status("generating", "生成详细内容...", phase="generating")
+
+        sections: List[ContentSection] = []
+        full_content = ""
+
+        # Start text message
+        message_id = str(uuid.uuid4())
+        yield emitter.text_message_start(message_id=message_id)
+
+        for i, section_title in enumerate(outline.sections):
+            # Emit section header
+            section_header = f"\n\n# {section_title}\n\n"
+            yield emitter.text_message_content(section_header)
+            full_content += section_header
+
+            section_content = ""
+            async for chunk in self._generate_section(
+                section_title=section_title,
+                outline=outline,
+                doc_type=doc_type,
+                context=context,
+                previous_sections=sections,
+            ):
+                section_content += chunk
+                yield emitter.text_message_content(chunk)
+
+            sections.append(ContentSection(
+                title=section_title,
+                content=section_content,
+            ))
+            full_content += section_content
+
+            # Emit progress status
+            progress = (i + 1) / len(outline.sections)
+            yield emitter.status(
+                "generating",
+                f"正在生成: {section_title}",
+                phase="generating",
+                progress=progress,
+            )
+
+        yield emitter.text_message_end()
+        yield emitter.step_finished(step_id=step_id_generating)
+
+        # Step 4: Validation
+        step_id_validating = str(uuid.uuid4())
+        yield emitter.step_started(
+            step_name="验证内容质量",
+            step_type="validating",
+            step_id=step_id_validating,
+        )
+        yield emitter.status("validating", "验证内容质量...", phase="validating")
+
+        validation = self.guardrails.validate(full_content, doc_type)
+
+        # Emit state snapshot with validation results
+        yield emitter.state_snapshot({
+            "validation": {
+                "passed": validation.passed,
+                "score": validation.score,
+                "issues": [i.to_dict() for i in validation.issues],
+            },
+        })
+
+        # Step 5: Self-repair if needed
+        repair_attempts = 0
+        while not validation.passed and repair_attempts < self.MAX_REPAIR_ATTEMPTS:
+            repair_attempts += 1
+
+            step_id_repair = str(uuid.uuid4())
+            yield emitter.step_started(
+                step_name=f"修复质量问题 ({repair_attempts}/{self.MAX_REPAIR_ATTEMPTS})",
+                step_type="repairing",
+                step_id=step_id_repair,
+            )
+            yield emitter.status(
+                "repairing",
+                f"检测到质量问题，正在修复 ({repair_attempts}/{self.MAX_REPAIR_ATTEMPTS})...",
+                phase="repairing",
+            )
+
+            # Agent self-repair
+            repaired_content = ""
+            repair_message_id = str(uuid.uuid4())
+            yield emitter.text_message_start(message_id=repair_message_id, role="assistant")
+
+            async for chunk in self._repair_content(
+                content=full_content,
+                issues=validation.issues,
+                doc_type=doc_type,
+            ):
+                repaired_content += chunk
+                yield emitter.text_message_content(chunk)
+
+            yield emitter.text_message_end()
+
+            full_content = repaired_content
+
+            # Re-validate
+            validation = self.guardrails.validate(full_content, doc_type)
+
+            # Emit updated state
+            yield emitter.state_delta([
+                {"op": "replace", "path": "/validation/passed", "value": validation.passed},
+                {"op": "replace", "path": "/validation/score", "value": validation.score},
+                {"op": "replace", "path": "/validation/issues", "value": [i.to_dict() for i in validation.issues]},
+            ])
+
+            yield emitter.step_finished(step_id=step_id_repair)
+
+        yield emitter.step_finished(step_id=step_id_validating)
+
+        # Emit completion
+        yield emitter.state_snapshot({
+            "content": full_content,
+            "word_count": self._count_words(full_content),
+            "validation_passed": validation.passed,
+            "repair_attempts": repair_attempts,
+            "outline": {
+                "title": outline.title,
+                "sections": outline.sections,
+            },
+        })
+
+        yield emitter.run_finished(metadata={
+            "word_count": self._count_words(full_content),
+            "section_count": len(sections),
+            "validation_passed": validation.passed,
+            "repair_attempts": repair_attempts,
+        })
+
+        yield emitter.stream_end()
 
     async def _generate_outline(
         self,
