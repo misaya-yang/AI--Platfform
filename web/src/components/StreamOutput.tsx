@@ -99,35 +99,62 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const isBase64 = src?.startsWith("data:");
   const displayAlt = alt || "Generated Image";
 
-  // Download base64 image
-  const handleDownload = () => {
-    if (!src) return;
+  // Download image - supports both base64 and URL images
+  const handleDownload = async () => {
+    if (!src || isDownloading) return;
 
-    const link = document.createElement("a");
-    link.href = src;
-    link.download = `${displayAlt.replace(/\s+/g, "_")}_${Date.now()}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const filename = `${displayAlt.replace(/\s+/g, "_")}_${Date.now()}.png`;
+
+    if (isBase64) {
+      // Direct download for base64 images
+      const link = document.createElement("a");
+      link.href = src;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } else {
+      // Fetch and download for URL images
+      setIsDownloading(true);
+      try {
+        const response = await fetch(src);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error("Failed to download image:", error);
+        // Fallback: open in new tab
+        window.open(src, "_blank");
+      } finally {
+        setIsDownloading(false);
+      }
+    }
   };
 
-  // Open in new tab
+  // Open in new tab - using DOM API instead of document.write to prevent XSS
   const handleOpenInNewTab = () => {
     if (!src) return;
-    const newWindow = window.open();
+    const newWindow = window.open("", "_blank");
     if (newWindow) {
-      newWindow.document.write(`
-        <html>
-          <head><title>${displayAlt}</title></head>
-          <body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;">
-            <img src="${src}" alt="${displayAlt}" style="max-width:100%;max-height:100vh;object-fit:contain;" />
-          </body>
-        </html>
-      `);
+      const doc = newWindow.document;
+      doc.title = displayAlt;
+      doc.body.style.cssText = "margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;";
+      const img = doc.createElement("img");
+      img.src = src;
+      img.alt = displayAlt;
+      img.style.cssText = "max-width:100%;max-height:100vh;object-fit:contain;";
+      doc.body.appendChild(img);
     }
   };
 
@@ -165,15 +192,16 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
         }}
       />
 
-      {/* Hover actions for base64 images */}
-      {!isLoading && isBase64 && (
+      {/* Hover actions for all images */}
+      {!isLoading && !hasError && (
         <span className="absolute top-2 right-2 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={handleDownload}
-            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
+            disabled={isDownloading}
+            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors disabled:opacity-50"
             title="下载图片"
           >
-            <Download className="h-4 w-4" />
+            <Download className={`h-4 w-4 ${isDownloading ? 'animate-pulse' : ''}`} />
           </button>
           <button
             onClick={handleOpenInNewTab}
@@ -260,6 +288,33 @@ const MemoizedMarkdownBlock = memo(
 );
 
 /**
+ * Filter out JSON tool arguments that models might accidentally output to chat.
+ * This happens when models output JSON before calling a tool (e.g., PPTX slides array).
+ *
+ * Pattern: Detects code blocks containing JSON with "slides", "title", "bullets" etc.
+ */
+function filterToolJsonOutput(text: string): string {
+  // Pattern 1: Code block with JSON tool arguments (```json ... ```)
+  const jsonCodeBlockPattern = /```(?:json)?\s*\n?\s*\{[\s\S]*?"(?:slides|title|bullets|type|content)"[\s\S]*?\}\s*\n?```/gi;
+
+  // Pattern 2: Raw JSON object with tool-like structure (at start of text or after newlines)
+  const rawJsonPattern = /(?:^|\n)\s*\{\s*"(?:title|slides)"[\s\S]*?\}\s*(?=\n|$)/gi;
+
+  // Pattern 3: JSON array of slides [ { "type": ... } ]
+  const slidesArrayPattern = /\[\s*\{\s*"(?:type|title|bullets)"[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]/gi;
+
+  let filtered = text
+    .replace(jsonCodeBlockPattern, '')
+    .replace(rawJsonPattern, '')
+    .replace(slidesArrayPattern, '');
+
+  // Clean up excessive newlines left behind
+  filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
+
+  return filtered;
+}
+
+/**
  * High-performance streaming markdown renderer.
  *
  * Uses block-level memoization to achieve O(n) rendering instead of O(n²).
@@ -276,8 +331,11 @@ export const StreamOutput = memo(function StreamOutput({
   isStreaming = false,
   id = "msg"
 }: StreamOutputProps) {
+  // Filter out accidental JSON tool output before parsing
+  const filteredText = useMemo(() => filterToolJsonOutput(text), [text]);
+
   // Parse markdown into blocks for memoization, preserving global definitions
-  const { blocks, definitions } = useMemo(() => parseMarkdownIntoBlocks(text), [text]);
+  const { blocks, definitions } = useMemo(() => parseMarkdownIntoBlocks(filteredText), [filteredText]);
 
   if (!text) return null;
 
@@ -290,9 +348,51 @@ export const StreamOutput = memo(function StreamOutput({
           definitions={definitions}
         />
       ))}
-      {/* Streaming cursor */}
+      {/* Streaming cursor with thinking animation */}
       {isStreaming && (
-        <span className="inline-block w-1.5 h-4 ml-0.5 bg-primary/60 animate-pulse rounded-sm align-text-bottom" />
+        <span className="inline-flex items-center gap-1 ml-1 align-text-bottom">
+          {/* Animated cursor bar */}
+          <span
+            className="inline-block w-0.5 h-4 bg-violet-500 rounded-sm"
+            style={{
+              animation: 'cursor-blink 1s ease-in-out infinite',
+            }}
+          />
+          {/* Pulsing dots for "thinking" effect */}
+          <span className="inline-flex gap-0.5 ml-0.5">
+            <span
+              className="w-1 h-1 rounded-full bg-violet-400"
+              style={{
+                animation: 'thinking-dot 1.4s ease-in-out infinite',
+                animationDelay: '0s',
+              }}
+            />
+            <span
+              className="w-1 h-1 rounded-full bg-purple-400"
+              style={{
+                animation: 'thinking-dot 1.4s ease-in-out infinite',
+                animationDelay: '0.2s',
+              }}
+            />
+            <span
+              className="w-1 h-1 rounded-full bg-fuchsia-400"
+              style={{
+                animation: 'thinking-dot 1.4s ease-in-out infinite',
+                animationDelay: '0.4s',
+              }}
+            />
+          </span>
+          <style>{`
+            @keyframes cursor-blink {
+              0%, 100% { opacity: 1; }
+              50% { opacity: 0.3; }
+            }
+            @keyframes thinking-dot {
+              0%, 100% { transform: scale(1); opacity: 0.5; }
+              50% { transform: scale(1.3); opacity: 1; }
+            }
+          `}</style>
+        </span>
       )}
     </div>
   );

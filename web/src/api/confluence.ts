@@ -283,14 +283,31 @@ export async function getSyncTask(taskId: string): Promise<ConfluenceSyncTask> {
 
 /**
  * List synced pages for a binding
+ *
+ * @param synced_only - If true (default), only returns pages with document_id (synced to KB)
  */
 export async function listPages(
   bindingId: string,
-  params?: { status?: string; limit?: number; offset?: number }
+  params?: { status?: string; limit?: number; offset?: number; synced_only?: boolean }
 ): Promise<ConfluencePageListResponse> {
   const { data } = await api.get<ConfluencePageListResponse>(
     `/api/v1/confluence/bindings/${bindingId}/pages`,
     { params }
+  );
+  return data;
+}
+
+/**
+ * Cleanup unsynced pages for a binding
+ *
+ * Deletes all confluence_pages records that have no document_id
+ * (pages that were discovered but never actually synced to the knowledge base)
+ */
+export async function cleanupUnsyncedPages(
+  bindingId: string
+): Promise<{ binding_id: string; deleted: number }> {
+  const { data } = await api.post<{ binding_id: string; deleted: number }>(
+    `/api/v1/confluence/bindings/${bindingId}/cleanup`
   );
   return data;
 }
@@ -337,6 +354,25 @@ export async function batchSyncPages(
   const { data } = await api.post("/api/v1/confluence/pages/batch-sync", {
     page_record_ids: pageRecordIds,
     force,
+  });
+  return data;
+}
+
+/**
+ * Remove pages from confluence_pages table
+ * Optionally also deletes corresponding documents from knowledge base
+ */
+export async function removePages(
+  pageRecordIds: string[],
+  deleteDocuments = true
+): Promise<{
+  removed: number;
+  documents_deleted: number;
+  errors: Array<{ id: string; error: string }>;
+}> {
+  const { data } = await api.post("/api/v1/confluence/pages/remove", {
+    page_record_ids: pageRecordIds,
+    delete_documents: deleteDocuments,
   });
   return data;
 }

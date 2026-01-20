@@ -1,7 +1,7 @@
 // web/src/pages/dashboard/components/DashboardHeader.tsx
 // Enterprise Dashboard Header - Unified Layout System
 
-import { DatePicker, Select, Tooltip, Badge } from "antd";
+import { DatePicker, Select, Tooltip, Badge, Button } from "antd";
 import {
   SyncOutlined,
   ExpandOutlined,
@@ -10,9 +10,12 @@ import {
   UserOutlined,
   FilterOutlined,
   CalendarOutlined,
+  DownOutlined,
+  UpOutlined,
+  ClearOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
@@ -43,6 +46,26 @@ export function DashboardHeader() {
   } = useDashboardContext();
 
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [filterCollapsed, setFilterCollapsed] = useState(false);
+
+  // Auto-collapse on smaller screens
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 1400) {
+        setFilterCollapsed(true);
+      }
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Reset all filters
+  const handleResetFilters = () => {
+    setServiceId("all");
+    setUserId("all");
+    setSource("all");
+  };
 
   // Fetch services and users from usage breakdown
   const { data: serviceBreakdown } = useQuery({
@@ -218,33 +241,31 @@ export function DashboardHeader() {
         </div>
       </div>
 
-      {/* Filter Bar */}
+      {/* Filter Bar - Collapsible */}
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: LAYOUT.GRID_GAP,
-          padding: "14px 20px",
           borderRadius: 16,
           background: darkMode ? "rgba(30, 41, 59, 0.7)" : "rgba(255, 255, 255, 0.8)",
           backdropFilter: "blur(12px)",
           border: `1px solid ${darkMode ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)"}`,
           boxShadow: colors.shadowSm,
+          overflow: "hidden",
+          transition: "all 0.3s ease",
         }}
       >
-        {/* Left: Filters */}
+        {/* Collapsed Header - Always visible */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 20,
-            flexWrap: "wrap",
+            justifyContent: "space-between",
+            padding: "12px 20px",
+            cursor: "pointer",
+            borderBottom: filterCollapsed ? "none" : `1px solid ${darkMode ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.03)"}`,
           }}
+          onClick={() => setFilterCollapsed(!filterCollapsed)}
         >
-          {/* Filter Group: Data Filters */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div
               style={{
                 display: "flex",
@@ -253,16 +274,15 @@ export function DashboardHeader() {
                 color: colors.textSecondary,
                 fontSize: 13,
                 fontWeight: 600,
-                marginRight: 4,
               }}
             >
               <FilterOutlined />
-              <span>筛选</span>
+              <span>筛选条件</span>
               {hasActiveFilters && (
                 <Badge
                   count={activeFilterCount}
                   size="small"
-                  style={{ 
+                  style={{
                     backgroundColor: colors.accent,
                     fontSize: 10,
                     height: 16,
@@ -273,111 +293,243 @@ export function DashboardHeader() {
               )}
             </div>
 
-            {/* Service Filter */}
-            <Select
-              value={serviceId}
-              onChange={setServiceId}
-              options={serviceOptions}
-              style={{ minWidth: 140 }}
-              suffixIcon={<AppstoreOutlined />}
-              placeholder="选择服务"
-              popupMatchSelectWidth={false}
-              variant="filled"
-            />
-
-            {/* User Filter */}
-            <Select
-              value={userId}
-              onChange={setUserId}
-              options={userOptions}
-              style={{ minWidth: 140 }}
-              suffixIcon={<UserOutlined />}
-              placeholder="选择用户"
-              popupMatchSelectWidth={false}
-              variant="filled"
-            />
-
-            {/* Source Filter */}
-            <Select
-              value={source}
-              onChange={(v) => setSource(v as SourceFilter)}
-              options={sourceOptions}
-              style={{ minWidth: 110 }}
-              placeholder="来源"
-              popupMatchSelectWidth={false}
-              variant="filled"
-            />
+            {/* Show active filter summary when collapsed */}
+            {filterCollapsed && hasActiveFilters && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginLeft: 8,
+                }}
+              >
+                {serviceId !== "all" && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 12,
+                      background: darkMode ? "rgba(99, 102, 241, 0.15)" : "#EEF2FF",
+                      color: colors.accent,
+                    }}
+                  >
+                    {serviceId}
+                  </span>
+                )}
+                {userId !== "all" && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 12,
+                      background: darkMode ? "rgba(16, 185, 129, 0.15)" : "#ECFDF5",
+                      color: "#10B981",
+                    }}
+                  >
+                    {userId.startsWith("anon:") ? `匿名-${userId.slice(-6)}` : userId}
+                  </span>
+                )}
+                {source !== "all" && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: "2px 8px",
+                      borderRadius: 12,
+                      background: darkMode ? "rgba(245, 158, 11, 0.15)" : "#FEF3C7",
+                      color: "#F59E0B",
+                    }}
+                  >
+                    {source === "internal" ? "内部" : "外部"}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Divider */}
-          <div
-            style={{
-              width: 1,
-              height: 24,
-              background: darkMode ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)",
-            }}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Reset filters button */}
+            {hasActiveFilters && (
+              <Tooltip title="重置筛选">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ClearOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleResetFilters();
+                  }}
+                  style={{ color: colors.textMuted }}
+                >
+                  重置
+                </Button>
+              </Tooltip>
+            )}
 
-          {/* Filter Group: Time Range */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* Auto refresh - always visible */}
             <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                color: colors.textSecondary,
-                fontSize: 13,
-                fontWeight: 600,
-                marginRight: 4,
-              }}
+              style={{ display: "flex", alignItems: "center", gap: 8 }}
+              onClick={(e) => e.stopPropagation()}
             >
-              <CalendarOutlined />
-              <span>时间</span>
+              <span style={{ fontSize: 12, fontWeight: 500, color: colors.textSecondary }}>
+                自动刷新
+              </span>
+              <Select
+                value={refreshInterval}
+                onChange={setRefreshInterval}
+                options={refreshOptions}
+                style={{ width: 100 }}
+                variant="filled"
+                suffixIcon={<SyncOutlined spin={refreshInterval > 0} />}
+              />
             </div>
 
-            {/* Date Range */}
-            <RangePicker
-              value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
-              onChange={(dates) => {
-                if (dates && dates[0] && dates[1]) {
-                  setDateRange([
-                    dates[0].format("YYYY-MM-DD"),
-                    dates[1].format("YYYY-MM-DD"),
-                  ]);
-                }
+            {/* Collapse toggle */}
+            <button
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                border: "none",
+                background: darkMode ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.03)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                color: colors.textMuted,
+                transition: "all 0.2s",
               }}
-              style={{ width: 240 }}
-              allowClear={false}
-              variant="filled"
-            />
-
-            {/* Granularity */}
-            <Select
-              value={granularity}
-              onChange={setGranularity}
-              options={[
-                { value: "day", label: "天" },
-                { value: "hour", label: "时" },
-              ]}
-              style={{ width: 70 }}
-              variant="filled"
-            />
+            >
+              {filterCollapsed ? <DownOutlined style={{ fontSize: 10 }} /> : <UpOutlined style={{ fontSize: 10 }} />}
+            </button>
           </div>
         </div>
 
-        {/* Right: Auto Refresh */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 12, fontWeight: 500, color: colors.textSecondary }}>
-            自动刷新
-          </span>
-          <Select
-            value={refreshInterval}
-            onChange={setRefreshInterval}
-            options={refreshOptions}
-            style={{ width: 100 }}
-            variant="filled"
-            suffixIcon={<SyncOutlined spin={refreshInterval > 0} />}
-          />
+        {/* Expandable Filter Content */}
+        <div
+          style={{
+            maxHeight: filterCollapsed ? 0 : 200,
+            overflow: "hidden",
+            transition: "max-height 0.3s ease",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-start",
+              flexWrap: "wrap",
+              gap: LAYOUT.GRID_GAP,
+              padding: "14px 20px",
+            }}
+          >
+            {/* Filter Group: Data Filters */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  color: colors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  marginRight: 4,
+                }}
+              >
+                <AppstoreOutlined />
+                <span>数据筛选</span>
+              </div>
+
+              {/* Service Filter */}
+              <Select
+                value={serviceId}
+                onChange={setServiceId}
+                options={serviceOptions}
+                style={{ minWidth: 140 }}
+                suffixIcon={<AppstoreOutlined />}
+                placeholder="选择服务"
+                popupMatchSelectWidth={false}
+                variant="filled"
+              />
+
+              {/* User Filter */}
+              <Select
+                value={userId}
+                onChange={setUserId}
+                options={userOptions}
+                style={{ minWidth: 140 }}
+                suffixIcon={<UserOutlined />}
+                placeholder="选择用户"
+                popupMatchSelectWidth={false}
+                variant="filled"
+              />
+
+              {/* Source Filter */}
+              <Select
+                value={source}
+                onChange={(v) => setSource(v as SourceFilter)}
+                options={sourceOptions}
+                style={{ minWidth: 110 }}
+                placeholder="来源"
+                popupMatchSelectWidth={false}
+                variant="filled"
+              />
+            </div>
+
+            {/* Divider */}
+            <div
+              style={{
+                width: 1,
+                height: 24,
+                background: darkMode ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.1)",
+              }}
+            />
+
+            {/* Filter Group: Time Range */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  color: colors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  marginRight: 4,
+                }}
+              >
+                <CalendarOutlined />
+                <span>时间范围</span>
+              </div>
+
+              {/* Date Range */}
+              <RangePicker
+                value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
+                onChange={(dates) => {
+                  if (dates && dates[0] && dates[1]) {
+                    setDateRange([
+                      dates[0].format("YYYY-MM-DD"),
+                      dates[1].format("YYYY-MM-DD"),
+                    ]);
+                  }
+                }}
+                style={{ width: 240 }}
+                allowClear={false}
+                variant="filled"
+              />
+
+              {/* Granularity */}
+              <Select
+                value={granularity}
+                onChange={setGranularity}
+                options={[
+                  { value: "day", label: "天" },
+                  { value: "hour", label: "时" },
+                ]}
+                style={{ width: 70 }}
+                variant="filled"
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>

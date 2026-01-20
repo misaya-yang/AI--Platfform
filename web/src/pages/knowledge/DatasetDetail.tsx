@@ -1418,6 +1418,7 @@ export function KnowledgeDatasetDetailPage() {
                   <DocumentRow
                     key={doc.document_id}
                     doc={doc}
+                    datasetId={datasetId || ""}
                     selected={selectedDocId === doc.document_id}
                     checked={selectedDocIds.has(doc.document_id)}
                     showCheckbox={batchMode}
@@ -1425,6 +1426,7 @@ export function KnowledgeDatasetDetailPage() {
                     onCheck={() => toggleDocSelection(doc.document_id)}
                     onReindex={() => handleReindex(doc)}
                     onDelete={() => handleDeleteDoc(doc)}
+                    onVersionRestored={() => qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] })}
                   />
                 ))}
                 {filteredDocs.length === 0 && !docsQuery.isLoading && (

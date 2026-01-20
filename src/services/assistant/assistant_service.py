@@ -58,6 +58,7 @@ from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
 from .context_engine import ContextEngine, ContextStructure
 from .working_memory import WorkingMemory, TaskStatus
 from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType, create_task_planner
+from .react_executor import ReActExecutor, ReActPhase, create_react_executor
 from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult, create_tool_orchestrator
 from .memory import MemoryManager
 from ..metrics.usage_recorder import get_usage_recorder
@@ -132,13 +133,23 @@ class StreamEventType(str, Enum):
     # Tool execution error event (for error preservation)
     TOOL_ERROR = "tool_error"
 
+    # Manus-style task visualization events
+    STEP_STARTED = "step_started"
+    STEP_FINISHED = "step_finished"
+    OUTLINE_READY = "outline_ready"
+
+    # Run lifecycle events
+    RUN_STARTED = "run_started"
+    RUN_FINISHED = "run_finished"
+    RUN_ERROR = "run_error"
+
 
 @dataclass
 class AssistantConfig:
     """Configuration for an assistant conversation."""
     # Model settings
-    model_provider: ModelProvider = ModelProvider.OPENAI
-    model_id: str = "gpt-4o"
+    model_provider: ModelProvider = ModelProvider.GOOGLE
+    model_id: str = "gemini-3-flash-preview"
     temperature: float = 0.7
     max_tokens: Optional[int] = None
 
@@ -173,7 +184,8 @@ class AssistantConfig:
     long_term_memory: Optional[str] = None  # Persistent user knowledge
 
     # Task Planning settings (Phase 2.4: Multi-step task planning)
-    enable_task_planning: bool = True  # Enable task decomposition and parallel execution
+    enable_task_planning: bool = False  # Enable task decomposition and parallel execution
+    confirm_plan: bool = False  # When True, pause and require user confirmation before executing template plans
     max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
 
 
@@ -270,7 +282,7 @@ class AssistantService:
         assistant = AssistantService(model_registry, kb_service)
 
         config = AssistantConfig(
-            model_id="gpt-4o",
+            model_id="gemini-3-flash-preview",
             kb_dataset_ids=["docs", "wiki"],
         )
 
@@ -282,11 +294,41 @@ class AssistantService:
     """
 
     # Default system prompt when none provided
-    DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. When answering questions:
-1. Use the provided context when available
-2. Be concise and accurate
-3. Cite sources when referencing specific information
-4. If you don't know something, say so honestly"""
+    DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools via function calling.
+
+## How to Use Tools
+
+You have access to tools like `generate_pptx`, `generate_document`, `web_search`, etc.
+
+**CRITICAL**: To use a tool, you must trigger the function calling mechanism - NOT write tool calls as text in your response.
+- WRONG: Writing `generate_pptx(title="...", slides=[...])` in your text response
+- RIGHT: Using the function calling feature to invoke the tool
+
+When you need to use a tool:
+1. Briefly explain what you will do
+2. Then invoke the tool via function calling (the system handles this automatically)
+3. After the tool executes, summarize the result
+
+## Task Guidelines
+
+### Answering Questions
+- Use provided context when available
+- Be accurate and cite sources
+
+### PowerPoint/PPT Generation
+When asked to create a PPT/演示文稿/幻灯片:
+1. Briefly outline the structure (1-2 sentences)
+2. Invoke `generate_pptx` tool with title and slides data
+3. Tell the user when done
+
+### Document Generation (Word/PDF)
+When asked to create a document:
+1. Write the FULL content in chat first
+2. Then invoke `generate_document` tool
+
+### General Rules
+- Tell the user when files are ready
+- Do NOT output JSON or function call syntax in your text"""
 
     # Context injection template
     CONTEXT_TEMPLATE = """## Relevant Context
@@ -502,6 +544,29 @@ Please use this web search context to inform your response when relevant."""
         # ========== LATENCY DEBUG: Track timing for each step ==========
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
 
+        # ========== ReAct Phase 1: ANALYZING ==========
+        # Detect task type for appropriate ReAct phase handling
+        is_document_task = self._is_document_generation_task(message)
+        is_complex_task = config.enable_task_planning
+
+        # Emit initial status - analyzing
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.STATUS,
+            data={
+                "phase": ReActPhase.ANALYZING.value,
+                "message": "分析任务需求...",
+                "is_document_task": is_document_task,
+            }
+        )
+
+        # Detect office scenario for downstream routing (no behavior change yet)
+        try:
+            from .office.scenario import detect_scenario
+            scenario = detect_scenario(message)
+            logger.info(f"[OFFICE] scenario={scenario.value}")
+        except Exception:
+            scenario = None
+
         # Step 0: Load history from session if not provided
         step_start = time.time()
         if history is None and self.session_manager:
@@ -563,17 +628,22 @@ Please use this web search context to inform your response when relevant."""
                         for fp in config.file_paths
                     ]
 
-                # Fire-and-forget: don't await, let it run in background
+                # Fire-and-forget with error logging: don't await, let it run in background
                 # This saves 0.5-1s of latency by not blocking on DB write
                 import asyncio
-                asyncio.create_task(
-                    self.session_manager.add_message(
-                        session_id=session_id,
-                        role="user",
-                        content=message,
-                        metadata=user_msg_metadata,
-                    )
-                )
+
+                async def _persist_user_message():
+                    try:
+                        await self.session_manager.add_message(
+                            session_id=session_id,
+                            role="user",
+                            content=message,
+                            metadata=user_msg_metadata,
+                        )
+                    except Exception as persist_err:
+                        logger.error(f"[CRITICAL] User message persistence failed for session {session_id}: {persist_err}")
+
+                asyncio.create_task(_persist_user_message())
             except Exception as e:
                 logger.warning(f"Failed to persist user message: {e}")
 
@@ -661,6 +731,7 @@ Please use this web search context to inform your response when relevant."""
         # Step 2: Web search if enabled
         step_start = time.time()
         web_search_context: Optional[str] = None
+        web_search_results_data: Optional[Dict] = None  # Store for persistence
         if config.web_search_enabled and self.tavily_tool.is_configured:
             yield AssistantStreamEvent(
                 event_type="status",
@@ -672,9 +743,10 @@ Please use this web search context to inform your response when relevant."""
                     max_results=config.web_search_max_results,
                 )
                 web_search_context = self.tavily_tool.format_for_context(search_response)
+                web_search_results_data = self.tavily_tool.format_for_display(search_response)
                 yield AssistantStreamEvent(
                     event_type="web_search_results",
-                    data=self.tavily_tool.format_for_display(search_response)
+                    data=web_search_results_data
                 )
             except Exception as e:
                 logger.warning(f"Web search failed: {e}")
@@ -731,6 +803,7 @@ Please use this web search context to inform your response when relevant."""
         # Step 2.6: Task Planning Mode (Phase 2.4)
         # If task planning is enabled, use the planner and orchestrator
         # for complex multi-step request execution
+        planning_deferred = False
         if config.enable_task_planning:
             logger.info(f"[TASK PLANNING] Task planning enabled for session {session_id}")
             async for event in self._execute_with_planning(
@@ -742,7 +815,16 @@ Please use this web search context to inform your response when relevant."""
                 retrieved_contexts=retrieved_contexts,
                 web_search_context=web_search_context,
             ):
+                if (
+                    event.event_type == StreamEventType.STATUS.value
+                    and isinstance(event.data, dict)
+                    and event.data.get("status") == "plan_ready"
+                ):
+                    planning_deferred = True
                 yield event
+
+            if planning_deferred:
+                return
 
             # After planning execution, we still need to generate the final response
             # using the collected results. The working memory contains all results.
@@ -774,13 +856,23 @@ Please use this web search context to inform your response when relevant."""
         total_content = ""
         usage: Dict[str, int] = {}
 
-        # Get tools from registry if code executor is available
-        tools = None
-        if self.code_executor:
-            from .tools import get_tool_registry
-            registry = get_tool_registry()
-            tools = registry.get_openai_schemas()
-            logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
+        # Get tools from registry (always load tools, not just when code executor exists)
+        from .tools import get_tool_registry
+        registry = get_tool_registry()
+        tools = registry.get_openai_schemas()
+
+        # Filter out search_knowledge_base tool when no KB datasets are configured
+        # This prevents the LLM from calling the KB search tool when it would result
+        # in searching ALL datasets (which is very slow - can cause 80+ second delays)
+        if not config.kb_dataset_ids:
+            tools = [t for t in tools if t.get("function", {}).get("name") != "search_knowledge_base"]
+            logger.info("KB search tool disabled - no datasets configured")
+
+        # Filter out code executor tool if not available
+        if not self.code_executor:
+            tools = [t for t in tools if t.get("function", {}).get("name") != "execute_code"]
+
+        logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
 
         # Agentic loop: handle tool calls until model finishes
         max_tool_iterations = 5
@@ -790,10 +882,50 @@ Please use this web search context to inform your response when relevant."""
         total_prep_time = (time.time() - start_time) * 1000
         logger.info(f"[LATENCY] Total preprocessing time: {total_prep_time:.1f}ms, starting LLM stream now")
 
+        # Determine thinking level and task type
+        thinking_level = None
+        is_ppt_request = False
+        
+        last_user_msg = next((m.content for m in reversed(messages) if m.role == "user"), "").lower()
+        ppt_keywords = ["ppt", "slide", "powerpoint", "演示文稿", "幻灯片"]
+        if any(kw in last_user_msg for kw in ppt_keywords):
+            is_ppt_request = True
+            logger.info(f"[TASK_DETECT] PPT generation request detected. Model: {config.model_id}")
+            
+            # Only apply thinking level for Gemini 3 models
+            if "gemini-3" in config.model_id:
+                thinking_level = "high"
+                logger.info(f"[THINKING] High thinking level enabled for Gemini 3 PPT task")
+
+        next_iteration_tool_config = None # Initialize variable for tool forcing
+        current_thinking_level = thinking_level # Track thinking level for current iteration
+
         while iteration < max_tool_iterations:
             iteration += 1
             tool_calls_accumulated: Dict[int, Dict[str, Any]] = {}
             finish_reason = None
+            thought_signature_accumulated = None # Track standalone thought signature
+
+            # Log iteration context
+            logger.info(f"[ITERATION {iteration}] Starting chat stream. ToolConfig: {bool(next_iteration_tool_config)}, Thinking: {current_thinking_level}")
+
+            # Emit ReAct phase status based on task type
+            if iteration == 1:
+                # First iteration - show THINKING or WRITING based on task type
+                phase = ReActPhase.WRITING if is_document_task else ReActPhase.THINKING
+                phase_message = "撰写内容中..." if is_document_task else "思考中..."
+            else:
+                # Subsequent iterations after tool execution
+                phase = ReActPhase.THINKING
+                phase_message = "继续思考..."
+
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS,
+                data={
+                    "phase": phase.value,
+                    "message": phase_message,
+                }
+            )
 
             try:
                 async for delta in self.model_registry.chat_stream(
@@ -802,6 +934,8 @@ Please use this web search context to inform your response when relevant."""
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                     tools=tools,
+                    thinking_level=current_thinking_level,
+                    tool_config=next_iteration_tool_config # Pass tool_config if set
                 ):
                     if delta.content:
                         total_content += delta.content
@@ -809,6 +943,10 @@ Please use this web search context to inform your response when relevant."""
                             event_type="text_delta",
                             data=delta.content
                         )
+                    
+                    if delta.thought_signature:
+                        thought_signature_accumulated = delta.thought_signature
+                        logger.info(f"[GEMINI3] Received standalone thought_signature of length {len(thought_signature_accumulated)}")
 
                     if delta.tool_calls:
                         # Accumulate tool call chunks
@@ -826,6 +964,10 @@ Please use this web search context to inform your response when relevant."""
                                 tool_calls_accumulated[idx]["function"]["name"] = tc["function"]["name"]
                             if tc.get("function", {}).get("arguments"):
                                 tool_calls_accumulated[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                            # CRITICAL: Preserve thoughtSignature for Gemini 3
+                            # Must be passed back in subsequent requests
+                            if tc.get("thoughtSignature"):
+                                tool_calls_accumulated[idx]["thoughtSignature"] = tc["thoughtSignature"]
 
                         yield AssistantStreamEvent(
                             event_type="tool_call",
@@ -846,21 +988,95 @@ Please use this web search context to inform your response when relevant."""
                 )
                 return
 
-            # If no tool calls or finish_reason is not "tool_calls", we're done
-            if finish_reason != "tool_calls" or not tool_calls_accumulated:
+            # Add assistant response to history
+            assistant_msg = ChatMessage(
+                role="assistant", 
+                content=total_content,
+                thought_signature=thought_signature_accumulated
+            )
+            if tool_calls_accumulated:
+                assistant_msg.tool_calls = [
+                    tool_calls_accumulated[idx] for idx in sorted(tool_calls_accumulated.keys())
+                ]
+            current_messages.append(assistant_msg)
+
+            # Check if we should execute tools
+            # IMPORTANT: Execute tools if we have ANY accumulated tool calls, regardless of finish_reason
+            # Some providers (like Gemini) return finish_reason="stop" even when making tool calls
+            logger.info(f"[DEBUG] Iteration {iteration}: finish_reason={finish_reason}, tool_calls_accumulated={list(tool_calls_accumulated.keys())}, is_ppt_request={is_ppt_request}")
+
+            # If we have tool calls, execute them regardless of finish_reason
+            if not tool_calls_accumulated:
+                # No tool calls - check if we need self-correction for PPT
+                # Self-correction logic for PPT generation
+                # Trigger if it's a PPT request, first iteration, and no tool calls were made
+                # This works for ALL models (Gemini Flash, Pro, etc.)
+                if is_ppt_request and iteration == 1:
+                    logger.info(f"[SELF-CORRECTION] PPT task finished without tool call (Model: {config.model_id}). Forcing tool call iteration.")
+
+                    # Append a system message to force tool execution
+                    correction_msg = ChatMessage(
+                        role="user",
+                        content="规划已完成。请立即调用 `generate_pptx` 工具，将上述大纲转换为 JSON 参数生成文件。无需再解释。"
+                    )
+                    current_messages.append(correction_msg)
+
+                    # Force tool execution using tool_config
+                    tool_config = {
+                        "functionCallingConfig": {
+                            "mode": "ANY",
+                            "allowedFunctionNames": ["generate_pptx"]
+                        }
+                    }
+                    logger.info("[SELF-CORRECTION] Enabling forced tool execution for generate_pptx and disabling thinking")
+
+                    # Emit a status event to let user know we are proceeding
+                    yield AssistantStreamEvent(
+                        event_type=StreamEventType.STATUS,
+                        data={
+                            "phase": ReActPhase.EXECUTING.value,
+                            "message": "大纲规划完成，正在生成文件...",
+                        }
+                    )
+
+                    # Update variables for next iteration
+                    next_iteration_tool_config = tool_config
+
+                    # Optimization: Use lower thinking level for the mechanical tool call step
+                    # This saves tokens and reduces latency since the plan is already done
+                    if "flash" in config.model_id:
+                        current_thinking_level = "minimal"
+                    else:
+                        current_thinking_level = "low"
+
+                    logger.info(f"[SELF-CORRECTION] Setting thinking_level='{current_thinking_level}' for tool execution")
+
+                    continue
+
+                # No tool calls and not PPT self-correction, we're done
                 yield AssistantStreamEvent(
                     event_type="finish",
                     data={"reason": finish_reason or "stop"}
                 )
                 break
 
-            # Execute tools and continue conversation
+            # Execute tools - we have tool calls to process
             tool_results = []
             for idx in sorted(tool_calls_accumulated.keys()):
                 tc = tool_calls_accumulated[idx]
                 tool_name = tc["function"]["name"]
                 tool_args_str = tc["function"]["arguments"]
                 tool_id = tc["id"]
+
+                # Emit ReAct EXECUTING phase status
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.STATUS,
+                    data={
+                        "phase": ReActPhase.EXECUTING.value,
+                        "message": f"执行 {tool_name}...",
+                        "task_id": tool_id,
+                    }
+                )
 
                 try:
                     import json as json_module
@@ -1162,6 +1378,176 @@ Please use this web search context to inform your response when relevant."""
                             "content": error_info.to_rich_context(),
                         })
 
+                elif tool_name == "generate_pptx":
+                    # PPTX generation with streaming events (Manus-style workflow)
+                    pptx_start_time = time.time()
+                    title = tool_args.get("title", "Presentation")
+                    slides = tool_args.get("slides", [])
+                    theme = tool_args.get("theme", "professional")
+                    step_id = f"pptx-{tool_id}"
+
+                    # Emit Manus-style STEP_STARTED for task panel visualization
+                    yield AssistantStreamEvent(
+                        event_type=StreamEventType.STEP_STARTED,
+                        data={
+                            "step_id": step_id,
+                            "title": f"生成PPT: {title}",
+                            "description": f"创建 {len(slides)} 页演示文稿",
+                            "icon": "ppt",
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+
+                    # Emit Manus-style OUTLINE_READY event before generation
+                    # This enables the frontend to display a slide outline preview
+                    outline_slides = []
+                    for i, slide in enumerate(slides, start=1):
+                        slide_type = slide.get("layout", "content")
+                        # Map layout to type
+                        type_map = {
+                            "title_slide": "title",
+                            "title": "title",
+                            "content": "content",
+                            "two_column": "two_column",
+                            "section_header": "section",
+                            "section": "section",
+                            "blank": "blank",
+                        }
+                        outline_slides.append({
+                            "number": i,
+                            "title": slide.get("title", f"Slide {i}"),
+                            "subtitle": slide.get("subtitle"),
+                            "type": type_map.get(slide_type, "content"),
+                            "bulletCount": len(slide.get("bullets", [])) if slide.get("bullets") else 0,
+                        })
+
+                    yield AssistantStreamEvent(
+                        event_type=StreamEventType.OUTLINE_READY,
+                        data={
+                            "outline": {
+                                "title": title,
+                                "slides": outline_slides,
+                                "theme": theme,
+                                "totalSlides": len(slides),
+                            },
+                            "format": "pptx",
+                        }
+                    )
+
+                    yield AssistantStreamEvent(
+                        event_type=StreamEventType.DOCUMENT_GENERATION_START,
+                        data={"execution_id": tool_id, "title": title, "format": "pptx"}
+                    )
+
+                    try:
+                        from .tools import get_tool_registry, ToolCallRequest
+                        registry = get_tool_registry()
+                        tool_result = await registry.execute(
+                            ToolCallRequest(
+                                call_id=tool_id,
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                                user=user,
+                            )
+                        )
+
+                        # Persist generated PPTX as artifacts
+                        output_files = tool_result.output_files or []
+                        if output_files:
+                            output_files = await self._persist_artifacts(
+                                user=user,
+                                session_id=session_id,
+                                output_files=output_files,
+                                source="pptx_generation",
+                            )
+
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.DOCUMENT_GENERATION_RESULT,
+                            data={
+                                "execution_id": tool_id,
+                                "success": tool_result.success,
+                                "result": tool_result.result,
+                                "error": tool_result.error,
+                                "output_files": output_files,
+                                "duration_ms": tool_result.duration_ms,
+                            }
+                        )
+
+                        # Send ARTIFACT_CREATED events for persisted PPTX
+                        for file_info in output_files:
+                            if file_info.get("artifact_id"):
+                                yield AssistantStreamEvent(
+                                    event_type=StreamEventType.ARTIFACT_CREATED,
+                                    data={
+                                        "artifact_id": file_info["artifact_id"],
+                                        "type": "document",
+                                        "format": "pptx",
+                                        "title": file_info.get("filename", title),
+                                        "filename": file_info.get("filename"),
+                                        "mime_type": file_info.get("mime_type", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                                        "size_bytes": file_info.get("size_bytes"),
+                                        "source": "pptx_generation",
+                                        "download_url": file_info.get("download_url"),
+                                    }
+                                )
+
+                        # Emit STEP_FINISHED for task panel visualization
+                        pptx_duration_ms = int((time.time() - pptx_start_time) * 1000)
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.STEP_FINISHED,
+                            data={
+                                "step_id": step_id,
+                                "status": "completed" if tool_result.success else "failed",
+                                "result": f"PPT已生成: {title} ({len(slides)}页)",
+                                "duration_ms": pptx_duration_ms,
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        )
+
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
+                        })
+                    except Exception as e:
+                        logger.error(f"PPTX generation failed: {e}", exc_info=True)
+                        # Create structured error for better agent recovery
+                        error_info = self._create_tool_error(
+                            tool_name=tool_name,
+                            tool_call_id=tool_id,
+                            error=e,
+                            arguments=tool_args,
+                        )
+                        # Emit error event for frontend
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.TOOL_ERROR,
+                            data={
+                                "tool_name": error_info.tool_name,
+                                "tool_call_id": error_info.tool_call_id,
+                                "error_type": error_info.error_type,
+                                "error_message": error_info.error_message,
+                                "suggestion": error_info.suggestion,
+                            }
+                        )
+                        # Emit STEP_FINISHED with failed status
+                        pptx_duration_ms = int((time.time() - pptx_start_time) * 1000)
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.STEP_FINISHED,
+                            data={
+                                "step_id": step_id,
+                                "status": "failed",
+                                "error": str(e),
+                                "duration_ms": pptx_duration_ms,
+                                "timestamp": int(time.time() * 1000),
+                            }
+                        )
+                        # Add rich error context to tool results for model
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "content": error_info.to_rich_context(),
+                        })
+
                 else:
                     # Execute other registered tools via registry
                     try:
@@ -1234,6 +1620,15 @@ Please use this web search context to inform your response when relevant."""
                             "content": error_info.to_rich_context(),
                         })
 
+            # Emit ReAct OBSERVING phase status after tool execution
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS,
+                data={
+                    "phase": ReActPhase.OBSERVING.value,
+                    "message": "分析工具执行结果...",
+                }
+            )
+
             # Add assistant message with tool calls and tool results
             current_messages.append(ChatMessage(
                 role="assistant",
@@ -1274,6 +1669,7 @@ Please use this web search context to inform your response when relevant."""
                         "model_id": config.model_id,
                         "usage": usage,
                         "contexts": contexts_data if contexts_data else None,
+                        "web_search_results": web_search_results_data,
                     },
                 )
             except Exception as e:
@@ -1358,12 +1754,43 @@ Please use this web search context to inform your response when relevant."""
                 context=context_text if context_text else None,
             )
 
+            if retrieved_contexts:
+                output_warnings.extend(
+                    self._validate_citations(total_content, citations)
+                )
+
             if output_warnings:
                 logger.warning(f"Output warnings: {output_warnings}")
                 yield AssistantStreamEvent(
                     event_type="output_warnings",
                     data={"warnings": output_warnings}
                 )
+
+        # Step 6.6: Extract user preferences for memory
+        if self.memory_service and message:
+            try:
+                from .memory.preference_extractor import extract_preferences
+                prefs = extract_preferences(message)
+                for key, value in prefs.items():
+                    await self.memory_service.set_user_memory(
+                        user_id=user.user_id,
+                        key=f"preference:{key}",
+                        value=value,
+                        tenant_id=user.tenant_id,
+                        metadata={"source": "auto_extract"},
+                    )
+            except Exception as e:
+                logger.debug(f"Preference extraction failed: {e}")
+
+        # Prepare legacy memory manager fallback (when MemoryService not configured)
+        memory_manager = None
+        if not self.memory_service and self.db:
+            memory_manager = MemoryManager(
+                db=self.db,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            )
 
         # Step 6.7: Store session memory for future context
         if memory_manager and total_content:
@@ -1423,6 +1850,7 @@ Please use this web search context to inform your response when relevant."""
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     service_id="__builtin_assistant__",
+                    provider=config.model_provider.value,
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
                     metadata={
@@ -1443,6 +1871,15 @@ Please use this web search context to inform your response when relevant."""
                     logger.debug(f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}")
             except Exception as e:
                 logger.warning(f"Failed to update realtime metrics: {e}")
+
+        # Emit ReAct COMPLETING phase status before done
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.STATUS,
+            data={
+                "phase": ReActPhase.COMPLETING.value,
+                "message": "完成",
+            }
+        )
 
         yield AssistantStreamEvent(
             event_type="done",
@@ -1525,6 +1962,7 @@ Please use this web search context to inform your response when relevant."""
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     service_id="__builtin_assistant__",
+                    provider=config.model_provider.value,
                     latency_ms=int(elapsed_ms),
                     request_type="chat",
                     metadata={
@@ -1820,6 +2258,30 @@ Please use this web search context to inform your response when relevant."""
                 event_type=StreamEventType.ERROR.value,
                 data={"message": f"Planning execution failed: {str(e)}", "recoverable": True}
             )
+
+    def _is_document_generation_task(self, message: str) -> bool:
+        """
+        Detect if the user message requests document generation.
+
+        Used for ReAct phase routing to apply two-stage document flow.
+
+        Args:
+            message: User's message
+
+        Returns:
+            True if this appears to be a document generation request
+        """
+        doc_keywords = [
+            # Chinese keywords
+            "写", "撰写", "生成文档", "写报告", "写计划", "写文章",
+            "帮我写", "写一个", "写一份", "文档", "报告", "计划书",
+            "研究报告", "分析报告", "总结", "论文", "方案",
+            # English keywords
+            "write", "generate", "create", "document", "report", "plan",
+            "docx", "pdf", "markdown", "article", "paper", "summary",
+        ]
+        message_lower = message.lower()
+        return any(kw in message_lower for kw in doc_keywords)
 
     def _build_messages(
         self,
@@ -2226,18 +2688,26 @@ Please use this web search context to inform your response when relevant."""
 
         logger.info(f"[TASK PLANNING] Available tools: {available_tools}")
 
-        # Step 1: Create execution plan using TaskPlanner
+        # Step 1: Create execution plan using office templates or TaskPlanner
         try:
-            plan = await self.task_planner.create_plan(
-                user_request=message,
-                available_tools=available_tools,
-                context={
-                    "session_id": session_id,
-                    "has_kb_context": len(retrieved_contexts) > 0,
-                    "has_web_context": web_search_context is not None,
-                },
-                use_llm=False,  # Use rule-based planning for now
-            )
+            from .office.scenario import detect_scenario
+            from .office.planner import build_plan_for_scenario
+
+            scenario = detect_scenario(message)
+            plan = build_plan_for_scenario(scenario, message)
+            plan_from_template = plan is not None
+            if plan is None:
+                plan = await self.task_planner.create_plan(
+                    user_request=message,
+                    available_tools=available_tools,
+                    context={
+                        "session_id": session_id,
+                        "has_kb_context": len(retrieved_contexts) > 0,
+                        "has_web_context": web_search_context is not None,
+                    },
+                    use_llm=False,  # Use rule-based planning for now
+                )
+                plan_from_template = False
 
             # Yield TASK_PLANNING event with plan details
             yield AssistantStreamEvent(
@@ -2261,6 +2731,47 @@ Please use this web search context to inform your response when relevant."""
             yield AssistantStreamEvent(
                 event_type=StreamEventType.ERROR.value,
                 data={"message": f"Task planning failed: {str(e)}", "recoverable": True}
+            )
+            return
+
+        # Confirmation gate for template plans (when user wants explicit confirmation)
+        if plan_from_template and config.confirm_plan:
+            if self.memory_service:
+                try:
+                    await self.memory_service.set_session_memory(
+                        session_id=session_id,
+                        key="pending_plan",
+                        value=plan.to_dict(),
+                        tenant_id=user.tenant_id,
+                        metadata={"scenario": scenario.value},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store pending plan: {e}")
+            elif self.db:
+                try:
+                    memory_manager = MemoryManager(
+                        db=self.db,
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        session_id=session_id,
+                    )
+                    await memory_manager.remember(
+                        key="pending_plan",
+                        value=plan.to_dict(),
+                        layer="session",
+                        metadata={"scenario": scenario.value},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store pending plan in legacy memory: {e}")
+
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS.value,
+                data={
+                    "status": "plan_ready",
+                    "message": "Plan ready. Please confirm to execute.",
+                    "requires_confirmation": True,
+                    "plan": plan.to_dict(),
+                },
             )
             return
 
@@ -2397,6 +2908,13 @@ Please use this web search context to inform your response when relevant."""
             parts.append(f"Duration: {result.duration_ms:.1f}ms\n")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _validate_citations(answer: str, citations: List[Citation]) -> List[str]:
+        """Validate that citations are present when RAG is used."""
+        if answer and not citations:
+            return ["Missing citations for RAG response."]
+        return []
 
     def _format_context(self, contexts: List[RetrievedContext]) -> str:
         """Format retrieved contexts for injection into the prompt."""

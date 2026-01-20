@@ -109,7 +109,7 @@ class AssistantChatRequest(BaseModel):
     history: Optional[List[AssistantMessage]] = Field(default=None, description="Previous conversation history. If None and session_id provided, auto-loads from session.")
 
     # Model settings
-    model_id: str = Field(default="gpt-4o", description="Model ID to use")
+    model_id: str = Field(default="gemini-3-flash-preview", description="Model ID to use")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: Optional[int] = Field(default=None, description="Maximum tokens to generate")
 
@@ -129,6 +129,10 @@ class AssistantChatRequest(BaseModel):
 
     # System prompt
     system_prompt: Optional[str] = Field(default=None, description="Custom system prompt")
+
+    # Task planning settings
+    enable_task_planning: bool = Field(default=False, description="Enable task planning and tool orchestration")
+    confirm_plan: bool = Field(default=False, description="Confirm execution plan before running tools")
 
 
 class AssistantChatResponse(BaseModel):

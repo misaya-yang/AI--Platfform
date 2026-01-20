@@ -12,7 +12,16 @@ import { sseFetch } from "@/lib/sse";
 // SSE Event Types (matches backend SSEEventType)
 // =============================================================================
 
+/**
+ * SSE Event Types - AG-UI Protocol Compatible
+ *
+ * Supports both legacy events and AG-UI standard events for Manus-style
+ * workflow visualization.
+ *
+ * Reference: https://docs.ag-ui.com/concepts/architecture
+ */
 export const SSEEventType = {
+  // === Legacy Events (backwards compatible) ===
   STARTED: "started",  // Immediate response to reduce first-token latency
   STATUS: "status",  // Added for agent thinking status
   TEXT_DELTA: "text_delta",
@@ -29,22 +38,65 @@ export const SSEEventType = {
   FINISH: "finish",
   DONE: "done",
   ERROR: "error",
+
+  // === AG-UI Lifecycle Events ===
+  RUN_STARTED: "run_started",      // Agent execution begins
+  RUN_FINISHED: "run_finished",    // Agent execution completed
+  RUN_ERROR: "run_error",          // Agent execution failed
+  STEP_STARTED: "step_started",    // Sub-task/step begins
+  STEP_FINISHED: "step_finished",  // Sub-task/step completed
+
+  // === AG-UI Text Message Events ===
+  TEXT_MESSAGE_START: "text_message_start",
+  TEXT_MESSAGE_CONTENT: "text_message_content",
+  TEXT_MESSAGE_END: "text_message_end",
+
+  // === AG-UI Tool Call Events ===
+  TOOL_CALL_START: "tool_call_start",
+  TOOL_CALL_ARGS: "tool_call_args",
+  TOOL_CALL_END: "tool_call_end",
+  TOOL_CALL_RESULT: "tool_call_result",
+
+  // === AG-UI State Management Events ===
+  STATE_SNAPSHOT: "state_snapshot",
+  STATE_DELTA: "state_delta",
+  MESSAGES_SNAPSHOT: "messages_snapshot",
+
+  // === AG-UI Special Events ===
+  RAW_EVENT: "raw_event",
+  CUSTOM_EVENT: "custom_event",
+
+  // === Custom Events for AI Gateway ===
+  ARTIFACT_CREATED: "artifact_created",
+  FILE_CREATING: "file_creating",
+  FILE_CREATED: "file_created",
+  SEARCH_STARTED: "search_started",
+  SEARCH_PROGRESS: "search_progress",
+  SEARCH_COMPLETED: "search_completed",
+
   // Code execution events
   CODE_EXECUTION_START: "code_execution_start",
   CODE_EXECUTION_OUTPUT: "code_execution_output",
   CODE_EXECUTION_RESULT: "code_execution_result",
-  ARTIFACT_CREATED: "artifact_created",
+
   // Image generation events
   IMAGE_GENERATION_START: "image_generation_start",
   IMAGE_GENERATION_RESULT: "image_generation_result",
+
   // Document generation events
   DOCUMENT_GENERATION_START: "document_generation_start",
   DOCUMENT_GENERATION_RESULT: "document_generation_result",
+
+  // Manus-style slide outline event
+  OUTLINE_READY: "outline_ready",
+
   // KV-Cache metrics
   CACHE_METRICS: "cache_metrics",
+
   // Output validation
   OUTPUT_WARNINGS: "output_warnings",
-  // Agentic workflow events
+
+  // Agentic workflow events (legacy)
   WORKING_MEMORY_UPDATE: "working_memory_update",
   TASK_PLANNING: "task_planning",
   MEMORY_LOADED: "memory_loaded",
@@ -313,6 +365,177 @@ export interface CacheMetricsEvent {
 /**
  * Output warnings event data - validation warnings about the response.
  */
+
+// =============================================================================
+// AG-UI Protocol Event Data Types
+// =============================================================================
+
+/**
+ * AG-UI Run Started Event - Agent execution begins
+ */
+export interface AGUIRunStartedEvent {
+  run_id: string;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Run Finished Event - Agent execution completed
+ */
+export interface AGUIRunFinishedEvent {
+  run_id: string;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Run Error Event - Agent execution failed
+ */
+export interface AGUIRunErrorEvent {
+  run_id: string;
+  error: string;
+  code?: string;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Step Started Event - Sub-task begins (Manus-style)
+ */
+export interface AGUIStepStartedEvent {
+  step_id: string;
+  title: string;
+  description?: string;
+  icon?: 'search' | 'web' | 'kb' | 'code' | 'image' | 'doc' | 'file' | 'brain' | 'ppt';
+  parent_step_id?: string;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Step Finished Event - Sub-task completed
+ */
+export interface AGUIStepFinishedEvent {
+  step_id: string;
+  status: 'completed' | 'failed' | 'skipped';
+  result?: string;
+  error?: string;
+  duration_ms?: number;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Tool Call Start Event
+ */
+export interface AGUIToolCallStartEvent {
+  tool_call_id: string;
+  tool_name: string;
+  step_id?: string;  // Link to parent step
+  timestamp: number;
+}
+
+/**
+ * AG-UI Tool Call Args Event - Stream tool arguments
+ */
+export interface AGUIToolCallArgsEvent {
+  tool_call_id: string;
+  args_delta: string;  // Incremental JSON string
+  timestamp: number;
+}
+
+/**
+ * AG-UI Tool Call End Event
+ */
+export interface AGUIToolCallEndEvent {
+  tool_call_id: string;
+  timestamp: number;
+}
+
+/**
+ * AG-UI Tool Call Result Event
+ */
+export interface AGUIToolCallResultEvent {
+  tool_call_id: string;
+  result: unknown;
+  success: boolean;
+  duration_ms?: number;
+  timestamp: number;
+}
+
+/**
+ * AG-UI State Snapshot Event - Full state
+ */
+export interface AGUIStateSnapshotEvent {
+  state: Record<string, unknown>;
+  timestamp: number;
+}
+
+/**
+ * AG-UI State Delta Event - Incremental update (RFC6902 JSON Patch)
+ */
+export interface AGUIStateDeltaEvent {
+  delta: Array<{
+    op: 'add' | 'remove' | 'replace' | 'move' | 'copy' | 'test';
+    path: string;
+    value?: unknown;
+    from?: string;
+  }>;
+  timestamp: number;
+}
+
+/**
+ * Custom Event: File Creating
+ */
+export interface FileCreatingEvent {
+  step_id?: string;
+  filename: string;
+  type: string;  // pptx, docx, pdf, etc.
+  timestamp: number;
+}
+
+/**
+ * Custom Event: File Created
+ */
+export interface FileCreatedEvent {
+  step_id?: string;
+  filename: string;
+  type: string;
+  size_bytes?: number;
+  artifact_id?: string;
+  download_url?: string;
+  timestamp: number;
+}
+
+/**
+ * Custom Event: Search Started
+ */
+export interface SearchStartedEvent {
+  step_id?: string;
+  search_id: string;
+  query: string;
+  source: 'kb' | 'web' | 'file';
+  timestamp: number;
+}
+
+/**
+ * Custom Event: Search Progress
+ */
+export interface SearchProgressEvent {
+  search_id: string;
+  progress: number;  // 0-100
+  results_found?: number;
+  timestamp: number;
+}
+
+/**
+ * Custom Event: Search Completed
+ */
+export interface SearchCompletedEvent {
+  search_id: string;
+  results_count: number;
+  duration_ms: number;
+  timestamp: number;
+}
+
+// =============================================================================
+// End AG-UI Protocol Event Data Types
+// =============================================================================
 export interface OutputWarningsEvent {
   warnings: Array<{
     type: string;

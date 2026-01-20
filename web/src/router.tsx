@@ -4,7 +4,7 @@ import { AppLayout } from "@/layouts/AppLayout";
 import { EnterpriseDashboard } from "@/pages/dashboard/index";
 import { ServicesPage } from "@/pages/Services";
 import { PlaygroundPage } from "@/pages/Playground";
-import { TasksPage } from "@/pages/Tasks";
+import { TasksPage } from "@/pages/tasks";
 import { SettingsPage } from "@/pages/Settings";
 import { LoginPage } from "@/pages/Login";
 import { UserManagementPage } from "@/pages/UserManagement";

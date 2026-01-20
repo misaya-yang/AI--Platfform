@@ -305,14 +305,67 @@ def create_app() -> FastAPI:
                 await billing_interceptor.start()
                 logger.info("计费拦截器已启动")
 
-        # 启动 Knowledge Base (KBMS) 后台任务
+        # ========== 初始化存储服务 ==========
+        # 存储服务独立于知识库服务，用于文档生成、图片生成、代码执行等功能
+        # 即使没有启用知识库，也需要存储服务来保存生成的文件
+        image_storage_service = None
+        storage_config = None
+        try:
+            from .services.storage.image_storage import (
+                ImageStorageService,
+                StorageConfig,
+                StorageBackend,
+            )
+            # 确定存储后端：优先使用配置的，否则使用本地存储
+            storage_backend = StorageBackend.LOCAL
+            if hasattr(settings, "storage"):
+                backend_str = getattr(settings.storage, "backend", "local")
+                try:
+                    storage_backend = StorageBackend(backend_str)
+                except ValueError:
+                    storage_backend = StorageBackend.LOCAL
+
+            storage_config = StorageConfig(
+                backend=storage_backend,
+                s3_bucket=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "bucket", "") or "",
+                s3_region=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "region", "") or "us-east-1",
+                s3_access_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "access_key", "") or "",
+                s3_secret_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "secret_key", "") or "",
+                s3_endpoint_url=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "endpoint_url", None) or None,
+                oss_bucket=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "bucket", "") or "",
+                oss_endpoint=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "endpoint", "") or "",
+                oss_access_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "access_key", "") or "",
+                oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "secret_key", "") or "",
+                local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/artifacts",
+                url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
+            )
+            # Get signing key for local file URLs (security)
+            signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
+            image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
+            app.state.image_storage_service = image_storage_service
+            logger.info(f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})")
+
+            # Initialize artifact storage service (for document/image generation, code execution)
+            from .services.storage import init_artifact_storage
+            artifact_storage = init_artifact_storage(storage_config, container.database)
+            app.state.artifact_storage = artifact_storage
+            logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
+
+            # Initialize file storage service for user uploads
+            from .services.storage import init_file_storage
+            file_storage = init_file_storage(storage_config)
+            app.state.file_storage = file_storage
+            logger.info(f"文件存储服务已初始化 (backend={storage_backend.value})")
+        except Exception as e:
+            logger.warning(f"存储服务初始化失败: {e}")
+
+        # ========== 启动 Knowledge Base (KBMS) 后台任务 ==========
         if getattr(settings, "knowledge", None) and settings.knowledge.enabled:
             from .services.knowledge.knowledge_service import KnowledgeService
             from .services.knowledge.worker import KnowledgeWorker
 
             # 初始化多模态嵌入服务（如果配置了 DashScope API Key）
             multimodal_embedding = None
-            image_storage_service = None
 
             dashscope_key = getattr(
                 getattr(settings, "knowledge", None), "dashscope", None
@@ -329,58 +382,6 @@ def create_app() -> FastAPI:
                     logger.info("多模态嵌入服务已初始化 (UnifiedMultimodalEmbedding tongyi-embedding-vision-plus)")
                 except Exception as e:
                     logger.warning(f"多模态嵌入服务初始化失败: {e}")
-
-            # 初始化图片存储服务（支持 S3/OSS/本地存储）
-            # 独立于多模态嵌入初始化 - Confluence VLM 图片描述只需要存储服务
-            if hasattr(settings, "storage") or dashscope_key:
-                try:
-                    from .services.storage.image_storage import (
-                        ImageStorageService,
-                        StorageConfig,
-                        StorageBackend,
-                    )
-                    # 确定存储后端：优先使用配置的，否则使用本地存储
-                    storage_backend = StorageBackend.LOCAL
-                    if hasattr(settings, "storage"):
-                        backend_str = getattr(settings.storage, "backend", "local")
-                        try:
-                            storage_backend = StorageBackend(backend_str)
-                        except ValueError:
-                            storage_backend = StorageBackend.LOCAL
-
-                    storage_config = StorageConfig(
-                        backend=storage_backend,
-                        s3_bucket=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "bucket", "") or "",
-                        s3_region=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "region", "") or "us-east-1",
-                        s3_access_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "access_key", "") or "",
-                        s3_secret_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "secret_key", "") or "",
-                        s3_endpoint_url=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "endpoint_url", None) or None,
-                        oss_bucket=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "bucket", "") or "",
-                        oss_endpoint=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "endpoint", "") or "",
-                        oss_access_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "access_key", "") or "",
-                        oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "secret_key", "") or "",
-                        local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/images",
-                        url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
-                    )
-                    # Get signing key for local file URLs (security)
-                    signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
-                    image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
-                    app.state.image_storage_service = image_storage_service
-                    logger.info(f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})")
-
-                    # Initialize artifact storage service (reuse same storage config)
-                    from .services.storage import init_artifact_storage
-                    artifact_storage = init_artifact_storage(storage_config, container.database)
-                    app.state.artifact_storage = artifact_storage
-                    logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
-
-                    # Initialize file storage service for user uploads (reuse same storage config)
-                    from .services.storage import init_file_storage
-                    file_storage = init_file_storage(storage_config)
-                    app.state.file_storage = file_storage
-                    logger.info(f"文件存储服务已初始化 (backend={storage_backend.value})")
-                except Exception as e:
-                    logger.warning(f"图片存储服务初始化失败: {e}")
 
             # Initialize VLM service for image description generation in knowledge service
             knowledge_vlm_service = None
@@ -937,7 +938,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     )
 
     # Initialize Tool Registry (Phase 2)
-    from .services.assistant.tools import get_tool_registry, register_builtin_tools, register_code_executor_tool, register_document_generation_tool
+    from .services.assistant.tools import get_tool_registry, register_builtin_tools, register_code_executor_tool, register_document_generation_tool, register_pptx_generation_tool
     from .services.assistant.tools.image_generator_tool import register_image_generation_tool
     tool_registry = get_tool_registry()
     register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool, memory_service=memory_service)
@@ -951,6 +952,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     # Register document generation tool (always available)
     doc_gen_registered = register_document_generation_tool()
+
+    # Register PowerPoint generation tool (requires python-pptx)
+    pptx_gen_registered = register_pptx_generation_tool()
 
     # Store in app.state
     app.state.model_registry = model_registry

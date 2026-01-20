@@ -405,5 +405,20 @@ class ConfluenceBatchSyncResultSchema(BaseModel):
     completed_at: Optional[str] = None
 
 
+class ConfluenceRemovePagesRequestSchema(BaseModel):
+    """Request to remove pages from confluence_pages table"""
+    model_config = ConfigDict(extra="allow")
+
+    page_record_ids: List[str] = Field(..., description="List of page record IDs to remove")
+    delete_documents: bool = Field(default=True, description="Also delete corresponding documents from knowledge base")
+
+
+class ConfluenceRemovePagesResultSchema(BaseModel):
+    """Remove pages operation result"""
+    removed: int = Field(default=0, description="Number of page records removed")
+    documents_deleted: int = Field(default=0, description="Number of documents deleted from knowledge base")
+    errors: List[Dict[str, Any]] = Field(default_factory=list, description="List of errors encountered")
+
+
 # Update forward references for self-referential schemas
 ConfluencePageTreeNodeSchema.model_rebuild()

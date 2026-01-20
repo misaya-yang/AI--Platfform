@@ -22,6 +22,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -266,7 +267,7 @@ async def get_config(
         tools_available = [t.name for t in tool_registry.list_tools()]
 
     return AssistantConfigResponse(
-        default_model_id="gpt-4o",
+        default_model_id="gemini-3-flash-preview",
         available_providers=available_providers,
         kb_enabled=kb_service is not None,
         web_search_enabled=bool(tavily_api_key),
@@ -384,6 +385,8 @@ async def chat(
         web_search_max_results=body.web_search_max_results,
         file_paths=body.file_paths,
         system_prompt=body.system_prompt,
+        enable_task_planning=body.enable_task_planning,
+        confirm_plan=body.confirm_plan,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
@@ -472,6 +475,8 @@ async def chat_stream(
         web_search_max_results=body.web_search_max_results,
         file_paths=body.file_paths,
         system_prompt=body.system_prompt,
+        enable_task_planning=body.enable_task_planning,
+        confirm_plan=body.confirm_plan,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
@@ -531,6 +536,40 @@ def get_session_manager(request: Request):
     return manager
 
 
+async def _list_assistant_sessions(session_manager, user: UserContext, limit: int):
+    """List assistant sessions with legacy service_id compatibility."""
+    primary = await session_manager.list_sessions(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id="__builtin_assistant__",
+        limit=limit,
+    )
+    legacy = await session_manager.list_sessions(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id="assistant",
+        limit=limit,
+    )
+
+    merged = {}
+    for session in list(primary) + list(legacy):
+        existing = merged.get(session.session_id)
+        if existing is None:
+            merged[session.session_id] = session
+            continue
+        existing_ts = existing.updated_at or existing.created_at or datetime.min
+        candidate_ts = session.updated_at or session.created_at or datetime.min
+        if candidate_ts > existing_ts:
+            merged[session.session_id] = session
+
+    sessions = list(merged.values())
+    sessions.sort(
+        key=lambda s: s.updated_at or s.created_at or datetime.min,
+        reverse=True,
+    )
+    return sessions[:limit]
+
+
 @router.post("/sessions", response_model=SessionResponse)
 async def create_session(
     body: SessionCreateRequest = None,
@@ -583,12 +622,7 @@ async def list_sessions(
     session_manager = get_session_manager(request)
 
     try:
-        sessions = await session_manager.list_sessions(
-            user_id=user.user_id,
-            tenant_id=user.tenant_id,
-            service_id="__builtin_assistant__",  # 保留的 service_id
-            limit=limit,
-        )
+        sessions = await _list_assistant_sessions(session_manager, user, limit)
 
         return SessionListResponse(
             sessions=[

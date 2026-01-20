@@ -1531,6 +1531,7 @@ async def dedupe_segments(
     dry_run: bool = Query(default=True, description="If true, only report duplicates without deleting"),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Remove duplicate segments from a dataset.
@@ -1540,20 +1541,14 @@ async def dedupe_segments(
 
     Use dry_run=true to preview what would be deleted.
 
-    Internal maintenance: Use X-Internal-Maintenance: true header to bypass permission check.
+    Requires owner access to the dataset.
     """
     from collections import defaultdict
 
     try:
-        # Allow internal maintenance calls to bypass permission check
-        internal_header = request.headers.get("X-Internal-Maintenance", "").lower()
-        if internal_header == "true":
-            dataset = await svc.db.get_dataset(dataset_id)
-            if not dataset:
-                raise ValidationFailedError(f"dataset {dataset_id} not found")
-        else:
-            # Require admin/owner access for maintenance operations
-            dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
+        # Always require owner access for maintenance operations
+        # Security: No bypass allowed - maintenance operations should be properly authenticated
+        dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
 
         collection_name = dataset.get("collection_name")
 
@@ -1626,3 +1621,271 @@ async def dedupe_segments(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ============================================================
+# Document Version Control APIs
+# ============================================================
+
+class VersionListResponse(BaseModel):
+    """Version list response schema"""
+    versions: List[Dict[str, Any]]
+    total: int
+    current_version: Optional[int] = None
+
+
+class VersionCompareResponse(BaseModel):
+    """Version compare response schema"""
+    from_version: int
+    to_version: int
+    diff: List[Dict[str, Any]]
+    stats: Dict[str, int]
+
+
+class VersionRestoreRequest(BaseModel):
+    """Version restore request schema"""
+    reason: Optional[str] = Field(None, description="Reason for restoring this version")
+
+
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions")
+async def list_document_versions(
+    dataset_id: str,
+    document_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    List version history for a document.
+
+    Returns a list of versions without full content (for performance).
+    Use GET .../versions/{version_number} to get full content.
+    """
+    try:
+        # Verify access
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Get document to verify it exists and get current version
+        doc = await svc.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("Document not found")
+
+        # Get versions
+        versions = await svc.db.list_document_versions(document_id, limit, offset)
+        total = await svc.db.get_document_version_count(document_id)
+
+        return VersionListResponse(
+            versions=versions,
+            total=total,
+            current_version=doc.get("current_version", 1),
+        )
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/{version_number}")
+async def get_document_version(
+    dataset_id: str,
+    document_id: str,
+    version_number: int,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Get a specific version of a document with full content.
+    """
+    try:
+        # Verify access
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Get document to verify it exists
+        doc = await svc.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("Document not found")
+
+        # Get specific version
+        version = await svc.db.get_document_version(document_id, version_number)
+        if not version:
+            raise ValidationFailedError(f"Version {version_number} not found")
+
+        return version
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/knowledge/{dataset_id}/documents/{document_id}/versions/compare")
+async def compare_document_versions(
+    dataset_id: str,
+    document_id: str,
+    from_version: int = Query(..., description="Version to compare from"),
+    to_version: int = Query(..., description="Version to compare to"),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Compare two versions of a document.
+
+    Returns a unified diff showing additions, deletions, and changes.
+    """
+    import difflib
+
+    try:
+        # Verify access
+        await svc.require_dataset_access(user, dataset_id, required="viewer")
+
+        # Get document to verify it exists
+        doc = await svc.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("Document not found")
+
+        # Get both versions
+        version_from = await svc.db.get_document_version(document_id, from_version)
+        version_to = await svc.db.get_document_version(document_id, to_version)
+
+        if not version_from:
+            raise ValidationFailedError(f"Version {from_version} not found")
+        if not version_to:
+            raise ValidationFailedError(f"Version {to_version} not found")
+
+        # Get content
+        content_from = (version_from.get("content") or "").splitlines(keepends=True)
+        content_to = (version_to.get("content") or "").splitlines(keepends=True)
+
+        # Generate unified diff
+        diff_lines = list(difflib.unified_diff(
+            content_from,
+            content_to,
+            fromfile=f"Version {from_version}",
+            tofile=f"Version {to_version}",
+            lineterm=""
+        ))
+
+        # Parse diff into structured format
+        diff_items = []
+        additions = 0
+        deletions = 0
+
+        for line in diff_lines:
+            if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+                continue
+            elif line.startswith("+"):
+                diff_items.append({"type": "insert", "content": line[1:]})
+                additions += 1
+            elif line.startswith("-"):
+                diff_items.append({"type": "delete", "content": line[1:]})
+                deletions += 1
+            else:
+                diff_items.append({"type": "equal", "content": line})
+
+        return VersionCompareResponse(
+            from_version=from_version,
+            to_version=to_version,
+            diff=diff_items[:500],  # Limit to 500 lines
+            stats={
+                "additions": additions,
+                "deletions": deletions,
+                "changes": additions + deletions,
+            }
+        )
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/versions/{version_number}/restore")
+async def restore_document_version(
+    dataset_id: str,
+    document_id: str,
+    version_number: int,
+    payload: VersionRestoreRequest = Body(default=VersionRestoreRequest()),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Restore a document to a specific version.
+
+    This creates a new version with the content from the specified version,
+    then re-indexes the document.
+    """
+    import hashlib
+
+    try:
+        # Verify access (need editor permission to restore)
+        await svc.require_dataset_access(user, dataset_id, required="editor")
+
+        # Get document to verify it exists
+        doc = await svc.db.get_document(document_id)
+        if not doc or str(doc.get("dataset_id")) != dataset_id:
+            raise ValidationFailedError("Document not found")
+
+        # Get the version to restore
+        version_to_restore = await svc.db.get_document_version(document_id, version_number)
+        if not version_to_restore:
+            raise ValidationFailedError(f"Version {version_number} not found")
+
+        # Save current content as a new version before restoring
+        current_content = doc.get("content", "")
+        if current_content:
+            current_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+            await svc.db.create_document_version(
+                document_id=document_id,
+                content=current_content,
+                content_hash=current_hash,
+                change_type="updated",
+                title=doc.get("title"),
+                metadata=doc.get("metadata"),
+                change_reason=f"Before restore to version {version_number}",
+                changed_by=user.user_id,
+                confluence_version=doc.get("confluence_version"),
+            )
+
+        # Update document with restored content
+        restored_content = version_to_restore.get("content", "")
+        await svc.db.update_document_fields(
+            document_id,
+            {
+                "content": restored_content,
+                "status": "uploaded",
+                "progress": 0,
+            }
+        )
+
+        # Create a new version marking the restore
+        restored_hash = hashlib.sha256(restored_content.encode("utf-8")).hexdigest()
+        new_version = await svc.db.create_document_version(
+            document_id=document_id,
+            content=restored_content,
+            content_hash=restored_hash,
+            change_type="restored",
+            title=version_to_restore.get("title") or doc.get("title"),
+            metadata=version_to_restore.get("metadata"),
+            change_reason=payload.reason or f"Restored from version {version_number}",
+            changed_by=user.user_id,
+            confluence_version=version_to_restore.get("confluence_version"),
+        )
+
+        # Re-index the document
+        await worker.enqueue(dataset_id, document_id)
+
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "restored_from_version": version_number,
+            "new_version": new_version.get("version_number") if new_version else None,
+            "message": f"Document restored to version {version_number}. Re-indexing started.",
+        }
+
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

@@ -41,7 +41,8 @@ logger = get_logger(__name__)
 DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     name="generate_document",
     description="Generate a formatted document (Word, PDF, or Markdown) from text content. "
-                "The content should be provided in Markdown format for best formatting.",
+                "IMPORTANT: The content parameter must contain COMPLETE, DETAILED document content in Markdown format. "
+                "Before calling this tool, you MUST first write out the full document content in your chat response.",
     parameters=[
         ToolParameter(
             name="title",
@@ -52,8 +53,10 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
         ToolParameter(
             name="content",
             type="string",
-            description="Document content in Markdown format. Supports headers, lists, "
-                        "bold/italic text, code blocks, and tables.",
+            description="COMPLETE document content in Markdown format. This MUST be the FULL detailed content, "
+                        "not a skeleton or outline. Include: headers (# ## ###), detailed paragraphs, lists, "
+                        "examples, and analysis. The content should be comprehensive and well-structured. "
+                        "Minimum 500+ words for typical documents.",
             required=True,
         ),
         ToolParameter(
@@ -67,10 +70,11 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
-    when_to_use="Use when the user asks for a report, document, or file output. "
-                "Good for creating summaries, reports, analyses, or any formatted document.",
-    when_not_to_use="Do not use for simple text responses that don't need to be downloaded. "
-                    "Do not use for code files (use code execution instead).",
+    when_to_use="Use ONLY AFTER you have written out the complete document content in your chat response. "
+                "The user should see the full content before you generate the document file. "
+                "Good for creating detailed reports, plans, analyses, or documentation.",
+    when_not_to_use="Do NOT use with minimal/skeleton content. Do NOT use for simple responses. "
+                    "Do NOT call immediately - first show the full content in chat, then generate.",
     examples=[
         ToolExample(
             description="Generate a sales report",
@@ -385,7 +389,7 @@ class DocumentGeneratorExecutor(ToolExecutor):
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
-                result=f"Successfully generated {format.upper()} document: {filename}",
+                result=f"Document '{filename}' generated successfully. The user can download it directly from the chat interface - do NOT mention any file paths or workspace directories.",
                 output_files=[{
                     "filename": filename,
                     "content_base64": base64.b64encode(doc_bytes).decode("utf-8"),

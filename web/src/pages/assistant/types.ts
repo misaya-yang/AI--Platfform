@@ -42,6 +42,8 @@ export const SSEEventType = {
   IMAGE_GENERATION_RESULT: "image_generation_result",
   DOCUMENT_GENERATION_START: "document_generation_start",
   DOCUMENT_GENERATION_RESULT: "document_generation_result",
+  // Manus-style PPT outline events
+  OUTLINE_READY: "outline_ready",  // Slide outline parsed and ready for preview
   // Artifact events
   ARTIFACT_CREATED: "artifact_created",
   // Agentic workflow events
@@ -49,6 +51,12 @@ export const SSEEventType = {
   TASK_PLANNING: "task_planning",
   MEMORY_LOADED: "memory_loaded",
   TOOL_ERROR: "tool_error",
+  // AG-UI step events
+  STEP_STARTED: "step_started",
+  STEP_FINISHED: "step_finished",
+  RUN_STARTED: "run_started",
+  RUN_FINISHED: "run_finished",
+  RUN_ERROR: "run_error",
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -187,6 +195,22 @@ export interface SearchStatusItem {
 }
 
 // =============================================================================
+// Generated Artifact (for inline document preview in messages)
+// =============================================================================
+
+export interface GeneratedArtifact {
+  id: string;
+  type: "document" | "image" | "code" | "file";
+  format: string;
+  title: string;
+  url: string;
+  filename?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  content?: string;  // For markdown preview
+}
+
+// =============================================================================
 // Enhanced Chat Message (Phase 1)
 // =============================================================================
 
@@ -204,6 +228,9 @@ export interface ChatMessage {
 
   // Search status (for GPT-like "Searching..." display)
   searchStatus?: SearchStatusItem[];
+
+  // Agent phase status (for ReAct thinking display)
+  agentPhase?: AgentPhaseStatus;
 
   // Agentic extensions
   toolCalls?: ToolCall[];
@@ -226,6 +253,9 @@ export interface ChatMessage {
   // Multimodal
   attachments?: MessageAttachment[];
 
+  // Generated artifacts (documents, images, etc.)
+  generatedArtifacts?: GeneratedArtifact[];
+
   // Metadata
   usage?: {
     input_tokens?: number;
@@ -233,6 +263,7 @@ export interface ChatMessage {
     total_tokens?: number;
   };
   durationMs?: number;
+  firstTokenMs?: number;
   modelId?: string;
   timestamp?: string;
 }
@@ -457,6 +488,26 @@ export interface ArtifactData {
 }
 
 // =============================================================================
+// ReAct Phase Types (for Agent thinking status display)
+// =============================================================================
+
+export type ReActPhase =
+  | "analyzing"    // Initial task analysis
+  | "thinking"     // Reasoning about next step
+  | "planning"     // Creating execution plan
+  | "executing"    // Running a tool
+  | "observing"    // Analyzing tool result
+  | "writing"      // Generating content
+  | "completing";  // Finishing up
+
+export interface AgentPhaseStatus {
+  phase: ReActPhase;
+  message: string;
+  isDocumentTask?: boolean;
+  taskId?: string;
+}
+
+// =============================================================================
 // Task Panel Types (for Agentic workflow progress)
 // =============================================================================
 
@@ -500,4 +551,117 @@ export interface ParallelGroup {
 export interface ParallelExecutionViewProps {
   groups: ParallelGroup[];
   currentGroup: number;
+}
+
+// =============================================================================
+// Manus-style Slide Outline Types (for PPT preview)
+// =============================================================================
+
+export interface SlideOutlineItem {
+  number: number;
+  title: string;
+  subtitle?: string;
+  type: "title" | "content" | "two_column" | "section" | "blank";
+  bulletCount?: number;
+}
+
+export interface SlideOutline {
+  title: string;
+  subtitle?: string;
+  slides: SlideOutlineItem[];
+  theme?: string;
+  totalSlides: number;
+}
+
+export interface OutlineReadyEventData {
+  outline: SlideOutline;
+  format: "pptx" | "docx" | "pdf";
+}
+
+// Step event data for AG-UI workflow tracking
+export interface StepStartedEventData {
+  step_id: string;
+  title: string;
+  description?: string;
+  icon?: string;
+  timestamp: number;
+}
+
+export interface StepFinishedEventData {
+  step_id: string;
+  status: "completed" | "failed";
+  duration_ms?: number;
+  timestamp: number;
+}
+
+// =============================================================================
+// Manus-style Agentic Task Types
+// =============================================================================
+
+export type ManusTaskStatus = "pending" | "in_progress" | "completed" | "failed";
+export type ManusTaskIcon = "search" | "web" | "kb" | "code" | "image" | "doc" | "ppt" | "file" | "brain";
+
+export interface ManusSubTask {
+  id: string;
+  label: string;
+  status: ManusTaskStatus;
+  icon?: ManusTaskIcon;
+  durationMs?: number;
+}
+
+export interface ManusTask {
+  id: string;
+  title: string;
+  description?: string;
+  status: ManusTaskStatus;
+  icon?: ManusTaskIcon;
+  subTasks?: ManusSubTask[];
+  result?: string;
+  error?: string;
+  durationMs?: number;
+  // For slide outline preview
+  slideOutline?: SlideOutline;
+}
+
+// =============================================================================
+// Working Memory State (for useChatSession hook)
+// =============================================================================
+
+export interface WorkingMemoryTask {
+  id: string;
+  description: string;
+  status: ManusTaskStatus;
+  icon?: string;
+  result?: string;
+  error?: string;
+  startTime?: number;
+  endTime?: number;
+  durationMs?: number;
+  currentTool?: string;
+  subTasks?: Array<{
+    id: string;
+    name?: string;
+    label?: string;
+    status: string;
+    endTime?: number;
+    durationMs?: number;
+    searchResultsCount?: number;
+    searchDurationMs?: number;
+  }>;
+  slideOutline?: SlideOutline;
+}
+
+export interface WorkingMemoryCollectedInfo {
+  key: string;
+  value: string;
+  source: string;
+}
+
+export interface WorkingMemory {
+  goal: string;
+  tasks: WorkingMemoryTask[];
+  collectedInfo: WorkingMemoryCollectedInfo[];
+  notes: string[];
+  runId?: string;
+  error?: string;
 }

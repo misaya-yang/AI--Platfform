@@ -75,9 +75,13 @@ export function ChatInputArea({
     [setInput]
   );
 
-  // Handle key press
+  // Handle key press (check isComposing to avoid sending during IME composition)
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // Don't send if user is composing with IME (e.g., typing Chinese/Japanese)
+      if (e.nativeEvent.isComposing || e.keyCode === 229) {
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         onSend();

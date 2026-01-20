@@ -138,11 +138,24 @@ class KBSearchExecutor(ToolExecutor):
         try:
             all_results = []
 
-            # If no datasets specified, we need to get user's accessible datasets
-            if not dataset_ids and request.user:
-                # Get all accessible datasets
-                datasets = await self.kb_service.list_datasets(user=request.user)
-                dataset_ids = [ds.get("dataset_id") for ds in datasets if ds.get("dataset_id")]
+            # If no datasets specified, return early with helpful message
+            # This prevents expensive list_datasets() + multi-dataset search operations
+            # that can cause 80+ second delays when searching all accessible datasets
+            if not dataset_ids:
+                logger.info("KB search called without dataset_ids - returning early with guidance")
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result="知识库搜索需要先选择一个知识库。当前没有配置任何知识库数据集。请让用户在对话界面选择一个知识库后再进行搜索。",
+                    metadata={
+                        "total_results": 0,
+                        "datasets_searched": 0,
+                        "query": query,
+                        "intent": intent,
+                        "message": "No datasets configured - user needs to select a knowledge base first",
+                    },
+                )
 
             for dataset_id in dataset_ids:
                 try:

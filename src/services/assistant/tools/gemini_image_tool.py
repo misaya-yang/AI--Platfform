@@ -78,49 +78,83 @@ class GeminiImageGenerator:
 
             # Build request for Gemini image generation
             # Using generateContent with responseModalities to enable image output
-            endpoint = f"{self.BASE_URL}/v1beta/models/{self.DEFAULT_MODEL}:generateContent?key={self.api_key}"
+            # Endpoint format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+            endpoint = f"{self.BASE_URL}/v1beta/models/{self.DEFAULT_MODEL}:generateContent"
 
             # Request body for native image generation
+            # Based on official docs: https://ai.google.dev/gemini-api/docs/image-generation
             body = {
                 "contents": [
                     {
                         "parts": [
-                            {"text": f"Generate an image: {prompt}"}
+                            {"text": prompt}
                         ]
                     }
                 ],
                 "generationConfig": {
+                    # IMAGE modality is required for image generation
+                    # TEXT can optionally be included if you want text explanations too
                     "responseModalities": ["TEXT", "IMAGE"],
-                    "responseMimeType": "text/plain",
                 },
             }
 
             logger.info(f"Submitting Gemini image generation: {prompt[:50]}...")
 
+            # API key must be passed as x-goog-api-key header (NOT query param)
             response = await client.post(
                 endpoint,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                },
                 json=body,
             )
 
             if response.status_code != 200:
                 error_text = response.text
-                logger.error(f"Gemini image generation failed: {response.status_code} - {error_text}")
+                logger.error(f"Gemini image generation failed: {response.status_code} - {error_text[:500]}")
+                # Parse error for user-friendly message
+                try:
+                    error_json = response.json()
+                    error_msg = error_json.get("error", {}).get("message", error_text[:200])
+                except Exception:
+                    error_msg = error_text[:200]
                 return GeminiImageResult(
                     success=False,
-                    error=f"API error: {response.status_code} - {error_text}",
+                    error=f"API error: {response.status_code} - {error_msg}",
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
             result = response.json()
+
+            # Debug: Log response structure to diagnose issues
+            logger.debug(f"Gemini response keys: {result.keys()}")
+            if "candidates" in result:
+                for i, cand in enumerate(result["candidates"]):
+                    content = cand.get("content", {})
+                    parts = content.get("parts", [])
+                    logger.debug(f"Candidate {i}: {len(parts)} parts")
+                    for j, part in enumerate(parts):
+                        part_keys = list(part.keys())
+                        logger.debug(f"  Part {j} keys: {part_keys}")
+                        if "text" in part:
+                            logger.debug(f"  Part {j} text: {part['text'][:100]}...")
+
             images = self._extract_images(result)
 
             duration_ms = (time.time() - start_time) * 1000
 
             if not images:
-                # Try alternative: Gemini might return text explaining it can generate images
-                # In that case, we should use Imagen API instead
-                logger.warning("Gemini did not return images, model may not support native generation")
+                # Log detailed info about the response
+                text_parts = []
+                for cand in result.get("candidates", []):
+                    for part in cand.get("content", {}).get("parts", []):
+                        if "text" in part:
+                            text_parts.append(part["text"])
+                if text_parts:
+                    logger.warning(f"Gemini returned text instead of images: {text_parts[0][:200]}...")
+                else:
+                    logger.warning("Gemini did not return images or text")
                 return GeminiImageResult(
                     success=False,
                     error="Model did not generate images. Try using a different provider.",

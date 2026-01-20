@@ -1,4 +1,9 @@
+/**
+ * TaskQueryTab - Task ID query tab (migrated from original Tasks.tsx)
+ */
+
 import { useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Search,
   Loader2,
@@ -12,16 +17,21 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import { useTranslation } from "react-i18next";
-
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useTask, useTaskResult } from "@/hooks/useTasks";
 
-// Status config with i18n keys
-const STATUS_CONFIG: Record<string, { labelKey: string; variant: "default" | "secondary" | "destructive" | "outline"; icon: React.ReactNode; color: string }> = {
+const STATUS_CONFIG: Record<
+  string,
+  {
+    labelKey: string;
+    variant: "default" | "secondary" | "destructive" | "outline";
+    icon: React.ReactNode;
+    color: string;
+  }
+> = {
   completed: {
     labelKey: "tasks.status.completed",
     variant: "default",
@@ -71,7 +81,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export function TasksPage() {
+export function TaskQueryTab() {
   const { t, i18n } = useTranslation();
   const [inputValue, setInputValue] = useState("");
   const [searchedId, setSearchedId] = useState<string | undefined>(undefined);
@@ -111,16 +121,6 @@ export function TasksPage() {
 
   return (
     <div className="space-y-6">
-      {/* Page title */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">{t('tasks.title')}</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {t('tasks.description')}
-          </p>
-        </div>
-      </div>
-
       {/* Search area */}
       <Card className="overflow-hidden">
         <CardContent className="p-4">
@@ -129,7 +129,7 @@ export function TasksPage() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
               <Input
                 className="pl-9 h-10 bg-background"
-                placeholder={t('tasks.searchPlaceholder')}
+                placeholder={t("tasks.searchPlaceholder")}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
@@ -143,11 +143,11 @@ export function TasksPage() {
               {isLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {t('tasks.querying')}
+                  {t("tasks.querying")}
                 </>
               ) : (
                 <>
-                  {t('tasks.query')}
+                  {t("tasks.query")}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </>
               )}
@@ -166,8 +166,12 @@ export function TasksPage() {
                 <Loader2 className="h-8 w-8 text-primary animate-spin" />
               </div>
             </div>
-            <p className="mt-4 text-sm font-medium text-foreground">{t('tasks.states.loading')}</p>
-            <p className="text-xs text-muted-foreground mt-1">Task ID: {searchedId}</p>
+            <p className="mt-4 text-sm font-medium text-foreground">
+              {t("tasks.states.loading")}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Task ID: {searchedId}
+            </p>
           </CardContent>
         </Card>
       )}
@@ -179,11 +183,13 @@ export function TasksPage() {
             <div className="rounded-full bg-destructive/10 p-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
             </div>
-            <p className="mt-4 text-sm font-medium text-destructive">{t('tasks.states.error')}</p>
+            <p className="mt-4 text-sm font-medium text-destructive">
+              {t("tasks.states.error")}
+            </p>
             <p className="text-xs text-muted-foreground mt-1 max-w-md text-center">
               {taskQuery.error instanceof Error
                 ? taskQuery.error.message
-                : t('tasks.states.errorDesc')}
+                : t("tasks.states.errorDesc")}
             </p>
             <Button
               variant="outline"
@@ -192,7 +198,7 @@ export function TasksPage() {
               onClick={() => taskQuery.refetch()}
             >
               <RefreshCw className="mr-2 h-3.5 w-3.5" />
-              {t('tasks.states.retry')}
+              {t("tasks.states.retry")}
             </Button>
           </CardContent>
         </Card>
@@ -205,9 +211,11 @@ export function TasksPage() {
             <div className="rounded-full bg-muted p-4">
               <FileSearch className="h-8 w-8 text-muted-foreground/60" />
             </div>
-            <p className="mt-4 text-sm font-medium text-foreground">{t('tasks.states.notFound')}</p>
+            <p className="mt-4 text-sm font-medium text-foreground">
+              {t("tasks.states.notFound")}
+            </p>
             <p className="text-xs text-muted-foreground mt-1">
-              {t('tasks.states.notFoundDesc', { id: searchedId })}
+              {t("tasks.states.notFoundDesc", { id: searchedId })}
             </p>
           </CardContent>
         </Card>
@@ -221,13 +229,15 @@ export function TasksPage() {
             <CardHeader className="pb-3">
               <div className="flex items-start justify-between">
                 <div className="space-y-1">
-                  <CardTitle className="text-base">{t('tasks.taskDetail')}</CardTitle>
+                  <CardTitle className="text-base">
+                    {t("tasks.taskDetail")}
+                  </CardTitle>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span className="font-mono">{searchedId}</span>
                     <button
                       onClick={handleCopyId}
                       className="p-1 hover:bg-muted rounded transition-colors"
-                      title={t('common.copy')}
+                      title={t("common.copy")}
                     >
                       {copied ? (
                         <Check className="h-3 w-3 text-green-500" />
@@ -243,13 +253,21 @@ export function TasksPage() {
             <CardContent className="pt-0">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">{t('tasks.service')}</p>
-                  <p className="text-sm font-medium">{taskQuery.data.service_id}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("tasks.service")}
+                  </p>
+                  <p className="text-sm font-medium">
+                    {taskQuery.data.service_id}
+                  </p>
                 </div>
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">{t('tasks.createdAt')}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t("tasks.createdAt")}
+                  </p>
                   <p className="text-sm font-medium">
-                    {new Date(taskQuery.data.created_at).toLocaleString(i18n.language)}
+                    {new Date(taskQuery.data.created_at).toLocaleString(
+                      i18n.language
+                    )}
                   </p>
                 </div>
               </div>
@@ -260,7 +278,9 @@ export function TasksPage() {
                   <div className="flex items-start gap-2">
                     <AlertCircle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
                     <div>
-                      <p className="text-xs font-medium text-destructive">{t('tasks.errorInfo')}</p>
+                      <p className="text-xs font-medium text-destructive">
+                        {t("tasks.errorInfo")}
+                      </p>
                       <p className="text-xs text-destructive/80 mt-1">
                         {taskQuery.data.error}
                       </p>
@@ -275,7 +295,9 @@ export function TasksPage() {
           {resultQuery.data && (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">{t('tasks.taskResult')}</CardTitle>
+                <CardTitle className="text-base">
+                  {t("tasks.taskResult")}
+                </CardTitle>
               </CardHeader>
               <CardContent className="pt-0">
                 <pre className="rounded-lg bg-muted/50 border p-4 text-xs font-mono whitespace-pre-wrap overflow-auto max-h-96">
@@ -294,9 +316,11 @@ export function TasksPage() {
             <div className="rounded-full bg-primary/5 p-4">
               <Search className="h-8 w-8 text-primary/40" />
             </div>
-            <p className="mt-4 text-sm font-medium text-foreground">{t('tasks.states.initial')}</p>
+            <p className="mt-4 text-sm font-medium text-foreground">
+              {t("tasks.states.initial")}
+            </p>
             <p className="text-xs text-muted-foreground mt-1">
-              {t('tasks.states.initialDesc')}
+              {t("tasks.states.initialDesc")}
             </p>
           </CardContent>
         </Card>

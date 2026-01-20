@@ -1,10 +1,10 @@
 /**
  * Assistant Page - Enterprise-grade AI Chat Interface
- * 
+ *
  * Refactored modular architecture.
  */
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, Component, type ErrorInfo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -14,6 +14,7 @@ import {
   PanelLeft,
   FileText,
   PanelRightOpen,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,13 +36,56 @@ import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
 
 // Local Components & Hooks
-import { ChatMessage, CompactModelSelector, TaskPanel } from "./components";
+import { ChatMessage, CompactModelSelector, AgentTaskTimeline, type AgentTask } from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
+
+// Error Boundary for ChatMessage rendering failures
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error?: Error;
+}
+
+class MessageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("[MessageErrorBoundary] Caught error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || (
+        <div className="flex items-center gap-2 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+          <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-red-800 dark:text-red-200">消息渲染失败</p>
+            <p className="text-xs text-red-600 dark:text-red-400 truncate">
+              {this.state.error?.message || "Unknown error"}
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export function AssistantPage() {
   const { t } = useTranslation();
@@ -296,16 +340,26 @@ export function AssistantPage() {
                   <WelcomeScreen />
                 ) : (
                   <div className="space-y-6">
-                    {showTaskPanel && workingMemory && (
-                      <TaskPanel
+                    {/* Manus-style task timeline for agentic workflows */}
+                    {showTaskPanel && workingMemory && workingMemory.tasks?.length > 0 && (
+                      <AgentTaskTimeline
                         goal={workingMemory.goal}
-                        tasks={workingMemory.tasks}
-                        collectedInfo={workingMemory.collectedInfo}
-                        isVisible={showTaskPanel}
+                        tasks={workingMemory.tasks.map((task: any): AgentTask => ({
+                          id: task.id,
+                          title: task.description,
+                          status: task.status === "blocked" ? "failed" : task.status,
+                          result: task.result,
+                          error: task.error,
+                        }))}
+                        isThinking={isStreaming && workingMemory.tasks.some((t: any) => t.status === "in_progress")}
+                        thinkingMessage="正在执行任务..."
+                        className="mb-4"
                       />
                     )}
                     {messages.map((message) => (
-                      <ChatMessage key={message.id} message={message} />
+                      <MessageErrorBoundary key={message.id}>
+                        <ChatMessage message={message} />
+                      </MessageErrorBoundary>
                     ))}
                   </div>
                 )}

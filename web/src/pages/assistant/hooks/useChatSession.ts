@@ -22,19 +22,27 @@ import {
   type SessionConfig,
 } from "@/api/sessions";
 import { useAppStore } from "@/store/useAppStore";
-import type { 
-  ChatMessage as ChatMessageType, 
-  RetrievedContext, 
+import type {
+  ChatMessage as ChatMessageType,
+  RetrievedContext,
   SearchStatusItem,
   RAGEvaluationEventData,
   RAGCitation,
   RAGEvaluation,
   CacheMetricsEventData,
   FileProcessedEventData,
+  GeneratedArtifact,
+  AgentPhaseStatus,
+  ReActPhase,
   // Agentic types
   TaskPlanningEventData,
   WorkingMemoryUpdateEventData,
   ToolErrorEventData,
+  // Manus-style outline types
+  OutlineReadyEventData,
+  // Working memory and code execution state types
+  WorkingMemory,
+  CodeExecutionState,
 } from "../types";
 import { getStyleSystemPrompt } from "../styles";
 import type { Artifact } from "@/components/artifacts";
@@ -59,6 +67,10 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 
   // Restore assistant metadata
   if (msg.role === "assistant" && msg.metadata) {
+    // Initialize search status array
+    const searchStatusItems: any[] = [];
+
+    // Restore KB contexts
     if (msg.metadata.contexts && Array.isArray(msg.metadata.contexts)) {
       baseMessage.contexts = msg.metadata.contexts.map((ctx: any) => ({
         dataset_id: ctx.dataset_id,
@@ -67,14 +79,30 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
         query: ctx.query,
         took_ms: ctx.took_ms,
       }));
-      baseMessage.searchStatus = msg.metadata.contexts.map((ctx: any) => ({
+      searchStatusItems.push(...msg.metadata.contexts.map((ctx: any) => ({
         type: "kb" as const,
         state: "completed" as const,
         resultCount: ctx.chunks?.length || 0,
         datasets: [ctx.dataset_name],
         durationMs: ctx.took_ms,
-      }));
+      })));
     }
+
+    // Restore web search results
+    if (msg.metadata.web_search_results && msg.metadata.web_search_results.results) {
+      baseMessage.webSearchResults = msg.metadata.web_search_results.results;
+      searchStatusItems.push({
+        type: "web" as const,
+        state: "completed" as const,
+        resultCount: msg.metadata.web_search_results.results.length,
+        durationMs: msg.metadata.web_search_results.response_time_ms,
+      });
+    }
+
+    if (searchStatusItems.length > 0) {
+      baseMessage.searchStatus = searchStatusItems;
+    }
+
     if (msg.metadata.usage) {
       baseMessage.usage = {
         input_tokens: msg.metadata.usage.prompt_tokens,
@@ -105,12 +133,15 @@ export function useChatSession() {
   // Artifacts & Agent State (Managed here as they are tied to session)
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [showArtifacts, setShowArtifacts] = useState(false);
-  const [workingMemory, setWorkingMemory] = useState<any>(null); // Simplified type
+  const [workingMemory, setWorkingMemory] = useState<WorkingMemory | null>(null);
   const [showTaskPanel, setShowTaskPanel] = useState(false);
-  const [codeExecution, setCodeExecution] = useState<any>({ // Simplified type
+  const [codeExecution, setCodeExecution] = useState<CodeExecutionState>({
     isExecuting: false,
-    status: "idle",
+    executionId: null,
+    code: null,
     output: "",
+    executionTimeMs: null,
+    status: "idle",
     outputFiles: [],
   });
 
@@ -118,6 +149,13 @@ export function useChatSession() {
 
   // 用于跟踪是否已经初始化完成
   const isInitialized = useRef(false);
+
+  // Cleanup AbortController on unmount to prevent state updates on unmounted component
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
 
   // Load sessions on mount and restore active session if exists
   useEffect(() => {
@@ -208,8 +246,11 @@ export function useChatSession() {
     setShowTaskPanel(false);
     setCodeExecution({
       isExecuting: false,
-      status: "idle",
+      executionId: null,
+      code: null,
       output: "",
+      executionTimeMs: null,
+      status: "idle",
       outputFiles: [],
     });
   }, [setActiveSessionId]);
@@ -363,7 +404,8 @@ export function useChatSession() {
     let searchStatus = [...initialSearchStatus];
     const updateSearchStatus = (type: "kb" | "web", updates: Partial<SearchStatusItem>) => {
       searchStatus = searchStatus.map((s) => s.type === type ? { ...s, ...updates } : s);
-      setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { ...m, searchStatus } : m));
+      // Ensure firstTokenMs is passed from the local scope to the state update
+      setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { ...m, searchStatus, firstTokenMs } : m));
     };
 
     try {
@@ -387,20 +429,20 @@ export function useChatSession() {
       }, abortControllerRef.current.signal);
 
       for await (const event of stream) {
+        const now = Date.now();
+
         // Track TTFT on ANY first meaningful event
-        if (firstTokenMs === undefined && 
-            event.event_type !== "error" && 
+        if (firstTokenMs === undefined &&
+            event.event_type !== "error" &&
             event.event_type !== "done" &&
             event.event_type !== "finish") {
-           firstTokenMs = Date.now() - startTime;
+           firstTokenMs = now - startTime;
         }
 
         // Event Handling
         switch (event.event_type) {
           case SSEEventType.STARTED:
             // Immediate response received - stream connection established
-            // This reduces perceived first-token latency
-            console.debug("[SSE] Stream started, processing request...");
             break;
 
           case "text_delta":
@@ -411,8 +453,31 @@ export function useChatSession() {
             break;
 
           case SSEEventType.STATUS:
-            const statusData = event.data as { status: string; message: string };
-            // Update searchStatus based on status type
+            const statusData = event.data as {
+              status?: string;
+              message: string;
+              phase?: ReActPhase;
+              is_document_task?: boolean;
+              task_id?: string;
+            };
+
+            // Handle ReAct phase status (new format with "phase" field)
+            if (statusData.phase) {
+              const phaseStatus: AgentPhaseStatus = {
+                phase: statusData.phase,
+                message: statusData.message,
+                isDocumentTask: statusData.is_document_task,
+                taskId: statusData.task_id,
+              };
+              setMessages(prev => prev.map(m =>
+                m.id === assistantMessage.id
+                  ? { ...m, agentPhase: phaseStatus, firstTokenMs }
+                  : m
+              ));
+              break;
+            }
+
+            // Handle legacy search status (old format with "status" field)
             let statusType: "kb" | "web" | "files" | null = null;
             if (statusData.status === "searching_kb") statusType = "kb";
             else if (statusData.status === "searching_web") statusType = "web";
@@ -470,6 +535,357 @@ export function useChatSession() {
              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, ragEvaluation, ragCitations: evalData.citations } : m));
              break;
 
+          // === AG-UI Lifecycle Events ===
+          case SSEEventType.RUN_STARTED:
+            // Agent execution started - initialize working memory if needed
+            if (!workingMemory) {
+              setWorkingMemory({
+                goal: "",
+                tasks: [],
+                collectedInfo: [],
+                notes: [],
+                runId: (event.data as any)?.run_id,
+              });
+            }
+            setShowTaskPanel(true);
+            break;
+
+          case SSEEventType.RUN_FINISHED:
+            // Agent execution completed
+            // Working memory stays visible for user reference
+            break;
+
+          case SSEEventType.RUN_ERROR:
+            // Agent execution failed
+            const runErrorData = event.data as { error: string; run_id?: string };
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              error: runErrorData.error,
+            } : null);
+            break;
+
+          // === AG-UI Step Events (Manus-style) ===
+          case SSEEventType.STEP_STARTED:
+            const stepStartData = event.data as {
+              step_id: string;
+              title: string;
+              description?: string;
+              icon?: string;
+              timestamp: number;
+            };
+            // Add new step to working memory tasks
+            setWorkingMemory((prev) => {
+              if (!prev) {
+                return {
+                  goal: "",
+                  tasks: [{
+                    id: stepStartData.step_id,
+                    description: stepStartData.title,
+                    status: "in_progress",
+                    icon: stepStartData.icon,
+                    startTime: stepStartData.timestamp,
+                  }],
+                  collectedInfo: [],
+                  notes: [],
+                };
+              }
+              // Check if task already exists (from TASK_PLANNING)
+              const existingTask = prev.tasks.find((t) => t.id === stepStartData.step_id);
+              if (existingTask) {
+                return {
+                  ...prev,
+                  tasks: prev.tasks.map((t) =>
+                    t.id === stepStartData.step_id
+                      ? { ...t, status: "in_progress", icon: stepStartData.icon, startTime: stepStartData.timestamp }
+                      : t
+                  ),
+                };
+              }
+              // Add new task
+              return {
+                ...prev,
+                tasks: [...prev.tasks, {
+                  id: stepStartData.step_id,
+                  description: stepStartData.title,
+                  status: "in_progress",
+                  icon: stepStartData.icon,
+                  startTime: stepStartData.timestamp,
+                }],
+              };
+            });
+            setShowTaskPanel(true);
+            break;
+
+          case SSEEventType.STEP_FINISHED:
+            const stepFinishData = event.data as {
+              step_id: string;
+              status: "completed" | "failed" | "skipped";
+              result?: string;
+              error?: string;
+              duration_ms?: number;
+              timestamp: number;
+            };
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.id === stepFinishData.step_id
+                  ? {
+                      ...t,
+                      status: stepFinishData.status,
+                      result: stepFinishData.result,
+                      error: stepFinishData.error,
+                      durationMs: stepFinishData.duration_ms,
+                      endTime: stepFinishData.timestamp,
+                    }
+                  : t
+              ),
+            } : null);
+            break;
+
+          // === AG-UI Tool Call Events ===
+          case SSEEventType.TOOL_CALL_START:
+            const toolStartData = event.data as {
+              tool_call_id: string;
+              tool_name: string;
+              step_id?: string;
+              timestamp: number;
+            };
+            // Update the parent step with sub-task info
+            if (toolStartData.step_id) {
+              setWorkingMemory((prev) => prev ? {
+                ...prev,
+                tasks: prev.tasks.map((t) =>
+                  t.id === toolStartData.step_id
+                    ? {
+                        ...t,
+                        currentTool: toolStartData.tool_name,
+                        subTasks: [...(t.subTasks || []), {
+                          id: toolStartData.tool_call_id,
+                          name: toolStartData.tool_name,
+                          status: "running",
+                          startTime: toolStartData.timestamp,
+                        }],
+                      }
+                    : t
+                ),
+              } : null);
+            }
+            break;
+
+          case SSEEventType.TOOL_CALL_END:
+            const toolEndData = event.data as {
+              tool_call_id: string;
+              timestamp: number;
+            };
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              tasks: prev.tasks.map((t) => ({
+                ...t,
+                subTasks: (t.subTasks || []).map((st) =>
+                  st.id === toolEndData.tool_call_id
+                    ? { ...st, status: "completed", endTime: toolEndData.timestamp }
+                    : st
+                ),
+              })),
+            } : null);
+            break;
+
+          case SSEEventType.TOOL_CALL_RESULT:
+            const toolResultData = event.data as {
+              tool_call_id: string;
+              result: unknown;
+              success: boolean;
+              duration_ms?: number;
+              timestamp: number;
+            };
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              tasks: prev.tasks.map((t) => ({
+                ...t,
+                subTasks: (t.subTasks || []).map((st) =>
+                  st.id === toolResultData.tool_call_id
+                    ? {
+                        ...st,
+                        status: toolResultData.success ? "completed" : "failed",
+                        result: toolResultData.result,
+                        durationMs: toolResultData.duration_ms,
+                      }
+                    : st
+                ),
+              })),
+            } : null);
+            break;
+
+          // === Custom File Events ===
+          case SSEEventType.FILE_CREATING:
+            const fileCreatingData = event.data as {
+              step_id?: string;
+              filename: string;
+              type: string;
+              timestamp: number;
+            };
+            // Show file creation progress
+            if (fileCreatingData.step_id) {
+              setWorkingMemory((prev) => prev ? {
+                ...prev,
+                tasks: prev.tasks.map((t) =>
+                  t.id === fileCreatingData.step_id
+                    ? { ...t, currentFile: fileCreatingData.filename, fileStatus: "creating" }
+                    : t
+                ),
+              } : null);
+            }
+            break;
+
+          case SSEEventType.FILE_CREATED:
+            const fileCreatedData = event.data as {
+              step_id?: string;
+              filename: string;
+              type: string;
+              artifact_id?: string;
+              download_url?: string;
+              timestamp: number;
+            };
+            if (fileCreatedData.step_id) {
+              setWorkingMemory((prev) => prev ? {
+                ...prev,
+                tasks: prev.tasks.map((t) =>
+                  t.id === fileCreatedData.step_id
+                    ? {
+                        ...t,
+                        fileStatus: "completed",
+                        createdFile: {
+                          filename: fileCreatedData.filename,
+                          type: fileCreatedData.type,
+                          artifactId: fileCreatedData.artifact_id,
+                          downloadUrl: fileCreatedData.download_url,
+                        },
+                      }
+                    : t
+                ),
+              } : null);
+            }
+            break;
+
+          // === Custom Search Events ===
+          case SSEEventType.SEARCH_STARTED:
+            const searchStartData = event.data as {
+              step_id?: string;
+              search_id: string;
+              query: string;
+              source: "kb" | "web" | "file";
+              timestamp: number;
+            };
+            if (searchStartData.step_id) {
+              setWorkingMemory((prev) => prev ? {
+                ...prev,
+                tasks: prev.tasks.map((t) =>
+                  t.id === searchStartData.step_id
+                    ? {
+                        ...t,
+                        searchStatus: "searching",
+                        searchQuery: searchStartData.query,
+                        searchSource: searchStartData.source,
+                      }
+                    : t
+                ),
+              } : null);
+            }
+            break;
+
+          case SSEEventType.SEARCH_PROGRESS:
+            const searchProgressData = event.data as {
+              search_id: string;
+              progress: number;
+              results_found?: number;
+              timestamp: number;
+            };
+            // Update search progress (if we can find the matching step)
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.searchStatus === "searching"
+                  ? {
+                      ...t,
+                      searchProgress: searchProgressData.progress,
+                      searchResultsFound: searchProgressData.results_found,
+                    }
+                  : t
+              ),
+            } : null);
+            break;
+
+          case SSEEventType.SEARCH_COMPLETED:
+            const searchCompletedData = event.data as {
+              search_id: string;
+              results_count: number;
+              duration_ms: number;
+              timestamp: number;
+            };
+            setWorkingMemory((prev) => prev ? {
+              ...prev,
+              tasks: prev.tasks.map((t) =>
+                t.searchStatus === "searching"
+                  ? {
+                      ...t,
+                      searchStatus: "completed",
+                      searchResultsCount: searchCompletedData.results_count,
+                      searchDurationMs: searchCompletedData.duration_ms,
+                    }
+                  : t
+              ),
+            } : null);
+            break;
+
+          // === Manus-style Slide Outline Event ===
+          case SSEEventType.OUTLINE_READY:
+            const outlineData = event.data as OutlineReadyEventData;
+            // Add slide outline to the current in-progress task (if any)
+            // This enables SlideOutlinePreview display in AgentTaskTimeline
+            setWorkingMemory((prev) => {
+              if (!prev) {
+                // Create working memory with outline task
+                return {
+                  goal: `生成${outlineData.format.toUpperCase()}文档`,
+                  tasks: [{
+                    id: `outline-${Date.now()}`,
+                    description: `创建幻灯片大纲: ${outlineData.outline.title}`,
+                    status: "completed",
+                    icon: outlineData.format === "pptx" ? "ppt" : "doc",
+                    slideOutline: outlineData.outline,
+                  }],
+                  collectedInfo: [],
+                  notes: [],
+                };
+              }
+              // Find the current in_progress task and attach the outline
+              const hasInProgressTask = prev.tasks.some((t) => t.status === "in_progress");
+              if (hasInProgressTask) {
+                return {
+                  ...prev,
+                  tasks: prev.tasks.map((t) =>
+                    t.status === "in_progress"
+                      ? { ...t, slideOutline: outlineData.outline }
+                      : t
+                  ),
+                };
+              }
+              // No in-progress task, add a new completed outline task
+              return {
+                ...prev,
+                tasks: [...prev.tasks, {
+                  id: `outline-${Date.now()}`,
+                  description: `幻灯片大纲: ${outlineData.outline.title}`,
+                  status: "completed",
+                  icon: outlineData.format === "pptx" ? "ppt" : "doc",
+                  slideOutline: outlineData.outline,
+                }],
+              };
+            });
+            setShowTaskPanel(true);
+            break;
+
+          // === Legacy Events ===
           case SSEEventType.TASK_PLANNING:
             const planData = event.data as TaskPlanningEventData;
             setWorkingMemory({
@@ -497,12 +913,14 @@ export function useChatSession() {
           case SSEEventType.DOCUMENT_GENERATION_START:
           case SSEEventType.IMAGE_GENERATION_START:
             if (event.data) {
-              const startData = event.data as { execution_id?: string; title?: string };
+              const startData = event.data as { execution_id?: string; title?: string; code?: string };
               setCodeExecution({
                 isExecuting: true,
-                executionId: startData.execution_id,
-                status: "running",
+                executionId: startData.execution_id ?? null,
+                code: startData.code ?? null,
                 output: "Processing...\n",
+                executionTimeMs: null,
+                status: "running",
                 outputFiles: [],
               });
               setShowArtifacts(true);
@@ -511,7 +929,7 @@ export function useChatSession() {
 
           case SSEEventType.CODE_EXECUTION_OUTPUT:
             if (typeof event.data === "string") {
-              setCodeExecution((prev: any) => ({
+              setCodeExecution((prev) => ({
                 ...prev,
                 output: prev.output + event.data,
               }));
@@ -537,12 +955,12 @@ export function useChatSession() {
                   download_url?: string;
                 }>;
               };
-              setCodeExecution((prev: any) => ({
+              setCodeExecution((prev) => ({
                 ...prev,
                 isExecuting: false,
                 status: resultData.success ? "success" : "error",
                 output: resultData.output || resultData.result || (resultData.error ? `Error: ${resultData.error}` : prev.output),
-                executionTimeMs: resultData.duration_ms,
+                executionTimeMs: resultData.duration_ms ?? null,
                 outputFiles: resultData.output_files || [],
               }));
             }
@@ -563,6 +981,8 @@ export function useChatSession() {
               };
               // Prefer presigned download_url (no auth required)
               const downloadUrl = artifactData.download_url || getArtifactDownloadUrl(artifactData.artifact_id);
+
+              // Add to artifacts panel
               setArtifacts((prev) => [
                 ...prev,
                 {
@@ -579,37 +999,28 @@ export function useChatSession() {
                 },
               ]);
               setShowArtifacts(true);
+
+              // Also add to current message's generatedArtifacts for inline display
+              const generatedArtifact: GeneratedArtifact = {
+                id: artifactData.artifact_id,
+                type: artifactData.type as GeneratedArtifact["type"],
+                format: artifactData.format,
+                title: artifactData.title,
+                url: downloadUrl,
+                filename: artifactData.filename,
+                mimeType: artifactData.mime_type,
+                sizeBytes: artifactData.size_bytes,
+              };
+              setMessages(prev => prev.map(m =>
+                m.id === assistantMessage.id
+                  ? { ...m, generatedArtifacts: [...(m.generatedArtifacts || []), generatedArtifact] }
+                  : m
+              ));
             }
             break;
 
-          case SSEEventType.TASK_PLANNING:
-            if (event.data) {
-              // Initialize working memory from plan
-              const plan = event.data as any;
-              setWorkingMemory({
-                goal: plan.goal,
-                tasks: plan.tasks.map((t: any) => ({
-                  id: t.id,
-                  description: t.description,
-                  status: "pending"
-                })),
-                collectedInfo: [],
-                notes: []
-              });
-              setShowTaskPanel(true);
-            }
-            break;
-
-          case SSEEventType.WORKING_MEMORY_UPDATE:
-            if (event.data) {
-              const data = event.data as any;
-              setWorkingMemory({
-                ...data,
-                collectedInfo: data.collected_info || [],
-              });
-              setShowTaskPanel(true);
-            }
-            break;
+          // Note: TASK_PLANNING and WORKING_MEMORY_UPDATE are handled above (lines 552-571)
+          // Do not duplicate handlers here
 
           case "usage":
             usage = event.data;
@@ -628,8 +1039,8 @@ export function useChatSession() {
       }
 
       // Final update
-      setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-        ...m, content, contexts, webSearchResults, usage, durationMs, firstTokenMs, isStreaming: false 
+      setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
+        ...m, content, contexts, webSearchResults, usage, durationMs, firstTokenMs, isStreaming: false
       } : m));
 
     } catch (error: any) {

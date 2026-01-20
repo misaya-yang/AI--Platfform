@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -37,11 +38,11 @@ async def list_sessions(
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
 ):
-    sessions = await session_manager.list_sessions(
-        user_id=user.user_id,
-        tenant_id=user.tenant_id,
-        service_id=service_id,
+    sessions = await _list_assistant_sessions_for_service_id(
+        session_manager=session_manager,
+        user=user,
         limit=limit,
+        service_id=service_id,
     )
     return [
         {
@@ -56,6 +57,41 @@ async def list_sessions(
         }
         for s in sessions
     ]
+
+
+async def _list_assistant_sessions_for_service_id(
+    session_manager: SessionManager,
+    user: UserContext,
+    limit: int,
+    service_id: Optional[str],
+):
+    """List sessions with backward compatibility for assistant service IDs."""
+    if service_id != "__builtin_assistant__":
+        return await session_manager.list_sessions(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            service_id=service_id,
+            limit=limit,
+        )
+
+    # Fetch broader set then filter to assistant-compatible service_ids.
+    fetch_limit = min(max(limit * 5, limit), 500)
+    sessions = await session_manager.list_sessions(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id=None,
+        limit=fetch_limit,
+    )
+
+    allowed_service_ids = {None, "", "__builtin_assistant__", "assistant"}
+    filtered = [
+        s for s in sessions if getattr(s, "service_id", None) in allowed_service_ids
+    ]
+    filtered.sort(
+        key=lambda s: s.updated_at or s.created_at or datetime.min,
+        reverse=True,
+    )
+    return filtered[:limit]
 
 
 @router.post("/sessions")

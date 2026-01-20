@@ -150,6 +150,59 @@ class ConfluenceSyncService:
         task.add_done_callback(self._handle_task_exception)
         return task
 
+    async def _save_version_before_update(
+        self,
+        doc_id: str,
+        new_confluence_version: int,
+        change_reason: Optional[str] = None,
+    ) -> None:
+        """
+        Save current document content as a version before updating.
+
+        This creates a version snapshot for rollback capability.
+
+        Args:
+            doc_id: Document ID to save version for
+            new_confluence_version: The new Confluence version being synced
+            change_reason: Reason for the change (e.g., "Confluence sync (version X)")
+        """
+        import hashlib
+
+        try:
+            # Get current document content
+            current_doc = await self.db.get_document(doc_id)
+            if not current_doc or not current_doc.get("content"):
+                logger.debug(f"No content to version for document {doc_id}")
+                return
+
+            content = current_doc.get("content", "")
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+            # Check if we already have this version (avoid duplicates)
+            latest_version = await self.db.get_latest_document_version(doc_id)
+            if latest_version and latest_version.get("content_hash") == content_hash:
+                logger.debug(f"Content unchanged for document {doc_id}, skipping version")
+                return
+
+            # Create version snapshot
+            await self.db.create_document_version(
+                document_id=doc_id,
+                content=content,
+                content_hash=content_hash,
+                change_type="updated",
+                title=current_doc.get("title"),
+                metadata=current_doc.get("metadata"),
+                change_reason=change_reason or f"Confluence sync (version {new_confluence_version})",
+                confluence_version=current_doc.get("confluence_version"),
+                confluence_updated_at=current_doc.get("updated_at"),
+            )
+
+            logger.info(f"Saved version snapshot for document {doc_id} before Confluence sync")
+
+        except Exception as e:
+            # Don't fail the sync if versioning fails - just log and continue
+            logger.warning(f"Failed to save version for document {doc_id}: {e}")
+
     async def _get_client(self, connection_id: str) -> ConfluenceClient:
         """
         获取或创建 Confluence 客户端（带 TTL 和并发保护）
@@ -165,13 +218,12 @@ class ConfluenceSyncService:
             if time.time() - created_at < self._client_cache_ttl:
                 return self._clients[connection_id]
 
-        # Get or create connection-specific lock (protected by global lock)
-        if connection_id not in self._client_locks:
-            # Use a simple approach: create lock under global lock check
-            # This is safe because dict operations are atomic in CPython
-            self._client_locks[connection_id] = asyncio.Lock()
+        # Get or create connection-specific lock atomically using setdefault
+        # setdefault is atomic in CPython, preventing race conditions where
+        # multiple coroutines could create different locks for the same connection_id
+        lock = self._client_locks.setdefault(connection_id, asyncio.Lock())
 
-        async with self._client_locks[connection_id]:
+        async with lock:
             # Double-check after acquiring lock (another coroutine may have created/refreshed)
             if connection_id in self._clients:
                 created_at = self._client_created_at.get(connection_id, 0)
@@ -218,11 +270,10 @@ class ConfluenceSyncService:
 
     async def _close_client(self, connection_id: str) -> None:
         """Close and remove a cached client (thread-safe)."""
-        # Acquire lock to prevent race with _get_client
-        if connection_id not in self._client_locks:
-            self._client_locks[connection_id] = asyncio.Lock()
+        # Get or create lock atomically to prevent race with _get_client
+        lock = self._client_locks.setdefault(connection_id, asyncio.Lock())
 
-        async with self._client_locks[connection_id]:
+        async with lock:
             await self._close_client_unsafe(connection_id)
 
     def _verify_confluence_access(
@@ -1784,10 +1835,25 @@ class ConfluenceSyncService:
                 # 去重（不同根页面可能有重叠的子页面）
                 pages_to_sync = list(dict.fromkeys(pages_to_sync))
             else:
-                # 获取空间中的所有页面
-                pages_to_sync = []
-                async for page_data in client.iter_space_pages(space_id, batch_size=50):
-                    pages_to_sync.append(str(page_data.get("id")))
+                # 白名单模式：只同步已添加到 confluence_pages 表中的页面
+                # 不再自动拉取整个空间的所有页面，避免同步用户不需要的内容
+                pages_to_sync = list(existing_page_ids)
+
+                if not pages_to_sync:
+                    # 没有已添加的页面，直接返回成功
+                    logger.info(f"No pages added to binding {binding_id}, nothing to sync")
+                    result.completed_at = _utc_now()
+                    await self.db.update_confluence_binding(binding_id, {
+                        "status": "completed",
+                        "last_sync_at": _utc_now(),
+                    })
+                    await self.db.update_confluence_sync_task(task_id, {
+                        "status": "completed",
+                        "progress": 100,
+                        "completed_at": _utc_now(),
+                        "result": result.to_dict(),
+                    })
+                    return result
 
             total_count = len(pages_to_sync)
             result.total_pages = total_count
@@ -1859,6 +1925,12 @@ class ConfluenceSyncService:
                         # 更新现有文档（内容变化时也需要重新处理图片）
                         doc_id = existing.get("document_id")
                         if doc_id:
+                            # 保存版本快照（用于回滚）
+                            await self._save_version_before_update(
+                                doc_id, page.version,
+                                f"Confluence sync: {page.title} (v{page.version})"
+                            )
+
                             content_text = extract_plain_text(page.body_storage)
                             await self.db.update_document_fields(
                                 doc_id,
@@ -1931,20 +2003,23 @@ class ConfluenceSyncService:
                     logger.error(f"Failed to sync page {page_id}: {e}")
 
             # 处理删除的页面
-            deleted_page_ids = existing_page_ids - seen_page_ids
-            for page_id in deleted_page_ids:
-                existing = await self.db.get_confluence_page_by_page_id(binding_id, page_id)
-                if existing and existing.get("document_id"):
-                    doc_id = existing["document_id"]
-                    try:
-                        await self.knowledge_service.delete_document(
-                            dataset_id=dataset_id,
-                            document_id=doc_id,
-                        )
-                        result.deleted_documents.append(doc_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete document {doc_id}: {e}")
-                await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
+            # 只在 root_page_ids 模式下自动删除（基于空间发现）
+            # 白名单模式下跳过自动删除，避免因同步失败而误删页面
+            if root_page_ids:
+                deleted_page_ids = existing_page_ids - seen_page_ids
+                for page_id in deleted_page_ids:
+                    existing = await self.db.get_confluence_page_by_page_id(binding_id, page_id)
+                    if existing and existing.get("document_id"):
+                        doc_id = existing["document_id"]
+                        try:
+                            await self.knowledge_service.delete_document(
+                                dataset_id=dataset_id,
+                                document_id=doc_id,
+                            )
+                            result.deleted_documents.append(doc_id)
+                        except Exception as e:
+                            logger.warning(f"Failed to delete document {doc_id}: {e}")
+                    await self.db.delete_confluence_page_by_page_id(binding_id, page_id)
 
             result.completed_at = _utc_now()
 
@@ -2120,6 +2195,13 @@ class ConfluenceSyncService:
                     if existing and existing.get("document_id"):
                         # 更新现有文档
                         doc_id = existing["document_id"]
+
+                        # 保存版本快照（用于回滚）
+                        await self._save_version_before_update(
+                            doc_id, page.version,
+                            f"Confluence sync: {page.title} (v{page.version})"
+                        )
+
                         content_text = extract_plain_text(page.body_storage)
                         await self.db.update_document_fields(
                             doc_id,
@@ -2240,6 +2322,12 @@ class ConfluenceSyncService:
             doc_id = page_record.get("document_id")
 
             if doc_id:
+                # 保存版本快照（用于回滚）
+                await self._save_version_before_update(
+                    doc_id, page.version,
+                    f"Confluence sync: {page.title} (v{page.version})"
+                )
+
                 # 更新现有文档
                 content_text = extract_plain_text(page.body_storage)
                 await self.db.update_document_fields(
@@ -2386,6 +2474,13 @@ class ConfluenceSyncService:
         if existing and existing.get("document_id"):
             # 更新现有文档
             doc_id = existing["document_id"]
+
+            # 保存版本快照（用于回滚）
+            await self._save_version_before_update(
+                doc_id, page.version,
+                f"Confluence sync: {page.title} (v{page.version})"
+            )
+
             content_text = extract_plain_text(page.body_storage)
             await self.db.update_document_fields(
                 doc_id,
@@ -2436,6 +2531,7 @@ class ConfluenceSyncService:
         status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        synced_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         列出绑定下的页面记录
@@ -2446,6 +2542,7 @@ class ConfluenceSyncService:
             status: 状态过滤
             limit: 返回数量限制
             offset: 偏移量
+            synced_only: 如果为 True，只返回已入库的页面（有 document_id）
 
         Returns:
             页面记录列表
@@ -2461,7 +2558,113 @@ class ConfluenceSyncService:
             status=status,
             limit=limit,
             offset=offset,
+            synced_only=synced_only,
         )
+
+    async def cleanup_unsynced_pages(
+        self,
+        binding_id: str,
+        user: UserContext,
+    ) -> Dict[str, Any]:
+        """
+        清理未同步的页面记录
+
+        删除所有 document_id 为空的记录（从未真正同步到知识库的页面）
+
+        Args:
+            binding_id: 绑定 ID
+            user: 用户上下文
+
+        Returns:
+            清理结果，包含删除的记录数
+        """
+        # 验证访问权限
+        await self._verify_binding_access(binding_id, user)
+
+        deleted = await self.db.cleanup_unsynced_confluence_pages(binding_id)
+
+        logger.info(f"Cleaned up {deleted} unsynced pages for binding {binding_id}")
+
+        return {
+            "binding_id": binding_id,
+            "deleted": deleted,
+        }
+
+    async def remove_pages(
+        self,
+        page_record_ids: List[str],
+        user: UserContext,
+        delete_documents: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        批量移除页面记录（从 confluence_pages 表中删除）
+
+        Args:
+            page_record_ids: confluence_pages 表中的记录 ID 列表
+            user: 用户上下文
+            delete_documents: 是否同时删除知识库中的对应文档
+
+        Returns:
+            移除结果统计
+
+        Raises:
+            ConfluenceAccessDeniedError: 访问被拒绝
+        """
+        if not page_record_ids:
+            return {
+                "removed": 0,
+                "documents_deleted": 0,
+                "errors": [],
+            }
+
+        removed = 0
+        documents_deleted = 0
+        errors = []
+
+        for record_id in page_record_ids:
+            try:
+                # 获取页面记录
+                page = await self.db.get_confluence_page(record_id)
+                if not page:
+                    errors.append({"id": record_id, "error": "Page not found"})
+                    continue
+
+                # 验证访问权限
+                await self._verify_binding_access(page["binding_id"], user)
+
+                # 如果需要删除文档，先删除知识库中的文档
+                if delete_documents and page.get("document_id"):
+                    try:
+                        # 获取 binding 信息以获取 dataset_id
+                        binding = await self.db.get_confluence_binding(page["binding_id"])
+                        if binding and binding.get("dataset_id"):
+                            await self.kb.delete_document(
+                                binding["dataset_id"],
+                                page["document_id"],
+                            )
+                            documents_deleted += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to delete document {page.get('document_id')}: {e}"
+                        )
+
+                # 删除页面记录
+                success = await self.db.delete_confluence_page(record_id)
+                if success:
+                    removed += 1
+                else:
+                    errors.append({"id": record_id, "error": "Failed to delete"})
+
+            except ConfluenceAccessDeniedError:
+                errors.append({"id": record_id, "error": "Access denied"})
+            except Exception as e:
+                errors.append({"id": record_id, "error": str(e)})
+
+        return {
+            "removed": removed,
+            "documents_deleted": documents_deleted,
+            "errors": errors,
+        }
 
     # ============ Batch Sync Operations ============
 
@@ -2749,6 +2952,12 @@ class ConfluenceSyncService:
                         # 更新现有文档
                         doc_id = existing.get("document_id")
                         if doc_id:
+                            # 保存版本快照（用于回滚）
+                            await self._save_version_before_update(
+                                doc_id, page.version,
+                                f"Confluence sync: {page.title} (v{page.version})"
+                            )
+
                             content_text = extract_plain_text(page.body_storage)
                             await self.db.update_document_fields(
                                 doc_id,

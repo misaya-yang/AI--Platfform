@@ -41,6 +41,11 @@ from .document_generator_tool import (
     DocumentGeneratorExecutor,
     register_document_generation_tool,
 )
+from .pptx_generator_tool import (
+    PPTX_GENERATION_DEFINITION,
+    PPTXGeneratorExecutor,
+    register_pptx_generation_tool,
+)
 
 __all__ = [
     # Tavily
@@ -71,4 +76,8 @@ __all__ = [
     "DOCUMENT_GENERATION_DEFINITION",
     "DocumentGeneratorExecutor",
     "register_document_generation_tool",
+    # PPTX generator tool
+    "PPTX_GENERATION_DEFINITION",
+    "PPTXGeneratorExecutor",
+    "register_pptx_generation_tool",
 ]

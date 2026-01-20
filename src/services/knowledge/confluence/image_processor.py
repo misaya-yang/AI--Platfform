@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 # Max image size for DashScope multimodal API (3MB)
 MAX_IMAGE_SIZE_BYTES = 3 * 1024 * 1024
 
+# VLM call timeout in seconds (prevent hanging on slow/unresponsive VLM service)
+VLM_TIMEOUT_SECONDS = 60
+
 
 @dataclass
 class ImageProcessingResult:
@@ -438,16 +441,26 @@ class ConfluenceImageProcessor:
                 if context:
                     vlm_context = f"{vlm_context} - {context}" if vlm_context else context
 
-                description_result = await self.vlm_service.describe_image(
-                    image_bytes=image_bytes,
-                    image_type=image_type,
-                    context=vlm_context,
+                # Add timeout to prevent hanging on slow/unresponsive VLM service
+                description_result = await asyncio.wait_for(
+                    self.vlm_service.describe_image(
+                        image_bytes=image_bytes,
+                        image_type=image_type,
+                        context=vlm_context,
+                    ),
+                    timeout=VLM_TIMEOUT_SECONDS,
                 )
                 vlm_description = description_result.description
                 logger.debug(
                     f"Generated VLM description for {attachment.filename}: "
                     f"{len(vlm_description)} chars, {description_result.tokens_used} tokens"
                 )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"VLM description timed out for {attachment.filename} "
+                    f"after {VLM_TIMEOUT_SECONDS}s"
+                )
+                # Continue without VLM description - image still stored
             except Exception as e:
                 logger.warning(f"Failed to generate VLM description for {attachment.filename}: {e}")
                 # Continue without VLM description - image still stored
@@ -593,31 +606,27 @@ class ConfluenceImageProcessor:
 
         storage_url = await upload_with_limit()
 
-        # Generate VLM description with semaphore
+        # Generate VLM description with semaphore and timeout
         vlm_description: Optional[str] = None
         if self.generate_vlm_descriptions and self.vlm_service:
             async def vlm_with_limit():
+                image_type = self._detect_image_type(attachment.filename)
+                vlm_context = page_title or ""
+                if context:
+                    vlm_context = f"{vlm_context} - {context}" if vlm_context else context
+
+                # Add timeout to prevent hanging on slow/unresponsive VLM service
+                vlm_call = self.vlm_service.describe_image(
+                    image_bytes=image_bytes,
+                    image_type=image_type,
+                    context=vlm_context,
+                )
+
                 if vlm_semaphore:
                     async with vlm_semaphore:
-                        image_type = self._detect_image_type(attachment.filename)
-                        vlm_context = page_title or ""
-                        if context:
-                            vlm_context = f"{vlm_context} - {context}" if vlm_context else context
-                        return await self.vlm_service.describe_image(
-                            image_bytes=image_bytes,
-                            image_type=image_type,
-                            context=vlm_context,
-                        )
+                        return await asyncio.wait_for(vlm_call, timeout=VLM_TIMEOUT_SECONDS)
                 else:
-                    image_type = self._detect_image_type(attachment.filename)
-                    vlm_context = page_title or ""
-                    if context:
-                        vlm_context = f"{vlm_context} - {context}" if vlm_context else context
-                    return await self.vlm_service.describe_image(
-                        image_bytes=image_bytes,
-                        image_type=image_type,
-                        context=vlm_context,
-                    )
+                    return await asyncio.wait_for(vlm_call, timeout=VLM_TIMEOUT_SECONDS)
 
             try:
                 description_result = await vlm_with_limit()
@@ -625,6 +634,11 @@ class ConfluenceImageProcessor:
                 logger.debug(
                     f"Generated VLM description for {attachment.filename}: "
                     f"{len(vlm_description)} chars, {description_result.tokens_used} tokens"
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"VLM description timed out for {attachment.filename} "
+                    f"after {VLM_TIMEOUT_SECONDS}s"
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate VLM description for {attachment.filename}: {e}")

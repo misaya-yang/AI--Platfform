@@ -84,6 +84,7 @@ class StreamDelta:
     tool_calls: Optional[List[Dict[str, Any]]] = None
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
+    thought_signature: Optional[str] = None  # Gemini 3 thought signature
 
 
 @dataclass
@@ -95,6 +96,7 @@ class ChatMessage:
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     images: Optional[List[str]] = None  # Base64 or URLs for vision models
+    thought_signature: Optional[str] = None  # Gemini 3 thought signature
 
 
 @dataclass
@@ -102,7 +104,7 @@ class ModelConfig:
     """Configuration for a model provider."""
     api_key: str
     base_url: Optional[str] = None
-    timeout: float = 120.0
+    timeout: float = 300.0
     max_retries: int = 2
 
 
@@ -493,6 +495,8 @@ class ModelRegistry:
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         stream: bool = False,
+        thinking_level: Optional[str] = None,
+        tool_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build request body for the provider's API."""
         if provider == ModelProvider.ANTHROPIC:
@@ -501,7 +505,7 @@ class ModelRegistry:
             )
         elif provider == ModelProvider.GOOGLE:
             return self._build_google_body(
-                model_id, messages, temperature, max_tokens, tools, stream
+                model_id, messages, temperature, max_tokens, tools, stream, thinking_level, tool_config
             )
         else:
             return self._build_openai_body(
@@ -658,6 +662,8 @@ class ModelRegistry:
         max_tokens: Optional[int],
         tools: Optional[List[Dict[str, Any]]],
         stream: bool,
+        thinking_level: Optional[str] = None,
+        tool_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build Google Gemini API request body."""
         contents = []
@@ -668,8 +674,76 @@ class ModelRegistry:
                 system_instruction = msg.content
                 continue
 
+            # Handle tool result messages (functionResponse)
+            if msg.role == "tool" and msg.tool_call_id:
+                # Parse function name from tool_call_id (format: "call_<name>")
+                func_name = msg.name or msg.tool_call_id
+                if func_name.startswith("call_"):
+                    func_name = func_name[5:]
+
+                # Try to parse content as JSON, otherwise wrap as object
+                try:
+                    response_data = json.loads(msg.content) if msg.content else {}
+                except json.JSONDecodeError:
+                    response_data = {"result": msg.content}
+
+                contents.append({
+                    "role": "user",  # Google uses "user" role for function responses
+                    "parts": [{
+                        "functionResponse": {
+                            "name": func_name,
+                            "response": response_data
+                        }
+                    }]
+                })
+                continue
+
             role = "user" if msg.role == "user" else "model"
             parts = []
+
+            # Handle assistant messages with tool_calls (functionCall)
+            if msg.role == "assistant":
+                # Add text content first if present
+                if msg.content:
+                    text_part = {"text": msg.content}
+                    # Attach thoughtSignature to text part if present
+                    if msg.thought_signature:
+                        text_part["thoughtSignature"] = msg.thought_signature
+                    parts.append(text_part)
+
+                # Add function calls with thoughtSignature (CRITICAL for Gemini 3)
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        func = tc.get("function", {})
+                        func_name = func.get("name", "")
+    
+                        # Parse arguments
+                        try:
+                            args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+    
+                        func_call_part: Dict[str, Any] = {
+                            "functionCall": {
+                                "name": func_name,
+                                "args": args
+                            }
+                        }
+    
+                        # CRITICAL: Include thoughtSignature if present (required for Gemini 3)
+                        if "thoughtSignature" in tc:
+                            func_call_part["thoughtSignature"] = tc["thoughtSignature"]
+                            logger.debug(f"[GEMINI3] Including thoughtSignature for {func_name}")
+    
+                        parts.append(func_call_part)
+                
+                # If only thoughtSignature is present without content or tool calls (unlikely but possible)
+                if not msg.content and not msg.tool_calls and msg.thought_signature:
+                     parts.append({"text": "", "thoughtSignature": msg.thought_signature})
+
+                if parts:
+                    contents.append({"role": role, "parts": parts})
+                continue
 
             # Handle vision content
             if msg.images and msg.role == "user":
@@ -726,6 +800,9 @@ class ModelRegistry:
             }
         }
 
+        if thinking_level:
+            body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level}
+
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
@@ -744,6 +821,10 @@ class ModelRegistry:
             if function_declarations:
                 google_tools.append({"functionDeclarations": function_declarations})
                 body["tools"] = google_tools
+        
+        # Apply tool_config if provided
+        if tool_config:
+            body["toolConfig"] = tool_config
 
         return body
 
@@ -754,6 +835,7 @@ class ModelRegistry:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        thinking_level: Optional[str] = None,
     ) -> Tuple[str, Dict[str, int]]:
         """
         Non-streaming chat completion.
@@ -767,7 +849,7 @@ class ModelRegistry:
 
         client = await self._get_client(model.provider)
         body = self._build_request_body(
-            model.provider, model_id, messages, temperature, max_tokens, tools, stream=False
+            model.provider, model_id, messages, temperature, max_tokens, tools, stream=False, thinking_level=thinking_level
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -819,6 +901,8 @@ class ModelRegistry:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        thinking_level: Optional[str] = None,
+        tool_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[StreamDelta]:
         """
         Streaming chat completion.
@@ -831,7 +915,7 @@ class ModelRegistry:
 
         client = await self._get_client(model.provider)
         body = self._build_request_body(
-            model.provider, model_id, messages, temperature, max_tokens, tools, stream=True
+            model.provider, model_id, messages, temperature, max_tokens, tools, stream=True, thinking_level=thinking_level, tool_config=tool_config
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -943,7 +1027,20 @@ class ModelRegistry:
         body: Dict[str, Any],
     ) -> AsyncIterator[StreamDelta]:
         """Stream from Google Gemini API."""
+        # Debug: Log request body for troubleshooting
+        import json as json_module
+        tool_names = []
+        for t in body.get("tools", []):
+            for fd in t.get("functionDeclarations", []):
+                tool_names.append(fd.get("name", "unknown"))
+        logger.info(f"[GEMINI] Tools in request: {tool_names}")
+        logger.debug(f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}")
+
         async with client.stream("POST", endpoint, json=body) as response:
+            if response.status_code != 200:
+                # Read error response body for debugging
+                error_body = await response.aread()
+                logger.error(f"[GEMINI] Error response ({response.status_code}): {error_body.decode('utf-8', errors='replace')}")
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
@@ -958,18 +1055,71 @@ class ModelRegistry:
 
                 # Parse Google Gemini streaming response
                 candidates = evt.get("candidates", [])
+                
+                # Check for promptFeedback (Safety blocking)
+                prompt_feedback = evt.get("promptFeedback")
+                if prompt_feedback and prompt_feedback.get("blockReason"):
+                    block_reason = prompt_feedback.get("blockReason")
+                    logger.warning(f"[GEMINI] Response blocked: {block_reason}")
+                    yield StreamDelta(
+                        finish_reason="safety",
+                        content=f"\n\n[System: Response blocked due to safety reason: {block_reason}]"
+                    )
+                    continue
+
                 if candidates:
                     candidate = candidates[0]
                     content = candidate.get("content", {})
                     parts = content.get("parts", [])
+
+                    # Check for finishReason in candidate even if parts are empty
+                    finish_reason = candidate.get("finishReason")
+                    
+                    if not parts and finish_reason:
+                         # Handle case where only finishReason is sent (e.g. SAFETY, STOP)
+                         yield StreamDelta(finish_reason=finish_reason.lower())
+
+                    tool_calls_batch = []
                     for part in parts:
                         if "text" in part:
                             yield StreamDelta(content=part["text"])
+                        elif "functionCall" in part:
+                            # Gemini 3 function call with optional thoughtSignature
+                            fc = part["functionCall"]
+                            tool_call: Dict[str, Any] = {
+                                "id": f"call_{fc.get('name', 'unknown')}",
+                                "type": "function",
+                                "function": {
+                                    "name": fc.get("name"),
+                                    "arguments": json.dumps(fc.get("args", {})),
+                                }
+                            }
+                            # CRITICAL: Preserve thoughtSignature for Gemini 3
+                            # This must be passed back in subsequent requests
+                            if "thoughtSignature" in part:
+                                tool_call["thoughtSignature"] = part["thoughtSignature"]
+                                logger.debug(f"[GEMINI3] Captured thoughtSignature for {fc.get('name')}")
+                            tool_calls_batch.append(tool_call)
+                        
+                        # Capture standalone thoughtSignature if present (rare but possible)
+                        elif "thoughtSignature" in part and "functionCall" not in part:
+                             logger.debug(f"[GEMINI3] Captured standalone thoughtSignature")
+                             ts = part["thoughtSignature"]
+                             # If we have text content in the same part (which shouldn't happen based on API structure, but to be safe)
+                             # Or if we want to yield it attached to text
+                             yield StreamDelta(thought_signature=ts)
+
+                    # Yield all tool calls together
+                    if tool_calls_batch:
+                        yield StreamDelta(tool_calls=tool_calls_batch)
 
                     # Check finish reason
-                    finish_reason = candidate.get("finishReason")
                     if finish_reason:
                         yield StreamDelta(finish_reason=finish_reason.lower())
+                
+                else:
+                    # No candidates - could be usage metadata only or keep-alive
+                    pass
 
                 # Handle usage metadata
                 usage_meta = evt.get("usageMetadata", {})

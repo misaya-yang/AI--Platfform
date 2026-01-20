@@ -53,6 +53,21 @@ export function TokenUsagePanel() {
     staleTime: 30000,
   });
 
+  // Provider breakdown query
+  const providerQuery = useQuery({
+    queryKey: ["dashboard-provider-breakdown", dateRange, serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      getUsageBreakdown({
+        dimension: "provider",
+        start_date: dateRange[0],
+        end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+        limit: 10,
+      }),
+    staleTime: 30000,
+  });
+
   const timeseriesQuery = useQuery({
     queryKey: ["dashboard-token-timeseries", dateRange, granularity, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
@@ -69,11 +84,13 @@ export function TokenUsagePanel() {
   const refetch = () => {
     summaryQuery.refetch();
     breakdownQuery.refetch();
+    providerQuery.refetch();
     timeseriesQuery.refetch();
   };
 
   const summary = summaryQuery.data;
   const breakdown = breakdownQuery.data?.items || [];
+  const providerBreakdown = providerQuery.data?.items || [];
   const timeseries = timeseriesQuery.data?.data || [];
 
   const totalTokens = summary?.total_tokens || 0;
@@ -117,54 +134,108 @@ export function TokenUsagePanel() {
             success={{ percent: inputPercent }}
             showInfo={false}
             strokeColor="#8b5cf6"
-            trailColor={darkMode ? "#334155" : "#e2e8f0"}
+            railColor={darkMode ? "#334155" : "#e2e8f0"}
           />
         </div>
       </div>
 
-      {/* Model breakdown */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-          模型分布
-        </div>
-        {breakdown.slice(0, 4).map((item, index) => (
-          <div
-            key={item.model || index}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 6,
-            }}
-          >
+      {/* Distribution sections - side by side */}
+      <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+        {/* Model breakdown */}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+            模型分布
+          </div>
+          {breakdown.slice(0, 3).map((item, index) => (
             <div
+              key={item.model || index}
               style={{
-                width: 8,
-                height: 8,
-                borderRadius: 2,
-                background: modelColors[index % modelColors.length],
-              }}
-            />
-            <span
-              style={{
-                flex: 1,
-                fontSize: 12,
-                color: darkMode ? "#e2e8f0" : "#475569",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                marginBottom: 5,
               }}
             >
-              {item.model || "Unknown"}
-            </span>
-            <span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>
-              {formatTokens(item.total_tokens)}
-            </span>
-            <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8", width: 40 }}>
-              {item.percentage.toFixed(0)}%
-            </span>
+              <div
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 2,
+                  background: modelColors[index % modelColors.length],
+                }}
+              />
+              <span
+                style={{
+                  flex: 1,
+                  fontSize: 11,
+                  color: darkMode ? "#e2e8f0" : "#475569",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {item.model || "Unknown"}
+              </span>
+              <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>
+                {item.percentage.toFixed(0)}%
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Provider breakdown */}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+            厂商分布
           </div>
-        ))}
+          {providerBreakdown.slice(0, 3).map((item, index) => {
+            const providerColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
+            const providerName = item.provider || "unknown";
+            const displayName = {
+              "dashscope": "阿里云",
+              "openai": "OpenAI",
+              "anthropic": "Anthropic",
+              "google": "Google",
+              "deepseek": "DeepSeek",
+              "unknown": "其他",
+            }[providerName] || providerName;
+            return (
+              <div
+                key={providerName}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  marginBottom: 5,
+                }}
+              >
+                <div
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 2,
+                    background: providerColors[index % providerColors.length],
+                  }}
+                />
+                <span
+                  style={{
+                    flex: 1,
+                    fontSize: 11,
+                    color: darkMode ? "#e2e8f0" : "#475569",
+                  }}
+                >
+                  {displayName}
+                </span>
+                <span style={{ fontSize: 11, color: "#10b981", fontWeight: 500 }}>
+                  ${(item.cost_usd || 0).toFixed(2)}
+                </span>
+                <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>
+                  {item.percentage.toFixed(0)}%
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Trend chart */}

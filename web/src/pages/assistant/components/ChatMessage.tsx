@@ -13,13 +13,14 @@
 
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap } from "lucide-react";
+import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap, Brain, PenTool, Cog, Eye, ListTodo } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { WebSearchDisplay } from "./WebSearchDisplay";
 import { ContextDisplay } from "./ContextDisplay";
 import { CitationDisplay } from "./CitationDisplay";
-import type { ChatMessage as ChatMessageType, SearchStatusItem } from "../types";
+import { DocumentPreview } from "./DocumentPreview";
+import type { ChatMessage as ChatMessageType, SearchStatusItem, AgentPhaseStatus } from "../types";
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -137,6 +138,108 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
         })}
       </AnimatePresence>
     </div>
+  );
+}
+
+/** Agent phase display showing ReAct thinking status - Manus style (at end of content) */
+function AgentPhaseDisplay({ phase }: { phase: AgentPhaseStatus }) {
+  const { t } = useTranslation();
+
+  // Map phase to icon, color, and label
+  const phaseConfig: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
+    analyzing: {
+      icon: <Brain className="h-3.5 w-3.5" />,
+      color: "text-blue-500",
+      label: t("assistant.phase.analyzing", "Analyzing task..."),
+    },
+    thinking: {
+      icon: <Brain className="h-3.5 w-3.5" />,
+      color: "text-violet-500",
+      label: t("assistant.phase.thinking", "Thinking..."),
+    },
+    planning: {
+      icon: <ListTodo className="h-3.5 w-3.5" />,
+      color: "text-amber-500",
+      label: t("assistant.phase.planning", "Creating plan..."),
+    },
+    executing: {
+      icon: <Cog className="h-3.5 w-3.5" />,
+      color: "text-emerald-500",
+      label: t("assistant.phase.executing", "Executing..."),
+    },
+    observing: {
+      icon: <Eye className="h-3.5 w-3.5" />,
+      color: "text-cyan-500",
+      label: t("assistant.phase.observing", "Analyzing results..."),
+    },
+    writing: {
+      icon: <PenTool className="h-3.5 w-3.5" />,
+      color: "text-pink-500",
+      label: t("assistant.phase.writing", "Writing content..."),
+    },
+    completing: {
+      icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+      color: "text-emerald-500",
+      label: t("assistant.phase.completing", "Completing..."),
+    },
+  };
+
+  const config = phaseConfig[phase.phase] || phaseConfig.thinking;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/50"
+    >
+      {/* Animated icon */}
+      <motion.div
+        animate={{
+          rotate: phase.phase === "executing" ? 360 : 0,
+          scale: [1, 1.1, 1],
+        }}
+        transition={{
+          rotate: {
+            duration: phase.phase === "executing" ? 2 : 0,
+            repeat: phase.phase === "executing" ? Infinity : 0,
+            ease: "linear"
+          },
+          scale: {
+            duration: 1.5,
+            repeat: Infinity,
+            ease: "easeInOut"
+          }
+        }}
+        className={config.color}
+      >
+        {config.icon}
+      </motion.div>
+
+      {/* Status text */}
+      <span className={cn("text-xs font-medium", config.color)}>
+        {phase.message || config.label}
+      </span>
+
+      {/* Three dots animation */}
+      <div className="flex gap-0.5 ml-1">
+        <motion.span
+          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
+          animate={{ opacity: [0.3, 1, 0.3] }}
+          transition={{ duration: 1, repeat: Infinity, delay: 0 }}
+        />
+        <motion.span
+          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
+          animate={{ opacity: [0.3, 1, 0.3] }}
+          transition={{ duration: 1, repeat: Infinity, delay: 0.2 }}
+        />
+        <motion.span
+          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
+          animate={{ opacity: [0.3, 1, 0.3] }}
+          transition={{ duration: 1, repeat: Infinity, delay: 0.4 }}
+        />
+      </div>
+    </motion.div>
   );
 }
 
@@ -391,34 +494,41 @@ export function ChatMessage({ message }: ChatMessageProps) {
               {message.isGeneratingImage ? (
                 <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
               ) : message.isStreaming ? (
-                message.content ? (
-                  <StreamOutput
-                    text={message.content}
-                    isStreaming={true}
-                    id={`msg-${message.id}`}
-                  />
-                ) : (
-                  <div className="flex items-center gap-3 text-slate-500 dark:text-slate-400">
-                    <div className="flex gap-1">
-                      <motion.div
-                        className="w-2 h-2 rounded-full bg-violet-500"
-                        animate={{ scale: [1, 1.2, 1] }}
-                        transition={{ duration: 0.6, repeat: Infinity, delay: 0 }}
-                      />
-                      <motion.div
-                        className="w-2 h-2 rounded-full bg-purple-500"
-                        animate={{ scale: [1, 1.2, 1] }}
-                        transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }}
-                      />
-                      <motion.div
-                        className="w-2 h-2 rounded-full bg-fuchsia-500"
-                        animate={{ scale: [1, 1.2, 1] }}
-                        transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }}
-                      />
+                <>
+                  {/* Streaming content */}
+                  {message.content && (
+                    <StreamOutput
+                      text={message.content}
+                      isStreaming={true}
+                      id={`msg-${message.id}`}
+                    />
+                  )}
+                  {/* Manus-style thinking indicator at the END of streaming content */}
+                  {message.agentPhase ? (
+                    <AgentPhaseDisplay phase={message.agentPhase} />
+                  ) : !message.content && (
+                    <div className="flex items-center gap-3 text-slate-500 dark:text-slate-400">
+                      <div className="flex gap-1">
+                        <motion.div
+                          className="w-2 h-2 rounded-full bg-violet-500"
+                          animate={{ scale: [1, 1.2, 1] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0 }}
+                        />
+                        <motion.div
+                          className="w-2 h-2 rounded-full bg-purple-500"
+                          animate={{ scale: [1, 1.2, 1] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }}
+                        />
+                        <motion.div
+                          className="w-2 h-2 rounded-full bg-fuchsia-500"
+                          animate={{ scale: [1, 1.2, 1] }}
+                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }}
+                        />
+                      </div>
+                      <span className="text-sm">{t("assistant.thinking", "Thinking...")}</span>
                     </div>
-                    <span className="text-sm">{t("assistant.thinking", "Thinking...")}</span>
-                  </div>
-                )
+                  )}
+                </>
               ) : message.content ? (
                 <StreamOutput
                   text={message.content}
@@ -439,6 +549,23 @@ export function ChatMessage({ message }: ChatMessageProps) {
               citations={message.ragCitations}
               evaluation={message.ragEvaluation}
             />
+          )}
+
+          {/* Generated artifacts (documents, images) - Manus style */}
+          {!isUser && !message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
+            <div className="mt-4 space-y-3">
+              {message.generatedArtifacts.map((artifact) => (
+                <DocumentPreview
+                  key={artifact.id}
+                  title={artifact.title || artifact.filename || "Document"}
+                  content={artifact.content || ""}
+                  format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
+                  downloadUrl={artifact.url}
+                  defaultExpanded={false}
+                  maxHeight={300}
+                />
+              ))}
+            </div>
           )}
         </div>
 

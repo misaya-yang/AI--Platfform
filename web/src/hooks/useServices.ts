@@ -5,6 +5,7 @@ export function useServices() {
   return useQuery({
     queryKey: ["services"],
     queryFn: listServices,
+    staleTime: 30000, // 30秒内不重新请求，避免重复调用
   });
 }
 
@@ -12,6 +13,7 @@ export function useHealth() {
   return useQuery({
     queryKey: ["health"],
     queryFn: getHealth,
+    staleTime: 15000, // 15秒内使用缓存，配合30秒自动刷新
     refetchInterval: 30000,
   });
 }
@@ -20,6 +22,7 @@ export function useProvidersHealth() {
   return useQuery({
     queryKey: ["providers-health"],
     queryFn: getProvidersHealth,
+    staleTime: 30000, // 30秒内使用缓存
     refetchInterval: 60000, // 每分钟刷新
   });
 }

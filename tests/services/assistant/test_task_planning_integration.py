@@ -530,6 +530,54 @@ class TestChatStreamWithPlanning:
         ]
         assert len(memory_events) >= 1
 
+    @pytest.mark.asyncio
+    async def test_chat_stream_requires_plan_confirmation(
+        self, assistant_service, user_context, mock_model_registry
+    ):
+        """Test that a plan confirmation gate is emitted when confirm_plan=True."""
+        config = AssistantConfig(
+            enable_task_planning=True,
+            confirm_plan=True,  # When True, user wants to confirm plan before execution
+            model_id="gpt-4o",
+        )
+
+        async def mock_stream(*args, **kwargs):
+            yield MagicMock(
+                content="Hello",
+                tool_calls=None,
+                usage={"input_tokens": 10, "output_tokens": 5},
+                finish_reason=None,
+            )
+            yield MagicMock(
+                content=None,
+                tool_calls=None,
+                usage=None,
+                finish_reason="stop",
+            )
+
+        mock_model_registry.chat_stream = mock_stream
+
+        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+            mock_registry = MagicMock()
+            mock_registry.list_tools.return_value = []
+            mock_registry.get_openai_schemas.return_value = []
+            mock_get_registry.return_value = mock_registry
+
+            events = []
+            async for event in assistant_service.chat_stream(
+                user=user_context,
+                session_id="test-confirm-plan",
+                message="整理会议纪要",
+                config=config,
+                persist_messages=False,
+            ):
+                events.append(event)
+
+        status_events = [
+            e for e in events if e.event_type == StreamEventType.STATUS.value
+        ]
+        assert any("confirm" in str(e.data).lower() for e in status_events)
+
 
 # =============================================================================
 # Working Memory Integration Tests

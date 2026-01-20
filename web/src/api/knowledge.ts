@@ -344,3 +344,115 @@ export async function previewChunking(
   );
   return data;
 }
+
+// ============================================================
+// Document Version History APIs
+// ============================================================
+
+export interface DocumentVersion {
+  version_id: string;
+  document_id: string;
+  version_number: number;
+  content: string;
+  content_hash: string;
+  confluence_version?: number;
+  confluence_updated_at?: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+  word_count: number;
+  change_type: "created" | "updated" | "restored" | "deleted";
+  change_reason?: string;
+  changed_by?: string;
+  created_at: string;
+}
+
+export interface VersionListResponse {
+  versions: DocumentVersion[];
+  total: number;
+  current_version: number;
+}
+
+export interface VersionDiffItem {
+  type: "insert" | "delete" | "equal";
+  content: string;
+  old_line?: number;
+  new_line?: number;
+}
+
+export interface VersionCompareResponse {
+  from_version: number;
+  to_version: number;
+  diff: VersionDiffItem[];
+  stats: {
+    additions: number;
+    deletions: number;
+    changes: number;
+  };
+}
+
+export interface VersionRestoreResponse {
+  document_id: string;
+  restored_version: number;
+  new_version: number;
+  status: string;
+}
+
+/**
+ * List document versions
+ */
+export async function listDocumentVersions(
+  datasetId: string,
+  documentId: string,
+  limit = 20,
+  offset = 0
+): Promise<VersionListResponse> {
+  const { data } = await api.get<VersionListResponse>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/versions`,
+    { params: { limit, offset } }
+  );
+  return data;
+}
+
+/**
+ * Get specific version
+ */
+export async function getDocumentVersion(
+  datasetId: string,
+  documentId: string,
+  versionNumber: number
+): Promise<DocumentVersion> {
+  const { data } = await api.get<DocumentVersion>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/versions/${versionNumber}`
+  );
+  return data;
+}
+
+/**
+ * Compare two versions
+ */
+export async function compareDocumentVersions(
+  datasetId: string,
+  documentId: string,
+  fromVersion: number,
+  toVersion: number
+): Promise<VersionCompareResponse> {
+  const { data } = await api.get<VersionCompareResponse>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/versions/compare`,
+    { params: { from_version: fromVersion, to_version: toVersion } }
+  );
+  return data;
+}
+
+/**
+ * Restore document to specific version
+ */
+export async function restoreDocumentVersion(
+  datasetId: string,
+  documentId: string,
+  versionNumber: number
+): Promise<VersionRestoreResponse> {
+  const { data } = await api.post<VersionRestoreResponse>(
+    `/api/v1/knowledge/${datasetId}/documents/${documentId}/versions/${versionNumber}/restore`
+  );
+  return data;
+}

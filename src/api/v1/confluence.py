@@ -30,6 +30,8 @@ from ..schemas.confluence import (
     ConfluencePageSyncConfigUpdateSchema,
     ConfluencePageTreeNodeSchema,
     ConfluencePageTreeResponseSchema,
+    ConfluenceRemovePagesRequestSchema,
+    ConfluenceRemovePagesResultSchema,
     ConfluenceSchedulerStatusSchema,
     ConfluenceSpaceBindingCreateSchema,
     ConfluenceSpaceBindingResponseSchema,
@@ -795,6 +797,7 @@ async def list_synced_pages(
     status: Optional[str] = Query(None, description="Filter by status"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    synced_only: bool = Query(True, description="Only return pages with document_id (synced to knowledge base)"),
     user: UserContext = Depends(get_user_context),
 ):
     """List synced pages for a binding."""
@@ -806,6 +809,7 @@ async def list_synced_pages(
             status=status,
             limit=limit,
             offset=offset,
+            synced_only=synced_only,
         )
 
         # Validate pages have required ID field
@@ -837,6 +841,32 @@ async def list_synced_pages(
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         logger.error(f"Failed to list pages: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/bindings/{binding_id}/cleanup")
+async def cleanup_unsynced_pages(
+    request: Request,
+    binding_id: str,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    清理未同步的页面记录。
+
+    删除所有 document_id 为空的记录（从未真正同步到知识库的页面）。
+    这些记录可能是之前发现但从未选择同步的页面。
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
+        svc = get_confluence_sync_service(request)
+        result = await svc.cleanup_unsynced_pages(binding_id, user)
+        return result
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Cleanup failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
@@ -982,6 +1012,38 @@ async def batch_sync_pages(
         raise HTTPException(status_code=403, detail=str(exc))
     except Exception as exc:
         logger.error(f"Batch sync failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/pages/remove", response_model=ConfluenceRemovePagesResultSchema)
+async def remove_pages(
+    request: Request,
+    payload: ConfluenceRemovePagesRequestSchema,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Remove pages from confluence_pages table.
+
+    This removes page records and optionally deletes corresponding documents
+    from the knowledge base. Use this to clean up unwanted pages that were
+    added by mistake or are no longer needed.
+    """
+    try:
+        request.app.state.dispatcher.rbac.require(user.roles, "confluence:manage")
+        svc = get_confluence_sync_service(request)
+
+        result = await svc.remove_pages(
+            page_record_ids=payload.page_record_ids,
+            user=user,
+            delete_documents=payload.delete_documents,
+        )
+        return result
+    except ConfluenceAccessDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Remove pages failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 

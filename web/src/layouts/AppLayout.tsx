@@ -413,20 +413,25 @@ export function AppLayout() {
           line-height: 44px !important;
           width: calc(100% - 24px) !important;
           transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+          /* Improved contrast for dark mode - use brighter text color */
+          color: ${darkMode ? '#D1D5DB' : '#374151'} !important;
         }
 
         .app-sider .ant-menu-item .ant-menu-item-icon {
           font-size: 16px !important;
           transition: transform 0.2s !important;
+          /* Icon color matching text for better readability */
+          color: ${darkMode ? '#9CA3AF' : '#6B7280'} !important;
         }
 
         .app-sider .ant-menu-item:hover .ant-menu-item-icon {
           transform: scale(1.1);
+          color: ${darkMode ? '#E5E7EB' : '#374151'} !important;
         }
 
         .app-sider .ant-menu-item:hover {
-          background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)'} !important;
-          color: ${darkMode ? '#ffffff' : '#000000'} !important;
+          background: ${darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.03)'} !important;
+          color: ${darkMode ? '#F9FAFB' : '#111827'} !important;
         }
 
         .app-sider .ant-menu-item-selected {

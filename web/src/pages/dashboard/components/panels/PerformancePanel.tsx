@@ -76,7 +76,7 @@ export function PerformancePanel() {
             title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P50</span>}
             value={latestData?.p50 || 0}
             suffix="ms"
-            valueStyle={{ fontSize: 16, color: darkMode ? "#f1f5f9" : "#1e293b" }}
+            styles={{ content: { fontSize: 16, color: darkMode ? "#f1f5f9" : "#1e293b" } }}
           />
         </Col>
         <Col span={6}>
@@ -84,7 +84,7 @@ export function PerformancePanel() {
             title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P95</span>}
             value={latestData?.p95 || 0}
             suffix="ms"
-            valueStyle={{ fontSize: 16, color: "#f59e0b" }}
+            styles={{ content: { fontSize: 16, color: "#f59e0b" } }}
           />
         </Col>
         <Col span={6}>
@@ -92,7 +92,7 @@ export function PerformancePanel() {
             title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P99</span>}
             value={latestData?.p99 || 0}
             suffix="ms"
-            valueStyle={{ fontSize: 16, color: "#ef4444" }}
+            styles={{ content: { fontSize: 16, color: "#ef4444" } }}
           />
         </Col>
         <Col span={6}>
@@ -100,7 +100,7 @@ export function PerformancePanel() {
             title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>平均</span>}
             value={latestData?.avgLatency || 0}
             suffix="ms"
-            valueStyle={{ fontSize: 16, color: "#3b82f6" }}
+            styles={{ content: { fontSize: 16, color: "#3b82f6" } }}
           />
         </Col>
       </Row>

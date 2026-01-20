@@ -36,12 +36,14 @@ interface BindingSyncConfigDialogProps {
   binding: ConfluenceBinding;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onUpdated?: () => void;
 }
 
 export function BindingSyncConfigDialog({
   binding,
   open,
   onOpenChange,
+  onUpdated,
 }: BindingSyncConfigDialogProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -74,6 +76,7 @@ export function BindingSyncConfigDialog({
       queryClient.invalidateQueries({ queryKey: ["confluence-bindings"] });
       setError(null);
       onOpenChange(false);
+      onUpdated?.();
     },
     onError: (err) => {
       console.error("Failed to update binding sync config:", err);

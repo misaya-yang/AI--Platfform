@@ -173,7 +173,7 @@ async def get_usage_breakdown(
     recorder = get_usage_recorder()
 
     # Validate dimension
-    valid_dimensions = {"model", "user", "assistant", "service"}
+    valid_dimensions = {"model", "user", "assistant", "service", "provider"}
     if dimension not in valid_dimensions:
         raise HTTPException(
             status_code=400,

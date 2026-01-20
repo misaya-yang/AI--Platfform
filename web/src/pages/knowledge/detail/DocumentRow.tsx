@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { History } from "lucide-react";
 
 import type { Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
@@ -13,29 +14,35 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { DocumentVersionHistory } from "./DocumentVersionHistory";
 
 export function DocumentRow({
   doc,
+  datasetId,
   selected,
   checked,
   onSelect,
   onCheck,
   onReindex,
   onDelete,
+  onVersionRestored,
   showCheckbox = false,
 }: {
   doc: Document;
+  datasetId: string;
   selected: boolean;
   checked?: boolean;
   onSelect: () => void;
   onCheck?: (checked: boolean) => void;
   onReindex: () => Promise<void>;
   onDelete: () => Promise<void>;
+  onVersionRestored?: () => void;
   showCheckbox?: boolean;
 }) {
   const [loading, setLoading] = useState(false);
   const [reindexOpen, setReindexOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
 
   const handleAction = async (action: () => Promise<void>) => {
     if (loading) return;
@@ -133,7 +140,7 @@ export function DocumentRow({
             : "-"}
         </div>
 
-        <div className="w-48 flex justify-center gap-3 text-sm">
+        <div className="w-48 flex justify-center gap-2 text-sm">
           <button
             className="text-primary hover:text-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={(e) => {
@@ -142,7 +149,19 @@ export function DocumentRow({
             }}
             disabled={loading}
           >
-            查看切片
+            切片
+          </button>
+          <button
+            className="text-amber-600 hover:text-amber-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-0.5"
+            onClick={(e) => {
+              e.stopPropagation();
+              setVersionHistoryOpen(true);
+            }}
+            disabled={loading}
+            title="版本历史"
+          >
+            <History className="h-3.5 w-3.5" />
+            历史
           </button>
           <button
             className="text-primary hover:text-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -153,7 +172,7 @@ export function DocumentRow({
             disabled={loading}
             title="重新索引"
           >
-            {loading ? "处理中..." : "重建索引"}
+            {loading ? "..." : "重建"}
           </button>
           <button
             className="text-rose-500 hover:text-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -217,6 +236,15 @@ export function DocumentRow({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <DocumentVersionHistory
+        datasetId={datasetId}
+        documentId={doc.document_id}
+        documentTitle={doc.title || "未命名文档"}
+        open={versionHistoryOpen}
+        onOpenChange={setVersionHistoryOpen}
+        onRestored={onVersionRestored}
+      />
     </>
   );
 }

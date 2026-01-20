@@ -39,7 +39,7 @@ logger = get_logger(__name__)
 
 CODE_EXECUTOR_TOOL = ToolDefinition(
     name="execute_python_code",
-    description="""Execute Python code in a secure sandbox for data analysis and visualization.
+    description="""Execute Python code in a secure Docker sandbox for data analysis and visualization.
 
 ## When to Use (MUST use for these scenarios)
 - Analyzing Excel/CSV data files (calculations, statistics, growth rates, trends)
@@ -106,7 +106,7 @@ print("Chart saved to /workspace/output/revenue_trend.png")
     category=ToolCategory.ANALYSIS,
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
-    when_to_use="ALWAYS use when user uploads Excel/CSV files and asks about data analysis, trends, growth rates, "
+    when_to_use="ALWAYS use when user uploads Excel/CSV files and asks to analyze data, trends, growth rates, "
                 "statistics, or visualization. Use for any data computation that requires precision beyond LLM estimation. "
                 "Use for creating charts, graphs, or any data visualization.",
     when_not_to_use="Do not use for generating AI images/artwork (use generate_image instead). "

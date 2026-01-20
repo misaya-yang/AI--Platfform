@@ -20,5 +20,11 @@ export { WebSearchToggle } from "./WebSearchToggle";
 export { TaskPanel } from "./TaskPanel";
 export type { Task, TaskStatus, CollectedInfo, TaskPanelProps } from "./TaskPanel";
 
+// Manus-style agentic components
+export { AgentTaskTimeline } from "./AgentTaskTimeline";
+export type { AgentTask, SubTask, AgentTaskTimelineProps } from "./AgentTaskTimeline";
+export { DocumentPreview } from "./DocumentPreview";
+export type { DocumentPreviewProps } from "./DocumentPreview";
+
 // Parallel execution visualization
 export { ParallelExecutionView } from "./ParallelExecutionView";

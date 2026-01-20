@@ -630,6 +630,7 @@ class UsageRecorder:
             "user": "user_id",
             "assistant": "assistant_id",
             "service": "service_id",
+            "provider": "provider",  # Special handling via JOIN
         }
         if dimension not in dimension_mapping:
             logger.warning(f"Invalid dimension requested: {dimension}")
@@ -638,30 +639,57 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
-                query = f"""
-                    SELECT
-                        {dimension_column} as dimension_value,
-                        SUM(request_count) as total_requests,
-                        SUM(total_input_tokens) as total_input_tokens,
-                        SUM(total_output_tokens) as total_output_tokens,
-                        SUM(total_cost_cents) as total_cost_cents
-                    FROM usage_daily_aggregates
-                    WHERE tenant_id = $1
-                      AND date >= $2
-                      AND date <= $3
-                      AND {dimension_column} IS NOT NULL
-                """
-                params: List[Any] = [tenant_id, start_date, end_date]
+                # Special query for provider dimension - requires JOIN with model_pricing
+                if dimension == "provider":
+                    query = """
+                        SELECT
+                            COALESCE(mp.provider, 'unknown') as dimension_value,
+                            SUM(u.request_count) as total_requests,
+                            SUM(u.total_input_tokens) as total_input_tokens,
+                            SUM(u.total_output_tokens) as total_output_tokens,
+                            SUM(u.total_cost_cents) as total_cost_cents
+                        FROM usage_daily_aggregates u
+                        LEFT JOIN model_pricing mp ON u.model = mp.model
+                        WHERE u.tenant_id = $1
+                          AND u.date >= $2
+                          AND u.date <= $3
+                    """
+                    params: List[Any] = [tenant_id, start_date, end_date]
 
-                if user_id:
-                    query += " AND user_id = $" + str(len(params) + 1)
-                    params.append(user_id)
-                if service_id:
-                    query += " AND service_id = $" + str(len(params) + 1)
-                    params.append(service_id)
+                    if user_id:
+                        query += " AND u.user_id = $" + str(len(params) + 1)
+                        params.append(user_id)
+                    if service_id:
+                        query += " AND u.service_id = $" + str(len(params) + 1)
+                        params.append(service_id)
 
-                query += f" GROUP BY {dimension_column} ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
-                params.append(limit)
+                    query += f" GROUP BY COALESCE(mp.provider, 'unknown') ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                    params.append(limit)
+                else:
+                    query = f"""
+                        SELECT
+                            {dimension_column} as dimension_value,
+                            SUM(request_count) as total_requests,
+                            SUM(total_input_tokens) as total_input_tokens,
+                            SUM(total_output_tokens) as total_output_tokens,
+                            SUM(total_cost_cents) as total_cost_cents
+                        FROM usage_daily_aggregates
+                        WHERE tenant_id = $1
+                          AND date >= $2
+                          AND date <= $3
+                          AND {dimension_column} IS NOT NULL
+                    """
+                    params: List[Any] = [tenant_id, start_date, end_date]
+
+                    if user_id:
+                        query += " AND user_id = $" + str(len(params) + 1)
+                        params.append(user_id)
+                    if service_id:
+                        query += " AND service_id = $" + str(len(params) + 1)
+                        params.append(service_id)
+
+                    query += f" GROUP BY {dimension_column} ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                    params.append(limit)
 
                 rows = await conn.fetch(query, *params)
 

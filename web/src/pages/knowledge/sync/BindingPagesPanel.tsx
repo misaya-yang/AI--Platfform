@@ -1,8 +1,9 @@
 /**
  * Binding Pages Panel Component
  *
- * Displays synced pages for a Confluence binding.
- * Embedded panel version of SyncedPages.tsx for use in knowledge detail page.
+ * Displays synced documents for a Confluence binding.
+ * Only shows pages that are already synced to the knowledge base (have document_id).
+ * Embedded panel version for use in knowledge detail page.
  */
 
 import { useState, useMemo } from "react";
@@ -20,32 +21,32 @@ import {
   AlertCircle,
   Loader2,
   ExternalLink,
-  RotateCcw,
-  CheckSquare,
-  Square,
   Plus,
-  Settings,
   Cloud,
-  Hand,
+  Trash2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+// Removed Select import - status filter no longer needed since we only show synced docs
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { toast } from "@/hooks/use-toast";
 
 import {
@@ -54,17 +55,14 @@ import {
   syncSinglePage,
   batchSyncPages,
   triggerSync,
+  removePages,
 } from "@/api/confluence";
 import type { ConfluencePageRecord, ConfluenceBinding, ConfluenceConnection } from "@/types/confluence";
 import AddPagesModal from "@/pages/confluence/AddPagesModal";
-import { BindingSyncConfigDialog } from "@/pages/confluence/BindingSyncConfigDialog";
-import { PageSyncConfigDialog } from "@/pages/confluence/PageSyncConfigDialog";
 
 // ============================================================
 // Types
 // ============================================================
-
-type PageStatus = "all" | "synced" | "pending" | "error";
 
 interface BindingPagesPanelProps {
   bindingId: string;
@@ -186,17 +184,13 @@ function PageListRow({
   isSyncing,
   onSelect,
   onSync,
-  onConfigureSync,
 }: {
   page: ConfluencePageRecord;
   isSelected: boolean;
   isSyncing: boolean;
   onSelect: (checked: boolean) => void;
   onSync: () => void;
-  onConfigureSync: () => void;
 }) {
-  const hasSyncConfig = page.sync_mode !== null;
-
   return (
     <div className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/40 border-b border-border/40 last:border-b-0 transition-colors">
       <Checkbox checked={isSelected} onCheckedChange={onSelect} className="flex-shrink-0" />
@@ -218,16 +212,6 @@ function PageListRow({
         <PageIcon hasChildren={page.depth === 0 || page.parent_page_id === null} />
 
         <span className="text-sm font-medium text-foreground truncate">{page.title}</span>
-
-        {hasSyncConfig && (
-          <Badge variant="outline" className="text-xs px-1.5 py-0">
-            {page.sync_mode === "polling" ? (
-              <Clock className="h-3 w-3" />
-            ) : (
-              <Hand className="h-3 w-3" />
-            )}
-          </Badge>
-        )}
       </div>
 
       <div className="w-24 flex-shrink-0">
@@ -247,68 +231,36 @@ function PageListRow({
         {page.last_synced_at ? new Date(page.last_synced_at).toLocaleDateString() : "-"}
       </span>
 
-      <div className="flex items-center gap-1 w-28 flex-shrink-0 justify-end">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-primary hover:bg-primary/10"
-                onClick={onConfigureSync}
+      <div className="flex items-center justify-center gap-3 w-28 flex-shrink-0 text-sm">
+        {isSyncing ? (
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>同步中</span>
+          </div>
+        ) : (
+          <>
+            <button
+              className="text-primary hover:text-primary/80 font-medium transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSync();
+              }}
+            >
+              更新
+            </button>
+            {page.web_url && (
+              <button
+                className="text-primary hover:text-primary/80 font-medium transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(page.web_url, "_blank");
+                }}
               >
-                <Settings className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>同步配置</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={`h-7 w-7 ${
-                  isSyncing
-                    ? "text-primary bg-primary/10"
-                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                }`}
-                onClick={onSync}
-                disabled={isSyncing}
-              >
-                {isSyncing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RotateCcw className="h-3.5 w-3.5" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{isSyncing ? "同步中..." : "同步页面"}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={`h-7 w-7 ${
-                  page.web_url
-                    ? "text-muted-foreground hover:text-primary hover:bg-primary/10"
-                    : "text-muted-foreground/30 cursor-not-allowed"
-                }`}
-                onClick={() => page.web_url && window.open(page.web_url, "_blank")}
-                disabled={!page.web_url}
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{page.web_url ? "在 Confluence 中打开" : "无链接"}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+                查看
+              </button>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -329,12 +281,10 @@ export function BindingPagesPanel({
 
   // State
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<PageStatus>("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [syncingIds, setSyncingIds] = useState<Set<string>>(new Set());
   const [showAddModal, setShowAddModal] = useState(false);
-  const [showBindingConfig, setShowBindingConfig] = useState(false);
-  const [configPageRecord, setConfigPageRecord] = useState<ConfluencePageRecord | null>(null);
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
 
   // Queries
   const { data: binding } = useQuery({
@@ -348,15 +298,16 @@ export function BindingPagesPanel({
     queryKey: ["confluence-pages", bindingId],
     queryFn: () => listPages(bindingId),
     enabled: !!bindingId,
-    refetchInterval: (data) => {
+    refetchInterval: (query) => {
       // Poll more frequently when user just triggered sync
       if (syncingIds.size > 0) return 2000;
 
       // Poll if there are pages being processed
-      const pages = data?.pages || [];
+      const responseData = query.state.data;
+      const pagesList = responseData?.pages || [];
       const processingStatuses = ["uploaded", "parsing", "segmenting", "embedding", "embedding_images"];
-      const hasProcessing = pages.some(
-        (p) =>
+      const hasProcessing = pagesList.some(
+        (p: { status: string; document_status?: string }) =>
           p.status === "pending" ||
           (p.document_status && processingStatuses.includes(p.document_status))
       );
@@ -371,35 +322,13 @@ export function BindingPagesPanel({
     return pages.map(p => `${p.id}-${p.status}-${p.document_status}`).join(',');
   }, [pages]);
 
-  // Filtered pages
+  // Filtered pages (only search filter, since API already returns synced_only by default)
   const filteredPages = useMemo(() => {
-    let result = pages;
+    if (!searchQuery) return pages;
 
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter((p) => p.title.toLowerCase().includes(q));
-    }
-
-    if (statusFilter !== "all") {
-      result = result.filter((p) => {
-        switch (statusFilter) {
-          case "synced":
-            return p.document_status === "completed";
-          case "pending":
-            return (
-              !p.document_status ||
-              ["uploaded", "parsing", "segmenting", "embedding"].includes(p.document_status)
-            );
-          case "error":
-            return p.status === "error" || p.document_status === "failed";
-          default:
-            return true;
-        }
-      });
-    }
-
-    return result;
-  }, [pagesKey, pages, searchQuery, statusFilter]);
+    const q = searchQuery.toLowerCase();
+    return pages.filter((p) => p.title.toLowerCase().includes(q));
+  }, [pagesKey, pages, searchQuery]);
 
   // Sync mutations
   const syncSingleMutation = useMutation({
@@ -409,7 +338,7 @@ export function BindingPagesPanel({
     },
     onSuccess: (_, pageRecordId) => {
       const page = pages.find((p) => p.id === pageRecordId);
-      toast.success("同步成功", page?.title || "页面同步已完成");
+      toast.success("更新成功", page?.title || "文档已更新");
     },
     onSettled: (_, __, pageRecordId) => {
       setSyncingIds((prev) => {
@@ -420,7 +349,7 @@ export function BindingPagesPanel({
       refetchPages();
     },
     onError: (error) => {
-      toast.error("同步失败", error instanceof Error ? error.message : String(error));
+      toast.error("更新失败", error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -430,7 +359,7 @@ export function BindingPagesPanel({
       setSyncingIds((prev) => new Set([...prev, ...ids]));
     },
     onSuccess: () => {
-      toast.success("批量同步已启动", `正在同步 ${selectedIds.size} 个页面`);
+      toast.success("批量更新已启动", `正在更新 ${selectedIds.size} 个文档`);
       setSelectedIds(new Set());
     },
     onSettled: (_, __, ids) => {
@@ -442,18 +371,31 @@ export function BindingPagesPanel({
       refetchPages();
     },
     onError: (error) => {
-      toast.error("批量同步失败", error instanceof Error ? error.message : String(error));
+      toast.error("批量更新失败", error instanceof Error ? error.message : String(error));
     },
   });
 
   const fullSyncMutation = useMutation({
-    mutationFn: () => triggerSync(bindingId, { force_full_sync: false }),
+    mutationFn: () => triggerSync(bindingId, { force: false }),
     onSuccess: () => {
-      toast.success("全量同步已触发", "正在后台同步所有页面");
+      toast.success("更新全部已触发", "正在后台更新所有文档");
       refetchPages();
     },
     onError: (error) => {
-      toast.error("同步失败", error instanceof Error ? error.message : String(error));
+      toast.error("更新失败", error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (ids: string[]) => removePages(ids, true),
+    onSuccess: (result) => {
+      toast.success("移除成功", `已从知识库移除 ${result.removed} 个文档`);
+      setSelectedIds(new Set());
+      refetchPages();
+      queryClient.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+    },
+    onError: (error) => {
+      toast.error("移除失败", error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -505,27 +447,37 @@ export function BindingPagesPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setShowAddModal(true)}>
-            <Plus className="h-4 w-4 mr-1.5" />
-            添加页面
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowBindingConfig(true)}>
-            <Settings className="h-4 w-4 mr-1.5" />
-            配置
-          </Button>
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => fullSyncMutation.mutate()}
-            disabled={fullSyncMutation.isPending}
-          >
-            {fullSyncMutation.isPending ? (
-              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-            ) : (
-              <RefreshCcw className="h-4 w-4 mr-1.5" />
-            )}
-            全量同步
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" onClick={() => setShowAddModal(true)}>
+                  <Plus className="h-4 w-4 mr-1.5" />
+                  添加文档
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>从 Confluence 选择页面添加到知识库</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => fullSyncMutation.mutate()}
+                  disabled={fullSyncMutation.isPending}
+                >
+                  {fullSyncMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  ) : (
+                    <RefreshCcw className="h-4 w-4 mr-1.5" />
+                  )}
+                  更新全部
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>从 Confluence 拉取最新内容更新全部文档</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
 
@@ -534,53 +486,67 @@ export function BindingPagesPanel({
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="搜索页面..."
+            placeholder="搜索文档..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9"
           />
         </div>
 
-        <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as PageStatus)}>
-          <SelectTrigger className="w-32">
-            <SelectValue placeholder="状态" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部</SelectItem>
-            <SelectItem value="synced">已同步</SelectItem>
-            <SelectItem value="pending">处理中</SelectItem>
-            <SelectItem value="error">错误</SelectItem>
-          </SelectContent>
-        </Select>
-
         {selectedIds.size > 0 && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => batchSyncMutation.mutate(Array.from(selectedIds))}
-            disabled={batchSyncMutation.isPending}
-          >
-            {batchSyncMutation.isPending ? (
-              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-            ) : (
-              <RefreshCcw className="h-4 w-4 mr-1.5" />
-            )}
-            同步选中 ({selectedIds.size})
-          </Button>
+          <>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => batchSyncMutation.mutate(Array.from(selectedIds))}
+                    disabled={batchSyncMutation.isPending}
+                  >
+                    {batchSyncMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                    ) : (
+                      <RefreshCcw className="h-4 w-4 mr-1.5" />
+                    )}
+                    更新选中 ({selectedIds.size})
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>从 Confluence 拉取最新内容更新选中的文档</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowRemoveConfirm(true)}
+                    disabled={removeMutation.isPending}
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  >
+                    {removeMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4 mr-1.5" />
+                    )}
+                    移除选中 ({selectedIds.size})
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>从知识库移除选中的文档（不影响 Confluence 原页面）</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </>
         )}
       </div>
 
       {/* Stats */}
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
-        <span>共 {pages.length} 个页面</span>
-        <span>•</span>
-        <span>
-          已同步 {pages.filter((p) => p.document_status === "completed").length}
-        </span>
+        <span>共 {pages.length} 个文档</span>
         {searchQuery && (
           <>
             <span>•</span>
-            <span>筛选结果 {filteredPages.length}</span>
+            <span>搜索结果 {filteredPages.length}</span>
           </>
         )}
       </div>
@@ -596,11 +562,11 @@ export function BindingPagesPanel({
             onCheckedChange={handleSelectAll}
             className="flex-shrink-0"
           />
-          <span className="flex-1">页面</span>
+          <span className="flex-1">文档</span>
           <span className="w-24">状态</span>
           <span className="w-12 text-center">版本</span>
           <span className="w-28 text-right">同步时间</span>
-          <span className="w-28 text-right">操作</span>
+          <span className="w-28 text-center">操作</span>
         </div>
 
         {/* Content */}
@@ -609,8 +575,18 @@ export function BindingPagesPanel({
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
         ) : filteredPages.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">
-            {searchQuery || statusFilter !== "all" ? "没有符合条件的页面" : "还没有同步的页面"}
+          <div className="p-8 text-center">
+            {searchQuery ? (
+              <p className="text-muted-foreground">没有找到匹配的文档</p>
+            ) : (
+              <div className="space-y-2">
+                <FolderOpen className="h-10 w-10 mx-auto text-muted-foreground/50" />
+                <p className="text-muted-foreground">还没有同步任何文档</p>
+                <p className="text-sm text-muted-foreground/70">
+                  点击上方「添加文档」从 Confluence 选择页面
+                </p>
+              </div>
+            )}
           </div>
         ) : (
           <div className="max-h-[500px] overflow-y-auto">
@@ -622,7 +598,6 @@ export function BindingPagesPanel({
                 isSyncing={syncingIds.has(page.id)}
                 onSelect={(checked) => handleSelectOne(page.id, checked)}
                 onSync={() => syncSingleMutation.mutate(page.id)}
-                onConfigureSync={() => setConfigPageRecord(page)}
               />
             ))}
           </div>
@@ -642,30 +617,29 @@ export function BindingPagesPanel({
         />
       )}
 
-      {binding && (
-        <>
-          <BindingSyncConfigDialog
-            binding={binding}
-            open={showBindingConfig}
-            onOpenChange={setShowBindingConfig}
-            onUpdated={() => {
-              queryClient.invalidateQueries({ queryKey: ["confluence-binding", bindingId] });
-              queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });
-            }}
-          />
-        </>
-      )}
-
-      {configPageRecord && (
-        <PageSyncConfigDialog
-          pageRecord={configPageRecord}
-          open={!!configPageRecord}
-          onOpenChange={(open) => !open && setConfigPageRecord(null)}
-          onUpdated={() => {
-            refetchPages();
-          }}
-        />
-      )}
+      {/* Remove Confirmation Dialog */}
+      <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认移除文档</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要移除选中的 {selectedIds.size} 个文档吗？这将从知识库中删除这些文档。Confluence 原页面不会受到影响。此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                removeMutation.mutate(Array.from(selectedIds));
+                setShowRemoveConfirm(false);
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              确认移除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

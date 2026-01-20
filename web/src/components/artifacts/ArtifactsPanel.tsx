@@ -277,38 +277,75 @@ function ArtifactCard({
   );
 }
 
-/** Image preview card */
+/** Image preview card - supports both OutputFile and Artifact types */
 function ImageCard({
-  file,
+  item,
   onDownload,
+  onOpenFullscreen,
 }: {
-  file: OutputFile;
+  item: OutputFile | Artifact;
   onDownload: () => void;
+  onOpenFullscreen?: () => void;
 }) {
+  // Determine image source - could be base64 (OutputFile) or URL (Artifact)
+  const isOutputFile = "content_base64" in item;
+  const imageSrc = isOutputFile
+    ? `data:${item.mime_type || "image/png"};base64,${item.content_base64}`
+    : (item as Artifact).url;
+  const filename = isOutputFile ? item.filename : (item as Artifact).filename || (item as Artifact).title;
+  const fileSize = isOutputFile ? item.size_bytes : (item as Artifact).sizeBytes;
+
+  const handleOpenInNewTab = () => {
+    if (!imageSrc) return;
+    const newWindow = window.open("", "_blank");
+    if (newWindow) {
+      const doc = newWindow.document;
+      doc.title = filename || "Image";
+      doc.body.style.cssText = "margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;";
+      const img = doc.createElement("img");
+      img.src = imageSrc;
+      img.alt = filename || "Image";
+      img.style.cssText = "max-width:100%;max-height:100vh;object-fit:contain;";
+      doc.body.appendChild(img);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-xl overflow-hidden bg-white dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/50"
+      className="group rounded-xl overflow-hidden bg-white dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/50"
     >
       {/* Image preview */}
-      <div className="aspect-video bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+      <div className="relative aspect-video bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
         <img
-          src={`data:${file.mime_type || "image/png"};base64,${file.content_base64}`}
-          alt={file.filename}
+          src={imageSrc}
+          alt={filename || "Generated Image"}
           className="max-w-full max-h-full object-contain"
         />
+        {/* Hover actions */}
+        <div className="absolute inset-0 flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity bg-black/30">
+          <button
+            onClick={handleOpenInNewTab}
+            className="p-2 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
+            title="在新标签页打开"
+          >
+            <Eye className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       {/* Info bar */}
       <div className="flex items-center justify-between px-3 py-2 border-t border-slate-200/80 dark:border-slate-700/50">
         <div className="min-w-0">
           <p className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">
-            {file.filename}
+            {filename || "Image"}
           </p>
-          <p className="text-[10px] text-slate-500">
-            {formatFileSize(file.size_bytes)}
-          </p>
+          {fileSize && (
+            <p className="text-[10px] text-slate-500">
+              {formatFileSize(fileSize)}
+            </p>
+          )}
         </div>
         <button
           onClick={onDownload}
@@ -340,21 +377,37 @@ export function ArtifactsPanel({
   const [view, setView] = React.useState<"preview" | "code" | "output">("preview");
   const [copied, setCopied] = React.useState(false);
 
-  // Categorize files
-  const imageFiles = React.useMemo(
-    () => outputFiles.filter((f) => f.mime_type?.startsWith("image/")),
-    [outputFiles]
-  );
+  // Categorize files - combine images from both artifacts and outputFiles
+  const imageFiles = React.useMemo(() => {
+    // Get image artifacts (from image generation, etc.)
+    const imageArtifacts = artifacts.filter(
+      (a) => a.type === "image" || a.mimeType?.startsWith("image/")
+    );
+    // Get image outputFiles (from code execution)
+    const imageOutputFiles = outputFiles.filter((f) => f.mime_type?.startsWith("image/"));
+    // Combine, avoiding duplicates by artifact_id
+    const artifactIds = new Set(imageArtifacts.map(a => a.id));
+    const uniqueOutputFiles = imageOutputFiles.filter(
+      (f) => !f.artifact_id || !artifactIds.has(f.artifact_id)
+    );
+    return [...imageArtifacts, ...uniqueOutputFiles] as (Artifact | OutputFile)[];
+  }, [artifacts, outputFiles]);
 
   const documentFiles = React.useMemo(() => {
+    // Get document artifacts (excluding images which are handled separately)
     const docs = artifacts.filter(
       (a) =>
-        a.type === "document" ||
-        a.type === "file" ||
-        ["docx", "pdf", "md", "xlsx", "csv"].includes(a.format)
+        a.type !== "image" &&
+        !a.mimeType?.startsWith("image/") &&
+        (a.type === "document" ||
+         a.type === "file" ||
+         ["docx", "pdf", "md", "xlsx", "csv"].includes(a.format))
     );
+    // Get artifact IDs to avoid duplicates
+    const artifactIds = new Set(docs.map(d => d.id));
+    // Only include outputFiles that aren't images and don't have a matching artifact_id
     const otherFiles = outputFiles.filter(
-      (f) => !f.mime_type?.startsWith("image/")
+      (f) => !f.mime_type?.startsWith("image/") && !(f.artifact_id && artifactIds.has(f.artifact_id))
     );
     return [...docs, ...otherFiles];
   }, [artifacts, outputFiles]);
@@ -496,14 +549,14 @@ export function ArtifactsPanel({
               {imageFiles.length > 0 && (
                 <div className="space-y-3">
                   <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                    Images
+                    Images ({imageFiles.length})
                   </h3>
                   <div className="grid grid-cols-2 gap-3">
-                    {imageFiles.map((file, idx) => (
+                    {imageFiles.map((item, idx) => (
                       <ImageCard
-                        key={`img-${idx}`}
-                        file={file}
-                        onDownload={() => handleDownload(file)}
+                        key={"id" in item ? item.id : `img-${idx}`}
+                        item={item}
+                        onDownload={() => handleDownload(item)}
                       />
                     ))}
                   </div>

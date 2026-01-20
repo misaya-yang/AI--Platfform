@@ -1,7 +1,8 @@
 // web/src/pages/dashboard/components/panels/UserQuotaPanel.tsx
 
-import { Table, Progress, Tag, Select } from "antd";
+import { Table, Progress, Tag, Select, Tooltip, Button, Modal, message } from "antd";
 import { useQuery } from "@tanstack/react-query";
+import { WarningOutlined, ExclamationCircleOutlined, ExpandOutlined } from "@ant-design/icons";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
@@ -151,20 +152,61 @@ export function UserQuotaPanel() {
         />
       }
     >
-      {/* Warning summary */}
+      {/* Warning summary - more prominent for exceeded users */}
       {warningCount > 0 && (
         <div
           style={{
-            padding: "8px 12px",
+            padding: "12px 16px",
             marginBottom: 12,
-            borderRadius: 6,
-            background: darkMode ? "rgba(245, 158, 11, 0.1)" : "rgba(245, 158, 11, 0.1)",
-            border: "1px solid rgba(245, 158, 11, 0.3)",
-            fontSize: 12,
-            color: "#f59e0b",
+            borderRadius: 8,
+            background: users.some((u) => u.status === "exceeded")
+              ? darkMode
+                ? "rgba(239, 68, 68, 0.15)"
+                : "rgba(239, 68, 68, 0.08)"
+              : darkMode
+              ? "rgba(245, 158, 11, 0.15)"
+              : "rgba(245, 158, 11, 0.08)",
+            border: users.some((u) => u.status === "exceeded")
+              ? "1px solid rgba(239, 68, 68, 0.4)"
+              : "1px solid rgba(245, 158, 11, 0.4)",
           }}
         >
-          {warningCount} 个用户接近或超过配额限制
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {users.some((u) => u.status === "exceeded") ? (
+                <ExclamationCircleOutlined style={{ fontSize: 16, color: "#ef4444" }} />
+              ) : (
+                <WarningOutlined style={{ fontSize: 16, color: "#f59e0b" }} />
+              )}
+              <div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: users.some((u) => u.status === "exceeded") ? "#ef4444" : "#f59e0b",
+                  }}
+                >
+                  {users.filter((u) => u.status === "exceeded").length > 0
+                    ? `${users.filter((u) => u.status === "exceeded").length} 个用户已超出配额限制`
+                    : `${warningCount} 个用户接近配额限制`}
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: darkMode ? "#94a3b8" : "#64748b",
+                    marginTop: 2,
+                  }}
+                >
+                  超额用户的后续请求可能会被限制
+                </div>
+              </div>
+            </div>
+            <Tooltip title="配额扩容申请功能即将上线">
+              <Button size="small" type="text" icon={<ExpandOutlined />}>
+                扩容
+              </Button>
+            </Tooltip>
+          </div>
         </div>
       )}
 
@@ -179,7 +221,28 @@ export function UserQuotaPanel() {
         style={{
           background: "transparent",
         }}
+        rowClassName={(record) =>
+          record.status === "exceeded"
+            ? "quota-exceeded-row"
+            : record.status === "warning"
+            ? "quota-warning-row"
+            : ""
+        }
       />
+      <style>{`
+        .quota-exceeded-row {
+          background: ${darkMode ? "rgba(239, 68, 68, 0.08)" : "rgba(239, 68, 68, 0.04)"} !important;
+        }
+        .quota-exceeded-row:hover > td {
+          background: ${darkMode ? "rgba(239, 68, 68, 0.12)" : "rgba(239, 68, 68, 0.08)"} !important;
+        }
+        .quota-warning-row {
+          background: ${darkMode ? "rgba(245, 158, 11, 0.06)" : "rgba(245, 158, 11, 0.03)"} !important;
+        }
+        .quota-warning-row:hover > td {
+          background: ${darkMode ? "rgba(245, 158, 11, 0.10)" : "rgba(245, 158, 11, 0.06)"} !important;
+        }
+      `}</style>
     </PanelWrapper>
   );
 }

@@ -168,24 +168,26 @@ export function ServiceHealthPanel() {
           title={<span style={{ fontSize: 12, color: colors.textSecondary }}>可用性</span>}
           value={totalServices > 0 ? ((healthyCount / totalServices) * 100).toFixed(1) : 0}
           suffix="%"
-          valueStyle={{ color: colors.success, fontSize: 24, fontWeight: 700 }}
+          styles={{ content: { color: colors.success, fontSize: 24, fontWeight: 700 } }}
         />
         <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
         <Statistic
           title={<span style={{ fontSize: 12, color: colors.textSecondary }}>错误率</span>}
           value={avgErrorRate.toFixed(2)}
           suffix="%"
-          valueStyle={{
-            color: avgErrorRate > 5 ? colors.error : avgErrorRate > 1 ? colors.warning : colors.success,
-            fontSize: 24,
-            fontWeight: 700,
+          styles={{
+            content: {
+              color: avgErrorRate > 5 ? colors.error : avgErrorRate > 1 ? colors.warning : colors.success,
+              fontSize: 24,
+              fontWeight: 700,
+            },
           }}
         />
         <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
         <Statistic
           title={<span style={{ fontSize: 12, color: colors.textSecondary }}>服务数</span>}
           value={totalServices}
-          valueStyle={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}
+          styles={{ content: { fontSize: 24, fontWeight: 700, color: colors.textPrimary } }}
         />
       </div>
 
