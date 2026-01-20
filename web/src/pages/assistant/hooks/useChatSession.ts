@@ -431,14 +431,6 @@ export function useChatSession() {
       for await (const event of stream) {
         const now = Date.now();
 
-        // Track TTFT on ANY first meaningful event
-        if (firstTokenMs === undefined &&
-            event.event_type !== "error" &&
-            event.event_type !== "done" &&
-            event.event_type !== "finish") {
-           firstTokenMs = now - startTime;
-        }
-
         // Event Handling
         switch (event.event_type) {
           case SSEEventType.STARTED:
@@ -447,12 +439,21 @@ export function useChatSession() {
 
           case "text_delta":
             if (typeof event.data === "string") {
+              // Track TTFT - first visible response (text, tool call, or status)
+              if (firstTokenMs === undefined) {
+                firstTokenMs = now - startTime;
+              }
               content += event.data;
               setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content, firstTokenMs } : m));
             }
             break;
 
           case SSEEventType.STATUS:
+            // 状态事件也算"首次响应"，因为用户能看到处理状态
+            if (firstTokenMs === undefined) {
+              firstTokenMs = now - startTime;
+              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, firstTokenMs } : m));
+            }
             const statusData = event.data as {
               status?: string;
               message: string;
@@ -497,12 +498,16 @@ export function useChatSession() {
             break;
           
           case "context_retrieved":
+            // KB 检索完成也算"首次响应"
+            if (firstTokenMs === undefined) {
+              firstTokenMs = now - startTime;
+            }
             const ctxData = event.data as RetrievedContext;
             contexts.push(ctxData);
             const totalResults = contexts.reduce((sum, c) => sum + c.chunks.length, 0);
             const totalDuration = contexts.reduce((sum, c) => sum + c.took_ms, 0);
             updateSearchStatus("kb", { state: "completed", resultCount: totalResults, durationMs: totalDuration });
-            setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, contexts, searchStatus } : m));
+            setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, contexts, searchStatus, firstTokenMs } : m));
             break;
 
           case "web_search_results":
@@ -644,6 +649,11 @@ export function useChatSession() {
 
           // === AG-UI Tool Call Events ===
           case SSEEventType.TOOL_CALL_START:
+            // 工具调用也算"首次响应"，因为用户能看到有事情在发生
+            if (firstTokenMs === undefined) {
+              firstTokenMs = now - startTime;
+              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, firstTokenMs } : m));
+            }
             const toolStartData = event.data as {
               tool_call_id: string;
               tool_name: string;

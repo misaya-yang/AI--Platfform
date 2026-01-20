@@ -487,9 +487,21 @@ class LangGraphAdapter(ProtocolAdapter):
             stream_subgraphs = self.config.get("stream_subgraphs")
         if stream_subgraphs is not None:
             payload["stream_subgraphs"] = stream_subgraphs
+
+        import httpx
+        import time
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # 详细时间追踪：帮助定位首 token 延迟来源
+        t_method_start = time.perf_counter()
+
         if self.service.session_enabled and request.session_id:
             # 确保 thread 存在并获取有效的 UUID thread_id
+            t_ensure_start = time.perf_counter()
             valid_thread_id = await self._ensure_thread(request.session_id, request)
+            t_ensure_end = time.perf_counter()
+            logger.info(f"[TIMING] _ensure_thread: {(t_ensure_end - t_ensure_start)*1000:.2f}ms")
             endpoint = self.thread_stream_endpoint.format(thread_id=valid_thread_id)
             payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
         else:
@@ -499,26 +511,25 @@ class LangGraphAdapter(ProtocolAdapter):
         client = getattr(self.connector, "_client", None)
         if client is None:
             raise ValidationFailedError("remote streaming requires HTTPConnector")
-
-        import httpx
-        import time
-        import logging
-        logger = logging.getLogger(__name__)
         
         # Use shorter connect timeout, longer read timeout for streaming
         stream_timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)
         auth_headers = self._build_auth_headers(request)
-        
+
+        t_pre_stream = time.perf_counter()
+        logger.info(f"[TIMING] Pre-stream setup: {(t_pre_stream - t_method_start)*1000:.2f}ms (includes _ensure_thread if applicable)")
+
         t_start = time.perf_counter()
         first_data_time = None
         first_yield_time = None
-        
+
         try:
             async with client.stream(
                 "POST", endpoint, json=payload, timeout=stream_timeout, headers=auth_headers
             ) as resp:
                 t_response = time.perf_counter()
-                logger.info(f"[TIMING] LangGraph HTTP response: {(t_response - t_start)*1000:.2f}ms, status={resp.status_code}")
+                logger.info(f"[TIMING] LangGraph HTTP response: {(t_response - t_start)*1000:.2f}ms (connect+server processing), status={resp.status_code}")
+                logger.info(f"[TIMING] Total to HTTP response: {(t_response - t_method_start)*1000:.2f}ms from method start")
                 
                 if resp.status_code != 200:
                     error_text = await resp.aread()

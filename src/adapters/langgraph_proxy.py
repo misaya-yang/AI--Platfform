@@ -775,12 +775,13 @@ class LangGraphProxy:
         interrupt_after: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """创建 Run（异步执行，立即返回）"""
+        import asyncio
 
-        # 验证 Thread 所有权
-        await self.get_thread(user, thread_id)
-
-        # 验证 Assistant 访问权限
-        await self.get_assistant(user, assistant_id)
+        # 性能优化：并发执行验证调用
+        await asyncio.gather(
+            self.get_thread(user, thread_id),
+            self.get_assistant(user, assistant_id),
+        )
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
@@ -858,12 +859,13 @@ class LangGraphProxy:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """创建 Run 并等待完成"""
+        import asyncio
 
-        # 验证 Thread 所有权
-        await self.get_thread(user, thread_id)
-
-        # 验证 Assistant 访问权限
-        await self.get_assistant(user, assistant_id)
+        # 性能优化：并发执行验证调用
+        await asyncio.gather(
+            self.get_thread(user, thread_id),
+            self.get_assistant(user, assistant_id),
+        )
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
@@ -962,14 +964,25 @@ class LangGraphProxy:
         Args:
             skip_thread_validation: 跳过 thread 所有权验证（当调用方已验证时使用）
         """
+        import asyncio
 
-        # 验证 Assistant 访问权限（无论是否有 thread_id 都需要验证）
-        await self.get_assistant(user, assistant_id)
+        # 性能优化：并发执行验证调用以减少首 token 延迟
+        # 之前是顺序执行，每个调用 100-500ms，总计 200-1000ms
+        # 现在并发执行，总耗时 = max(get_assistant, get_thread) ≈ 100-500ms
+        validation_start = time.time()
 
-        # 如果有 thread_id 且需要验证所有权
+        validation_tasks = [self.get_assistant(user, assistant_id)]
+        if thread_id and not skip_thread_validation:
+            validation_tasks.append(self.get_thread(user, thread_id))
+
+        # 并发执行所有验证
+        await asyncio.gather(*validation_tasks)
+
+        validation_ms = (time.time() - validation_start) * 1000
+        logger.debug(f"[TIMING] stream_run validation: {validation_ms:.2f}ms (concurrent)")
+
+        # 确定 endpoint
         if thread_id:
-            if not skip_thread_validation:
-                await self.get_thread(user, thread_id)
             endpoint = f"/threads/{thread_id}/runs/stream"
         else:
             endpoint = "/runs/stream"
@@ -1013,10 +1026,11 @@ class LangGraphProxy:
                             try:
                                 data = json.loads(data_str)
 
-                                # Extract token usage from stream events
-                                extracted = self._extract_token_usage(current_event, data)
-                                token_tracker["input"] += extracted.get("input", 0)
-                                token_tracker["output"] += extracted.get("output", 0)
+                                # Extract token usage from stream events (only if data is dict)
+                                if isinstance(data, dict):
+                                    extracted = self._extract_token_usage(current_event, data)
+                                    token_tracker["input"] += extracted.get("input", 0)
+                                    token_tracker["output"] += extracted.get("output", 0)
 
                                 yield {"event": current_event, "data": data}
                             except json.JSONDecodeError:

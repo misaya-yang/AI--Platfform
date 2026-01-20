@@ -938,6 +938,10 @@ export function PlaygroundPage() {
         }
 
         if (eventType === "tool_call_start" || eventType === "tool_call_delta") {
+          // 工具调用也算"首次响应"，因为用户能看到有事情在发生
+          if (firstTokenTime === null) {
+            firstTokenTime = performance.now();
+          }
           streamed = true;
           const tc = chunk?.tool_call;
           if (tc) {
