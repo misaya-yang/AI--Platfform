@@ -22,6 +22,7 @@ from ...core.auth.jwt import decode_jwt_token
 from ...core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
 from ...services.metrics import get_metrics_recorder
 from ...services.metrics.realtime_metrics import get_realtime_metrics, RealtimeSnapshot
+from ...services.metrics.usage_recorder import get_usage_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,17 @@ class UserDashboard(BaseModel):
     avg_latency_ms: int
     error_rate: float
     timestamp: str
+
+
+class UsageBreakdown(BaseModel):
+    """Usage breakdown item"""
+    dimension_value: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float
+    percentage: float
 
 
 # ============ Alert Thresholds ============
@@ -465,6 +477,58 @@ async def get_timeseries(
     if not start:
         start = end - timedelta(hours=24)
 
+    # Try to use UsageRecorder for granular data if available
+    recorder = get_usage_recorder()
+    if recorder and recorder.database:
+        try:
+            # Convert datetime to date for UsageRecorder
+            start_date = start.date()
+            end_date = end.date()
+
+            # Map metric names
+            metric_key = metric
+            if metric == "latency":
+                metric_key = "avg_latency_ms"
+            elif metric == "tokens":
+                metric_key = "total_tokens"
+            elif metric == "cost":
+                metric_key = "cost_usd"
+            elif metric == "runs":
+                # Runs might not be fully populated in UsageRecorder yet, fallback or use if available
+                metric_key = "requests" # Approximation if runs not separate
+
+            ts_data = await recorder.get_usage_timeseries(
+                tenant_id=auth.tenant_id, # UsageRecorder needs tenant_id
+                start_date=start_date,
+                end_date=end_date,
+                user_id=user_id,
+                granularity=granularity,
+            )
+
+            data = []
+            for item in ts_data:
+                val = item.get(metric_key, 0)
+                # Ensure we have a float
+                if val is None:
+                    val = 0.0
+                
+                data.append(TimeSeriesDataPoint(
+                    timestamp=item["date"],
+                    value=float(val),
+                ))
+            
+            return TimeSeriesResponse(
+                metric=metric,
+                granularity=granularity,
+                start=start.isoformat(),
+                end=end.isoformat(),
+                data=data,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch timeseries from UsageRecorder: {e}")
+
+    # Fallback to Redis implementation
     redis = getattr(request.app.state, "redis", None)
     data: List[TimeSeriesDataPoint] = []
 
@@ -547,6 +611,49 @@ async def get_timeseries(
     )
 
 
+@router.get("/breakdown", response_model=List[UsageBreakdown])
+async def get_usage_breakdown(
+    request: Request,
+    dimension: str = Query(..., description="model | user | service | provider"),
+    start: Optional[datetime] = Query(None, description="Start time"),
+    end: Optional[datetime] = Query(None, description="End time"),
+    limit: int = 20,
+    auth: AuthContext = Depends(get_auth_context),
+) -> List[UsageBreakdown]:
+    """
+    Get usage breakdown by dimension (Service, User, Vendor, Model)
+    """
+    if not end:
+        end = datetime.now()
+    if not start:
+        start = end - timedelta(days=7)
+
+    recorder = get_usage_recorder()
+    if not recorder:
+        return []
+
+    breakdown = await recorder.get_usage_breakdown(
+        tenant_id=auth.tenant_id or "public",
+        dimension=dimension,
+        start_date=start.date(),
+        end_date=end.date(),
+        limit=limit,
+    )
+
+    return [
+        UsageBreakdown(
+            dimension_value=item.get(dimension, "unknown"),
+            requests=item.get("requests", 0),
+            input_tokens=item.get("input_tokens", 0),
+            output_tokens=item.get("output_tokens", 0),
+            total_tokens=item.get("total_tokens", 0),
+            cost_usd=item.get("cost_usd", 0.0),
+            percentage=item.get("percentage", 0.0),
+        )
+        for item in breakdown
+    ]
+
+
 @router.get("/alerts", response_model=AlertsResponse)
 async def get_alerts(
     request: Request,
@@ -578,25 +685,28 @@ async def get_user_dashboard(
     realtime = get_realtime_metrics()
     user_metrics = await realtime.get_user_metrics(user_id)
 
-    # Get additional metrics from MetricsRecorder
-    recorder = get_metrics_recorder()
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    redis = getattr(request.app.state, "redis", None)
+    # Get additional metrics from UsageRecorder first, fall back to MetricsRecorder
+    usage_recorder = get_usage_recorder()
+    
     requests_today = 0
     avg_latency = 0
     error_rate = 0.0
-
-    if redis and redis._client:
+    cost_usd = 0.0
+    
+    if usage_recorder and usage_recorder.database:
         try:
-            # This would need per-user request tracking
-            # For now, return aggregate
-            summary = await recorder.get_today_summary()
+            summary = await usage_recorder.get_usage_summary(
+                tenant_id=auth.tenant_id,
+                user_id=user_id,
+                start_date=date.today(),
+                end_date=date.today()
+            )
             requests_today = summary.get("total_requests", 0)
             avg_latency = summary.get("avg_latency_ms", 0)
             error_rate = 100 - summary.get("success_rate", 100)
-        except Exception:
-            pass
+            cost_usd = summary.get("total_cost_usd", 0.0)
+        except Exception as e:
+            logger.warning(f"Failed to get user dashboard from UsageRecorder: {e}")
 
     tokens = user_metrics.get("tokens", {})
 
@@ -606,7 +716,7 @@ async def get_user_dashboard(
             total=tokens.get("total", 0),
             input_tokens=tokens.get("input", 0),
             output_tokens=tokens.get("output", 0),
-            cost_usd=0.0,  # Would need per-user cost tracking
+            cost_usd=cost_usd,
             per_minute=0.0,
         ),
         active_threads=user_metrics.get("active_threads", 0),
@@ -630,22 +740,76 @@ async def get_dashboard_summary(
     """
     recorder = get_metrics_recorder()
     realtime = get_realtime_metrics()
+    usage_recorder = get_usage_recorder()
 
-    # Get today's summary
-    today_summary = await recorder.get_today_summary()
+    # Get summary from UsageRecorder (Postgres)
+    summary_data = {}
+    if usage_recorder and usage_recorder.database:
+        try:
+            start_date = date.today()
+            if period == "week":
+                start_date = date.today() - timedelta(days=7)
+            elif period == "month":
+                start_date = date.today() - timedelta(days=30)
+                
+            summary = await usage_recorder.get_usage_summary(
+                tenant_id=auth.tenant_id or "public",
+                start_date=start_date,
+                end_date=date.today()
+            )
+            summary_data = {
+                "total_requests": summary.get("total_requests", 0),
+                "success_rate": summary.get("success_rate", 100),
+                "avg_latency_ms": summary.get("avg_latency_ms", 0),
+                "total_tokens": summary.get("total_tokens", 0),
+                "estimated_cost_usd": summary.get("total_cost_usd", 0),
+                "total_runs": 0, # UsageRecorder doesn't track runs fully separate yet
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch summary from UsageRecorder: {e}")
 
-    # Get real-time snapshot
-    snapshot = await realtime.get_realtime_snapshot()
-
-    return {
-        "period": period,
-        "overview": {
+    # If UsageRecorder failed or empty (and period is today), try Redis fallback
+    if not summary_data and period == "today":
+        today_summary = await recorder.get_today_summary()
+        summary_data = {
             "total_requests": today_summary.get("total_requests", 0),
             "success_rate": today_summary.get("success_rate", 100),
             "avg_latency_ms": today_summary.get("avg_latency_ms", 0),
             "total_tokens": today_summary.get("total_tokens", 0),
             "estimated_cost_usd": today_summary.get("estimated_cost_usd", 0),
             "total_runs": today_summary.get("total_runs", 0),
+        }
+
+    # If still empty, use defaults
+    if not summary_data:
+        summary_data = {
+            "total_requests": 0,
+            "success_rate": 100,
+            "avg_latency_ms": 0,
+            "total_tokens": 0,
+            "estimated_cost_usd": 0,
+            "total_runs": 0,
+        }
+
+    # Get real-time snapshot for non-historical data
+    snapshot = await realtime.get_realtime_snapshot()
+
+    # Get hourly trend (mix of Redis and UsageRecorder depending on period?)
+    # For now keep Redis for hourly trend on "today", but could enhance later
+    requests_by_hour = []
+    if period == "today":
+        ts_today = await recorder.get_today_summary()
+        requests_by_hour = ts_today.get("requests_by_hour", [])
+
+    return {
+        "period": period,
+        "overview": {
+            "total_requests": summary_data.get("total_requests", 0),
+            "success_rate": summary_data.get("success_rate", 100),
+            "avg_latency_ms": summary_data.get("avg_latency_ms", 0),
+            "total_tokens": summary_data.get("total_tokens", 0),
+            "estimated_cost_usd": summary_data.get("estimated_cost_usd", 0),
+            "total_runs": summary_data.get("total_runs", 0),
         },
         "realtime": {
             "rps": snapshot.rps,
@@ -654,11 +818,11 @@ async def get_dashboard_summary(
             "queue_depth": snapshot.queue_depth,
         },
         "latency": {
-            "p50": today_summary.get("latency_p50", 0),
-            "p95": today_summary.get("latency_p95", 0),
-            "p99": today_summary.get("latency_p99", 0),
+            "p50": summary_data.get("latency_p50", 0), # Note: UsageRecorder summary doesn't have percentiles yet
+            "p95": summary_data.get("latency_p95", 0),
+            "p99": summary_data.get("latency_p99", 0),
         },
-        "hourly_trend": today_summary.get("requests_by_hour", []),
+        "hourly_trend": requests_by_hour,
         "timestamp": datetime.now().isoformat(),
     }
 

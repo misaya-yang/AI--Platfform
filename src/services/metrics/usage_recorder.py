@@ -539,6 +539,7 @@ class UsageRecorder:
         model: Optional[str] = None,
         service_id: Optional[str] = None,
         assistant_id: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get aggregated usage summary."""
         if not self.database or not self.database._pool:
@@ -551,7 +552,34 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
-                query = """
+                # Base table and condition
+                table = "usage_daily_aggregates u"
+                conditions = ["u.tenant_id = $1", "u.date >= $2", "u.date <= $3"]
+                params: List[Any] = [tenant_id, start_date, end_date]
+                joins = ""
+
+                # Special handling for provider filter
+                if provider:
+                    joins = "LEFT JOIN model_pricing mp ON u.model = mp.model"
+                    conditions.append(f"mp.provider = ${len(params) + 1}")
+                    params.append(provider)
+
+                if user_id:
+                    conditions.append(f"u.user_id = ${len(params) + 1}")
+                    params.append(user_id)
+                if model:
+                    conditions.append(f"u.model = ${len(params) + 1}")
+                    params.append(model)
+                if service_id:
+                    conditions.append(f"u.service_id = ${len(params) + 1}")
+                    params.append(service_id)
+                if assistant_id:
+                    conditions.append(f"u.assistant_id = ${len(params) + 1}")
+                    params.append(assistant_id)
+
+                where_clause = " AND ".join(conditions)
+                
+                query = f"""
                     SELECT
                         COALESCE(SUM(request_count), 0) as total_requests,
                         COALESCE(SUM(success_count), 0) as success_count,
@@ -560,25 +588,10 @@ class UsageRecorder:
                         COALESCE(SUM(total_output_tokens), 0) as total_output_tokens,
                         COALESCE(SUM(total_cost_cents), 0) as total_cost_cents,
                         COALESCE(AVG(avg_latency_ms), 0) as avg_latency_ms
-                    FROM usage_daily_aggregates
-                    WHERE tenant_id = $1
-                      AND date >= $2
-                      AND date <= $3
+                    FROM {table}
+                    {joins}
+                    WHERE {where_clause}
                 """
-                params: List[Any] = [tenant_id, start_date, end_date]
-
-                if user_id:
-                    query += " AND user_id = $" + str(len(params) + 1)
-                    params.append(user_id)
-                if model:
-                    query += " AND model = $" + str(len(params) + 1)
-                    params.append(model)
-                if service_id:
-                    query += " AND service_id = $" + str(len(params) + 1)
-                    params.append(service_id)
-                if assistant_id:
-                    query += " AND assistant_id = $" + str(len(params) + 1)
-                    params.append(assistant_id)
 
                 row = await conn.fetchrow(query, *params)
                 if not row:
@@ -721,6 +734,7 @@ class UsageRecorder:
         user_id: Optional[str] = None,
         model: Optional[str] = None,
         service_id: Optional[str] = None,
+        provider: Optional[str] = None,
         granularity: str = "day",
     ) -> List[Dict[str, Any]]:
         """Get usage time series."""
@@ -735,7 +749,7 @@ class UsageRecorder:
         try:
             async with self.database._pool.acquire() as conn:
                 if granularity == "hour":
-                    query = """
+                    query = f"""
                         SELECT
                             bucket_start as bucket,
                             SUM(request_count) as requests,
@@ -743,21 +757,25 @@ class UsageRecorder:
                             SUM(total_output_tokens) as output_tokens,
                             SUM(total_cost_cents) as cost_cents,
                             AVG(avg_latency_ms) as avg_latency_ms
-                        FROM usage_hourly_aggregates
-                        WHERE tenant_id = $1
-                          AND date >= $2
-                          AND date <= $3
+                        FROM usage_hourly_aggregates u
+                        {("LEFT JOIN model_pricing mp ON u.model = mp.model" if provider else "")}
+                        WHERE u.tenant_id = $1
+                          AND u.date >= $2
+                          AND u.date <= $3
                     """
-                    params: List[Any] = [tenant_id, start_date, end_date]
-
+                    # Rebuild params cleanly
+                    params = [tenant_id, start_date, end_date]
+                    if provider:
+                         query += f" AND mp.provider = ${len(params)+1}"
+                         params.append(provider)
                     if user_id:
-                        query += " AND user_id = $" + str(len(params) + 1)
+                        query += f" AND u.user_id = ${len(params)+1}"
                         params.append(user_id)
                     if model:
-                        query += " AND model = $" + str(len(params) + 1)
+                        query += f" AND u.model = ${len(params)+1}"
                         params.append(model)
                     if service_id:
-                        query += " AND service_id = $" + str(len(params) + 1)
+                        query += f" AND u.service_id = ${len(params)+1}"
                         params.append(service_id)
 
                     query += " GROUP BY bucket_start ORDER BY bucket_start"
@@ -777,7 +795,7 @@ class UsageRecorder:
                         for row in rows
                     ]
 
-                query = """
+                query = f"""
                     SELECT
                         date,
                         SUM(request_count) as requests,
@@ -785,21 +803,25 @@ class UsageRecorder:
                         SUM(total_output_tokens) as output_tokens,
                         SUM(total_cost_cents) as cost_cents,
                         AVG(avg_latency_ms) as avg_latency_ms
-                    FROM usage_daily_aggregates
-                    WHERE tenant_id = $1
-                      AND date >= $2
-                      AND date <= $3
+                    FROM usage_daily_aggregates u
+                    {("LEFT JOIN model_pricing mp ON u.model = mp.model" if provider else "")}
+                    WHERE u.tenant_id = $1
+                      AND u.date >= $2
+                      AND u.date <= $3
                 """
                 params = [tenant_id, start_date, end_date]
+                if provider:
+                    query += f" AND mp.provider = ${len(params) + 1}"
+                    params.append(provider)
 
                 if user_id:
-                    query += " AND user_id = $" + str(len(params) + 1)
+                    query += f" AND u.user_id = ${len(params) + 1}"
                     params.append(user_id)
                 if model:
-                    query += " AND model = $" + str(len(params) + 1)
+                    query += f" AND u.model = ${len(params) + 1}"
                     params.append(model)
                 if service_id:
-                    query += " AND service_id = $" + str(len(params) + 1)
+                    query += f" AND u.service_id = ${len(params) + 1}"
                     params.append(service_id)
 
                 query += " GROUP BY date ORDER BY date"

@@ -134,6 +134,16 @@ export interface UserDashboard {
   timestamp: string;
 }
 
+export interface UsageBreakdown {
+  dimension_value: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  percentage: number;
+}
+
 // ============ WebSocket Types ============
 
 export interface WebSocketMessage {
@@ -217,6 +227,30 @@ export async function getAlerts(): Promise<AlertsResponse> {
 export async function getUserDashboard(userId: string): Promise<UserDashboard> {
   const response = await api.get<UserDashboard>(
     `/api/v1/dashboard/user/${userId}`
+  );
+  return response.data;
+}
+
+/**
+ * Get usage breakdown by dimension
+ */
+export async function getUsageBreakdown(
+  dimension: "model" | "user" | "service" | "provider",
+  start?: Date,
+  end?: Date,
+  limit: number = 10
+): Promise<UsageBreakdown[]> {
+  const params = new URLSearchParams({ dimension, limit: limit.toString() });
+
+  if (start) {
+    params.set("start", start.toISOString());
+  }
+  if (end) {
+    params.set("end", end.toISOString());
+  }
+
+  const response = await api.get<UsageBreakdown[]>(
+    `/api/v1/dashboard/breakdown?${params}`
   );
   return response.data;
 }

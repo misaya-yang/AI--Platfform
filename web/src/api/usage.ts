@@ -27,6 +27,7 @@ export interface UsageBreakdownItem {
   user?: string;
   assistant?: string;
   service?: string;
+  provider?: string;
   requests: number;
   input_tokens: number;
   output_tokens: number;
@@ -78,6 +79,7 @@ export async function getUsageSummary(params?: {
   model?: string;
   service_id?: string;
   assistant_id?: string;
+  provider?: string;
 }): Promise<UsageSummary> {
   const searchParams = new URLSearchParams();
   if (params?.start_date) searchParams.set("start_date", params.start_date);
@@ -86,6 +88,7 @@ export async function getUsageSummary(params?: {
   if (params?.model) searchParams.set("model", params.model);
   if (params?.service_id) searchParams.set("service_id", params.service_id);
   if (params?.assistant_id) searchParams.set("assistant_id", params.assistant_id);
+  if (params?.provider) searchParams.set("provider", params.provider);
 
   const query = searchParams.toString();
   const response = await api.get<UsageSummary>(`/api/v1/usage/summary${query ? `?${query}` : ""}`);
@@ -96,7 +99,7 @@ export async function getUsageSummary(params?: {
  * 获取用量分解 - 按维度分类
  */
 export async function getUsageBreakdown(params: {
-  dimension: "model" | "user" | "assistant" | "service";
+  dimension: "model" | "user" | "assistant" | "service" | "provider";
   start_date?: string;
   end_date?: string;
   user_id?: string;
@@ -124,6 +127,7 @@ export async function getUsageTimeSeries(params?: {
   user_id?: string;
   model?: string;
   service_id?: string;
+  provider?: string;
   granularity?: string;
 }): Promise<UsageTimeSeriesResponse> {
   const searchParams = new URLSearchParams();
@@ -132,6 +136,7 @@ export async function getUsageTimeSeries(params?: {
   if (params?.user_id) searchParams.set("user_id", params.user_id);
   if (params?.model) searchParams.set("model", params.model);
   if (params?.service_id) searchParams.set("service_id", params.service_id);
+  if (params?.provider) searchParams.set("provider", params.provider);
   if (params?.granularity) searchParams.set("granularity", params.granularity);
 
   const query = searchParams.toString();

@@ -57,6 +57,18 @@ export function UserServiceUsageAnalytics({
     staleTime: 60000,
   });
 
+  const providerBreakdownQuery = useQuery({
+    queryKey: ["usage-breakdown-provider", startDate, endDate, granularity],
+    queryFn: () =>
+      getUsageBreakdown({
+        dimension: "provider",
+        start_date: startDate,
+        end_date: endDate,
+        limit: 20,
+      }),
+    staleTime: 60000,
+  });
+
   const userOptions = useMemo(
     () =>
       (userBreakdownQuery.data?.items || []).map((item) => ({
@@ -75,8 +87,18 @@ export function UserServiceUsageAnalytics({
     [serviceBreakdownQuery.data]
   );
 
+  const providerOptions = useMemo(
+    () =>
+      (providerBreakdownQuery.data?.items || []).map((item) => ({
+        label: item.provider || "unknown",
+        value: item.provider || "unknown",
+      })),
+    [providerBreakdownQuery.data]
+  );
+
   const [selectedUser, setSelectedUser] = useState<string>();
   const [selectedService, setSelectedService] = useState<string>();
+  const [selectedProvider, setSelectedProvider] = useState<string>();
 
   useEffect(() => {
     if (!userOptions.length) {
@@ -97,6 +119,16 @@ export function UserServiceUsageAnalytics({
       setSelectedService(serviceOptions[0].value);
     }
   }, [serviceOptions, selectedService]);
+
+  useEffect(() => {
+    if (!providerOptions.length) {
+      setSelectedProvider(undefined);
+      return;
+    }
+    if (!selectedProvider || !providerOptions.some((opt) => opt.value === selectedProvider)) {
+      setSelectedProvider(providerOptions[0].value);
+    }
+  }, [providerOptions, selectedProvider]);
 
   const userSummaryQuery = useQuery({
     queryKey: ["usage-summary-user", startDate, endDate, selectedUser, granularity],
@@ -148,6 +180,31 @@ export function UserServiceUsageAnalytics({
     staleTime: 60000,
   });
 
+  const providerSummaryQuery = useQuery({
+    queryKey: ["usage-summary-provider", startDate, endDate, selectedProvider, granularity],
+    queryFn: () =>
+      getUsageSummary({
+        start_date: startDate,
+        end_date: endDate,
+        provider: selectedProvider,
+      }),
+    enabled: !!selectedProvider,
+    staleTime: 60000,
+  });
+
+  const providerTimeSeriesQuery = useQuery({
+    queryKey: ["usage-timeseries-provider", startDate, endDate, selectedProvider, granularity],
+    queryFn: () =>
+      getUsageTimeSeries({
+        start_date: startDate,
+        end_date: endDate,
+        provider: selectedProvider,
+        granularity,
+      }),
+    enabled: !!selectedProvider,
+    staleTime: 60000,
+  });
+
   const userChartData = useMemo(
     () =>
       (userTimeSeriesQuery.data?.data || []).map((point) => ({
@@ -166,6 +223,16 @@ export function UserServiceUsageAnalytics({
         cost: point.cost_usd,
       })),
     [serviceTimeSeriesQuery.data]
+  );
+
+  const providerChartData = useMemo(
+    () =>
+      (providerTimeSeriesQuery.data?.data || []).map((point) => ({
+        date: point.date,
+        requests: point.requests,
+        cost: point.cost_usd,
+      })),
+    [providerTimeSeriesQuery.data]
   );
 
   const chartGridColor = darkMode ? "#334155" : "#e2e8f0";
@@ -260,9 +327,13 @@ export function UserServiceUsageAnalytics({
     </Row>
   );
 
-  const [activeTab, setActiveTab] = useState<"user" | "service">("user");
+  const [activeTab, setActiveTab] = useState<"user" | "service" | "provider">("user");
   const activeSummary =
-    activeTab === "user" ? userSummaryQuery.data : serviceSummaryQuery.data;
+    activeTab === "user"
+      ? userSummaryQuery.data
+      : activeTab === "service"
+        ? serviceSummaryQuery.data
+        : providerSummaryQuery.data;
   const statusLabel = activeSummary?.data_status
     ? t(`dashboard.dataStatus.${activeSummary.data_status}`, activeSummary.data_status)
     : undefined;
@@ -280,7 +351,7 @@ export function UserServiceUsageAnalytics({
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ fontSize: 16, fontWeight: 600 }}>
-            {t("dashboard.usageAnalytics.title", "Usage by User & Service")}
+            {t("dashboard.usageAnalytics.title", "Usage Analytics")}
           </div>
           {statusLabel && (
             <span
@@ -302,7 +373,7 @@ export function UserServiceUsageAnalytics({
 
       <Tabs
         activeKey={activeTab}
-        onChange={(key) => setActiveTab(key as "user" | "service")}
+        onChange={(key) => setActiveTab(key as "user" | "service" | "provider")}
         items={[
           {
             key: "user",
@@ -357,6 +428,34 @@ export function UserServiceUsageAnalytics({
                 )}
 
                 {serviceTimeSeriesQuery.isLoading ? <Spin /> : renderChart(serviceChartData)}
+              </div>
+            ),
+          },
+          {
+            key: "provider",
+            label: t("dashboard.usageAnalytics.byProvider", "By Vendor"),
+            children: (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <Select
+                    value={selectedProvider}
+                    options={providerOptions}
+                    placeholder={t("dashboard.usageAnalytics.selectProvider", "Select vendor")}
+                    onChange={(value) => setSelectedProvider(value)}
+                    style={{ minWidth: 220 }}
+                    loading={providerBreakdownQuery.isLoading}
+                    disabled={providerOptions.length === 0}
+                  />
+                  {providerBreakdownQuery.isFetching && <SyncOutlined spin />}
+                </div>
+
+                {providerSummaryQuery.isLoading ? (
+                  <Spin />
+                ) : (
+                  renderSummary(providerSummaryQuery.data)
+                )}
+
+                {providerTimeSeriesQuery.isLoading ? <Spin /> : renderChart(providerChartData)}
               </div>
             ),
           },

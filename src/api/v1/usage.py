@@ -110,6 +110,7 @@ async def get_usage_summary(
     model: Optional[str] = Query(None, description="Filter by model"),
     service_id: Optional[str] = Query(None, description="Filter by service ID"),
     assistant_id: Optional[str] = Query(None, description="Filter by assistant ID"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageSummaryResponse:
     """
@@ -133,6 +134,7 @@ async def get_usage_summary(
         model=model,
         service_id=service_id,
         assistant_id=assistant_id,
+        provider=provider,
     )
 
     last_ingested_at = await recorder.get_last_ingested_at(
@@ -229,6 +231,7 @@ async def get_usage_timeseries(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     model: Optional[str] = Query(None, description="Filter by model"),
     service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
     granularity: str = Query("day", description="Granularity: hour, day"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageTimeSeriesResponse:
@@ -252,6 +255,7 @@ async def get_usage_timeseries(
         user_id=user_id,
         model=model,
         service_id=service_id,
+        provider=provider,
         granularity=granularity,
     )
 
