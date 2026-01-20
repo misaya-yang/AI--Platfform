@@ -43,6 +43,10 @@ logger = get_logger(__name__)
 # For production, consider using Redis or database
 _upload_sessions: Dict[str, Dict] = {}
 
+# Maximum number of sessions to prevent memory exhaustion
+# In production, use Redis with TTL instead
+MAX_UPLOAD_SESSIONS = 10000
+
 router = APIRouter(prefix="/presign", tags=["Presigned Upload"])
 
 
@@ -54,14 +58,39 @@ def _get_effective_tenant_id(user: UserContext) -> str:
 
 
 def _cleanup_expired_sessions() -> None:
-    """Remove expired upload sessions from cache."""
+    """Remove expired upload sessions from cache.
+
+    Also enforces MAX_UPLOAD_SESSIONS limit by removing oldest sessions
+    if the cache exceeds the limit.
+    """
     now = datetime.now(timezone.utc)
+
+    # Remove expired sessions
     expired = [
         upload_id for upload_id, session in _upload_sessions.items()
         if session.get("expires_at", now) < now
     ]
     for upload_id in expired:
         del _upload_sessions[upload_id]
+
+    if expired:
+        logger.info(f"Cleaned up {len(expired)} expired upload sessions")
+
+    # Enforce max size limit (FIFO eviction if still over limit)
+    if len(_upload_sessions) >= MAX_UPLOAD_SESSIONS:
+        # Sort by created_at and remove oldest
+        sorted_sessions = sorted(
+            _upload_sessions.items(),
+            key=lambda x: x[1].get("created_at", now)
+        )
+        to_remove = len(_upload_sessions) - MAX_UPLOAD_SESSIONS + 100  # Remove 100 extra
+        for upload_id, _ in sorted_sessions[:to_remove]:
+            del _upload_sessions[upload_id]
+
+        logger.warning(
+            f"Upload session cache exceeded {MAX_UPLOAD_SESSIONS}, "
+            f"evicted {to_remove} oldest sessions"
+        )
 
 
 async def _validate_document_access(
