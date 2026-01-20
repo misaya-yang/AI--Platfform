@@ -1,7 +1,7 @@
 /**
  * Services Page with Tabs
  *
- * Tabs: 服务管理, 厂商管理, 模型管理
+ * Tabs: Services, Providers, Models
  */
 
 import { useState } from "react";
@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Plus, Server, Cloud, Cpu } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useTranslation } from "react-i18next";
 
 import { useServices, useHealth } from "@/hooks/useServices";
 import { ServiceCard } from "@/components/ServiceCard";
@@ -35,6 +36,7 @@ import type { LLMModel, ModelCreate, ModelUpdate } from "@/api/models";
 
 export function ServicesPage() {
   const { toast } = useToast();
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState("services");
 
@@ -81,10 +83,10 @@ export function ServicesPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["providers"] });
       setProviderFormOpen(false);
-      toast({ title: "厂商创建成功" });
+      toast({ title: t("services.page.toast.providerCreated") });
     },
     onError: (err: Error) => {
-      toast({ title: "创建失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.createFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -95,10 +97,10 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["providers"] });
       setProviderFormOpen(false);
       setEditingProvider(null);
-      toast({ title: "厂商更新成功" });
+      toast({ title: t("services.page.toast.providerUpdated") });
     },
     onError: (err: Error) => {
-      toast({ title: "更新失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.updateFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -109,10 +111,10 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["models"] });
       setDeleteProviderOpen(false);
       setProviderToDelete(null);
-      toast({ title: "厂商删除成功" });
+      toast({ title: t("services.page.toast.providerDeleted") });
     },
     onError: (err: Error) => {
-      toast({ title: "删除失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.deleteFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -122,10 +124,10 @@ export function ServicesPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["models"] });
       setModelFormOpen(false);
-      toast({ title: "模型创建成功" });
+      toast({ title: t("services.page.toast.modelCreated") });
     },
     onError: (err: Error) => {
-      toast({ title: "创建失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.createFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -136,10 +138,10 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["models"] });
       setModelFormOpen(false);
       setEditingModel(null);
-      toast({ title: "模型更新成功" });
+      toast({ title: t("services.page.toast.modelUpdated") });
     },
     onError: (err: Error) => {
-      toast({ title: "更新失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.updateFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -149,10 +151,10 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["models"] });
       setDeleteModelOpen(false);
       setModelToDelete(null);
-      toast({ title: "模型删除成功" });
+      toast({ title: t("services.page.toast.modelDeleted") });
     },
     onError: (err: Error) => {
-      toast({ title: "删除失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.deleteFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -163,7 +165,7 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (err: Error) => {
-      toast({ title: "操作失败", description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.operationFailed"), description: err.message, variant: "destructive" });
     },
   });
 
@@ -227,15 +229,15 @@ export function ServicesPage() {
           <TabsList>
             <TabsTrigger value="services" className="gap-2">
               <Server className="h-4 w-4" />
-              服务管理
+              {t("services.page.tabs.services")}
             </TabsTrigger>
             <TabsTrigger value="providers" className="gap-2">
               <Cloud className="h-4 w-4" />
-              厂商管理
+              {t("services.page.tabs.providers")}
             </TabsTrigger>
             <TabsTrigger value="models" className="gap-2">
               <Cpu className="h-4 w-4" />
-              模型管理
+              {t("services.page.tabs.models")}
             </TabsTrigger>
           </TabsList>
 
@@ -253,7 +255,7 @@ export function ServicesPage() {
               }}
             >
               <Plus className="h-4 w-4 mr-2" />
-              添加厂商
+              {t("services.page.addProvider")}
             </Button>
           )}
           {activeTab === "models" && (
@@ -265,7 +267,7 @@ export function ServicesPage() {
               disabled={providers.length === 0}
             >
               <Plus className="h-4 w-4 mr-2" />
-              添加模型
+              {t("services.page.addModel")}
             </Button>
           )}
         </div>
@@ -273,10 +275,10 @@ export function ServicesPage() {
         {/* Services Tab */}
         <TabsContent value="services" className="mt-0">
           {servicesQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">加载中...</div>
+            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
           ) : services.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
-              <p className="text-sm text-muted-foreground">暂无服务，请点击右上角添加</p>
+              <p className="text-sm text-muted-foreground">{t("services.page.noServices")}</p>
             </div>
           ) : (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -293,7 +295,7 @@ export function ServicesPage() {
           )}
           {selectedServiceId && services.some(s => s.service_id === selectedServiceId) && (
             <div className="text-xs text-muted-foreground mt-4">
-              已选择: {selectedServiceId}
+              {t("services.page.selected")}: {selectedServiceId}
             </div>
           )}
         </TabsContent>
@@ -301,10 +303,10 @@ export function ServicesPage() {
         {/* Providers Tab */}
         <TabsContent value="providers" className="mt-0">
           {providersQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">加载中...</div>
+            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
           ) : providers.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
-              <p className="text-sm text-muted-foreground">暂无厂商，请点击右上角添加</p>
+              <p className="text-sm text-muted-foreground">{t("services.page.noProviders")}</p>
             </div>
           ) : (
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -323,11 +325,11 @@ export function ServicesPage() {
         {/* Models Tab */}
         <TabsContent value="models" className="mt-0">
           {modelsQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">加载中...</div>
+            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
           ) : providers.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
               <p className="text-sm text-muted-foreground">
-                请先添加厂商，然后再添加模型
+                {t("services.page.noModels")}
               </p>
             </div>
           ) : (
@@ -372,18 +374,18 @@ export function ServicesPage() {
       <AlertDialog open={deleteProviderOpen} onOpenChange={setDeleteProviderOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认删除厂商</AlertDialogTitle>
+            <AlertDialogTitle>{t("services.page.deleteProvider.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              删除厂商 "{providerToDelete?.display_name}" 后，该厂商下的所有模型配置也将被删除。此操作不可撤销。
+              {t("services.page.deleteProvider.description", { name: providerToDelete?.display_name })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("services.page.deleteProvider.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => providerToDelete && deleteProviderMutation.mutate(providerToDelete.provider_id)}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleteProviderMutation.isPending ? "删除中..." : "删除"}
+              {deleteProviderMutation.isPending ? t("services.page.deleteProvider.deleting") : t("services.page.deleteProvider.confirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -393,18 +395,18 @@ export function ServicesPage() {
       <AlertDialog open={deleteModelOpen} onOpenChange={setDeleteModelOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认删除模型</AlertDialogTitle>
+            <AlertDialogTitle>{t("services.page.deleteModel.title")}</AlertDialogTitle>
             <AlertDialogDescription>
-              删除模型 "{modelToDelete?.display_name}" 后，用户将无法再使用此模型。此操作不可撤销。
+              {t("services.page.deleteModel.description", { name: modelToDelete?.display_name })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("services.page.deleteModel.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => modelToDelete && deleteModelMutation.mutate(modelToDelete.model_id)}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {deleteModelMutation.isPending ? "删除中..." : "删除"}
+              {deleteModelMutation.isPending ? t("services.page.deleteModel.deleting") : t("services.page.deleteModel.confirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

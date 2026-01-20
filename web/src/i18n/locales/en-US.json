@@ -1113,7 +1113,47 @@
       "registerFailed": "Registration failed"
     },
     "register": "Register Service",
-    "registering": "Registering..."
+    "registering": "Registering...",
+    "page": {
+      "tabs": {
+        "services": "Services",
+        "providers": "Providers",
+        "models": "Models"
+      },
+      "addProvider": "Add Provider",
+      "addModel": "Add Model",
+      "loading": "Loading...",
+      "noServices": "No services found. Click button above to add.",
+      "noProviders": "No providers found. Click button above to add.",
+      "noModels": "Please add a provider first, then add models.",
+      "selected": "Selected",
+      "toast": {
+        "providerCreated": "Provider created successfully",
+        "providerUpdated": "Provider updated successfully",
+        "providerDeleted": "Provider deleted successfully",
+        "modelCreated": "Model created successfully",
+        "modelUpdated": "Model updated successfully",
+        "modelDeleted": "Model deleted successfully",
+        "createFailed": "Create failed",
+        "updateFailed": "Update failed",
+        "deleteFailed": "Delete failed",
+        "operationFailed": "Operation failed"
+      },
+      "deleteProvider": {
+        "title": "Confirm Delete Provider",
+        "description": "Deleting provider \"{{name}}\" will also delete all its model configurations. This action cannot be undone.",
+        "cancel": "Cancel",
+        "confirm": "Delete",
+        "deleting": "Deleting..."
+      },
+      "deleteModel": {
+        "title": "Confirm Delete Model",
+        "description": "Deleting model \"{{name}}\" will prevent users from using this model. This action cannot be undone.",
+        "cancel": "Cancel",
+        "confirm": "Delete",
+        "deleting": "Deleting..."
+      }
+    }
   },
   "llm": {
     "provider": {

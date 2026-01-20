@@ -1113,7 +1113,47 @@
       "registerFailed": "注册失败"
     },
     "register": "注册服务",
-    "registering": "注册中..."
+    "registering": "注册中...",
+    "page": {
+      "tabs": {
+        "services": "服务管理",
+        "providers": "厂商管理",
+        "models": "模型管理"
+      },
+      "addProvider": "添加厂商",
+      "addModel": "添加模型",
+      "loading": "加载中...",
+      "noServices": "暂无服务，请点击右上角添加",
+      "noProviders": "暂无厂商，请点击右上角添加",
+      "noModels": "请先添加厂商，然后再添加模型",
+      "selected": "已选择",
+      "toast": {
+        "providerCreated": "厂商创建成功",
+        "providerUpdated": "厂商更新成功",
+        "providerDeleted": "厂商删除成功",
+        "modelCreated": "模型创建成功",
+        "modelUpdated": "模型更新成功",
+        "modelDeleted": "模型删除成功",
+        "createFailed": "创建失败",
+        "updateFailed": "更新失败",
+        "deleteFailed": "删除失败",
+        "operationFailed": "操作失败"
+      },
+      "deleteProvider": {
+        "title": "确认删除厂商",
+        "description": "删除厂商 \"{{name}}\" 后，该厂商下的所有模型配置也将被删除。此操作不可撤销。",
+        "cancel": "取消",
+        "confirm": "删除",
+        "deleting": "删除中..."
+      },
+      "deleteModel": {
+        "title": "确认删除模型",
+        "description": "删除模型 \"{{name}}\" 后，用户将无法再使用此模型。此操作不可撤销。",
+        "cancel": "取消",
+        "confirm": "删除",
+        "deleting": "删除中..."
+      }
+    }
   },
   "llm": {
     "provider": {
