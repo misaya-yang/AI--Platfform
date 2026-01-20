@@ -11,9 +11,10 @@
  * - Search status display (Phase 1)
  */
 
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap, Brain, PenTool, Cog, Eye, ListTodo, ChevronRight } from "lucide-react";
+import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Zap, Brain, PenTool, Cog, Eye, ListTodo, ChevronRight, ChevronDown, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { WebSearchDisplay } from "./WebSearchDisplay";
@@ -26,11 +27,17 @@ interface ChatMessageProps {
   message: ChatMessageType;
 }
 
-/** Manus-style search steps display */
+/** Manus-style collapsible task panel */
 function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[] }) {
   const { t } = useTranslation();
+  const [isExpanded, setIsExpanded] = useState(true);
 
   if (!searchStatus || searchStatus.length === 0) return null;
+
+  // Check if all tasks are completed
+  const allCompleted = searchStatus.every(item => item.state === "completed");
+  const completedCount = searchStatus.filter(item => item.state === "completed").length;
+  const totalCount = searchStatus.length;
 
   const getStepConfig = (item: SearchStatusItem) => {
     const isKB = item.type === "kb";
@@ -38,116 +45,144 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
     const isSearching = item.state === "searching";
     const isCompleted = item.state === "completed";
 
+    // Get action text (what's being done)
+    const actionText = isSearching
+      ? isKB
+        ? t("assistant.searchingKB", "正在搜索知识库")
+        : isFiles
+        ? t("assistant.processingFiles", "正在分析文件")
+        : t("assistant.searchingWeb", "正在搜索")
+      : isCompleted
+      ? isKB
+        ? t("assistant.readSources", "已检索 {{count}} 个来源", { count: item.resultCount || 0 })
+        : isFiles
+        ? t("assistant.analyzedFiles", "已分析 {{count}} 个文件", { count: item.resultCount || 0 })
+        : t("assistant.foundResults", "已找到 {{count}} 条结果", { count: item.resultCount || 0 })
+      : item.error || t("assistant.searchFailed", "搜索失败");
+
     return {
-      icon: isKB ? Database : isFiles ? FileText : Globe,
+      icon: isKB ? Database : isFiles ? FileText : Search,
       iconColor: isKB
         ? "text-emerald-500"
         : isFiles
         ? "text-violet-500"
         : "text-blue-500",
-      bgColor: isKB
-        ? "bg-emerald-500/10"
-        : isFiles
-        ? "bg-violet-500/10"
-        : "bg-blue-500/10",
-      label: isSearching
-        ? isKB
-          ? t("assistant.searchingKB", "搜索知识库")
-          : isFiles
-          ? t("assistant.processingFiles", "分析文件")
-          : t("assistant.searchingWeb", "搜索网络")
-        : isCompleted
-        ? isKB
-          ? t("assistant.readSources", "阅读 {{count}} 个来源", { count: item.resultCount || 0 })
-          : isFiles
-          ? t("assistant.analyzedFiles", "已分析 {{count}} 个文件", { count: item.resultCount || 0 })
-          : t("assistant.foundResults", "找到 {{count}} 条结果", { count: item.resultCount || 0 })
-        : item.error || t("assistant.searchFailed", "搜索失败"),
+      actionText,
       isSearching,
       isCompleted,
     };
   };
 
   return (
-    <div className="mb-4 -mx-2">
-      <div className="rounded-xl bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-700/40 overflow-hidden">
-        {/* Compact header */}
-        <div className="px-3 py-2 flex items-center gap-2 border-b border-slate-200/60 dark:border-slate-700/40 bg-white/50 dark:bg-slate-800/50">
-          <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
-            {t("assistant.researchSteps", "研究步骤")}
-          </span>
-        </div>
+    <div className="mb-4">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="rounded-2xl border border-slate-200/80 dark:border-slate-700/60 bg-white/80 dark:bg-slate-800/60 backdrop-blur-sm overflow-hidden shadow-sm"
+      >
+        {/* Clickable header - Manus style */}
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="w-full px-4 py-3 flex items-center gap-3 hover:bg-slate-50/50 dark:hover:bg-slate-700/30 transition-colors"
+        >
+          {/* Status icon */}
+          <div className={cn(
+            "flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center",
+            allCompleted
+              ? "bg-emerald-100 dark:bg-emerald-900/40"
+              : "bg-blue-100 dark:bg-blue-900/40"
+          )}>
+            {allCompleted ? (
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+            ) : (
+              <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin" />
+            )}
+          </div>
 
-        {/* Steps list */}
-        <div className="divide-y divide-slate-200/60 dark:divide-slate-700/40">
-          <AnimatePresence mode="popLayout">
-            {searchStatus.map((item, index) => {
-              const config = getStepConfig(item);
-              const IconComponent = config.icon;
+          {/* Title */}
+          <div className="flex-1 text-left">
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              {allCompleted
+                ? t("assistant.researchComplete", "研究完成")
+                : t("assistant.researching", "正在研究")}
+            </span>
+            <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">
+              {completedCount}/{totalCount}
+            </span>
+          </div>
 
-              return (
-                <motion.div
-                  key={`${item.type}-${index}`}
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="flex items-center gap-3 px-3 py-2.5"
-                >
-                  {/* Icon with background */}
-                  <div className={cn(
-                    "flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center",
-                    config.bgColor
-                  )}>
-                    {config.isSearching ? (
-                      <Loader2 className={cn("h-3.5 w-3.5 animate-spin", config.iconColor)} />
-                    ) : config.isCompleted ? (
-                      <IconComponent className={cn("h-3.5 w-3.5", config.iconColor)} />
-                    ) : (
-                      <IconComponent className="h-3.5 w-3.5 text-red-500" />
-                    )}
-                  </div>
+          {/* Expand/collapse chevron */}
+          <motion.div
+            animate={{ rotate: isExpanded ? 180 : 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <ChevronDown className="h-4 w-4 text-slate-400" />
+          </motion.div>
+        </button>
 
-                  {/* Label */}
-                  <span className={cn(
-                    "text-xs font-medium flex-1",
-                    config.isSearching
-                      ? "text-slate-600 dark:text-slate-300"
-                      : config.isCompleted
-                      ? "text-slate-600 dark:text-slate-400"
-                      : "text-red-600 dark:text-red-400"
-                  )}>
-                    {config.label}
-                  </span>
+        {/* Collapsible task list */}
+        <AnimatePresence initial={false}>
+          {isExpanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="overflow-hidden"
+            >
+              <div className="px-4 pb-3 space-y-1">
+                {searchStatus.map((item, index) => {
+                  const config = getStepConfig(item);
+                  const IconComponent = config.icon;
 
-                  {/* Status indicator */}
-                  {config.isSearching ? (
-                    <div className="flex gap-0.5">
-                      {[0, 1, 2].map((i) => (
-                        <motion.div
-                          key={i}
-                          className={cn("w-1 h-1 rounded-full", config.iconColor.replace("text-", "bg-"))}
-                          animate={{ opacity: [0.3, 1, 0.3] }}
-                          transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
-                        />
-                      ))}
-                    </div>
-                  ) : config.isCompleted ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                  ) : null}
+                  return (
+                    <motion.div
+                      key={`${item.type}-${index}`}
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.05 }}
+                      className="flex items-center gap-3 py-2 pl-2 rounded-lg hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors"
+                    >
+                      {/* Step icon */}
+                      <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+                        {config.isSearching ? (
+                          <Loader2 className={cn("h-4 w-4 animate-spin", config.iconColor)} />
+                        ) : config.isCompleted ? (
+                          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                        ) : (
+                          <IconComponent className="h-4 w-4 text-red-500" />
+                        )}
+                      </div>
 
-                  {/* Duration badge */}
-                  {!config.isSearching && item.durationMs !== undefined && (
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
-                      {(item.durationMs / 1000).toFixed(1)}s
-                    </span>
-                  )}
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
-        </div>
-      </div>
+                      {/* Action icon */}
+                      <IconComponent className={cn("h-3.5 w-3.5 flex-shrink-0", config.iconColor)} />
+
+                      {/* Action text */}
+                      <span className={cn(
+                        "text-sm flex-1",
+                        config.isSearching
+                          ? "text-slate-600 dark:text-slate-300"
+                          : config.isCompleted
+                          ? "text-slate-500 dark:text-slate-400"
+                          : "text-red-600 dark:text-red-400"
+                      )}>
+                        {config.actionText}
+                      </span>
+
+                      {/* Duration badge */}
+                      {!config.isSearching && item.durationMs !== undefined && (
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
+                          {(item.durationMs / 1000).toFixed(1)}s
+                        </span>
+                      )}
+                    </motion.div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }

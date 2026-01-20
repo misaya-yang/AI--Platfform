@@ -516,7 +516,15 @@ export function useChatSession() {
           case "file_processed":
              const fileData = event.data as FileProcessedEventData;
              const fileCount = fileData.image_count + (fileData.text_length > 0 ? 1 : 0);
-             searchStatus = [...searchStatus, { type: "files", state: "completed", resultCount: fileCount }];
+             // Update existing "files" entry or add new one
+             const hasFilesEntry = searchStatus.some(s => s.type === "files");
+             if (hasFilesEntry) {
+               searchStatus = searchStatus.map(s =>
+                 s.type === "files" ? { ...s, state: "completed" as const, resultCount: fileCount } : s
+               );
+             } else {
+               searchStatus = [...searchStatus, { type: "files" as const, state: "completed" as const, resultCount: fileCount }];
+             }
              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, searchStatus } : m));
              break;
 
