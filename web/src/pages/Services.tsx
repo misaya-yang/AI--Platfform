@@ -4,10 +4,11 @@
  * Tabs: Services, Providers, Models
  */
 
-import { useState } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,7 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Plus, Server, Cloud, Cpu } from "lucide-react";
+import { Plus, Server, Cloud, Cpu, Search } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import { getErrorMessage } from "@/lib/utils";
@@ -40,12 +41,43 @@ export function ServicesPage() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState("services");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced search to avoid excessive re-renders
+  useEffect(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      setSearchQuery(searchInput);
+    }, 300);
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+  }, [searchInput]);
 
   // Services state
   const servicesQuery = useServices();
   const healthQuery = useHealth();
   const services = servicesQuery.data || [];
   const health = healthQuery.data || {};
+  // Filtered Services
+  const filteredServices = useMemo(() => {
+    let result = services;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(s =>
+        (s.service_id || "").toLowerCase().includes(q) ||
+        (s.description || "").toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [services, searchQuery]);
+
   const { selectedServiceId, setSelectedServiceId } = useAppStore();
 
   // Provider state
@@ -71,12 +103,51 @@ export function ServicesPage() {
     {} as Record<string, string>
   );
 
+  // Filtered Providers
+  const filteredProviders = useMemo(() => {
+    let result = providers;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(p =>
+        (p.display_name || "").toLowerCase().includes(q) ||
+        (p.provider_id || "").toLowerCase().includes(q) ||
+        (p.base_url || "").toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [providers, searchQuery]);
+
   // Model queries
   const modelsQuery = useQuery({
     queryKey: ["models"],
     queryFn: () => modelsApi.listModels(undefined, true),
   });
-  const models = modelsQuery.data || [];
+
+  const models = useMemo(() => {
+    if (!modelsQuery.data) return [];
+    let result = [...modelsQuery.data].sort((a, b) => {
+      // Priority 1: Enabled first
+      if (a.is_enabled !== b.is_enabled) {
+        return a.is_enabled ? -1 : 1;
+      }
+      // Priority 2: Sort order (descending)
+      if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+        return (b.sort_order || 0) - (a.sort_order || 0);
+      }
+      // Priority 3: Alphabetical by display name
+      return a.display_name.localeCompare(b.display_name);
+    });
+
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(m =>
+        (m.display_name || "").toLowerCase().includes(q) ||
+        (m.model_id || "").toLowerCase().includes(q) ||
+        (m.provider_id || "").toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [modelsQuery.data, searchQuery]);
 
   // Provider mutations
   const createProviderMutation = useMutation({
@@ -224,129 +295,192 @@ export function ServicesPage() {
   };
 
   return (
-    <div className="space-y-4">
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="flex items-center justify-between mb-4">
-          <TabsList>
-            <TabsTrigger value="services" className="gap-2">
+    <div className="space-y-6 p-1">
+      <div className="flex flex-col gap-2 mb-8">
+        <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-gray-900 to-gray-600 dark:from-gray-100 dark:to-gray-400 bg-clip-text text-transparent">
+          {t("services.page.title", "Service Management")}
+        </h1>
+        <p className="text-muted-foreground text-lg">
+          {t("services.page.subtitle", "Manage all your AI services, providers, and models in one place.")}
+        </p>
+      </div>
+
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-border/40 pb-4">
+          <TabsList className="bg-muted/50 p-1 h-auto rounded-xl">
+            <TabsTrigger
+              value="services"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+            >
               <Server className="h-4 w-4" />
               {t("services.page.tabs.services")}
             </TabsTrigger>
-            <TabsTrigger value="providers" className="gap-2">
+            <TabsTrigger
+              value="providers"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+            >
               <Cloud className="h-4 w-4" />
               {t("services.page.tabs.providers")}
             </TabsTrigger>
-            <TabsTrigger value="models" className="gap-2">
+            <TabsTrigger
+              value="models"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+            >
               <Cpu className="h-4 w-4" />
               {t("services.page.tabs.models")}
             </TabsTrigger>
           </TabsList>
 
-          {/* Tab-specific actions */}
-          {activeTab === "services" && (
-            <ServiceForm
-              onRegistered={() => qc.invalidateQueries({ queryKey: ["services"] })}
-            />
-          )}
-          {activeTab === "providers" && (
-            <Button
-              onClick={() => {
-                setEditingProvider(null);
-                setProviderFormOpen(true);
-              }}
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              {t("services.page.addProvider")}
-            </Button>
-          )}
-          {activeTab === "models" && (
-            <Button
-              onClick={() => {
-                setEditingModel(null);
-                setModelFormOpen(true);
-              }}
-              disabled={providers.length === 0}
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              {t("services.page.addModel")}
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            <div className="relative w-60">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder={t("services.page.searchPlaceholder", "Search...")}
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="pl-9 h-9 bg-background/50 border-border/50 focus:bg-background transition-colors rounded-xl"
+              />
+            </div>
+
+            {activeTab === "services" && (
+              <ServiceForm
+                onRegistered={() => qc.invalidateQueries({ queryKey: ["services"] })}
+              />
+            )}
+            {activeTab === "providers" && (
+              <Button
+                onClick={() => {
+                  setEditingProvider(null);
+                  setProviderFormOpen(true);
+                }}
+                className="rounded-full shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all hover:scale-105 active:scale-95"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                {t("services.page.addProvider")}
+              </Button>
+            )}
+            {activeTab === "models" && (
+              <Button
+                onClick={() => {
+                  setEditingModel(null);
+                  setModelFormOpen(true);
+                }}
+                disabled={providers.length === 0}
+                className="rounded-full shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all hover:scale-105 active:scale-95"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                {t("services.page.addModel")}
+              </Button>
+            )}
+          </div>
         </div>
 
-        {/* Services Tab */}
-        <TabsContent value="services" className="mt-0">
-          {servicesQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
-          ) : services.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
-              <p className="text-sm text-muted-foreground">{t("services.page.noServices")}</p>
-            </div>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {services.map((s) => (
-                <ServiceCard
-                  key={s.service_id}
-                  service={s}
-                  health={health[s.service_id]}
-                  selected={selectedServiceId === s.service_id}
-                  onSelect={() => setSelectedServiceId(s.service_id)}
-                />
-              ))}
-            </div>
-          )}
-          {selectedServiceId && services.some(s => s.service_id === selectedServiceId) && (
-            <div className="text-xs text-muted-foreground mt-4">
-              {t("services.page.selected")}: {selectedServiceId}
-            </div>
-          )}
-        </TabsContent>
+        <div className="min-h-[500px]">
+          {/* Services Tab */}
+          <TabsContent value="services" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+            {servicesQuery.isLoading ? (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="h-24 rounded-xl bg-muted/20 animate-pulse" />
+                ))}
+              </div>
+            ) : filteredServices.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
+                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
+                  <Server className="h-10 w-10 text-muted-foreground/50" />
+                </div>
+                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noServices")}</p>
+                {searchQuery ? (
+                  <p className="text-sm text-muted-foreground/60 mt-1">{t("services.search.noResults", "No services match your search.")}</p>
+                ) : (
+                  <p className="text-sm text-muted-foreground/60 mt-1">{t("services.empty.hint", "Get started by registering your first service.")}</p>
+                )}
+              </div>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {filteredServices.map((s) => (
+                  <ServiceCard
+                    key={s.service_id}
+                    service={s}
+                    health={health[s.service_id]}
+                    selected={selectedServiceId === s.service_id}
+                    onSelect={() => setSelectedServiceId(s.service_id)}
+                  />
+                ))}
+              </div>
+            )}
+            {selectedServiceId && services.some(s => s.service_id === selectedServiceId) && (
+              <div className="fixed bottom-6 right-6 z-50">
+                <div className="bg-foreground text-background px-4 py-2 rounded-full shadow-2xl text-sm font-medium animate-in slide-in-from-bottom-5 fade-in">
+                  {t("services.selected", "Selected")}: {selectedServiceId}
+                </div>
+              </div>
+            )}
+          </TabsContent>
 
-        {/* Providers Tab */}
-        <TabsContent value="providers" className="mt-0">
-          {providersQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
-          ) : providers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
-              <p className="text-sm text-muted-foreground">{t("services.page.noProviders")}</p>
-            </div>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-              {providers.map((p) => (
-                <ProviderCard
-                  key={p.provider_id}
-                  provider={p}
-                  onEdit={() => handleEditProvider(p)}
-                  onDelete={() => handleDeleteProvider(p)}
-                />
-              ))}
-            </div>
-          )}
-        </TabsContent>
+          {/* Providers Tab */}
+          <TabsContent value="providers" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+            {providersQuery.isLoading ? (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="h-20 rounded-xl bg-muted/20 animate-pulse" />
+                ))}
+              </div>
+            ) : filteredProviders.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
+                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
+                  <Cloud className="h-10 w-10 text-muted-foreground/50" />
+                </div>
+                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noProviders")}</p>
+                {searchQuery && <p className="text-sm text-muted-foreground/60 mt-1">{t("providers.search.noResults", "No providers match your search.")}</p>}
+              </div>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {filteredProviders.map((p) => (
+                  <ProviderCard
+                    key={p.provider_id}
+                    provider={p}
+                    onEdit={() => handleEditProvider(p)}
+                    onDelete={() => handleDeleteProvider(p)}
+                  />
+                ))}
+              </div>
+            )}
+          </TabsContent>
 
-        {/* Models Tab */}
-        <TabsContent value="models" className="mt-0">
-          {modelsQuery.isLoading ? (
-            <div className="text-sm text-muted-foreground">{t("services.page.loading")}</div>
-          ) : providers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 border rounded-lg bg-muted/10 border-dashed">
-              <p className="text-sm text-muted-foreground">
-                {t("services.page.noModels")}
-              </p>
-            </div>
-          ) : (
-            <ModelTable
-              models={models}
-              providers={providerMap}
-              onEdit={handleEditModel}
-              onDelete={handleDeleteModel}
-              onToggle={handleToggleModel}
-              loading={toggleModelMutation.isPending}
-            />
-          )}
-        </TabsContent>
+          {/* Models Tab */}
+          <TabsContent value="models" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+            {modelsQuery.isLoading ? (
+              <div className="space-y-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="h-16 rounded-xl bg-muted/20 animate-pulse" />
+                ))}
+              </div>
+            ) : models.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
+                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
+                  <Cpu className="h-10 w-10 text-muted-foreground/50" />
+                </div>
+                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noModels")}</p>
+                {searchQuery && <p className="text-sm text-muted-foreground/60 mt-1">{t("models.search.noResults", "No models match your search.")}</p>}
+              </div>
+            ) : (
+              <div className="bg-background/50 backdrop-blur-sm rounded-2xl border border-border/50 overflow-hidden shadow-sm">
+                <ModelTable
+                  models={models}
+                  providers={providerMap}
+                  onEdit={handleEditModel}
+                  onDelete={handleDeleteModel}
+                  onToggle={handleToggleModel}
+                  loading={toggleModelMutation.isPending}
+                />
+              </div>
+            )}
+          </TabsContent>
+        </div>
       </Tabs>
 
-      {/* Provider Form Dialog */}
+      {/* Dialogs and Modals remain unchanged in logic but inserted here */}
       <ProviderForm
         open={providerFormOpen}
         onOpenChange={(open) => {
@@ -358,7 +492,6 @@ export function ServicesPage() {
         loading={createProviderMutation.isPending || updateProviderMutation.isPending}
       />
 
-      {/* Model Form Dialog */}
       <ModelForm
         open={modelFormOpen}
         onOpenChange={(open) => {
@@ -371,7 +504,6 @@ export function ServicesPage() {
         loading={createModelMutation.isPending || updateModelMutation.isPending}
       />
 
-      {/* Delete Provider Confirmation */}
       <AlertDialog open={deleteProviderOpen} onOpenChange={setDeleteProviderOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -392,7 +524,6 @@ export function ServicesPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Delete Model Confirmation */}
       <AlertDialog open={deleteModelOpen} onOpenChange={setDeleteModelOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>

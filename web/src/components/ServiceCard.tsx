@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { HealthStatus, ServiceDefinition, ServiceType } from "@/types/gateway";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +72,7 @@ export function ServiceCard({
   selected?: boolean;
   onSelect?: () => void;
 }) {
+  const { t } = useTranslation();
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
   const isVirtual = service.metadata?.is_virtual === true;
@@ -80,50 +82,59 @@ export function ServiceCard({
     <>
       <Card
         className={cn(
-          "relative overflow-hidden cursor-pointer",
-          selected && "ring-2 ring-primary"
+          "relative overflow-hidden cursor-pointer group transition-all duration-300 border bg-card hover:shadow-md hover:border-primary/50",
+          selected && "ring-2 ring-primary border-primary shadow-sm"
         )}
         onClick={onSelect}
       >
-        <CardContent className="p-5">
-          <div className="flex items-start gap-4">
-            {/* Simple icon - no gradient container */}
-            <div className="text-muted-foreground">
+        <CardContent className="p-4 relative">
+          <div className="flex items-center gap-4">
+            {/* Icon */}
+            <div className="flex-shrink-0 p-2.5 rounded-lg bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors duration-300 border border-primary/20">
               <ServiceIcon serviceType={service.service_type} />
             </div>
 
+            {/* Content */}
             <div className="flex-1 min-w-0">
-              <h3 className="font-medium text-foreground truncate">
-                {service.name}
-              </h3>
-              <p className="text-sm text-muted-foreground mt-1">
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="font-semibold text-foreground truncate">
+                  {service.name}
+                </h3>
+                {/* Status Indicator */}
+                <div className="flex-shrink-0" title={isHealthy ? t("services.status.active", "Active") : t("services.status.inactive", "Inactive")}>
+                  <span className={cn(
+                    "inline-flex rounded-full h-2 w-2",
+                    isHealthy ? "bg-green-500" : "bg-red-500"
+                  )}></span>
+                </div>
+              </div>
+              <p className="font-mono text-xs text-muted-foreground truncate mb-1.5">
                 {service.service_id}
               </p>
-              {service.description && (
-                <p className="text-xs text-muted-foreground mt-2 line-clamp-2">
-                  {service.description}
-                </p>
-              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="secondary" className="bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 text-[10px] font-semibold border border-slate-200 dark:border-slate-700 px-1.5 py-0">
+                  {serviceTypeLabel}
+                </Badge>
+                {isVirtual && (
+                  <Badge variant="outline" className="text-[10px] font-semibold border-blue-200 text-blue-700 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 px-1.5 py-0">
+                    {t("services.badge.core", "Core")}
+                  </Badge>
+                )}
+                {service.supported_modes?.slice(0, 2).map((m) => (
+                  <Badge key={m} variant="outline" className="text-[10px] text-muted-foreground font-medium border-border bg-background px-1.5 py-0">
+                    {m}
+                  </Badge>
+                ))}
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              {/* Virtual service badge */}
-              {isVirtual && (
-                <Badge variant="outline" className="text-xs border-primary/50 text-primary">
-                  内置
-                </Badge>
-              )}
-              {/* Status badge */}
-              <Badge variant={isHealthy ? "default" : "destructive"}>
-                {isHealthy ? "Active" : "Inactive"}
-              </Badge>
-
-              {/* Config button - hidden for virtual services */}
+            {/* Actions */}
+            <div className="flex-shrink-0 flex items-center gap-1">
               {!isVirtual && (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 text-muted-foreground"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted transition-all duration-200"
                   onClick={(e) => {
                     e.stopPropagation();
                     setConfigOpen(true);
@@ -136,17 +147,12 @@ export function ServiceCard({
             </div>
           </div>
 
-          {/* Service type and modes badges */}
-          <div className="flex flex-wrap gap-2 mt-4">
-            <Badge variant="secondary" className="text-xs">
-              {serviceTypeLabel}
-            </Badge>
-            {service.supported_modes?.slice(0, 2).map((m) => (
-              <Badge key={m} variant="outline" className="text-xs">
-                {m}
-              </Badge>
-            ))}
-          </div>
+          {/* Description - optional, shown if exists */}
+          {service.description && (
+            <p className="text-xs text-muted-foreground mt-3 pt-3 border-t border-border/50 line-clamp-1">
+              {service.description}
+            </p>
+          )}
         </CardContent>
       </Card>
 

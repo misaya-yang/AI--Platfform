@@ -5,6 +5,7 @@
  */
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   Table,
   TableBody,
@@ -17,13 +18,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { Eye, EyeOff, Wrench, Pencil, Trash2 } from "lucide-react";
+import { Eye, Wrench, Pencil, Trash2 } from "lucide-react";
 import type { LLMModel } from "@/api/models";
 import {
   formatContextWindow,
   formatPrice,
   getAccessLevelDisplayName,
-  getAccessLevelColor,
 } from "@/api/models";
 
 interface ModelTableProps {
@@ -43,6 +43,7 @@ export function ModelTable({
   onToggle,
   loading,
 }: ModelTableProps) {
+  const { t } = useTranslation();
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const handleToggle = async (model: LLMModel, enabled: boolean) => {
@@ -58,68 +59,74 @@ export function ModelTable({
   if (models.length === 0) {
     return (
       <div className="text-center py-12 text-muted-foreground">
-        暂无模型数据
+        {t("models.empty", "暂无模型数据")}
       </div>
     );
   }
 
   return (
-    <div className="rounded-md border">
+    <div className="w-full">
       <Table>
         <TableHeader>
-          <TableRow>
-            <TableHead className="w-[200px]">模型</TableHead>
-            <TableHead>厂商</TableHead>
-            <TableHead className="text-center">上下文</TableHead>
-            <TableHead className="text-center">输出限制</TableHead>
-            <TableHead className="text-center">价格</TableHead>
-            <TableHead className="text-center">功能</TableHead>
-            <TableHead className="text-center">权限</TableHead>
-            <TableHead className="text-center">状态</TableHead>
-            <TableHead className="text-right">操作</TableHead>
+          <TableRow className="border-b border-border hover:bg-transparent">
+            <TableHead className="w-[200px] text-muted-foreground font-medium">{t("models.table.model", "模型")}</TableHead>
+            <TableHead className="text-muted-foreground font-medium">{t("models.table.provider", "厂商")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.context", "上下文")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.outputLimit", "输出限制")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.price", "价格")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.capabilities", "功能")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.accessLevel", "权限")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.status", "状态")}</TableHead>
+            <TableHead className="text-right text-muted-foreground font-medium">{t("models.table.actions", "操作")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {models.map((model) => (
             <TableRow
               key={model.model_id}
-              className={cn(!model.is_enabled && "opacity-60")}
+              className={cn(
+                "border-b border-border transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+                !model.is_enabled && "opacity-60 bg-muted/20"
+              )}
             >
-              <TableCell>
+              <TableCell className="font-medium">
                 <div>
-                  <div className="font-medium">{model.display_name}</div>
-                  <div className="text-xs text-muted-foreground">
+                  <div className="text-foreground font-semibold">{model.display_name}</div>
+                  <div className="text-xs text-muted-foreground font-mono mt-0.5">
                     {model.model_id}
                   </div>
                 </div>
               </TableCell>
               <TableCell>
-                {providers[model.provider_id] || model.provider_id}
+                <div className="flex items-center gap-2">
+                  <div className="h-2 w-2 rounded-full bg-primary/20" />
+                  <span className="font-medium text-sm">{providers[model.provider_id] || model.provider_id}</span>
+                </div>
               </TableCell>
-              <TableCell className="text-center">
+              <TableCell className="text-center text-foreground font-mono text-sm">
                 {formatContextWindow(model.context_window)}
               </TableCell>
-              <TableCell className="text-center">
+              <TableCell className="text-center text-foreground font-mono text-sm">
                 {formatContextWindow(model.max_output_tokens)}
               </TableCell>
               <TableCell className="text-center">
-                <div className="text-xs">
-                  <div>入: {formatPrice(model.input_price_per_1k)}</div>
-                  <div>出: {formatPrice(model.output_price_per_1k)}</div>
+                <div className="text-xs text-muted-foreground">
+                  <div className="flex items-center justify-center gap-1">{t("models.price.input", "In")}: <span className="font-mono text-foreground font-medium">{formatPrice(model.input_price_per_1k)}</span></div>
+                  <div className="flex items-center justify-center gap-1">{t("models.price.output", "Out")}: <span className="font-mono text-foreground font-medium">{formatPrice(model.output_price_per_1k)}</span></div>
                 </div>
               </TableCell>
               <TableCell className="text-center">
                 <div className="flex items-center justify-center gap-1">
                   {model.supports_vision && (
-                    <Badge variant="outline" className="text-xs">
+                    <Badge variant="outline" className="text-[10px] px-1.5 border-purple-200 bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-800 font-semibold shadow-sm">
                       <Eye className="h-3 w-3 mr-1" />
-                      Vision
+                      {t("models.capabilities.vision", "Vision")}
                     </Badge>
                   )}
                   {model.supports_tools && (
-                    <Badge variant="outline" className="text-xs">
+                    <Badge variant="outline" className="text-[10px] px-1.5 border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 font-semibold shadow-sm">
                       <Wrench className="h-3 w-3 mr-1" />
-                      Tools
+                      {t("models.capabilities.tools", "Tools")}
                     </Badge>
                   )}
                 </div>
@@ -128,13 +135,13 @@ export function ModelTable({
                 <Badge
                   variant="secondary"
                   className={cn(
-                    "text-xs",
+                    "text-[10px] font-semibold border shadow-sm",
                     model.access_level === "admin" &&
-                      "bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300",
+                    "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800",
                     model.access_level === "premium" &&
-                      "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+                    "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/30 dark:text-indigo-300 dark:border-indigo-800",
                     model.access_level === "public" &&
-                      "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300"
+                    "bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-950/30 dark:text-teal-300 dark:border-teal-800"
                   )}
                 >
                   {getAccessLevelDisplayName(model.access_level)}
@@ -145,25 +152,27 @@ export function ModelTable({
                   checked={model.is_enabled}
                   onCheckedChange={(checked) => handleToggle(model, checked)}
                   disabled={loading || togglingId === model.model_id}
+                  className="data-[state=checked]:bg-green-500"
                 />
               </TableCell>
               <TableCell className="text-right">
-                <div className="flex items-center justify-end gap-1">
+                <div className="flex items-center justify-end gap-2">
                   <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 px-2.5 text-xs font-medium border-primary/20 hover:bg-primary/5 hover:text-primary transition-colors"
                     onClick={() => onEdit?.(model)}
                   >
-                    <Pencil className="h-4 w-4" />
+                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                    {t("common.configure", "配置")}
                   </Button>
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8 text-destructive hover:text-destructive"
+                    className="h-8 w-8 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors"
                     onClick={() => onDelete?.(model)}
                   >
-                    <Trash2 className="h-4 w-4" />
+                    <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </TableCell>

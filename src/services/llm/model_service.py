@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
+from ...services.billing.model_pricing import get_pricing_service
 
 logger = get_logger(__name__)
 
@@ -123,7 +124,27 @@ class ModelService:
             input_price_per_1k, output_price_per_1k, access_level,
             is_enabled, sort_order,
         )
-        return self._row_to_dict(row)
+        row_dict = self._row_to_dict(row)
+        
+        # Sync with model_pricing table for usage recording
+        try:
+            pricing_svc = get_pricing_service()
+            await pricing_svc.update_pricing(
+                model=model_id,
+                input_price_per_1k=float(input_price_per_1k),
+                output_price_per_1k=float(output_price_per_1k),
+                provider=provider_id,
+                display_name=display_name,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_vision=supports_vision,
+                supports_tools=supports_tools,
+            )
+            logger.info(f"Synced pricing for model {model_id}")
+        except Exception as e:
+            logger.error(f"Failed to sync pricing for model {model_id}: {e}")
+
+        return row_dict
 
     async def update_model(
         self,
@@ -214,7 +235,30 @@ class ModelService:
                       is_enabled, sort_order, created_at, updated_at
         """
         row = await self.db.fetchrow(query, *params)
-        return self._row_to_dict(row) if row else None
+        
+        if row:
+            row_dict = self._row_to_dict(row)
+            # Sync with model_pricing table for usage recording
+            try:
+                pricing_svc = get_pricing_service()
+                # Use values from the updated row to ensure we have the latest state
+                await pricing_svc.update_pricing(
+                    model=model_id,
+                    input_price_per_1k=float(row['input_price_per_1k'] or 0),
+                    output_price_per_1k=float(row['output_price_per_1k'] or 0),
+                    provider=row['provider_id'],
+                    display_name=row['display_name'],
+                    context_window=row['context_window'],
+                    max_output_tokens=row['max_output_tokens'],
+                    supports_vision=row['supports_vision'],
+                    supports_tools=row['supports_tools'],
+                )
+                logger.info(f"Synced pricing for model {model_id}")
+            except Exception as e:
+                logger.error(f"Failed to sync pricing for model {model_id}: {e}")
+            return row_dict
+            
+        return None
 
     async def delete_model(
         self,

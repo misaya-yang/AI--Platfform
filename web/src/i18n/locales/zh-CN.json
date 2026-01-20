@@ -23,11 +23,14 @@
     "copied": "已复制",
     "enable": "启用",
     "disable": "禁用",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "test": "测试",
+    "configure": "配置",
     "status": "状态",
     "actions": "操作",
     "all": "全部",
     "active": "启用",
-    "disabled": "禁用",
     "never": "从未",
     "notSet": "未设置",
     "retry": "重试",
@@ -1094,6 +1097,21 @@
     "title": "服务管理",
     "addService": "添加服务",
     "registerService": "注册服务",
+    "status": {
+      "active": "运行中",
+      "inactive": "已停止"
+    },
+    "noDescription": "暂无描述",
+    "badge": {
+      "core": "内置"
+    },
+    "search": {
+      "noResults": "没有匹配的服务"
+    },
+    "empty": {
+      "hint": "开始注册您的第一个服务"
+    },
+    "selected": "已选择",
     "tabs": {
       "simple": "快速配置",
       "advanced": "高级 (YAML)"
@@ -1115,6 +1133,9 @@
     "register": "注册服务",
     "registering": "注册中...",
     "page": {
+      "title": "服务管理",
+      "subtitle": "集中管理您的 AI 服务、厂商和模型",
+      "searchPlaceholder": "搜索...",
       "tabs": {
         "services": "服务管理",
         "providers": "厂商管理",
@@ -1123,9 +1144,9 @@
       "addProvider": "添加厂商",
       "addModel": "添加模型",
       "loading": "加载中...",
-      "noServices": "暂无服务，请点击右上角添加",
-      "noProviders": "暂无厂商，请点击右上角添加",
-      "noModels": "请先添加厂商，然后再添加模型",
+      "noServices": "暂无服务",
+      "noProviders": "暂无厂商",
+      "noModels": "暂无模型",
       "selected": "已选择",
       "toast": {
         "providerCreated": "厂商创建成功",
@@ -1153,6 +1174,40 @@
         "confirm": "删除",
         "deleting": "删除中..."
       }
+    }
+  },
+  "providers": {
+    "search": {
+      "noResults": "没有匹配的厂商"
+    },
+    "apiKey": {
+      "configured": "已配置密钥",
+      "missing": "未配置密钥"
+    }
+  },
+  "models": {
+    "empty": "暂无模型数据",
+    "search": {
+      "noResults": "没有匹配的模型"
+    },
+    "table": {
+      "model": "模型",
+      "provider": "厂商",
+      "context": "上下文",
+      "outputLimit": "输出限制",
+      "price": "价格",
+      "capabilities": "功能",
+      "accessLevel": "权限",
+      "status": "状态",
+      "actions": "操作"
+    },
+    "price": {
+      "input": "入",
+      "output": "出"
+    },
+    "capabilities": {
+      "vision": "视觉",
+      "tools": "工具"
     }
   },
   "llm": {
