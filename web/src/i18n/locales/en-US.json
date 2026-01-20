@@ -587,7 +587,17 @@
   "playground": {
     "you": "You",
     "assistant": "AI Assistant",
-    "thinking": "Thinking...",
+    "thinking": {
+      "analyzing": "Analyzing...",
+      "thinking": "Thinking...",
+      "planning": "Planning...",
+      "preparing": "Preparing response..."
+    },
+    "timeline": {
+      "running": "Agent working...",
+      "completed": "{{count}} steps completed"
+    },
+    "artifacts": "Generated Files",
     "toolCalls": "Tool Calls",
     "newChat": "New chat",
     "selectAgentToView": "Select an agent to view chats.",
@@ -1024,6 +1034,13 @@
     "searchError": "Search failed",
     "searchingFor": "for \"{{query}}\"",
     "datasetsCount": "{{count}} datasets",
+    "toolCalls": "Tool Calls",
+    "toolStatus": {
+      "completed": "Completed",
+      "running": "Running",
+      "error": "Failed",
+      "pending": "Pending"
+    },
 
     "citationsTitle": "{{count}} Sources",
     "citedCount": "{{count}} cited",

@@ -128,7 +128,7 @@ class DeepContentGenerator:
         self,
         llm_client: Any,
         guardrails: Optional[QualityGuardrails] = None,
-        model_name: str = "claude-3-haiku-20240307",
+        model_name: str = "claude-sonnet-4-20250514",
     ):
         """
         Initialize the generator.
@@ -136,7 +136,7 @@ class DeepContentGenerator:
         Args:
             llm_client: LLM client for content generation
             guardrails: Quality guardrails validator
-            model_name: Model to use for generation
+            model_name: Model to use for generation (default: claude-sonnet-4 for quality)
         """
         self.llm_client = llm_client
         self.guardrails = guardrails or QualityGuardrails()
@@ -529,21 +529,23 @@ class DeepContentGenerator:
         thresholds = self.guardrails.thresholds.get(doc_type, {})
         min_sections = thresholds.get("min_sections", 4)
 
-        prompt = f"""为以下请求创建内容大纲：
+        prompt = f"""你是一位专业的文档撰写专家。请为以下请求创建一份详细、专业的内容大纲：
 
-请求：{request}
+用户请求：{request}
 文档类型：{doc_type.value}
 
-要求：
-- 至少 {min_sections} 个章节
-- 每个章节标题清晰明确
-- 结构合理，逻辑通顺
+大纲要求：
+- 至少 {min_sections} 个章节，涵盖主题的各个重要方面
+- 每个章节标题具体明确，避免过于笼统
+- 结构层次分明，逻辑递进
+- 包含引言/背景、核心内容、分析/讨论、结论等关键部分
+- 考虑实际应用场景和读者需求
 
 输出JSON格式：
 ```json
 {{
-    "title": "文档标题",
-    "sections": ["章节1标题", "章节2标题", ...]
+    "title": "专业且具体的文档标题",
+    "sections": ["引言/背景", "核心概念", "详细分析", "案例研究", "实践应用", "总结与展望"]
 }}
 ```"""
 
@@ -605,20 +607,33 @@ class DeepContentGenerator:
                 f"- {s.title}" for s in previous_sections
             )
 
-        prompt = f"""为文档 "{outline.title}" 写 "{section_title}" 章节的详细内容。
+        prompt = f"""你是一位资深专家，正在撰写专业文档《{outline.title}》。请为 "{section_title}" 章节撰写深度、详尽的内容。
 
-文档大纲：
-{', '.join(outline.sections)}
+文档完整大纲：
+{chr(10).join(f"- {s}" for s in outline.sections)}
 
 {prev_context}
 
-要求：
-- 内容详实，至少 {min_words_per_section} 字
-- 具体解释和案例
-- 不使用模糊表达如"等等"、"诸如此类"
-- 专业且有深度
+撰写要求（严格遵守）：
+1. 内容详实充分：至少 {min_words_per_section} 字，这是最低要求
+2. 深度分析：
+   - 提供详细的解释和论述
+   - 包含具体的数据、事实和案例
+   - 从多个角度深入分析问题
+3. 结构清晰：
+   - 使用 ## 二级标题来组织子主题
+   - 适当使用项目符号列表
+   - 段落之间逻辑连贯
+4. 专业性：
+   - 使用准确的专业术语
+   - 引用相关理论或框架
+   - 体现专业深度
+5. 绝对禁止：
+   - 禁止使用"等等"、"诸如此类"、"等内容"等模糊表达
+   - 禁止使用省略号代替内容
+   - 禁止使用空泛的描述，一切内容都要具体
 
-直接输出章节内容，不需要标题。"""
+直接输出章节内容，不要写章节标题。用实质性内容填充每一段。"""
 
         async for chunk in self._stream_llm(prompt):
             yield chunk
@@ -678,7 +693,7 @@ class DeepContentGenerator:
             # Anthropic
             response = await self.llm_client.messages.create(
                 model=self.model_name,
-                max_tokens=2048,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text
@@ -688,7 +703,7 @@ class DeepContentGenerator:
             response = await self.llm_client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
+                max_tokens=4096,
             )
             return response.choices[0].message.content
 
@@ -708,7 +723,7 @@ class DeepContentGenerator:
             # Anthropic streaming
             async with self.llm_client.messages.stream(
                 model=self.model_name,
-                max_tokens=2048,
+                max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 async for text in stream.text_stream:
@@ -719,7 +734,7 @@ class DeepContentGenerator:
             stream = await self.llm_client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
+                max_tokens=4096,
                 stream=True,
             )
             async for chunk in stream:
@@ -744,7 +759,7 @@ class DeepContentGenerator:
 def create_content_generator(
     llm_client: Any,
     guardrails: Optional[QualityGuardrails] = None,
-    model_name: str = "claude-3-haiku-20240307",
+    model_name: str = "claude-sonnet-4-20250514",
 ) -> DeepContentGenerator:
     """
     Factory function to create a DeepContentGenerator.
@@ -752,7 +767,7 @@ def create_content_generator(
     Args:
         llm_client: LLM client
         guardrails: Quality guardrails
-        model_name: Model to use
+        model_name: Model to use (default: claude-sonnet-4 for quality)
 
     Returns:
         Configured DeepContentGenerator

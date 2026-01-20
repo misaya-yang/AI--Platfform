@@ -363,7 +363,11 @@ class S3StorageBackend(BaseStorageBackend):
         client = await self._get_client()
         extra_args = {"ContentType": content_type}
         if metadata:
-            extra_args["Metadata"] = metadata
+            # Sanitize metadata values to ASCII-only for S3 compatibility
+            extra_args["Metadata"] = {
+                _sanitize_for_s3_metadata(k): _sanitize_for_s3_metadata(v)
+                for k, v in metadata.items()
+            }
 
         await client.put_object(
             Bucket=self.bucket,
@@ -377,9 +381,19 @@ class S3StorageBackend(BaseStorageBackend):
 
     async def download(self, key: str) -> bytes:
         client = await self._get_client()
-        response = await client.get_object(Bucket=self.bucket, Key=key)
-        async with response["Body"] as stream:
-            return await stream.read()
+        try:
+            logger.debug(f"[S3] Downloading key={key} from bucket={self.bucket}")
+            response = await client.get_object(Bucket=self.bucket, Key=key)
+            async with response["Body"] as stream:
+                data = await stream.read()
+                logger.debug(f"[S3] Downloaded {len(data)} bytes from key={key}")
+                return data
+        except client.exceptions.NoSuchKey:
+            logger.error(f"[S3] Key not found: bucket={self.bucket}, key={key}")
+            raise FileNotFoundError(f"S3 object not found: {key}")
+        except Exception as e:
+            logger.error(f"[S3] Download failed: bucket={self.bucket}, key={key}, error={e}")
+            raise
 
     async def delete(self, key: str) -> bool:
         client = await self._get_client()
@@ -589,8 +603,19 @@ class OSSStorageBackend(BaseStorageBackend):
 
     async def download(self, key: str) -> bytes:
         bucket = self._get_bucket()
-        result = await asyncio.to_thread(bucket.get_object, key)
-        return await asyncio.to_thread(result.read)
+        try:
+            logger.debug(f"[OSS] Downloading key={key} from bucket={self.bucket}")
+            result = await asyncio.to_thread(bucket.get_object, key)
+            data = await asyncio.to_thread(result.read)
+            logger.debug(f"[OSS] Downloaded {len(data)} bytes from key={key}")
+            return data
+        except Exception as e:
+            error_str = str(e)
+            if "NoSuchKey" in error_str or "404" in error_str:
+                logger.error(f"[OSS] Key not found: bucket={self.bucket}, key={key}")
+                raise FileNotFoundError(f"OSS object not found: {key}")
+            logger.error(f"[OSS] Download failed: bucket={self.bucket}, key={key}, error={e}")
+            raise
 
     async def delete(self, key: str) -> bool:
         bucket = self._get_bucket()

@@ -132,41 +132,41 @@ class ValidationResult:
 
 QUALITY_THRESHOLDS: Dict[DocumentType, Dict[str, Any]] = {
     DocumentType.PPT: {
-        "min_slides": 8,
-        "min_words_total": 600,
-        "min_words_per_slide": 50,
+        "min_slides": 10,
+        "min_words_total": 1500,
+        "min_words_per_slide": 100,
         "required_pages": ["title", "toc", "summary"],
     },
     DocumentType.PPTX: {
-        "min_slides": 8,
-        "min_words_total": 600,
-        "min_words_per_slide": 50,
+        "min_slides": 10,
+        "min_words_total": 1500,
+        "min_words_per_slide": 100,
         "required_pages": ["title", "toc", "summary"],
     },
     DocumentType.DOC: {
-        "min_words": 1000,
-        "min_sections": 4,
-        "min_words_per_section": 150,
+        "min_words": 2500,
+        "min_sections": 6,
+        "min_words_per_section": 400,
     },
     DocumentType.DOCX: {
-        "min_words": 1000,
-        "min_sections": 4,
-        "min_words_per_section": 150,
+        "min_words": 2500,
+        "min_sections": 6,
+        "min_words_per_section": 400,
     },
     DocumentType.XLS: {
-        "min_rows": 10,
+        "min_rows": 15,
         "require_headers": True,
     },
     DocumentType.XLSX: {
-        "min_rows": 10,
+        "min_rows": 15,
         "require_headers": True,
     },
     DocumentType.MARKDOWN: {
-        "min_words": 500,
-        "min_sections": 3,
+        "min_words": 1500,
+        "min_sections": 5,
     },
     DocumentType.TEXT: {
-        "min_words": 300,
+        "min_words": 800,
     },
 }
 

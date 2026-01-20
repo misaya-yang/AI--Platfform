@@ -27,7 +27,9 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Note: Database schema is auto-initialized by gateway service (AUTO_INIT=true)
+      # Uncomment below if you have a custom schema.sql
+      # - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     networks:
       - ai-gateway-net
     healthcheck:

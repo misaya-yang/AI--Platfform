@@ -590,7 +590,17 @@
   "playground": {
     "you": "你",
     "assistant": "AI 助手",
-    "thinking": "思考中...",
+    "thinking": {
+      "analyzing": "分析问题中...",
+      "thinking": "思考中...",
+      "planning": "规划步骤...",
+      "preparing": "准备回应..."
+    },
+    "timeline": {
+      "running": "Agent 执行中...",
+      "completed": "已完成 {{count}} 个步骤"
+    },
+    "artifacts": "生成的文件",
     "toolCalls": "工具调用",
     "newChat": "新对话",
     "selectAgentToView": "选择一个 Agent 以查看对话记录。",
@@ -1027,6 +1037,13 @@
     "searchError": "搜索失败",
     "searchingFor": "搜索\"{{query}}\"",
     "datasetsCount": "{{count}} 个数据集",
+    "toolCalls": "工具调用",
+    "toolStatus": {
+      "completed": "已完成",
+      "running": "执行中",
+      "error": "失败",
+      "pending": "等待中"
+    },
 
     "citationsTitle": "{{count}} 个来源",
     "citedCount": "{{count}} 个已引用",

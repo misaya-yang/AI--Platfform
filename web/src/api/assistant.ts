@@ -642,6 +642,9 @@ export async function* chatStream(
   request: ChatRequest,
   signal?: AbortSignal
 ): AsyncGenerator<StreamEvent, void, void> {
+  // Debug: Log request including file_paths
+  console.log("[chatStream] Request file_paths:", request.file_paths);
+
   const token = getAuthToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

@@ -28,6 +28,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -414,17 +415,25 @@ Please use this web search context to inform your response when relevant."""
         # File storage (for accessing user uploads from S3/OSS)
         try:
             self.file_storage = get_file_storage()
-        except RuntimeError:
+            logger.info(f"[AssistantService] File storage initialized: backend={self.file_storage.config.backend.value if self.file_storage else 'None'}")
+        except RuntimeError as e:
             self.file_storage = None  # Not initialized, local storage only
+            logger.warning(f"[AssistantService] File storage not available (will use local): {e}")
 
         # KV-Cache optimization
         self.cache_optimizer = ContextCacheOptimizer(CacheConfig())
 
         # File processor for upload analysis
+        # IMPORTANT: Use the same base path as FileStorageService to ensure path consistency
+        storage_base_path = None
+        if self.file_storage:
+            storage_base_path = Path(self.file_storage.config.local_base_path)
+            logger.info(f"[AssistantService] FileProcessor using storage_base_path: {storage_base_path}")
         self.file_processor = create_file_processor(
             vlm_service=vlm_service,
             knowledge_service=kb_service,
             file_storage=self.file_storage,  # Pass file storage for remote access
+            storage_base_path=storage_base_path,
             redis_client=redis_client,
         )
 
@@ -843,12 +852,84 @@ Please use this web search context to inform your response when relevant."""
                     f"descriptions={len(processed_files.image_descriptions)}, "
                     f"requires_rag={processed_files.requires_rag}"
                 )
+
+                # Handle case where document is too large for inline processing
+                # This happens when text exceeds max_text_chars (32000)
+                if processed_files.requires_rag and not processed_files.text_content:
+                    logger.warning(
+                        f"[FILE PROCESS] Document too large for inline processing. "
+                        f"Uploaded file RAG not implemented - model won't see document content."
+                    )
+                    yield AssistantStreamEvent(
+                        event_type="status",
+                        data={
+                            "status": "file_too_large",
+                            "message": "文档内容较大，正在尝试处理核心部分..."
+                        }
+                    )
+                    # For now, extract a truncated preview from metadata
+                    for metadata in processed_files.file_metadata:
+                        if metadata.get("truncated_preview"):
+                            truncated = metadata["truncated_preview"]
+                            processed_files.text_content = f"[文档内容过长，以下为前1000字符预览]\n{truncated}"
+                            logger.info(f"[FILE PROCESS] Using truncated preview: {len(truncated)} chars")
+                            break
+
+                # Handle case where document parsing failed
+                # This happens when unstructured library is not installed or file format is unsupported
+                if not processed_files.text_content and not processed_files.has_images:
+                    parse_errors = []
+                    for metadata in processed_files.file_metadata:
+                        # Check both 'parse_error' and 'error' keys
+                        error_msg = metadata.get("parse_error") or metadata.get("error")
+                        if error_msg:
+                            parse_errors.append(f"- {metadata.get('file_name', 'unknown')}: {error_msg}")
+
+                    if parse_errors:
+                        error_msg = "文档解析失败:\n" + "\n".join(parse_errors)
+                        logger.warning(f"[FILE PROCESS] Document parse errors: {parse_errors}")
+                        yield AssistantStreamEvent(
+                            event_type="status",
+                            data={
+                                "status": "file_parse_error",
+                                "message": "文档解析遇到问题，请尝试其他格式"
+                            }
+                        )
+                        # Add error message as text content so model can explain to user
+                        processed_files.text_content = f"[文件处理错误]\n{error_msg}\n\n请告知用户文件解析失败，建议尝试其他格式（如PDF、TXT、DOCX）或确保文件内容完整。"
+                    else:
+                        # Files processed but no content extracted (shouldn't happen normally)
+                        logger.warning(
+                            f"[FILE PROCESS] Files processed but no content extracted. "
+                            f"metadata={processed_files.file_metadata}"
+                        )
             except Exception as e:
                 logger.error(f"File processing failed: {e}", exc_info=True)
                 yield AssistantStreamEvent(
                     event_type="error",
                     data={"message": f"File processing failed: {str(e)}", "recoverable": True}
                 )
+                # Create a ProcessedFiles with error message so the model can explain the issue
+                processed_files = ProcessedFiles()
+                error_details = str(e)
+                if "remote storage not available" in error_details.lower() or "file_storage is none" in error_details.lower():
+                    processed_files.text_content = (
+                        f"[文件处理错误]\n"
+                        f"无法读取上传的文件。错误信息: {error_details}\n\n"
+                        f"可能的原因:\n"
+                        f"- 存储服务未正确配置 (请检查 FILE_STORAGE_BACKEND 环境变量)\n"
+                        f"- 文件可能存储在远程存储(S3/OSS)但本地无法访问\n\n"
+                        f"请告知用户文件读取失败，建议联系管理员检查存储配置。"
+                    )
+                else:
+                    processed_files.text_content = (
+                        f"[文件处理错误]\n"
+                        f"处理上传文件时发生错误: {error_details}\n\n"
+                        f"请告知用户文件处理失败，建议尝试:\n"
+                        f"1. 使用其他格式的文件（如PDF、TXT、DOCX）\n"
+                        f"2. 确保文件内容完整且未损坏\n"
+                        f"3. 尝试较小的文件"
+                    )
         logger.info(f"[LATENCY] Step 2.5 (file processing): {(time.time() - step_start)*1000:.1f}ms")
 
         # Step 2.6: Task Planning Mode (Phase 2.4)
@@ -1695,6 +1776,31 @@ Please use this web search context to inform your response when relevant."""
 
             logger.info(f"Tool iteration {iteration}: executed {len(tool_results)} tools, continuing...")
 
+        # Safeguard: Handle empty content after agentic loop
+        # If model generated output tokens but no text content, it likely only produced
+        # tool calls or thinking tokens. Provide a helpful fallback message.
+        if not total_content and usage.get("output_tokens", 0) > 0:
+            logger.warning(
+                f"[EMPTY CONTENT] Model generated {usage.get('output_tokens', 0)} output tokens "
+                f"but no text content. Iterations: {iteration}, max: {max_tool_iterations}"
+            )
+            # Check if there were file attachments - might need to explain what happened
+            if config.file_paths:
+                fallback_message = (
+                    "抱歉，我无法正确解析您上传的文件内容。"
+                    "这可能是因为文件格式不受支持或文件内容无法提取。"
+                    "请尝试上传其他格式的文件（如 PDF、TXT、DOCX）或确保文件不是空的。"
+                )
+            else:
+                fallback_message = (
+                    "抱歉，我无法生成有效的回复。请尝试重新提问或换一种方式描述您的需求。"
+                )
+            total_content = fallback_message
+            yield AssistantStreamEvent(
+                event_type="text_delta",
+                data=fallback_message
+            )
+
         # Step 5: Persist assistant response to session
         if persist_messages and self.session_manager and total_content:
             try:
@@ -2452,6 +2558,14 @@ Please use this web search context to inform your response when relevant."""
                 )
                 final_message += f"\n\n---\n[图像描述]\n{descriptions}"
                 logger.info(f"[FILE INJECT] Added {len(processed_files.image_descriptions)} image descriptions for text model")
+
+            # Log warning if files were processed but no content was extracted
+            if not processed_files.text_content and not processed_files.has_images:
+                logger.warning(
+                    f"[FILE INJECT] No content extracted from files. "
+                    f"requires_rag={processed_files.requires_rag}, "
+                    f"file_metadata={processed_files.file_metadata}"
+                )
 
         # Current message (with potential file content and images)
         messages.append(ChatMessage(role="user", content=final_message, images=user_images))

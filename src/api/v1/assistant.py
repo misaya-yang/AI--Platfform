@@ -444,7 +444,8 @@ async def chat_stream(
     # Debug: Log incoming request parameters
     logger.info(
         f"chat_stream request - kb_dataset_ids: {body.kb_dataset_ids}, "
-        f"kb_mode: {body.kb_mode}, model: {body.model_id}"
+        f"kb_mode: {body.kb_mode}, model: {body.model_id}, "
+        f"file_paths: {body.file_paths}"
     )
 
     # Map string mode to enum

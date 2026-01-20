@@ -436,13 +436,25 @@ The description should be detailed enough for someone who hasn't seen the image 
             Path to downloaded file, or None if download failed
         """
         if not self.file_storage:
+            logger.warning(f"[FileProcessor] Cannot download: file_storage is None")
             return None
 
         storage_key = self._get_storage_key(file_path)
+        logger.info(
+            f"[FileProcessor] Attempting remote download: "
+            f"api_path={file_path}, storage_key={storage_key}, "
+            f"backend={self.file_storage.config.backend.value}"
+        )
 
         try:
             # Download file content
             content = await self.file_storage.download_file(storage_key)
+
+            if not content:
+                logger.warning(f"[FileProcessor] Download returned empty content: {storage_key}")
+                return None
+
+            logger.info(f"[FileProcessor] Downloaded {len(content)} bytes from remote storage")
 
             # Create temp directory if needed
             if self._temp_dir is None:
@@ -459,7 +471,11 @@ The description should be detailed enough for someone who hasn't seen the image 
             return temp_path
 
         except Exception as e:
-            logger.warning(f"[FileProcessor] Failed to download from remote: {storage_key}: {e}")
+            logger.error(
+                f"[FileProcessor] Failed to download from remote: "
+                f"storage_key={storage_key}, error={type(e).__name__}: {e}",
+                exc_info=True
+            )
             return None
 
     async def _resolve_path_async(self, file_path: str) -> Path:
@@ -492,18 +508,41 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         actual_path = actual_path.resolve()
 
+        logger.debug(
+            f"[FileProcessor] Resolving path: api_path={file_path}, "
+            f"local_path={actual_path}, exists={actual_path.exists()}, "
+            f"has_remote_storage={self.file_storage is not None}"
+        )
+
         # Check if file exists locally
         if actual_path.exists() and actual_path.is_file():
+            logger.info(f"[FileProcessor] File found locally: {actual_path}")
             return actual_path
 
         # If not local, try downloading from remote storage
         if self.file_storage:
+            logger.info(
+                f"[FileProcessor] File not found locally, trying remote storage: "
+                f"backend={self.file_storage.config.backend.value}"
+            )
             downloaded_path = await self._download_from_remote(file_path)
             if downloaded_path and downloaded_path.exists():
                 return downloaded_path
+            logger.warning(
+                f"[FileProcessor] Remote download failed or returned empty for: {file_path}"
+            )
+        else:
+            # No remote storage configured - file might be in S3/OSS but we can't access it
+            logger.warning(
+                f"[FileProcessor] File not found locally and no remote storage configured: "
+                f"{file_path}. If file is in S3/OSS, ensure FILE_STORAGE_BACKEND is configured."
+            )
 
-        # File not found anywhere
-        raise FileProcessError(f"File not found: {file_path}", file_path=file_path)
+        # File not found anywhere - provide detailed error message
+        error_msg = f"File not found: {file_path}"
+        if not self.file_storage:
+            error_msg += " (remote storage not available - check FILE_STORAGE_BACKEND config)"
+        raise FileProcessError(error_msg, file_path=file_path)
 
     def _resolve_path(self, file_path: str) -> Path:
         """
@@ -871,6 +910,15 @@ The description should be detailed enough for someone who hasn't seen the image 
         result = ProcessedFiles()
         text_parts: List[str] = []
 
+        # Log file storage status for diagnostics
+        logger.info(
+            f"[FileProcessor] process_files called: "
+            f"file_count={len(file_paths)}, "
+            f"has_remote_storage={self.file_storage is not None}, "
+            f"storage_backend={self.file_storage.config.backend.value if self.file_storage else 'None'}, "
+            f"storage_base_path={self.storage_base_path}"
+        )
+
         for api_path in file_paths:
             # Try cache first
             cache_key = self._get_cache_key(api_path, model_supports_vision)
@@ -954,16 +1002,26 @@ The description should be detailed enough for someone who hasn't seen the image 
 
             except FileProcessError as e:
                 logger.error(f"[FileProcessor] Error processing file: {e}")
+                file_name = Path(api_path).name
                 result.file_metadata.append({
                     "file_path": api_path,
+                    "file_name": file_name,
                     "error": str(e),
                 })
+                # Add error as text content so model can explain to user
+                error_text = f"[文件处理失败: {file_name}]\n错误: {str(e)}"
+                text_parts.append(error_text)
             except Exception as e:
                 logger.exception(f"[FileProcessor] Unexpected error: {api_path}")
+                file_name = Path(api_path).name
                 result.file_metadata.append({
                     "file_path": api_path,
+                    "file_name": file_name,
                     "error": f"Unexpected error: {str(e)}",
                 })
+                # Add error as text content so model can explain to user
+                error_text = f"[文件处理失败: {file_name}]\n错误: {str(e)}"
+                text_parts.append(error_text)
 
         # Combine text parts
         if text_parts:

@@ -351,8 +351,14 @@ async def upload_file(
             # Size limit exceeded
             raise HTTPException(status_code=413, detail=str(e))
         except Exception as e:
-            logger.error(f"Storage service upload failed: {e}")
-            raise HTTPException(status_code=500, detail="Failed to save file")
+            # Log full error details for debugging
+            import traceback
+            logger.error(
+                f"Storage service upload failed: {e}\n"
+                f"File: {file.filename}, User: {user.user_id}\n"
+                f"Traceback: {traceback.format_exc()}"
+            )
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
     # Fallback to direct local storage (when storage service not initialized)
     file_id = generate_file_id()

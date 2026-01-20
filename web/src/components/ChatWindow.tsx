@@ -4,10 +4,11 @@ import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
+import { ThinkingIndicator } from "@/components/ThinkingIndicator";
 import { AgentTimeline, type TimelineState } from "@/components/agent/AgentTimeline";
 import { ArtifactList, type ArtifactData } from "@/components/agent/ArtifactCard";
 import type { ToolCall } from "@/types/gateway";
-import { Bot, User, Clock, Zap, MessageSquare, ChevronDown, ChevronRight, Activity } from "lucide-react";
+import { Bot, User, Clock, Zap, MessageSquare, ChevronDown, Activity, Sparkles } from "lucide-react";
 
 export interface ToolCallWithResult {
   toolCall: ToolCall;
@@ -35,7 +36,7 @@ export type ChatMessage = {
   artifacts?: ArtifactData[];
 };
 
-// Stats badge component for cleaner rendering
+// Premium stats badge with glassmorphism
 function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
   const { t } = useTranslation();
 
@@ -44,35 +45,36 @@ function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 4 }}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.2 }}
-      className="flex flex-wrap items-center gap-2 text-[10px] mt-2"
+      transition={{ delay: 0.3, duration: 0.4, ease: "easeOut" }}
+      className="flex flex-wrap items-center gap-2 text-[10px] mt-3 ml-1"
     >
-      {/* Duration */}
+      {/* Duration - with subtle gradient */}
       {stats.durationMs != null && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted/50 text-muted-foreground">
-          <Clock className="h-3 w-3" />
-          {(stats.durationMs / 1000).toFixed(2)}s
+        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-slate-100 to-slate-50 dark:from-zinc-800/80 dark:to-zinc-800/50 text-slate-600 dark:text-zinc-400 border border-slate-200/50 dark:border-zinc-700/50 backdrop-blur-sm">
+          <Clock className="h-3 w-3 text-slate-500 dark:text-zinc-500" />
+          <span className="font-medium">{(stats.durationMs / 1000).toFixed(2)}s</span>
         </span>
       )}
 
-      {/* TTFT (First Token Time) */}
+      {/* TTFT - accent color */}
       {stats.firstTokenMs != null && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400">
+        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-blue-500/10 to-indigo-500/10 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-500/20 backdrop-blur-sm">
           <Zap className="h-3 w-3" />
-          {t("playground.stats.ttft", "TTFT")}: {stats.firstTokenMs}ms
+          <span className="font-medium">{t("playground.stats.ttft", "TTFT")}: {stats.firstTokenMs}ms</span>
         </span>
       )}
 
-      {/* Token count */}
+      {/* Token count - with detail tooltip */}
       {stats.totalTokens != null && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted/50 text-muted-foreground group relative">
-          <MessageSquare className="h-3 w-3" />
-          <span>{stats.totalTokens} {t("playground.stats.tokens", "tokens")}</span>
+        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-slate-100 to-slate-50 dark:from-zinc-800/80 dark:to-zinc-800/50 text-slate-600 dark:text-zinc-400 border border-slate-200/50 dark:border-zinc-700/50 backdrop-blur-sm">
+          <MessageSquare className="h-3 w-3 text-slate-500 dark:text-zinc-500" />
+          <span className="font-medium">{stats.totalTokens}</span>
+          <span className="text-slate-400 dark:text-zinc-500">{t("playground.stats.tokens", "tokens")}</span>
           {stats.inputTokens != null && stats.outputTokens != null && (
-            <span className="text-muted-foreground/50 ml-1">
-              ({stats.inputTokens} {t("playground.stats.in", "in")} / {stats.outputTokens} {t("playground.stats.out", "out")})
+            <span className="text-slate-400 dark:text-zinc-500 text-[9px]">
+              ({stats.inputTokens}↓ {stats.outputTokens}↑)
             </span>
           )}
         </span>
@@ -81,7 +83,7 @@ function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
   );
 }
 
-/** Collapsible timeline section for Manus-style execution visualization */
+/** Collapsible timeline section - Manus-inspired design */
 function TimelineSection({
   timeline,
   isExpanded,
@@ -98,36 +100,40 @@ function TimelineSection({
   if (stepCount === 0) return null;
 
   return (
-    <div className="mb-3 w-full">
-      {/* Collapsible Header */}
+    <div className="mb-4 w-full">
+      {/* Collapsible Header - glassmorphism style */}
       <button
         type="button"
         onClick={onToggle}
         className={cn(
-          "flex items-center gap-2 w-full px-3 py-2 rounded-lg transition-colors",
+          "flex items-center gap-3 w-full px-4 py-2.5 rounded-xl transition-all duration-200",
           "text-left text-xs font-medium",
-          "bg-violet-500/5 hover:bg-violet-500/10 border border-violet-500/20",
-          isRunning && "border-violet-500/40"
+          "bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5",
+          "hover:from-violet-500/10 hover:via-purple-500/10 hover:to-fuchsia-500/10",
+          "border border-violet-500/20 dark:border-violet-400/20",
+          "backdrop-blur-sm",
+          isRunning && "border-violet-500/40 shadow-[0_0_15px_-3px] shadow-violet-500/20"
         )}
       >
         <div className={cn(
-          "flex items-center justify-center h-5 w-5 rounded-md",
+          "flex items-center justify-center h-6 w-6 rounded-lg transition-all duration-200",
           isRunning
-            ? "bg-violet-500/20 text-violet-600 dark:text-violet-400"
-            : "bg-violet-500/10 text-violet-500"
+            ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg shadow-violet-500/30"
+            : "bg-violet-500/10 text-violet-600 dark:text-violet-400"
         )}>
           <Activity className={cn("h-3.5 w-3.5", isRunning && "animate-pulse")} />
         </div>
-        <span className="flex-1 text-muted-foreground">
+        <span className="flex-1 text-slate-600 dark:text-zinc-300">
           {isRunning
             ? t("playground.timeline.running", "Agent working...")
             : t("playground.timeline.completed", "{{count}} steps completed", { count: stepCount })}
         </span>
-        {isExpanded ? (
-          <ChevronDown className="h-4 w-4 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-        )}
+        <motion.div
+          animate={{ rotate: isExpanded ? 180 : 0 }}
+          transition={{ duration: 0.2 }}
+        >
+          <ChevronDown className="h-4 w-4 text-violet-500/60" />
+        </motion.div>
       </button>
 
       {/* Timeline Content */}
@@ -137,10 +143,10 @@ function TimelineSection({
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.25, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="pt-2">
+            <div className="pt-3 pl-2">
               <AgentTimeline
                 state={timeline}
                 compact
@@ -153,16 +159,21 @@ function TimelineSection({
   );
 }
 
-/** Artifacts section for displaying generated files */
+/** Artifacts section with premium card design */
 function ArtifactsSection({ artifacts }: { artifacts: ArtifactData[] }) {
   const { t } = useTranslation();
 
   if (!artifacts || artifacts.length === 0) return null;
 
   return (
-    <div className="mt-3 pt-3 border-t border-border/30">
-      <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground mb-2">
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/60" />
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+      className="mt-4 pt-4 border-t border-slate-200/50 dark:border-zinc-700/50"
+    >
+      <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 mb-3">
+        <Sparkles className="h-3 w-3" />
         {t("playground.artifacts", "Generated Files")}
       </div>
       <ArtifactList
@@ -174,7 +185,42 @@ function ArtifactsSection({ artifacts }: { artifacts: ArtifactData[] }) {
           }
         }}
       />
-    </div>
+    </motion.div>
+  );
+}
+
+/** Premium Avatar Component */
+function Avatar({ isUser }: { isUser: boolean }) {
+  return (
+    <motion.div
+      initial={{ scale: 0.8, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ duration: 0.3, ease: "easeOut" }}
+      className="relative"
+    >
+      {/* Glow effect */}
+      <div className={cn(
+        "absolute inset-0 rounded-xl blur-lg opacity-40",
+        isUser
+          ? "bg-gradient-to-br from-emerald-400 to-teal-500"
+          : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500"
+      )} />
+
+      {/* Avatar */}
+      <div className={cn(
+        "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
+        "shadow-lg transition-transform duration-200 hover:scale-105",
+        isUser
+          ? "bg-gradient-to-br from-emerald-500 via-emerald-500 to-teal-600 text-white shadow-emerald-500/25"
+          : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-600 text-white shadow-violet-500/25"
+      )}>
+        {isUser ? (
+          <User className="h-5 w-5" strokeWidth={2.5} />
+        ) : (
+          <Bot className="h-5 w-5" strokeWidth={2.5} />
+        )}
+      </div>
+    </motion.div>
   );
 }
 
@@ -197,38 +243,53 @@ const ChatMessageItem = memo(
     );
 
     return (
-      <div
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: "easeOut", delay: index * 0.05 }}
         className={cn(
-          "flex w-full gap-4 animate-in fade-in-0 slide-in-from-bottom-2 duration-300",
+          "flex w-full gap-4",
           isUser ? "flex-row-reverse" : "flex-row"
         )}
       >
         {/* Avatar */}
-        <div className={cn(
-          "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-md transition-transform hover:scale-105",
-          isUser
-            ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white"
-            : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 text-white"
-        )}>
-          {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5" />}
-        </div>
+        <Avatar isUser={isUser} />
 
-        {/* Content Bubble */}
+        {/* Content Container */}
         <div className={cn(
-          "flex flex-col gap-2",
-          isUser ? "max-w-[85%] items-end" : "max-w-[85%] min-w-[280px] sm:min-w-[360px] items-start"
+          "flex flex-col gap-1.5",
+          isUser ? "max-w-[85%] items-end" : "max-w-[85%] min-w-[300px] sm:min-w-[400px] items-start"
         )}>
           {/* Name Label */}
-          <span className="text-xs text-muted-foreground ml-1">
+          <span className={cn(
+            "text-xs font-medium px-1",
+            isUser ? "text-emerald-600 dark:text-emerald-400" : "text-violet-600 dark:text-violet-400"
+          )}>
             {isUser ? t("playground.you", "You") : t("playground.assistant", "AI Assistant")}
           </span>
 
+          {/* Message Bubble */}
           <div
             className={cn(
-              "relative px-5 py-3.5 text-sm shadow-lg min-w-0",
+              "relative text-sm min-w-0 transition-all duration-200",
               isUser
-                ? "bg-gradient-to-br from-emerald-500 to-teal-600 text-white rounded-tl-2xl rounded-tr-sm rounded-br-2xl rounded-bl-2xl shadow-emerald-500/20"
-                : "bg-white dark:bg-zinc-900/90 border border-border/30 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl dark:shadow-black/20"
+                ? [
+                    // User message - modern gradient with glass effect
+                    "px-5 py-3.5",
+                    "bg-gradient-to-br from-emerald-500 via-emerald-500 to-teal-600",
+                    "text-white",
+                    "rounded-2xl rounded-tr-md",
+                    "shadow-lg shadow-emerald-500/20",
+                  ]
+                : [
+                    // Assistant message - clean, minimal design
+                    "px-5 py-4",
+                    "bg-white dark:bg-zinc-900/90",
+                    "text-slate-700 dark:text-zinc-200",
+                    "rounded-2xl rounded-tl-md",
+                    "border border-slate-200/80 dark:border-zinc-800",
+                    "shadow-xl shadow-slate-200/50 dark:shadow-black/20",
+                  ]
             )}
           >
             {/* AG-UI Timeline Section */}
@@ -242,9 +303,9 @@ const ChatMessageItem = memo(
 
             {/* Tool Calls Section (legacy, shown when no timeline) */}
             {!isUser && hasToolCalls && !hasTimeline && (
-              <div className="mb-3 space-y-2 w-full min-w-0">
-                <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  <span className="h-1.5 w-1.5 rounded-full bg-purple-500/60" />
+              <div className="mb-4 space-y-2 w-full min-w-0">
+                <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
                   {t("playground.toolCalls", "Tool Calls")}
                 </div>
                 <div className="space-y-2 w-full">
@@ -263,7 +324,10 @@ const ChatMessageItem = memo(
 
             {/* Message Content */}
             {message.content ? (
-              <div className={cn("leading-relaxed", isUser ? "text-white" : "text-foreground")}>
+              <div className={cn(
+                "leading-relaxed",
+                isUser ? "text-white" : "text-slate-700 dark:text-zinc-200"
+              )}>
                 {isUser ? (
                   <div className="whitespace-pre-wrap">{message.content}</div>
                 ) : (
@@ -276,28 +340,9 @@ const ChatMessageItem = memo(
               </div>
             ) : null}
 
-            {/* AI Thinking / Loading Indicator */}
+            {/* AI Thinking / Loading Indicator - Manus-style */}
             {!message.content && !hasToolCalls && !hasTimeline && !isUser && (
-              <div className="flex items-center gap-2 h-6">
-                {message.isThinking ? (
-                  <>
-                    <span className="text-sm text-muted-foreground">
-                      {t("playground.thinking", "Thinking...")}
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-violet-500 [animation-delay:-0.3s]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-purple-500 [animation-delay:-0.15s]" />
-                      <div className="h-2 w-2 animate-bounce rounded-full bg-fuchsia-500" />
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex items-center gap-1.5">
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-violet-500 [animation-delay:-0.3s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-purple-500 [animation-delay:-0.15s]" />
-                    <div className="h-2 w-2 animate-bounce rounded-full bg-fuchsia-500" />
-                  </div>
-                )}
-              </div>
+              <ThinkingIndicator />
             )}
 
             {/* Artifacts Section */}
@@ -311,7 +356,7 @@ const ChatMessageItem = memo(
             <StatsBadge stats={message.stats} />
           )}
         </div>
-      </div>
+      </motion.div>
     );
   },
   (prev, next) =>
@@ -334,16 +379,18 @@ export function ChatWindow({
   showTimeline = true,
 }: ChatWindowProps) {
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8">
-      {messages.map((message, i) => (
-        <ChatMessageItem
-          key={i}
-          message={message}
-          showToolCalls={showToolCalls}
-          showTimeline={showTimeline}
-          index={i}
-        />
-      ))}
+    <div className="mx-auto w-full max-w-4xl space-y-8 px-4 py-10">
+      <AnimatePresence mode="popLayout">
+        {messages.map((message, i) => (
+          <ChatMessageItem
+            key={`${message.role}-${i}`}
+            message={message}
+            showToolCalls={showToolCalls}
+            showTimeline={showTimeline}
+            index={i}
+          />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }

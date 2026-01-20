@@ -145,6 +145,7 @@ export function AssistantPage() {
     isImageMode,
     isGeneratingImage,
     handleImageGenerate,
+    cancelImageMode,
     sendImageGeneration
   } = useImageGeneration(
     activeSessionId ?? null,
@@ -198,6 +199,7 @@ export function AssistantPage() {
 
   // Sync settings when session changes
   const onSessionSelect = useCallback(async (sessionId: string) => {
+    cancelImageMode(); // Reset image mode when switching sessions
     const sessionConfig = await handleSelectSession(sessionId);
     if (sessionConfig) {
       if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
@@ -208,13 +210,30 @@ export function AssistantPage() {
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
-  }, [handleSelectSession, models]);
+  }, [handleSelectSession, models, cancelImageMode]);
+
+  // Handle new chat - reset all state including image mode
+  const onNewChat = useCallback(() => {
+    cancelImageMode(); // Reset image mode
+    handleNewChat();
+  }, [handleNewChat, cancelImageMode]);
 
   // Handle Send
   const handleSend = useCallback(() => {
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
     const filePaths = successfulUploads.map((f) => f.response!.file_path);
-    
+
+    // Debug: Log file upload info with detailed status
+    console.log("[handleSend] Files detail:", files.map(f => ({
+      name: f.file.name,
+      status: f.status,
+      hasResponse: !!f.response,
+      filePath: f.response?.file_path,
+      error: f.error
+    })));
+    console.log("[handleSend] Successful uploads count:", successfulUploads.length);
+    console.log("[handleSend] File paths:", filePaths);
+
     let messageContent = input.trim();
     if (successfulUploads.length > 0 && !messageContent) {
       messageContent = t("assistant.analyzeFiles", "Please analyze these uploaded files.");
@@ -308,7 +327,7 @@ export function AssistantPage() {
                     sessions={sessions}
                     activeSessionId={activeSessionId ?? null}
                     isLoading={sessionsLoading}
-                    onNewChat={handleNewChat}
+                    onNewChat={onNewChat}
                     onSelectSession={onSessionSelect}
                     onDeleteSession={handleDeleteSession}
                   />

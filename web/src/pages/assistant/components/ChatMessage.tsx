@@ -13,7 +13,7 @@
 
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap, Brain, PenTool, Cog, Eye, ListTodo } from "lucide-react";
+import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Sparkles, Zap, Brain, PenTool, Cog, Eye, ListTodo, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { WebSearchDisplay } from "./WebSearchDisplay";
@@ -26,160 +26,179 @@ interface ChatMessageProps {
   message: ChatMessageType;
 }
 
-/** Search status display showing KB/web search progress */
+/** Manus-style search steps display */
 function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[] }) {
   const { t } = useTranslation();
 
   if (!searchStatus || searchStatus.length === 0) return null;
 
+  const getStepConfig = (item: SearchStatusItem) => {
+    const isKB = item.type === "kb";
+    const isFiles = item.type === "files";
+    const isSearching = item.state === "searching";
+    const isCompleted = item.state === "completed";
+
+    return {
+      icon: isKB ? Database : isFiles ? FileText : Globe,
+      iconColor: isKB
+        ? "text-emerald-500"
+        : isFiles
+        ? "text-violet-500"
+        : "text-blue-500",
+      bgColor: isKB
+        ? "bg-emerald-500/10"
+        : isFiles
+        ? "bg-violet-500/10"
+        : "bg-blue-500/10",
+      label: isSearching
+        ? isKB
+          ? t("assistant.searchingKB", "搜索知识库")
+          : isFiles
+          ? t("assistant.processingFiles", "分析文件")
+          : t("assistant.searchingWeb", "搜索网络")
+        : isCompleted
+        ? isKB
+          ? t("assistant.readSources", "阅读 {{count}} 个来源", { count: item.resultCount || 0 })
+          : isFiles
+          ? t("assistant.analyzedFiles", "已分析 {{count}} 个文件", { count: item.resultCount || 0 })
+          : t("assistant.foundResults", "找到 {{count}} 条结果", { count: item.resultCount || 0 })
+        : item.error || t("assistant.searchFailed", "搜索失败"),
+      isSearching,
+      isCompleted,
+    };
+  };
+
   return (
-    <div className="mb-3 space-y-2">
-      <AnimatePresence mode="popLayout">
-        {searchStatus.map((item, index) => {
-          const isKB = item.type === "kb";
-          const isFiles = item.type === "files";
-          const isSearching = item.state === "searching";
-          const isCompleted = item.state === "completed";
+    <div className="mb-4 -mx-2">
+      <div className="rounded-xl bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-700/40 overflow-hidden">
+        {/* Compact header */}
+        <div className="px-3 py-2 flex items-center gap-2 border-b border-slate-200/60 dark:border-slate-700/40 bg-white/50 dark:bg-slate-800/50">
+          <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+            {t("assistant.researchSteps", "研究步骤")}
+          </span>
+        </div>
 
-          return (
-            <motion.div
-              key={`${item.type}-${index}`}
-              initial={{ opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              className={cn(
-                "flex items-center gap-2 px-3 py-2 rounded-xl text-xs",
-                isSearching
-                  ? "bg-slate-100/80 dark:bg-slate-700/50"
-                  : isCompleted
-                    ? "bg-emerald-50/80 dark:bg-emerald-900/20"
-                    : "bg-red-50/80 dark:bg-red-900/20"
-              )}
-            >
-              {/* Icon */}
-              <div className="flex-shrink-0">
-                {isSearching ? (
-                  <Loader2 className={cn(
-                    "h-4 w-4 animate-spin",
-                    isKB ? "text-emerald-500" : isFiles ? "text-violet-500" : "text-blue-500"
-                  )} />
-                ) : isCompleted ? (
-                  <CheckCircle2 className={cn(
-                    "h-4 w-4",
-                    isKB ? "text-emerald-500" : isFiles ? "text-violet-500" : "text-blue-500"
-                  )} />
-                ) : (
-                  isKB ? (
-                    <Database className="h-4 w-4 text-red-500" />
-                  ) : isFiles ? (
-                    <FileText className="h-4 w-4 text-red-500" />
-                  ) : (
-                    <Globe className="h-4 w-4 text-red-500" />
-                  )
-                )}
-              </div>
+        {/* Steps list */}
+        <div className="divide-y divide-slate-200/60 dark:divide-slate-700/40">
+          <AnimatePresence mode="popLayout">
+            {searchStatus.map((item, index) => {
+              const config = getStepConfig(item);
+              const IconComponent = config.icon;
 
-              {/* Text */}
-              <div className="flex-1 min-w-0">
-                <span className={cn(
-                  "font-medium",
-                  isSearching
-                    ? "text-slate-700 dark:text-slate-300"
-                    : isCompleted
-                      ? "text-emerald-700 dark:text-emerald-300"
-                      : "text-red-700 dark:text-red-300"
-                )}>
-                  {isSearching ? (
-                    isKB
-                      ? t("assistant.searchingKB", "Searching knowledge base...")
-                      : isFiles
-                        ? t("assistant.processingFiles", "Analyzing uploaded files...")
-                        : t("assistant.searchingWeb", "Searching the web...")
-                  ) : isCompleted ? (
-                    isKB
-                      ? t("assistant.kbResultsFound", "Found {{count}} sources", { count: item.resultCount || 0 })
-                      : isFiles
-                        ? t("assistant.filesProcessed", "Analyzed {{count}} files", { count: item.resultCount || 0 })
-                        : t("assistant.webResultsFound", "Found {{count}} results", { count: item.resultCount || 0 })
-                  ) : (
-                    item.error || t("assistant.searchError", "Search failed")
+              return (
+                <motion.div
+                  key={`${item.type}-${index}`}
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="flex items-center gap-3 px-3 py-2.5"
+                >
+                  {/* Icon with background */}
+                  <div className={cn(
+                    "flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center",
+                    config.bgColor
+                  )}>
+                    {config.isSearching ? (
+                      <Loader2 className={cn("h-3.5 w-3.5 animate-spin", config.iconColor)} />
+                    ) : config.isCompleted ? (
+                      <IconComponent className={cn("h-3.5 w-3.5", config.iconColor)} />
+                    ) : (
+                      <IconComponent className="h-3.5 w-3.5 text-red-500" />
+                    )}
+                  </div>
+
+                  {/* Label */}
+                  <span className={cn(
+                    "text-xs font-medium flex-1",
+                    config.isSearching
+                      ? "text-slate-600 dark:text-slate-300"
+                      : config.isCompleted
+                      ? "text-slate-600 dark:text-slate-400"
+                      : "text-red-600 dark:text-red-400"
+                  )}>
+                    {config.label}
+                  </span>
+
+                  {/* Status indicator */}
+                  {config.isSearching ? (
+                    <div className="flex gap-0.5">
+                      {[0, 1, 2].map((i) => (
+                        <motion.div
+                          key={i}
+                          className={cn("w-1 h-1 rounded-full", config.iconColor.replace("text-", "bg-"))}
+                          animate={{ opacity: [0.3, 1, 0.3] }}
+                          transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+                        />
+                      ))}
+                    </div>
+                  ) : config.isCompleted ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                  ) : null}
+
+                  {/* Duration badge */}
+                  {!config.isSearching && item.durationMs !== undefined && (
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                      {(item.durationMs / 1000).toFixed(1)}s
+                    </span>
                   )}
-                </span>
-
-                {/* Query preview */}
-                {isSearching && item.query && (
-                  <span className="ml-1.5 text-slate-500 dark:text-slate-400 truncate">
-                    {t("assistant.searchingFor", 'for "{{query}}"', {
-                      query: item.query.length > 30 ? `${item.query.slice(0, 30)}...` : item.query
-                    })}
-                  </span>
-                )}
-
-                {/* Dataset info */}
-                {isKB && item.datasets && item.datasets.length > 0 && (
-                  <span className="ml-1.5 text-slate-400 dark:text-slate-500">
-                    ({item.datasets.length === 1
-                      ? item.datasets[0]
-                      : t("assistant.datasetsCount", "{{count}} datasets", { count: item.datasets.length })
-                    })
-                  </span>
-                )}
-
-                {/* Duration */}
-                {!isSearching && item.durationMs !== undefined && (
-                  <span className="ml-1.5 text-slate-400 dark:text-slate-500">
-                    ({(item.durationMs / 1000).toFixed(2)}s)
-                  </span>
-                )}
-              </div>
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
+        </div>
+      </div>
     </div>
   );
 }
 
-/** Agent phase display showing ReAct thinking status - Manus style (at end of content) */
+/** Agent phase display - Manus style compact indicator */
 function AgentPhaseDisplay({ phase }: { phase: AgentPhaseStatus }) {
   const { t } = useTranslation();
 
   // Map phase to icon, color, and label
-  const phaseConfig: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
+  const phaseConfig: Record<string, { icon: React.ReactNode; color: string; bgColor: string; label: string }> = {
     analyzing: {
-      icon: <Brain className="h-3.5 w-3.5" />,
-      color: "text-blue-500",
-      label: t("assistant.phase.analyzing", "Analyzing task..."),
+      icon: <Brain className="h-3 w-3" />,
+      color: "text-blue-600 dark:text-blue-400",
+      bgColor: "bg-blue-100 dark:bg-blue-900/40",
+      label: t("assistant.phase.analyzing", "分析任务"),
     },
     thinking: {
-      icon: <Brain className="h-3.5 w-3.5" />,
-      color: "text-violet-500",
-      label: t("assistant.phase.thinking", "Thinking..."),
+      icon: <Brain className="h-3 w-3" />,
+      color: "text-violet-600 dark:text-violet-400",
+      bgColor: "bg-violet-100 dark:bg-violet-900/40",
+      label: t("assistant.phase.thinking", "思考中"),
     },
     planning: {
-      icon: <ListTodo className="h-3.5 w-3.5" />,
-      color: "text-amber-500",
-      label: t("assistant.phase.planning", "Creating plan..."),
+      icon: <ListTodo className="h-3 w-3" />,
+      color: "text-amber-600 dark:text-amber-400",
+      bgColor: "bg-amber-100 dark:bg-amber-900/40",
+      label: t("assistant.phase.planning", "规划任务"),
     },
     executing: {
-      icon: <Cog className="h-3.5 w-3.5" />,
-      color: "text-emerald-500",
-      label: t("assistant.phase.executing", "Executing..."),
+      icon: <Cog className="h-3 w-3" />,
+      color: "text-emerald-600 dark:text-emerald-400",
+      bgColor: "bg-emerald-100 dark:bg-emerald-900/40",
+      label: t("assistant.phase.executing", "执行中"),
     },
     observing: {
-      icon: <Eye className="h-3.5 w-3.5" />,
-      color: "text-cyan-500",
-      label: t("assistant.phase.observing", "Analyzing results..."),
+      icon: <Eye className="h-3 w-3" />,
+      color: "text-cyan-600 dark:text-cyan-400",
+      bgColor: "bg-cyan-100 dark:bg-cyan-900/40",
+      label: t("assistant.phase.observing", "分析结果"),
     },
     writing: {
-      icon: <PenTool className="h-3.5 w-3.5" />,
-      color: "text-pink-500",
-      label: t("assistant.phase.writing", "Writing content..."),
+      icon: <PenTool className="h-3 w-3" />,
+      color: "text-pink-600 dark:text-pink-400",
+      bgColor: "bg-pink-100 dark:bg-pink-900/40",
+      label: t("assistant.phase.writing", "撰写内容"),
     },
     completing: {
-      icon: <CheckCircle2 className="h-3.5 w-3.5" />,
-      color: "text-emerald-500",
-      label: t("assistant.phase.completing", "Completing..."),
+      icon: <CheckCircle2 className="h-3 w-3" />,
+      color: "text-emerald-600 dark:text-emerald-400",
+      bgColor: "bg-emerald-100 dark:bg-emerald-900/40",
+      label: t("assistant.phase.completing", "完成中"),
     },
   };
 
@@ -187,56 +206,37 @@ function AgentPhaseDisplay({ phase }: { phase: AgentPhaseStatus }) {
 
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/50"
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -4 }}
+      className="flex items-center gap-2 mt-2"
     >
-      {/* Animated icon */}
-      <motion.div
-        animate={{
-          rotate: phase.phase === "executing" ? 360 : 0,
-          scale: [1, 1.1, 1],
-        }}
-        transition={{
-          rotate: {
-            duration: phase.phase === "executing" ? 2 : 0,
-            repeat: phase.phase === "executing" ? Infinity : 0,
-            ease: "linear"
-          },
-          scale: {
-            duration: 1.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-          }
-        }}
-        className={config.color}
-      >
-        {config.icon}
-      </motion.div>
+      {/* Icon with background */}
+      <div className={cn("flex items-center justify-center w-5 h-5 rounded-md", config.bgColor)}>
+        <motion.div
+          animate={phase.phase === "executing" ? { rotate: 360 } : {}}
+          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+          className={config.color}
+        >
+          {config.icon}
+        </motion.div>
+      </div>
 
       {/* Status text */}
       <span className={cn("text-xs font-medium", config.color)}>
         {phase.message || config.label}
       </span>
 
-      {/* Three dots animation */}
-      <div className="flex gap-0.5 ml-1">
-        <motion.span
-          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
-          animate={{ opacity: [0.3, 1, 0.3] }}
-          transition={{ duration: 1, repeat: Infinity, delay: 0 }}
-        />
-        <motion.span
-          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
-          animate={{ opacity: [0.3, 1, 0.3] }}
-          transition={{ duration: 1, repeat: Infinity, delay: 0.2 }}
-        />
-        <motion.span
-          className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
-          animate={{ opacity: [0.3, 1, 0.3] }}
-          transition={{ duration: 1, repeat: Infinity, delay: 0.4 }}
-        />
+      {/* Dots animation */}
+      <div className="flex gap-0.5">
+        {[0, 1, 2].map((i) => (
+          <motion.span
+            key={i}
+            className={cn("w-1 h-1 rounded-full", config.color.replace("text-", "bg-"))}
+            animate={{ opacity: [0.3, 1, 0.3] }}
+            transition={{ duration: 1, repeat: Infinity, delay: i * 0.15 }}
+          />
+        ))}
       </div>
     </motion.div>
   );
@@ -326,86 +326,177 @@ function AttachmentsDisplay({
   );
 }
 
-/** GPT-style image generation placeholder */
+/** Premium Tool Calls Display - Manus style */
+function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls"] }) {
+  const { t } = useTranslation();
+
+  if (!toolCalls || toolCalls.length === 0) return null;
+
+  // Map tool names to icons
+  const getToolIcon = (name: string) => {
+    const iconMap: Record<string, React.ReactNode> = {
+      retrieve_product_info: <Database className="h-4 w-4" />,
+      get_product_details: <FileText className="h-4 w-4" />,
+      search_kb: <Database className="h-4 w-4" />,
+      web_search: <Globe className="h-4 w-4" />,
+      execute_python_code: <Cog className="h-4 w-4" />,
+      generate_image: <ImageIcon className="h-4 w-4" />,
+      generate_pptx: <FileText className="h-4 w-4" />,
+      generate_docx: <FileText className="h-4 w-4" />,
+    };
+    return iconMap[name] || <Cog className="h-4 w-4" />;
+  };
+
+  const getStatusConfig = (status: string) => {
+    switch (status) {
+      case "completed":
+        return {
+          label: t("assistant.toolStatus.completed", "已完成"),
+          color: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
+          dot: "bg-emerald-500"
+        };
+      case "running":
+        return {
+          label: t("assistant.toolStatus.running", "执行中"),
+          color: "bg-blue-500/10 text-blue-500 border-blue-500/20",
+          dot: "bg-blue-500"
+        };
+      case "error":
+        return {
+          label: t("assistant.toolStatus.error", "失败"),
+          color: "bg-red-500/10 text-red-500 border-red-500/20",
+          dot: "bg-red-500"
+        };
+      default:
+        return {
+          label: t("assistant.toolStatus.pending", "等待中"),
+          color: "bg-slate-500/10 text-slate-500 border-slate-500/20",
+          dot: "bg-slate-500"
+        };
+    }
+  };
+
+  return (
+    <div className="mb-4 space-y-2">
+      {/* Section header */}
+      <div className="flex items-center gap-2 text-xs font-medium text-violet-500 dark:text-violet-400">
+        <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
+        {t("assistant.toolCalls", "工具调用")}
+      </div>
+
+      {/* Tool call cards */}
+      <div className="space-y-2">
+        {toolCalls.map((tc, idx) => {
+          const statusConfig = getStatusConfig(tc.status);
+
+          return (
+            <motion.div
+              key={tc.id || idx}
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: idx * 0.1 }}
+              className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 border border-violet-500/10 dark:border-violet-400/10 hover:border-violet-500/30 transition-all duration-200"
+            >
+              {/* Glow effect on hover */}
+              <div className="absolute inset-0 bg-gradient-to-r from-violet-500/0 via-purple-500/5 to-fuchsia-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+
+              <div className="relative flex items-start gap-3 p-3">
+                {/* Tool icon */}
+                <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 border border-violet-500/20">
+                  <div className="text-violet-500 dark:text-violet-400">
+                    {getToolIcon(tc.name)}
+                  </div>
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  {/* Tool name */}
+                  <div className="flex items-center justify-between gap-2">
+                    <code className="text-sm font-mono font-medium text-slate-700 dark:text-slate-200">
+                      {tc.name}
+                    </code>
+                    {/* Status badge */}
+                    <span className={cn(
+                      "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+                      statusConfig.color
+                    )}>
+                      <span className={cn("h-1.5 w-1.5 rounded-full", statusConfig.dot)} />
+                      {statusConfig.label}
+                    </span>
+                  </div>
+
+                  {/* Arguments */}
+                  {tc.arguments && Object.keys(tc.arguments).length > 0 && (
+                    <pre className="mt-1.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+                      {JSON.stringify(tc.arguments).length > 60
+                        ? JSON.stringify(tc.arguments).slice(0, 60) + "..."
+                        : JSON.stringify(tc.arguments)}
+                    </pre>
+                  )}
+                </div>
+
+                {/* Expand indicator */}
+                <ChevronRight className="h-4 w-4 text-slate-300 dark:text-slate-600 group-hover:text-violet-400 transition-colors flex-shrink-0 mt-1" />
+              </div>
+            </motion.div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Compact image generation placeholder */
 function ImageGeneratingPlaceholder({ prompt }: { prompt?: string }) {
   const { t } = useTranslation();
 
   return (
-    <div className="space-y-3">
-      {/* Status header */}
-      <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-        >
-          <Sparkles className="h-4 w-4 text-pink-500" />
-        </motion.div>
-        <span className="font-medium">
-          {t("assistant.creatingImage", "正在创建图片")}
-        </span>
-      </div>
-
-      {/* Image placeholder box - GPT style */}
+    <div className="space-y-2">
+      {/* Compact placeholder box */}
       <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
+        initial={{ opacity: 0, scale: 0.98 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="relative w-[280px] h-[280px] rounded-2xl overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-700 dark:to-slate-800 border border-slate-200 dark:border-slate-600"
+        className="relative w-[200px] h-[200px] rounded-xl overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-700"
       >
         {/* Shimmer effect */}
         <motion.div
-          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent dark:via-white/10"
-          animate={{
-            x: ["-100%", "100%"],
-          }}
-          transition={{
-            duration: 1.5,
-            repeat: Infinity,
-            ease: "linear",
-          }}
+          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent dark:via-white/5"
+          animate={{ x: ["-100%", "100%"] }}
+          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
         />
 
-        {/* Center icon */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
+        {/* Center content */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
           <motion.div
-            animate={{
-              scale: [1, 1.1, 1],
-              opacity: [0.5, 0.8, 0.5],
-            }}
-            transition={{
-              duration: 2,
-              repeat: Infinity,
-              ease: "easeInOut",
-            }}
-            className="p-4 rounded-full bg-slate-200/80 dark:bg-slate-600/50"
+            animate={{ scale: [1, 1.05, 1] }}
+            transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+            className="p-3 rounded-lg bg-pink-500/10"
           >
-            <ImageIcon className="h-10 w-10 text-slate-400 dark:text-slate-500" />
+            <ImageIcon className="h-8 w-8 text-pink-500" />
           </motion.div>
 
-          {/* Progress dots */}
-          <div className="flex gap-1.5 mt-4">
-            <motion.div
-              className="w-2 h-2 rounded-full bg-pink-400"
-              animate={{ scale: [1, 1.3, 1] }}
-              transition={{ duration: 0.8, repeat: Infinity, delay: 0 }}
-            />
-            <motion.div
-              className="w-2 h-2 rounded-full bg-pink-400"
-              animate={{ scale: [1, 1.3, 1] }}
-              transition={{ duration: 0.8, repeat: Infinity, delay: 0.2 }}
-            />
-            <motion.div
-              className="w-2 h-2 rounded-full bg-pink-400"
-              animate={{ scale: [1, 1.3, 1] }}
-              transition={{ duration: 0.8, repeat: Infinity, delay: 0.4 }}
-            />
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              {t("assistant.creatingImage", "生成图片中")}
+            </span>
+            <div className="flex gap-0.5">
+              {[0, 1, 2].map((i) => (
+                <motion.div
+                  key={i}
+                  className="w-1 h-1 rounded-full bg-pink-500"
+                  animate={{ opacity: [0.3, 1, 0.3] }}
+                  transition={{ duration: 1, repeat: Infinity, delay: i * 0.15 }}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </motion.div>
 
       {/* Prompt preview */}
       {prompt && (
-        <p className="text-xs text-slate-400 dark:text-slate-500 italic truncate max-w-[280px]">
-          "{prompt.length > 50 ? prompt.slice(0, 50) + "..." : prompt}"
+        <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate max-w-[200px]">
+          "{prompt.length > 40 ? prompt.slice(0, 40) + "..." : prompt}"
         </p>
       )}
     </div>
@@ -418,50 +509,44 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: "easeOut" }}
+      transition={{ duration: 0.25, ease: "easeOut" }}
       className={cn(
-        "flex w-full gap-4",
+        "flex w-full gap-3",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
       {/* Avatar */}
       <motion.div
-        initial={{ scale: 0.8 }}
+        initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
-        transition={{ delay: 0.1, type: "spring", stiffness: 200 }}
+        transition={{ delay: 0.05, type: "spring", stiffness: 300, damping: 20 }}
         className={cn(
-          "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl shadow-lg transition-transform hover:scale-105",
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-transform hover:scale-105",
           isUser
-            ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-violet-500/25"
-            : "bg-gradient-to-br from-slate-700 to-slate-900 dark:from-slate-600 dark:to-slate-800 text-white shadow-slate-500/20"
+            ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/20"
+            : "bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-700 dark:to-slate-800 text-slate-600 dark:text-slate-300"
         )}
       >
-        {isUser ? <User className="h-5 w-5" /> : <Bot className="h-5 w-5" />}
+        {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </motion.div>
 
       {/* Content */}
       <div
         className={cn(
-          "flex flex-col gap-1 min-w-0",
-          isUser 
-            ? "max-w-[85%] items-end" 
-            : "max-w-[90%] lg:max-w-[80%] xl:max-w-[70%] items-start w-full"
+          "flex flex-col min-w-0",
+          isUser
+            ? "max-w-[85%] items-end"
+            : "max-w-full lg:max-w-[90%] items-start flex-1"
         )}
       >
-        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 ml-1 mb-1">
-          {isUser
-            ? t("assistant.you", "You")
-            : t("assistant.assistant", "Assistant")}
-        </span>
-
         <div
           className={cn(
-            "relative px-5 py-4 text-sm shadow-sm",
+            "relative text-sm",
             isUser
-              ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-3xl rounded-tr-lg shadow-violet-500/20"
-              : "bg-white dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/50 rounded-3xl rounded-tl-lg shadow-sm"
+              ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15"
+              : "w-full"
           )}
         >
           {/* Attachments for user messages */}
@@ -480,6 +565,11 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {/* Context display for assistant messages */}
           {!isUser && message.contexts && message.contexts.length > 0 && (
             <ContextDisplay contexts={message.contexts} />
+          )}
+
+          {/* Tool calls display for assistant messages - Manus style */}
+          {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
+            <ToolCallsDisplay toolCalls={message.toolCalls} />
           )}
 
           {/* Message content */}
@@ -502,29 +592,24 @@ export function ChatMessage({ message }: ChatMessageProps) {
                       id={`msg-${message.id}`}
                     />
                   )}
-                  {/* Manus-style thinking indicator at the END of streaming content */}
+                  {/* Manus-style thinking indicator */}
                   {message.agentPhase ? (
                     <AgentPhaseDisplay phase={message.agentPhase} />
                   ) : !message.content && (
-                    <div className="flex items-center gap-3 text-slate-500 dark:text-slate-400">
+                    <div className="flex items-center gap-2 py-1">
                       <div className="flex gap-1">
-                        <motion.div
-                          className="w-2 h-2 rounded-full bg-violet-500"
-                          animate={{ scale: [1, 1.2, 1] }}
-                          transition={{ duration: 0.6, repeat: Infinity, delay: 0 }}
-                        />
-                        <motion.div
-                          className="w-2 h-2 rounded-full bg-purple-500"
-                          animate={{ scale: [1, 1.2, 1] }}
-                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }}
-                        />
-                        <motion.div
-                          className="w-2 h-2 rounded-full bg-fuchsia-500"
-                          animate={{ scale: [1, 1.2, 1] }}
-                          transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }}
-                        />
+                        {[0, 1, 2].map((i) => (
+                          <motion.div
+                            key={i}
+                            className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500"
+                            animate={{ opacity: [0.3, 1, 0.3] }}
+                            transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
+                          />
+                        ))}
                       </div>
-                      <span className="text-sm">{t("assistant.thinking", "Thinking...")}</span>
+                      <span className="text-sm text-slate-500 dark:text-slate-400">
+                        {t("assistant.thinking", "思考中...")}
+                      </span>
                     </div>
                   )}
                 </>

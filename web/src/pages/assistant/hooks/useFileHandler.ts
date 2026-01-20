@@ -23,7 +23,7 @@ export function useFileHandler() {
   const uploadFiles = useCallback(async (filesToUpload: UploadedFile[]) => {
     if (filesToUpload.length === 0) return;
 
-    setIsUploading(true);
+    // Note: isUploading is already set to true by handleFileSelect
 
     for (const fileEntry of filesToUpload) {
       setFiles((prev) =>
@@ -44,6 +44,13 @@ export function useFileHandler() {
           },
           true
         );
+
+        // Debug: Log upload response
+        console.log("[useFileHandler] Upload success:", {
+          filename: fileEntry.file.name,
+          response,
+          file_path: response?.file_path,
+        });
 
         setFiles((prev) =>
           prev.map((f) =>
@@ -75,26 +82,42 @@ export function useFileHandler() {
     if (!selectedFiles || selectedFiles.length === 0) return;
 
     const MAX_FILES = 5;
+
+    // First, filter and validate files synchronously
+    const validFiles = Array.from(selectedFiles)
+      .filter((file) => isFileTypeSupported(file));
+
+    if (validFiles.length === 0) return;
+
+    // Set uploading state BEFORE updating files to prevent race condition
+    setIsUploading(true);
+
+    // Create new file entries
+    const newFiles: UploadedFile[] = validFiles.map((file) => ({
+      file,
+      status: "pending" as const,
+    }));
+
+    // Update files state
     setFiles((currentFiles) => {
       const remainingSlots = MAX_FILES - currentFiles.length;
-      if (remainingSlots <= 0) return currentFiles;
-
-      const validFiles = Array.from(selectedFiles)
-        .filter((file) => isFileTypeSupported(file))
-        .slice(0, remainingSlots);
-
-      if (validFiles.length === 0) return currentFiles;
-
-      const newFiles: UploadedFile[] = validFiles.map((file) => ({
-        file,
-        status: "pending" as const,
-      }));
-
-      // Start uploads automatically
-      setTimeout(() => uploadFiles(newFiles), 0);
-
-      return [...currentFiles, ...newFiles];
+      if (remainingSlots <= 0) {
+        // No slots available, reset uploading state
+        setTimeout(() => setIsUploading(false), 0);
+        return currentFiles;
+      }
+      return [...currentFiles, ...newFiles.slice(0, remainingSlots)];
     });
+
+    // Start uploads - take only the files that will actually be added
+    const filesToUpload = newFiles.slice(0, MAX_FILES);
+    if (filesToUpload.length > 0) {
+      // Small delay to ensure state is updated
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await uploadFiles(filesToUpload);
+    } else {
+      setIsUploading(false);
+    }
   }, [uploadFiles]);
 
   // Handle paste event
