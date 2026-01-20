@@ -70,6 +70,45 @@ class TaskType(str, Enum):
     TRANSFORM = "transform"    # Format conversion, translation, restructuring
 
 
+class IntentType(str, Enum):
+    """
+    Classification of user intent for intelligent task planning.
+
+    Used by Agent to understand what the user really wants:
+    - DOCUMENT_CREATION: Create documents (PPT, Word, Excel)
+    - INFORMATION_QUERY: Answer questions using knowledge base
+    - DATA_ANALYSIS: Analyze data and generate insights
+    - COMPARISON: Compare multiple items
+    - CREATIVE_WRITING: Creative content generation
+    - CODE_EXECUTION: Run code or generate code
+    """
+
+    DOCUMENT_CREATION = "document_creation"
+    INFORMATION_QUERY = "information_query"
+    DATA_ANALYSIS = "data_analysis"
+    COMPARISON = "comparison"
+    CREATIVE_WRITING = "creative_writing"
+    CODE_EXECUTION = "code_execution"
+    GENERAL = "general"
+
+
+class TaskStrategy(str, Enum):
+    """
+    Strategy for task execution.
+
+    Agent decides which strategy to use:
+    - SIMPLE: Single-step execution
+    - SEQUENTIAL: Multi-step sequential execution
+    - PARALLEL: Execute independent tasks in parallel
+    - ITERATIVE: Iterative refinement with validation
+    """
+
+    SIMPLE = "simple"
+    SEQUENTIAL = "sequential"
+    PARALLEL = "parallel"
+    ITERATIVE = "iterative"
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -527,6 +566,36 @@ class TaskPlanner:
         ),
     }
 
+    # Intent detection keywords for intelligent planning
+    INTENT_KEYWORDS: Dict[IntentType, List[str]] = {
+        IntentType.DOCUMENT_CREATION: [
+            "写", "生成", "制作", "创建", "做一个",
+            "ppt", "word", "excel", "文档", "报告", "演示",
+            "write", "create", "generate", "make", "produce",
+        ],
+        IntentType.INFORMATION_QUERY: [
+            "什么是", "如何", "怎么", "为什么", "解释",
+            "查找", "搜索", "告诉我",
+            "what", "how", "why", "explain", "find", "search",
+        ],
+        IntentType.DATA_ANALYSIS: [
+            "分析", "统计", "计算", "数据", "趋势",
+            "analyze", "statistics", "calculate", "data", "trend",
+        ],
+        IntentType.COMPARISON: [
+            "比较", "对比", "区别", "差异", "哪个更",
+            "compare", "versus", "vs", "difference", "better",
+        ],
+        IntentType.CREATIVE_WRITING: [
+            "写一篇", "创作", "编写", "撰写", "文章", "故事",
+            "write", "compose", "article", "story", "essay",
+        ],
+        IntentType.CODE_EXECUTION: [
+            "运行", "执行", "代码", "脚本", "python",
+            "run", "execute", "code", "script", "program",
+        ],
+    }
+
     # Tool to TaskType mapping for automatic type inference
     TOOL_TYPE_MAPPING: Dict[str, TaskType] = {
         "kb_search": TaskType.RETRIEVE,
@@ -597,10 +666,13 @@ class TaskPlanner:
             elif isinstance(tool, dict):
                 available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
 
-        # Step 1: Detect workflow pattern from keywords
+        # Step 1: Analyze user intent (Agent intelligence)
+        intent_type, strategy, intent_metadata = self.analyze_intent(user_request)
+
+        # Step 2: Detect workflow pattern from keywords
         detected_pattern = self._detect_pattern(user_request)
 
-        # Step 2: Generate tasks (via LLM or rule-based)
+        # Step 3: Generate tasks (via LLM or rule-based)
         if use_llm and self.model_client:
             tasks = await self._create_plan_with_llm(
                 user_request, available_tools, context, detected_pattern
@@ -610,10 +682,10 @@ class TaskPlanner:
                 user_request, available_tool_names, context, detected_pattern
             )
 
-        # Step 3: Analyze dependencies and create parallel groups
+        # Step 4: Analyze dependencies and create parallel groups
         parallel_groups = self.analyze_dependencies(tasks)
 
-        # Step 4: Build execution plan
+        # Step 5: Build execution plan with intent analysis
         plan = ExecutionPlan(
             goal=user_request,
             tasks=tasks,
@@ -623,6 +695,10 @@ class TaskPlanner:
                 "tool_count": len(set(t.tool for t in tasks)),
                 "task_count": len(tasks),
                 "parallel_group_count": len(parallel_groups),
+                # Agent intelligence: intent analysis results
+                "intent_type": intent_type.value,
+                "strategy": strategy.value,
+                **intent_metadata,
             },
         )
 
@@ -661,6 +737,113 @@ class TaskPlanner:
             return best_match
 
         return None
+
+    def analyze_intent(self, user_request: str) -> Tuple[IntentType, TaskStrategy, Dict[str, Any]]:
+        """
+        Analyze user intent to understand what they really want.
+
+        Agent uses this to make intelligent decisions about:
+        - What type of task this is
+        - What strategy to use for execution
+        - What constraints apply
+
+        Args:
+            user_request: The user's request text
+
+        Returns:
+            Tuple of (IntentType, TaskStrategy, metadata dict)
+        """
+        request_lower = user_request.lower()
+        scores: Dict[IntentType, int] = {intent: 0 for intent in IntentType}
+
+        # Score each intent type
+        for intent_type, keywords in self.INTENT_KEYWORDS.items():
+            for kw in keywords:
+                if kw in request_lower:
+                    scores[intent_type] += 1
+
+        # Find best matching intent
+        best_intent = max(scores, key=scores.get)
+        if scores[best_intent] == 0:
+            best_intent = IntentType.GENERAL
+
+        # Determine strategy based on intent
+        strategy = self._select_strategy(best_intent, user_request)
+
+        # Extract metadata for the intent
+        metadata = self._extract_intent_metadata(best_intent, user_request)
+
+        logger.info(f"Analyzed intent: {best_intent.value}, strategy: {strategy.value}")
+
+        return best_intent, strategy, metadata
+
+    def _select_strategy(self, intent: IntentType, user_request: str) -> TaskStrategy:
+        """
+        Select execution strategy based on intent and request complexity.
+
+        Agent decides which approach will work best.
+
+        Args:
+            intent: Detected user intent
+            user_request: The user's request
+
+        Returns:
+            TaskStrategy to use
+        """
+        # Document creation usually requires iterative refinement with validation
+        if intent == IntentType.DOCUMENT_CREATION:
+            return TaskStrategy.ITERATIVE
+
+        # Comparisons need parallel data gathering
+        if intent == IntentType.COMPARISON:
+            return TaskStrategy.PARALLEL
+
+        # Data analysis is usually sequential
+        if intent == IntentType.DATA_ANALYSIS:
+            return TaskStrategy.SEQUENTIAL
+
+        # Simple queries can be handled directly
+        if intent == IntentType.INFORMATION_QUERY:
+            return TaskStrategy.SIMPLE
+
+        # Default to sequential for unknown intents
+        return TaskStrategy.SEQUENTIAL
+
+    def _extract_intent_metadata(
+        self,
+        intent: IntentType,
+        user_request: str,
+    ) -> Dict[str, Any]:
+        """
+        Extract metadata relevant to the detected intent.
+
+        Args:
+            intent: Detected intent type
+            user_request: The user's request
+
+        Returns:
+            Dict with intent-specific metadata
+        """
+        metadata: Dict[str, Any] = {"intent": intent.value}
+        request_lower = user_request.lower()
+
+        if intent == IntentType.DOCUMENT_CREATION:
+            # Detect document type
+            if "ppt" in request_lower or "演示" in request_lower:
+                metadata["document_type"] = "ppt"
+            elif "word" in request_lower or "文档" in request_lower:
+                metadata["document_type"] = "docx"
+            elif "excel" in request_lower or "表格" in request_lower:
+                metadata["document_type"] = "xlsx"
+            else:
+                metadata["document_type"] = "markdown"
+
+        elif intent == IntentType.COMPARISON:
+            # Extract items to compare
+            items = self._extract_comparison_items(user_request)
+            metadata["comparison_items"] = items
+
+        return metadata
 
     def _create_plan_rule_based(
         self,
