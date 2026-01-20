@@ -11,7 +11,7 @@ import logging
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import asyncpg
@@ -21,6 +21,44 @@ except ImportError:
     asyncpg = None
 
 logger = logging.getLogger(__name__)
+
+
+def build_service_query(
+    status: Optional[str] = None,
+    service_type: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+) -> Tuple[str, List[Any]]:
+    """Build service query with safe parameterization.
+
+    Uses len(params) for parameter indexing to avoid off-by-one errors.
+    This is safer than manually tracking param_idx.
+
+    Args:
+        status: Filter by service status
+        service_type: Filter by service type
+        tags: Filter by tags (array overlap)
+
+    Returns:
+        Tuple of (query_string, params_list)
+    """
+    query_parts = ["SELECT * FROM services WHERE 1=1"]
+    params: List[Any] = []
+
+    if status:
+        params.append(status)
+        query_parts.append(f"AND status = ${len(params)}")
+
+    if service_type:
+        params.append(service_type)
+        query_parts.append(f"AND service_type = ${len(params)}")
+
+    if tags:
+        params.append(tags)
+        query_parts.append(f"AND tags && ${len(params)}")
+
+    query_parts.append("ORDER BY created_at DESC")
+
+    return " ".join(query_parts), params
 
 
 class DatabaseStorage:
@@ -376,36 +414,24 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def list_services(
-        self, 
+        self,
         status: Optional[str] = None,
         service_type: Optional[str] = None,
         tags: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """获取服务列表"""
+        """获取服务列表
+
+        Uses build_service_query() for safe parameterization.
+        """
         if not self._pool:
             return []
-        
-        query = "SELECT * FROM services WHERE 1=1"
-        params = []
-        param_idx = 1
-        
-        if status:
-            query += f" AND status = ${param_idx}"
-            params.append(status)
-            param_idx += 1
-        
-        if service_type:
-            query += f" AND service_type = ${param_idx}"
-            params.append(service_type)
-            param_idx += 1
-        
-        if tags:
-            query += f" AND tags && ${param_idx}"
-            params.append(tags)
-            param_idx += 1
-        
-        query += " ORDER BY created_at DESC"
-        
+
+        query, params = build_service_query(
+            status=status,
+            service_type=service_type,
+            tags=tags
+        )
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -3465,9 +3491,17 @@ class DatabaseStorage:
         status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        synced_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         列出 Confluence 页面记录
+
+        Args:
+            binding_id: 绑定 ID
+            status: 筛选状态
+            limit: 返回数量限制
+            offset: 偏移量
+            synced_only: 如果为 True，只返回有 document_id 的记录（已入库的）
 
         返回结果包含关联文档的处理状态:
         - document_status: 文档的实际处理状态 (uploaded/parsing/embedding/completed/failed)
@@ -3500,6 +3534,10 @@ class DatabaseStorage:
         params: List[Any] = [binding_id]
         param_idx = 2
 
+        # 只返回已入库的页面（有 document_id）
+        if synced_only:
+            query += " AND cp.document_id IS NOT NULL"
+
         if status:
             query += f" AND cp.status = ${param_idx}"
             params.append(status)
@@ -3511,6 +3549,38 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
+
+    async def cleanup_unsynced_confluence_pages(
+        self,
+        binding_id: str,
+    ) -> int:
+        """
+        清理未同步的 Confluence 页面记录
+
+        删除所有 document_id 为空的记录（从未真正同步到知识库的页面）
+
+        Args:
+            binding_id: 绑定 ID
+
+        Returns:
+            删除的记录数
+        """
+        if not self._pool:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM confluence_pages
+                WHERE binding_id = $1 AND document_id IS NULL
+                """,
+                binding_id,
+            )
+            # Parse result like "DELETE 5"
+            try:
+                return int(result.split()[-1])
+            except (ValueError, IndexError):
+                return 0
 
     async def update_confluence_page_status(
         self,
@@ -5178,3 +5248,266 @@ class DatabaseStorage:
                 result[field] = result[field].isoformat()
 
         return result
+
+    # =========================================================================
+    # Document Version Control Methods
+    # =========================================================================
+
+    async def create_document_version(
+        self,
+        document_id: str,
+        content: str,
+        content_hash: str,
+        change_type: str,
+        title: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        change_reason: Optional[str] = None,
+        changed_by: Optional[str] = None,
+        confluence_version: Optional[int] = None,
+        confluence_updated_at: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Create a new document version snapshot.
+
+        Args:
+            document_id: Document ID
+            content: Content snapshot
+            content_hash: SHA256 hash of content
+            change_type: Type of change (created/updated/restored/deleted)
+            title: Title snapshot
+            metadata: Metadata snapshot
+            change_reason: Reason for the change
+            changed_by: User who made the change
+            confluence_version: Confluence page version number
+            confluence_updated_at: Confluence page update timestamp
+
+        Returns:
+            Created version record
+        """
+        if not self._pool:
+            return None
+
+        async with self._pool.acquire() as conn:
+            # Get next version number for this document
+            row = await conn.fetchrow(
+                "SELECT COALESCE(MAX(version_number), 0) + 1 as next_version FROM document_versions WHERE document_id = $1",
+                document_id,
+            )
+            next_version = row["next_version"] if row else 1
+
+            # Calculate word count
+            word_count = len(content.split()) if content else 0
+
+            # Insert version record
+            version_id = str(uuid.uuid4())
+            await conn.execute(
+                """
+                INSERT INTO document_versions (
+                    version_id, document_id, version_number, content, content_hash,
+                    confluence_version, confluence_updated_at, title, metadata, word_count,
+                    change_type, change_reason, changed_by, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+                """,
+                version_id,
+                document_id,
+                next_version,
+                content,
+                content_hash,
+                confluence_version,
+                confluence_updated_at,
+                title,
+                json.dumps(metadata) if metadata else "{}",
+                word_count,
+                change_type,
+                change_reason,
+                changed_by,
+            )
+
+            # Update document version counters
+            await conn.execute(
+                """
+                UPDATE documents
+                SET current_version = $1, version_count = COALESCE(version_count, 0) + 1
+                WHERE document_id = $2
+                """,
+                next_version,
+                document_id,
+            )
+
+            return {
+                "version_id": version_id,
+                "document_id": document_id,
+                "version_number": next_version,
+                "change_type": change_type,
+                "word_count": word_count,
+            }
+
+    async def list_document_versions(
+        self,
+        document_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        List version history for a document.
+
+        Args:
+            document_id: Document ID
+            limit: Max results
+            offset: Pagination offset
+
+        Returns:
+            List of version records (without full content)
+        """
+        if not self._pool:
+            return []
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    version_id, document_id, version_number, content_hash,
+                    confluence_version, confluence_updated_at, title, word_count,
+                    change_type, change_reason, changed_by, created_at
+                FROM document_versions
+                WHERE document_id = $1
+                ORDER BY version_number DESC
+                LIMIT $2 OFFSET $3
+                """,
+                document_id,
+                limit,
+                offset,
+            )
+            return [self._row_to_dict(row) for row in rows]
+
+    async def get_document_version(
+        self,
+        document_id: str,
+        version_number: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific document version with full content.
+
+        Args:
+            document_id: Document ID
+            version_number: Version number to retrieve
+
+        Returns:
+            Full version record including content
+        """
+        if not self._pool:
+            return None
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM document_versions
+                WHERE document_id = $1 AND version_number = $2
+                """,
+                document_id,
+                version_number,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def get_document_version_count(self, document_id: str) -> int:
+        """Get total version count for a document."""
+        if not self._pool:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) as count FROM document_versions WHERE document_id = $1",
+                document_id,
+            )
+            return row["count"] if row else 0
+
+    async def get_latest_document_version(
+        self,
+        document_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get the latest version of a document."""
+        if not self._pool:
+            return None
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM document_versions
+                WHERE document_id = $1
+                ORDER BY version_number DESC
+                LIMIT 1
+                """,
+                document_id,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def delete_old_document_versions(
+        self,
+        document_id: str,
+        keep_count: int = 50,
+        keep_first: bool = True,
+    ) -> int:
+        """
+        Delete old versions exceeding the keep count.
+
+        Args:
+            document_id: Document ID
+            keep_count: Number of recent versions to keep
+            keep_first: Whether to always keep the first version
+
+        Returns:
+            Number of versions deleted
+        """
+        if not self._pool:
+            return 0
+
+        async with self._pool.acquire() as conn:
+            if keep_first:
+                # Keep first version and most recent N-1 versions
+                result = await conn.execute(
+                    """
+                    DELETE FROM document_versions
+                    WHERE document_id = $1
+                    AND version_number NOT IN (
+                        SELECT version_number FROM (
+                            SELECT version_number FROM document_versions
+                            WHERE document_id = $1
+                            ORDER BY version_number DESC
+                            LIMIT $2
+                        ) recent
+                        UNION
+                        SELECT 1
+                    )
+                    """,
+                    document_id,
+                    keep_count - 1,
+                )
+            else:
+                # Keep most recent N versions
+                result = await conn.execute(
+                    """
+                    DELETE FROM document_versions
+                    WHERE document_id = $1
+                    AND version_number NOT IN (
+                        SELECT version_number FROM document_versions
+                        WHERE document_id = $1
+                        ORDER BY version_number DESC
+                        LIMIT $2
+                    )
+                    """,
+                    document_id,
+                    keep_count,
+                )
+
+            # Update version count
+            count_row = await conn.fetchrow(
+                "SELECT COUNT(*) as count FROM document_versions WHERE document_id = $1",
+                document_id,
+            )
+            await conn.execute(
+                "UPDATE documents SET version_count = $1 WHERE document_id = $2",
+                count_row["count"] if count_row else 0,
+                document_id,
+            )
+
+            return int(result.split()[-1]) if result else 0
