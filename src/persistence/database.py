@@ -84,6 +84,7 @@ class DatabaseStorage:
         self._pool_min_size = max(int(pool_min_size), 1)
         self._pool_max_size = max(int(pool_max_size), self._pool_min_size)
         self._permission_cache: Dict[str, tuple[List[str], float]] = {}
+        self._permission_cache_max_size = 10000  # Prevent unbounded memory growth
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
         self._permission_cache_lock = asyncio.Lock()
 
@@ -101,9 +102,22 @@ class DatabaseStorage:
             return list(permissions)
 
     async def _set_cached_permissions(self, user_id: str, permissions: List[str]) -> None:
+        """Set cached permissions with size limit enforcement.
+
+        Uses FIFO eviction when cache exceeds max_size.
+        """
         if self._permission_cache_ttl_seconds <= 0:
             return
         async with self._permission_cache_lock:
+            # Enforce size limit (simple FIFO eviction)
+            while len(self._permission_cache) >= self._permission_cache_max_size:
+                if self._permission_cache:
+                    # Remove oldest entry (first inserted in dict)
+                    oldest_key = next(iter(self._permission_cache))
+                    del self._permission_cache[oldest_key]
+                else:
+                    break
+
             self._permission_cache[user_id] = (
                 list(permissions),
                 time.time() + self._permission_cache_ttl_seconds,
