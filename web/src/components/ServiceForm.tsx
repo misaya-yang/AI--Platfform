@@ -147,7 +147,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
       <DialogTrigger asChild>
         <Button size="sm">{t("services.addService")}</Button>
       </DialogTrigger>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t("services.registerService")}</DialogTitle>
         </DialogHeader>

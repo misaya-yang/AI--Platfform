@@ -251,7 +251,7 @@ export function ServiceConfigDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <span>服务配置</span>
@@ -263,13 +263,13 @@ export function ServiceConfigDialog({
           <div className="py-8 text-center text-muted-foreground">加载中...</div>
         ) : (
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="grid w-full grid-cols-6">
-              <TabsTrigger value="basic">基础</TabsTrigger>
-              <TabsTrigger value="rate_limit">限流</TabsTrigger>
-              <TabsTrigger value="auth">鉴权</TabsTrigger>
-              <TabsTrigger value="cache">缓存</TabsTrigger>
-              <TabsTrigger value="priority">优先级</TabsTrigger>
-              <TabsTrigger value="danger">危险区</TabsTrigger>
+            <TabsList className="flex flex-wrap gap-1 h-auto p-1 sm:grid sm:grid-cols-6">
+              <TabsTrigger value="basic" className="text-xs sm:text-sm">基础</TabsTrigger>
+              <TabsTrigger value="rate_limit" className="text-xs sm:text-sm">限流</TabsTrigger>
+              <TabsTrigger value="auth" className="text-xs sm:text-sm">鉴权</TabsTrigger>
+              <TabsTrigger value="cache" className="text-xs sm:text-sm">缓存</TabsTrigger>
+              <TabsTrigger value="priority" className="text-xs sm:text-sm">优先级</TabsTrigger>
+              <TabsTrigger value="danger" className="text-xs sm:text-sm">危险区</TabsTrigger>
             </TabsList>
 
             <TabsContent value="basic" className="space-y-4 pt-4">
