@@ -68,6 +68,16 @@ from .guardrails import (
     BANNED_PHRASES,
     TOOL_CONSTRAINTS,
 )
+from .content_generator import (
+    GenerationPhase,
+    ContentSection,
+    ContentOutline,
+    GeneratedContent,
+    StreamEvent,
+    DeepContentGenerator,
+    create_content_generator,
+)
+from .task_planner import IntentType, TaskStrategy
 
 __all__ = [
     "AssistantService",
@@ -129,4 +139,15 @@ __all__ = [
     "QUALITY_THRESHOLDS",
     "BANNED_PHRASES",
     "TOOL_CONSTRAINTS",
+    # Deep Content Generator (Phase 2)
+    "GenerationPhase",
+    "ContentSection",
+    "ContentOutline",
+    "GeneratedContent",
+    "StreamEvent",
+    "DeepContentGenerator",
+    "create_content_generator",
+    # Intent Analysis (Phase 2)
+    "IntentType",
+    "TaskStrategy",
 ]
