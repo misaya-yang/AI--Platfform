@@ -23,69 +23,11 @@ import type {
   TimelineArtifact,
   ToolCallInfo,
   StepType,
-  StepStatus,
 } from "@/components/agent/AgentTimeline";
+import type { AGUIEvent, AGUIEventType } from "@/lib/sse";
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/** AG-UI Event Types */
-export type AGUIEventType =
-  // Lifecycle
-  | "run_started"
-  | "run_finished"
-  | "run_error"
-  | "step_started"
-  | "step_finished"
-  // Text Message
-  | "text_message_start"
-  | "text_message_content"
-  | "text_message_end"
-  | "text_delta"
-  // Tool Call
-  | "tool_call_start"
-  | "tool_call_args"
-  | "tool_call_result"
-  | "tool_call_end"
-  | "tool_error"
-  // State
-  | "state_snapshot"
-  | "state_delta"
-  | "messages_snapshot"
-  // Artifacts
-  | "artifact_created"
-  | "file_creating"
-  | "file_created"
-  // Document
-  | "outline_ready"
-  | "document_generation_start"
-  | "document_generation_result"
-  // Search
-  | "search_started"
-  | "search_progress"
-  | "search_completed"
-  // Code Execution
-  | "code_execution_start"
-  | "code_execution_result"
-  // Image
-  | "image_generation_start"
-  | "image_generation_result"
-  // Status
-  | "status"
-  // Special
-  | "stream_end"
-  | "custom_event"
-  | "raw_event";
-
-/** Base AG-UI Event */
-export interface AGUIEvent {
-  event: AGUIEventType;
-  request_id: string;
-  chunk_index: number;
-  timestamp: number;
-  [key: string]: unknown;
-}
+// Re-export types for consumers
+export type { AGUIEvent, AGUIEventType };
 
 /** Timeline reducer action types */
 type TimelineAction =
@@ -145,6 +87,11 @@ function mapStepType(type: string): StepType {
     complete: "complete",
   };
   return typeMap[type] || "planning";
+}
+
+/** Safely convert AG-UI timestamp (seconds) to milliseconds */
+function toMs(timestamp: number | undefined): number {
+  return timestamp ? toMs(timestamp) : Date.now();
 }
 
 function updateStepStatus(
@@ -250,7 +197,7 @@ function timelineReducer(
         ...initialState,
         runId: run_id as string,
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         metadata: {
           ...(metadata as Record<string, unknown>),
           threadId: thread_id,
@@ -263,7 +210,7 @@ function timelineReducer(
       return {
         ...state,
         status: "completed",
-        endTime: timestamp * 1000,
+        endTime: toMs(timestamp),
         currentStepId: undefined,
         metadata: {
           ...state.metadata,
@@ -277,7 +224,7 @@ function timelineReducer(
       return {
         ...state,
         status: "error",
-        endTime: timestamp * 1000,
+        endTime: toMs(timestamp),
         currentStepId: undefined,
         metadata: {
           ...state.metadata,
@@ -294,7 +241,7 @@ function timelineReducer(
         type: mapStepType(step_type as string),
         name: step_name as string,
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         metadata: metadata as Record<string, unknown>,
       };
 
@@ -331,7 +278,7 @@ function timelineReducer(
         ...state,
         steps: updateStepStatus(state.steps, stepId, {
           status: "completed",
-          endTime: timestamp * 1000,
+          endTime: toMs(timestamp),
           metadata: {
             ...(state.steps.find((s) => s.id === stepId)?.metadata || {}),
             ...(metadata as Record<string, unknown>),
@@ -357,7 +304,7 @@ function timelineReducer(
           type: "tool_call",
           name: tool_name as string,
           status: "running",
-          startTime: timestamp * 1000,
+          startTime: toMs(timestamp),
           toolCalls: [toolCall],
         };
         return {
@@ -375,7 +322,7 @@ function timelineReducer(
 
     case "TOOL_CALL_RESULT":
     case "TOOL_CALL_END": {
-      const { tool_call_id, tool_name, result, error, status, timestamp } = action.payload;
+      const { tool_call_id, result, error, status } = action.payload;
       const stepId = state.currentStepId || `step-tc-${tool_call_id}`;
 
       return {
@@ -438,7 +385,7 @@ function timelineReducer(
         type: "search",
         name: `搜索: ${(query as string).slice(0, 30)}...`,
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         message: query as string,
         metadata: { searchType: search_type },
       };
@@ -450,7 +397,7 @@ function timelineReducer(
     }
 
     case "SEARCH_COMPLETED": {
-      const { query, result_count, timestamp } = action.payload;
+      const { result_count, timestamp } = action.payload;
       const stepId = state.currentStepId;
       if (!stepId) return state;
 
@@ -458,20 +405,20 @@ function timelineReducer(
         ...state,
         steps: updateStepStatus(state.steps, stepId, {
           status: "completed",
-          endTime: timestamp * 1000,
+          endTime: toMs(timestamp),
           message: `找到 ${result_count} 条结果`,
         }),
       };
     }
 
     case "CODE_EXECUTION_START": {
-      const { code, language, timestamp } = action.payload;
+      const { language, timestamp } = action.payload;
       const newStep: TimelineStep = {
         id: `code-${Date.now()}`,
         type: "code_execution",
         name: `执行 ${language || "Python"} 代码`,
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         metadata: { language },
       };
       return {
@@ -490,7 +437,7 @@ function timelineReducer(
         ...state,
         steps: updateStepStatus(state.steps, stepId, {
           status: success ? "completed" : "error",
-          endTime: timestamp * 1000,
+          endTime: toMs(timestamp),
           message: error as string || (output as string)?.slice(0, 100),
         }),
       };
@@ -503,7 +450,7 @@ function timelineReducer(
         type: "image_generation",
         name: "生成图片",
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         message: (prompt as string)?.slice(0, 50),
       };
       return {
@@ -530,7 +477,7 @@ function timelineReducer(
         steps: addArtifactToStep(
           updateStepStatus(state.steps, stepId, {
             status: "completed",
-            endTime: timestamp * 1000,
+            endTime: toMs(timestamp),
           }),
           stepId,
           artifact
@@ -545,7 +492,7 @@ function timelineReducer(
         type: "document_generation",
         name: `生成 ${(doc_type as string)?.toUpperCase()} 文档`,
         status: "running",
-        startTime: timestamp * 1000,
+        startTime: toMs(timestamp),
         message: title as string,
       };
       return {
@@ -575,7 +522,7 @@ function timelineReducer(
         steps: addArtifactToStep(
           updateStepStatus(state.steps, stepId, {
             status: "completed",
-            endTime: timestamp * 1000,
+            endTime: toMs(timestamp),
           }),
           stepId,
           artifact
@@ -584,7 +531,7 @@ function timelineReducer(
     }
 
     case "OUTLINE_READY": {
-      const { title, sections, timestamp } = action.payload;
+      const { title, sections } = action.payload;
       const stepId = state.currentStepId;
       if (!stepId) return state;
 

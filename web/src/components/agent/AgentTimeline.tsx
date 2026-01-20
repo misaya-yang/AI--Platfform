@@ -16,7 +16,6 @@ import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronDown,
-  ChevronRight,
   CheckCircle2,
   Circle,
   Loader2,
@@ -315,7 +314,6 @@ function TimelineStepItem({
   defaultExpanded?: boolean;
   depth?: number;
 }) {
-  const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = React.useState(
     defaultExpanded ?? step.status === "running"
   );

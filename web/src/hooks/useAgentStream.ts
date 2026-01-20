@@ -24,9 +24,13 @@
  */
 
 import { useCallback, useReducer, useRef, useState } from "react";
-import { useAgentTimeline, type AGUIEvent } from "./useAgentTimeline";
+import { useAgentTimeline } from "./useAgentTimeline";
+import type { AGUIEvent } from "@/lib/sse";
 import type { TimelineState } from "@/components/agent/AgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
+
+// Re-export for convenience
+export type { AGUIEvent };
 
 // ============================================================================
 // Types
@@ -168,7 +172,7 @@ function streamReducer(
             ? {
                 ...tc,
                 arguments: tc.arguments + action.payload.args,
-                argumentsJson: tryParseJson(tc.arguments + action.payload.args),
+                argumentsJson: tryParseJson(tc.arguments + action.payload.args) as Record<string, unknown> | undefined,
               }
             : tc
         ),

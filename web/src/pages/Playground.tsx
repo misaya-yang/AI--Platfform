@@ -14,7 +14,9 @@ import {
   type SessionMessage,
   type SessionMessageToolCall,
 } from "@/api/sessions";
-import { sseFetch, sseFetchEvents } from "@/lib/sse";
+import { sseFetch, sseFetchEvents, streamChunkToAGUIEvent, type AGUIEvent } from "@/lib/sse";
+import { useAgentTimeline } from "@/hooks/useAgentTimeline";
+import type { ArtifactData } from "@/components/agent/ArtifactCard";
 import { cn } from "@/lib/utils";
 import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
 import { MultimodalInput } from "@/components/MultimodalInput";
@@ -438,6 +440,16 @@ export function PlaygroundPage() {
     return stored === null ? true : stored === "true";
   });
 
+  // AG-UI Timeline state management
+  const {
+    state: timelineState,
+    processEvent: processTimelineEvent,
+    reset: resetTimeline,
+  } = useAgentTimeline();
+
+  // Track artifacts collected during streaming
+  const artifactsRef = useRef<ArtifactData[]>([]);
+
   // 浼氳瘽绠＄悊鐘舵€侊紙鐢ㄤ簬宸︿晶鍘嗗彶鍒楄〃 & 澶氳疆涓婁笅鏂囷級
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -755,11 +767,23 @@ export function PlaygroundPage() {
 
     // **绔嬪嵆鏄剧ず鐢ㄦ埛娑堟伅鍜?AI鎬濊€冧腑"鐘舵€侊紝涓嶇瓑寰呬换浣曠綉缁滆姹?*
     let assistantIndex = 0;
+    // Reset AG-UI timeline and artifacts for new message
+    resetTimeline();
+    artifactsRef.current = [];
+
     setMessages((prev) => {
       const next = [
         ...prev,
         { role: "user" as const, content: inputText },
-        { role: "assistant" as const, content: "", toolCalls: [], isThinking: true, isStreaming: true },
+        {
+          role: "assistant" as const,
+          content: "",
+          toolCalls: [],
+          isThinking: true,
+          isStreaming: true,
+          timeline: undefined,
+          artifacts: undefined,
+        },
       ];
       assistantIndex = next.length - 1;
       return next;
@@ -877,6 +901,10 @@ export function PlaygroundPage() {
           argsValid: tc.argsValid,
         }));
 
+        // Include AG-UI timeline state and artifacts
+        const currentTimeline = timelineState.steps.length > 0 ? { ...timelineState } : undefined;
+        const currentArtifacts = artifactsRef.current.length > 0 ? [...artifactsRef.current] : undefined;
+
         startTransition(() => {
           setMessages((m) => {
             const next = [...m];
@@ -887,6 +915,8 @@ export function PlaygroundPage() {
                 toolCalls,
                 isThinking: false,
                 isStreaming: true,
+                timeline: currentTimeline,
+                artifacts: currentArtifacts,
                 ...overrides,
               };
             }
@@ -910,8 +940,63 @@ export function PlaygroundPage() {
         }
       };
 
+      // Process AG-UI events and update timeline
+      const processAGUIEvent = (event: AGUIEvent) => {
+        // Forward to timeline processor
+        processTimelineEvent(event);
+
+        // Collect artifacts
+        if (event.event === "artifact_created" || event.event === "file_created") {
+          const artifact: ArtifactData = {
+            id: (event.artifact_id || event.file_id || `art-${Date.now()}`) as string,
+            type: (event.artifact_type as ArtifactData["type"]) || "file",
+            name: (event.name || event.file_name || "File") as string,
+            url: event.url as string,
+            mimeType: event.mime_type as string,
+            size: event.size as number,
+            status: "ready",
+          };
+          if (!artifactsRef.current.some((a) => a.id === artifact.id)) {
+            artifactsRef.current.push(artifact);
+          }
+        }
+
+        // Handle document generation result
+        if (event.event === "document_generation_result") {
+          const artifact: ArtifactData = {
+            id: (event.file_id || `doc-${Date.now()}`) as string,
+            type: "document",
+            name: (event.title || "Document") as string,
+            url: event.url as string,
+            format: event.doc_type as string,
+            status: "ready",
+          };
+          if (!artifactsRef.current.some((a) => a.id === artifact.id)) {
+            artifactsRef.current.push(artifact);
+          }
+        }
+
+        // Handle image generation result
+        if (event.event === "image_generation_result") {
+          const artifact: ArtifactData = {
+            id: `img-${Date.now()}`,
+            type: "image",
+            name: ((event.prompt as string) || "Image").slice(0, 30),
+            url: event.url as string,
+            status: "ready",
+          };
+          if (!artifactsRef.current.some((a) => a.id === artifact.id)) {
+            artifactsRef.current.push(artifact);
+          }
+        }
+      };
+
       const processStreamChunk = (chunk: StreamChunk): boolean => {
         const eventType = chunk?.event_type || "text_delta";
+
+        // Convert legacy chunk to AG-UI event and process
+        const aguiEvent = streamChunkToAGUIEvent(chunk);
+        processAGUIEvent(aguiEvent);
 
         const usage = chunk?.metadata?.usage;
         if (usage && typeof usage === "object" && !Array.isArray(usage)) {

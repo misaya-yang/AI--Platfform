@@ -18,11 +18,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
   Image as ImageIcon,
-  Code2,
   Download,
   ExternalLink,
   Eye,
-  MoreHorizontal,
   Check,
   Loader2,
   FileSpreadsheet,

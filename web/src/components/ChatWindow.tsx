@@ -1,11 +1,13 @@
-import { motion } from "framer-motion";
-import { memo } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
+import { AgentTimeline, type TimelineState } from "@/components/agent/AgentTimeline";
+import { ArtifactList, type ArtifactData } from "@/components/agent/ArtifactCard";
 import type { ToolCall } from "@/types/gateway";
-import { Bot, User, Clock, Zap, MessageSquare } from "lucide-react";
+import { Bot, User, Clock, Zap, MessageSquare, ChevronDown, ChevronRight, Activity } from "lucide-react";
 
 export interface ToolCallWithResult {
   toolCall: ToolCall;
@@ -27,6 +29,10 @@ export type ChatMessage = {
     totalTokens?: number;
     firstTokenMs?: number;
   };
+  /** AG-UI Protocol: Agent execution timeline */
+  timeline?: TimelineState;
+  /** AG-UI Protocol: Generated artifacts (documents, images, etc.) */
+  artifacts?: ArtifactData[];
 };
 
 // Stats badge component for cleaner rendering
@@ -75,11 +81,120 @@ function StatsBadge({ stats }: { stats: NonNullable<ChatMessage["stats"]> }) {
   );
 }
 
+/** Collapsible timeline section for Manus-style execution visualization */
+function TimelineSection({
+  timeline,
+  isExpanded,
+  onToggle,
+}: {
+  timeline: TimelineState;
+  isExpanded: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useTranslation();
+  const stepCount = timeline.steps.length;
+  const isRunning = timeline.status === "running";
+
+  if (stepCount === 0) return null;
+
+  return (
+    <div className="mb-3 w-full">
+      {/* Collapsible Header */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          "flex items-center gap-2 w-full px-3 py-2 rounded-lg transition-colors",
+          "text-left text-xs font-medium",
+          "bg-violet-500/5 hover:bg-violet-500/10 border border-violet-500/20",
+          isRunning && "border-violet-500/40"
+        )}
+      >
+        <div className={cn(
+          "flex items-center justify-center h-5 w-5 rounded-md",
+          isRunning
+            ? "bg-violet-500/20 text-violet-600 dark:text-violet-400"
+            : "bg-violet-500/10 text-violet-500"
+        )}>
+          <Activity className={cn("h-3.5 w-3.5", isRunning && "animate-pulse")} />
+        </div>
+        <span className="flex-1 text-muted-foreground">
+          {isRunning
+            ? t("playground.timeline.running", "Agent working...")
+            : t("playground.timeline.completed", "{{count}} steps completed", { count: stepCount })}
+        </span>
+        {isExpanded ? (
+          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        )}
+      </button>
+
+      {/* Timeline Content */}
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="pt-2">
+              <AgentTimeline
+                state={timeline}
+                compact
+              />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/** Artifacts section for displaying generated files */
+function ArtifactsSection({ artifacts }: { artifacts: ArtifactData[] }) {
+  const { t } = useTranslation();
+
+  if (!artifacts || artifacts.length === 0) return null;
+
+  return (
+    <div className="mt-3 pt-3 border-t border-border/30">
+      <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground mb-2">
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/60" />
+        {t("playground.artifacts", "Generated Files")}
+      </div>
+      <ArtifactList
+        artifacts={artifacts}
+        variant="compact"
+        onArtifactClick={(artifact) => {
+          if (artifact.url) {
+            window.open(artifact.url, "_blank");
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 const ChatMessageItem = memo(
-  function ChatMessageItem({ message, showToolCalls, index }: { message: ChatMessage; showToolCalls: boolean; index: number }) {
+  function ChatMessageItem({ message, showToolCalls, showTimeline = true, index }: {
+    message: ChatMessage;
+    showToolCalls: boolean;
+    showTimeline?: boolean;
+    index: number;
+  }) {
     const { t } = useTranslation();
     const isUser = message.role === "user";
     const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
+    const hasTimeline = showTimeline && !isUser && message.timeline && message.timeline.steps.length > 0;
+    const hasArtifacts = !isUser && message.artifacts && message.artifacts.length > 0;
+
+    // Timeline expansion state - auto-expand when running
+    const [isTimelineExpanded, setIsTimelineExpanded] = useState(
+      message.timeline?.status === "running"
+    );
 
     return (
       <div
@@ -116,8 +231,17 @@ const ChatMessageItem = memo(
                 : "bg-white dark:bg-zinc-900/90 border border-border/30 rounded-tl-sm rounded-tr-2xl rounded-br-2xl rounded-bl-2xl dark:shadow-black/20"
             )}
           >
-            {/* Tool Calls Section */}
-            {!isUser && hasToolCalls && (
+            {/* AG-UI Timeline Section */}
+            {hasTimeline && message.timeline && (
+              <TimelineSection
+                timeline={message.timeline}
+                isExpanded={isTimelineExpanded}
+                onToggle={() => setIsTimelineExpanded(!isTimelineExpanded)}
+              />
+            )}
+
+            {/* Tool Calls Section (legacy, shown when no timeline) */}
+            {!isUser && hasToolCalls && !hasTimeline && (
               <div className="mb-3 space-y-2 w-full min-w-0">
                 <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                   <span className="h-1.5 w-1.5 rounded-full bg-purple-500/60" />
@@ -153,7 +277,7 @@ const ChatMessageItem = memo(
             ) : null}
 
             {/* AI Thinking / Loading Indicator */}
-            {!message.content && !hasToolCalls && !isUser && (
+            {!message.content && !hasToolCalls && !hasTimeline && !isUser && (
               <div className="flex items-center gap-2 h-6">
                 {message.isThinking ? (
                   <>
@@ -175,6 +299,11 @@ const ChatMessageItem = memo(
                 )}
               </div>
             )}
+
+            {/* Artifacts Section */}
+            {hasArtifacts && message.artifacts && (
+              <ArtifactsSection artifacts={message.artifacts} />
+            )}
           </div>
 
           {/* Stats (assistant messages only, after content loaded) */}
@@ -185,14 +314,35 @@ const ChatMessageItem = memo(
       </div>
     );
   },
-  (prev, next) => prev.message === next.message && prev.showToolCalls === next.showToolCalls && prev.index === next.index
+  (prev, next) =>
+    prev.message === next.message &&
+    prev.showToolCalls === next.showToolCalls &&
+    prev.showTimeline === next.showTimeline &&
+    prev.index === next.index
 );
 
-export function ChatWindow({ messages, showToolCalls = true }: { messages: ChatMessage[]; showToolCalls?: boolean }) {
+export interface ChatWindowProps {
+  messages: ChatMessage[];
+  showToolCalls?: boolean;
+  /** Show AG-UI timeline in assistant messages (default: true) */
+  showTimeline?: boolean;
+}
+
+export function ChatWindow({
+  messages,
+  showToolCalls = true,
+  showTimeline = true,
+}: ChatWindowProps) {
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8">
       {messages.map((message, i) => (
-        <ChatMessageItem key={i} message={message} showToolCalls={showToolCalls} index={i} />
+        <ChatMessageItem
+          key={i}
+          message={message}
+          showToolCalls={showToolCalls}
+          showTimeline={showTimeline}
+          index={i}
+        />
       ))}
     </div>
   );
