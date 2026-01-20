@@ -7,11 +7,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseSettings(BaseModel):
-    """PostgreSQL 数据库配置"""
+    """PostgreSQL 数据库配置
+
+    SECURITY NOTE:
+    - DSN must be explicitly configured via environment variables
+    - auto_init is disabled by default to prevent accidental schema changes
+    """
     enabled: bool = False
-    dsn: str = "postgresql://postgres:postgres@localhost:5432/gateway"
-    # Development-friendly: automatically run `database/schema.sql` when core tables are missing.
-    auto_init: bool = True
+    # SECURITY: No default credentials - must be configured via env
+    dsn: str = "postgresql://localhost:5432/gateway"
+    # SECURITY: Disabled by default - enable explicitly in development
+    auto_init: bool = False
     # Permission cache TTL in seconds (0 to disable).
     permission_cache_ttl_seconds: int = 60
     # Connection pool settings
