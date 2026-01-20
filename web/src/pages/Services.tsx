@@ -21,6 +21,7 @@ import {
 import { Plus, Server, Cloud, Cpu } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
+import { getErrorMessage } from "@/lib/utils";
 
 import { useServices, useHealth } from "@/hooks/useServices";
 import { ServiceCard } from "@/components/ServiceCard";
@@ -86,7 +87,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.providerCreated") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.createFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.createFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -100,7 +101,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.providerUpdated") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.updateFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.updateFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -114,7 +115,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.providerDeleted") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.deleteFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.deleteFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -127,7 +128,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.modelCreated") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.createFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.createFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -141,7 +142,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.modelUpdated") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.updateFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.updateFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -154,7 +155,7 @@ export function ServicesPage() {
       toast({ title: t("services.page.toast.modelDeleted") });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.deleteFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.deleteFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
@@ -165,7 +166,7 @@ export function ServicesPage() {
       qc.invalidateQueries({ queryKey: ["models"] });
     },
     onError: (err: Error) => {
-      toast({ title: t("services.page.toast.operationFailed"), description: err.message, variant: "destructive" });
+      toast({ title: t("services.page.toast.operationFailed"), description: getErrorMessage(err), variant: "destructive" });
     },
   });
 
