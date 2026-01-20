@@ -57,6 +57,11 @@ const statusConfig = {
     color: "text-red-500",
     bgColor: "bg-red-500/10 text-red-600",
   },
+  deleted: {
+    icon: <AlertCircle className="h-3.5 w-3.5" />,
+    color: "text-gray-400",
+    bgColor: "bg-gray-500/10 text-gray-500",
+  },
 };
 
 export function PageManageDialog({

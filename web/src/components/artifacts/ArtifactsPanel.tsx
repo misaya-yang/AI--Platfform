@@ -15,7 +15,6 @@ import {
   Code2,
   Eye,
   FileText,
-  Image as ImageIcon,
   Loader2,
   Play,
   Terminal,
@@ -281,11 +280,9 @@ function ArtifactCard({
 function ImageCard({
   item,
   onDownload,
-  onOpenFullscreen,
 }: {
   item: OutputFile | Artifact;
   onDownload: () => void;
-  onOpenFullscreen?: () => void;
 }) {
   // Determine image source - could be base64 (OutputFile) or URL (Artifact)
   const isOutputFile = "content_base64" in item;
@@ -413,7 +410,6 @@ export function ArtifactsPanel({
   }, [artifacts, outputFiles]);
 
   const hasCode = Boolean(currentCode);
-  const hasOutput = Boolean(executionOutput);
 
   // Get display title
   const firstDoc = documentFiles[0];

@@ -11,7 +11,6 @@ import {
   RefreshCcw,
   Settings,
   Trash2,
-  ExternalLink,
   CheckCircle,
   AlertCircle,
   Loader2,
@@ -107,7 +106,7 @@ export function ConfluenceBindingCard({
 
   // Sync mutation
   const syncMutation = useMutation({
-    mutationFn: () => triggerSync(binding.binding_id, { force_full_sync: false }),
+    mutationFn: () => triggerSync(binding.binding_id, { force: false }),
     onSuccess: () => {
       toast.success("同步已触发", "正在后台同步 Confluence 页面");
       queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });

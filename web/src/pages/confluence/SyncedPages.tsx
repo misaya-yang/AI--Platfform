@@ -251,8 +251,8 @@ function PageListRow({
       <div className="w-24 flex-shrink-0">
         <StatusBadge
           status={page.status}
-          documentStatus={page.document_status}
-          documentProgress={page.document_progress}
+          documentStatus={page.document_status ?? undefined}
+          documentProgress={page.document_progress ?? undefined}
         />
       </div>
 
@@ -441,8 +441,8 @@ function TreeNodeRow({
         <div className="w-24 flex-shrink-0">
           <StatusBadge
             status={node.status}
-            documentStatus={node.document_status}
-            documentProgress={node.document_progress}
+            documentStatus={node.document_status ?? undefined}
+            documentProgress={node.document_progress ?? undefined}
           />
         </div>
 

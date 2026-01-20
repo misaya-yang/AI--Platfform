@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Edit3, Eye, EyeOff, Trash2, ImageIcon, FileText, Download, ExternalLink } from "lucide-react";
+import { Edit3, Eye, EyeOff, Trash2, ImageIcon, ExternalLink } from "lucide-react";
 
 import type { Segment } from "@/types/knowledge";
 import { Badge } from "@/components/ui/badge";

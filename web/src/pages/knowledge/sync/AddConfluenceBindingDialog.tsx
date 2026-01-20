@@ -326,9 +326,9 @@ export function AddConfluenceBindingDialog({
   const [syncEntireSpace, setSyncEntireSpace] = useState(true);
   const [maxDepth, setMaxDepth] = useState(10);
   const [includeAttachments, setIncludeAttachments] = useState(false);
-  const [includeComments, setIncludeComments] = useState(false);
+  const [includeComments] = useState(false);
   const [syncImages, setSyncImages] = useState(true);
-  const [imageMaxSizeBytes, setImageMaxSizeBytes] = useState(3 * 1024 * 1024);
+  const [imageMaxSizeBytes] = useState(3 * 1024 * 1024);
 
   // Reset form when dialog closes
   const handleOpenChange = (open: boolean) => {

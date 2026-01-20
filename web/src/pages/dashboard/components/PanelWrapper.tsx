@@ -1,10 +1,10 @@
 // web/src/pages/dashboard/components/PanelWrapper.tsx
 
 import { type ReactNode } from "react";
-import { Card, Tooltip } from "antd";
+import { Tooltip } from "antd";
 import { SyncOutlined } from "@ant-design/icons";
 import { useAppStore } from "@/store/useAppStore";
-import { LAYOUT, getColors, commonStyles } from "../styles";
+import { LAYOUT, getColors } from "../styles";
 
 interface PanelWrapperProps {
   title: string;

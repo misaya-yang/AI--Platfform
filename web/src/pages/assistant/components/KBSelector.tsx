@@ -6,7 +6,7 @@
 
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { Database, FileText, Sparkles, Image as ImageIcon } from "lucide-react";
+import { Database, FileText, Image as ImageIcon } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";

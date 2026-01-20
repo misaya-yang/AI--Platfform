@@ -52,7 +52,7 @@ export function useImageGeneration(
           },
         });
         sessionId = session_id;
-        setActiveSessionId(sessionId);
+        if (sessionId) setActiveSessionId(sessionId);
         const updatedSessions = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
         setSessions(updatedSessions);
       } catch (error) {
@@ -144,10 +144,10 @@ export function useImageGeneration(
         } : m));
 
         if (sessionId) {
-          addSessionMessage(sessionId, { 
-            role: "assistant", 
+          addSessionMessage(sessionId, {
+            role: "assistant",
             content: responseContent,
-            metadata: { model_id: selectedModel, provider: result.provider, duration_ms: result.duration_ms }
+            metadata: { model_id: selectedModel, stats: { duration_ms: result.duration_ms } }
           }).catch(console.error);
         }
 

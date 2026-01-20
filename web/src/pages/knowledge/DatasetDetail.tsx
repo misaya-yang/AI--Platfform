@@ -3068,7 +3068,7 @@ for chunk in results.get("chunks", []):
                         onClick={async () => {
                           if (dsQuery.data && opt.id !== currentVisibility) {
                             try {
-                              await updateDataset(datasetId!, { visibility: opt.id });
+                              await updateDataset(datasetId!, { visibility: opt.id as "private" | "tenant" | "public" });
                               dsQuery.refetch();
                               toast.success("权限已更新");
                             } catch (e) {

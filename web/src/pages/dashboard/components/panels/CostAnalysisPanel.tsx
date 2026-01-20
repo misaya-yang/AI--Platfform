@@ -189,14 +189,14 @@ export function CostAnalysisPanel() {
                   innerRadius={30}
                   outerRadius={50}
                   dataKey="value"
-                  label={({ percent }) => `${(percent * 100).toFixed(0)}%`}
+                  label={({ percent }) => `${((percent || 0) * 100).toFixed(0)}%`}
                   labelLine={false}
                 >
                   {pieData.map((_, index) => (
                     <Cell key={index} fill={pieColors[index % pieColors.length]} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value: number) => formatCost(value)} />
+                <Tooltip formatter={(value) => formatCost(Number(value || 0))} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -234,8 +234,8 @@ export function CostAnalysisPanel() {
                 />
                 <YAxis tick={{ fontSize: 10 }} width={35} />
                 <Tooltip
-                  formatter={(value: number) => [formatCost(value), "成本"]}
-                  labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD")}
+                  formatter={(value) => [formatCost(Number(value || 0)), "成本"]}
+                  labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD")}
                 />
                 <Area
                   type="monotone"

@@ -3,6 +3,9 @@
 # =============================================================================
 # Build: docker build -t ai-gateway-web:latest .
 # Run:   docker run -p 80:80 ai-gateway-web:latest
+#
+# 国内构建（使用镜像源）:
+#   docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t ai-gateway-web:latest .
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -12,8 +15,13 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@10.27.0 --activate
+# Build arguments for mirror configuration
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+# Configure npm registry and install pnpm
+RUN npm config set registry ${NPM_REGISTRY} && \
+    npm install -g pnpm@10.27.0 && \
+    pnpm config set registry ${NPM_REGISTRY}
 
 # Copy package files
 COPY package.json pnpm-lock.yaml ./

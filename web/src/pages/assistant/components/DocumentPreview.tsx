@@ -9,7 +9,7 @@
  * - Download and copy actions
  */
 
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
@@ -258,7 +258,7 @@ export function DocumentPreview({
   defaultExpanded = true,
   maxHeight = 400,
 }: DocumentPreviewProps) {
-  const hasContent = content && content.trim().length > 0;
+  const hasContent = Boolean(content && content.trim().length > 0);
   const [isExpanded, setIsExpanded] = useState(hasContent ? defaultExpanded : false);
   const [copied, setCopied] = useState(false);
 

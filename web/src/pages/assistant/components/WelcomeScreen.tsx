@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Bot, Sparkles } from "lucide-react";
+import { Bot } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 export function WelcomeScreen() {

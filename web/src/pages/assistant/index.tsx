@@ -145,10 +145,9 @@ export function AssistantPage() {
     isImageMode,
     isGeneratingImage,
     handleImageGenerate,
-    cancelImageMode,
     sendImageGeneration
   } = useImageGeneration(
-    activeSessionId,
+    activeSessionId ?? null,
     selectedModel,
     setMessages,
     setArtifacts,
@@ -307,7 +306,7 @@ export function AssistantPage() {
                 <div className="h-full w-[280px]">
                   <ConversationSidebar
                     sessions={sessions}
-                    activeSessionId={activeSessionId}
+                    activeSessionId={activeSessionId ?? null}
                     isLoading={sessionsLoading}
                     onNewChat={handleNewChat}
                     onSelectSession={onSessionSelect}

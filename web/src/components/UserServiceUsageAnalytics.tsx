@@ -271,9 +271,10 @@ export function UserServiceUsageAnalytics({
               width={50}
             />
             <Tooltip
-              formatter={(value: number, name: string) => {
+              formatter={(value, name) => {
+                if (value === undefined) return [0, name ?? ""];
                 if (name === "requests") return [value, t("dashboard.usageAnalytics.requests", "Requests")];
-                return [formatCost(value), t("dashboard.usageAnalytics.cost", "Cost")];
+                return [formatCost(Number(value)), t("dashboard.usageAnalytics.cost", "Cost")];
               }}
               labelFormatter={(label) =>
                 dayjs(label).format(granularity === "hour" ? "YYYY-MM-DD HH:00" : "YYYY-MM-DD")

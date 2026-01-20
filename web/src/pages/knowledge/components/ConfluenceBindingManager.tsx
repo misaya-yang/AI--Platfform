@@ -248,7 +248,7 @@ function ExpandableBindingCard({
 
   // Sync mutation
   const syncMutation = useMutation({
-    mutationFn: () => triggerSync(binding.binding_id, { force_full_sync: false }),
+    mutationFn: () => triggerSync(binding.binding_id, { force: false }),
     onSuccess: () => {
       toast.success(t("confluence.syncStatus.triggered"), t("confluence.syncStatus.success"));
       queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });

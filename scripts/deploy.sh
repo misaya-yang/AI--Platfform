@@ -5,12 +5,17 @@
 # Usage:
 #   ./scripts/deploy.sh              # Deploy all services
 #   ./scripts/deploy.sh --build      # Force rebuild images
+#   ./scripts/deploy.sh --cn         # Use China mirrors for build
 #   ./scripts/deploy.sh --pull       # Pull latest images
 #   ./scripts/deploy.sh --infra      # Deploy infrastructure only
 #   ./scripts/deploy.sh --app        # Deploy application only
 #   ./scripts/deploy.sh --down       # Stop all services
 #   ./scripts/deploy.sh --logs       # Show logs
 #   ./scripts/deploy.sh --status     # Show status
+#
+# China mirrors (--cn flag):
+#   - PyPI: https://pypi.tuna.tsinghua.edu.cn/simple
+#   - NPM:  https://registry.npmmirror.com
 # =============================================================================
 
 set -e
@@ -35,6 +40,7 @@ APP_ONLY=false
 SHOW_LOGS=false
 SHOW_STATUS=false
 STOP=false
+USE_CN_MIRROR=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -67,18 +73,28 @@ while [[ $# -gt 0 ]]; do
             SHOW_STATUS=true
             shift
             ;;
+        --cn|--china)
+            USE_CN_MIRROR=true
+            BUILD=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --build    Force rebuild Docker images"
-            echo "  --pull     Pull latest base images"
-            echo "  --infra    Deploy infrastructure only (postgres, redis, qdrant)"
-            echo "  --app      Deploy application only (gateway, frontend)"
-            echo "  --down     Stop all services"
-            echo "  --logs     Show logs"
-            echo "  --status   Show service status"
-            echo "  -h, --help Show this help"
+            echo "  --build      Force rebuild Docker images"
+            echo "  --cn         Use China mirrors for build (implies --build)"
+            echo "  --pull       Pull latest base images"
+            echo "  --infra      Deploy infrastructure only (postgres, redis, qdrant)"
+            echo "  --app        Deploy application only (gateway, frontend)"
+            echo "  --down       Stop all services"
+            echo "  --logs       Show logs"
+            echo "  --status     Show service status"
+            echo "  -h, --help   Show this help"
+            echo ""
+            echo "China mirrors (--cn flag):"
+            echo "  PyPI: https://pypi.tuna.tsinghua.edu.cn/simple"
+            echo "  NPM:  https://registry.npmmirror.com"
             exit 0
             ;;
         *)
@@ -242,10 +258,18 @@ fi
 # Build and deploy
 if [ "$BUILD" = true ]; then
     log_info "Building Docker images..."
+
+    # Set build args for mirrors
+    BUILD_ARGS=""
+    if [ "$USE_CN_MIRROR" = true ]; then
+        log_info "Using China mirrors for faster build..."
+        BUILD_ARGS="--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn --build-arg NPM_REGISTRY=https://registry.npmmirror.com"
+    fi
+
     if [ -n "$SERVICES" ]; then
-        $COMPOSE_CMD build $SERVICES
+        $COMPOSE_CMD build $BUILD_ARGS $SERVICES
     else
-        $COMPOSE_CMD build
+        $COMPOSE_CMD build $BUILD_ARGS
     fi
 fi
 

@@ -20,7 +20,6 @@ import {
   Clock,
   AlertCircle,
   Loader2,
-  ExternalLink,
   Plus,
   Cloud,
   Trash2,
@@ -84,8 +83,8 @@ function StatusBadge({
 }: {
   status: ConfluencePageRecord["status"];
   effectiveStatusProp?: ConfluencePageRecord["effective_status"];
-  documentStatus?: string;
-  documentProgress?: number;
+  documentStatus?: string | null;
+  documentProgress?: number | null;
 }) {
   const getEffectiveStatus = () => {
     // If backend provides effective_status, use it directly for needs_resync detection
@@ -253,7 +252,7 @@ function PageListRow({
                 className="text-primary hover:text-primary/80 font-medium transition-colors"
                 onClick={(e) => {
                   e.stopPropagation();
-                  window.open(page.web_url, "_blank");
+                  if (page.web_url) window.open(page.web_url, "_blank");
                 }}
               >
                 查看
@@ -307,7 +306,7 @@ export function BindingPagesPanel({
       const pagesList = responseData?.pages || [];
       const processingStatuses = ["uploaded", "parsing", "segmenting", "embedding", "embedding_images"];
       const hasProcessing = pagesList.some(
-        (p: { status: string; document_status?: string }) =>
+        (p: { status: string; document_status?: string | null }) =>
           p.status === "pending" ||
           (p.document_status && processingStatuses.includes(p.document_status))
       );

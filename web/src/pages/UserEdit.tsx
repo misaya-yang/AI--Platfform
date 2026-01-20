@@ -258,7 +258,7 @@ export function UserEditPage() {
               <div
                 className="w-20 h-20 rounded-2xl flex items-center justify-center mb-4"
                 style={{
-                  background: `linear-gradient(135deg, ${colors.primary[400]}, ${colors.cyan[400]})`,
+                  background: `linear-gradient(135deg, ${colors.primary[400]}, #22d3ee)`,
                   boxShadow: `0 8px 24px ${colors.primary[500]}40`,
                 }}
               >
@@ -308,7 +308,7 @@ export function UserEditPage() {
               <div className="flex items-center gap-3 p-3 rounded-xl" style={{
                 background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
               }}>
-                <KeyOutlined style={{ color: colors.purple[500] }} />
+                <KeyOutlined style={{ color: "#a855f7" }} />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs text-muted-foreground">角色</p>
                   <div className="flex flex-wrap gap-1 mt-1">
@@ -415,9 +415,9 @@ export function UserEditPage() {
           >
             <div className="flex items-center gap-3 mb-6">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: `${colors.purple[500]}15`,
+                background: "#a855f715",
               }}>
-                <SafetyCertificateOutlined style={{ fontSize: 18, color: colors.purple[500] }} />
+                <SafetyCertificateOutlined style={{ fontSize: 18, color: "#a855f7" }} />
               </div>
               <div>
                 <h3 className="font-semibold">角色分配</h3>
@@ -498,9 +498,9 @@ export function UserEditPage() {
           >
             <div className="flex items-center gap-3 mb-2">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: `${colors.cyan[500]}15`,
+                background: "#06b6d415",
               }}>
-                <KeyOutlined style={{ fontSize: 18, color: colors.cyan[500] }} />
+                <KeyOutlined style={{ fontSize: 18, color: "#06b6d4" }} />
               </div>
               <div>
                 <h3 className="font-semibold">额外权限</h3>
@@ -595,8 +595,8 @@ export function UserEditPage() {
                                       style={{
                                         background: isSelected
                                           ? darkMode
-                                            ? `${colors.cyan[500]}20`
-                                            : `${colors.cyan[500]}10`
+                                            ? "#06b6d420"
+                                            : "#06b6d410"
                                           : "transparent",
                                         opacity: fromRole ? 0.5 : 1,
                                         cursor: canEdit && !fromRole ? "pointer" : "default",
@@ -660,7 +660,7 @@ export function UserEditPage() {
               }}
             >
               <div className="flex items-center gap-2 text-sm">
-                <ExclamationCircleOutlined style={{ color: colors.orange[500] }} />
+                <ExclamationCircleOutlined style={{ color: "#f97316" }} />
                 <span>您有未保存的更改</span>
               </div>
               <div className="flex items-center gap-3">
@@ -683,7 +683,7 @@ export function UserEditPage() {
                   disabled={isSaving}
                   className="min-w-[100px]"
                   style={{
-                    background: `linear-gradient(135deg, ${colors.primary[500]}, ${colors.cyan[500]})`,
+                    background: `linear-gradient(135deg, ${colors.primary[500]}, #06b6d4)`,
                   }}
                 >
                   {isSaving ? (

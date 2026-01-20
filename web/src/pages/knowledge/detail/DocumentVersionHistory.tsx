@@ -9,7 +9,6 @@ import {
   History,
   GitCompare,
   RotateCcw,
-  ChevronRight,
   Clock,
   FileText,
   Cloud,

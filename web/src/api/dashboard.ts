@@ -263,7 +263,7 @@ export class DashboardWebSocket {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
-  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private callbacks: Set<DashboardWebSocketCallback> = new Set();
   private url: string;
 

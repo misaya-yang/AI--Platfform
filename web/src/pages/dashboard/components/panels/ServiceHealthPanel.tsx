@@ -1,12 +1,11 @@
 // web/src/pages/dashboard/components/panels/ServiceHealthPanel.tsx
 
-import { Row, Col, Tag, Statistic } from "antd";
+import { Row, Col, Statistic } from "antd";
 import { CheckCircleOutlined, WarningOutlined, CloseCircleOutlined } from "@ant-design/icons";
 import { PanelWrapper } from "../PanelWrapper";
-import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { useServices, useHealth } from "@/hooks/useServices";
-import { LAYOUT, getColors, commonStyles } from "../../styles";
+import { getColors } from "../../styles";
 
 interface ServiceCardProps {
   name: string;

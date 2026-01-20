@@ -73,6 +73,7 @@ export interface Document {
   enabled?: boolean;
   archived?: boolean;
   metadata?: Record<string, unknown>;
+  source_type?: "upload" | "url" | "confluence";
   created_at?: string;
   updated_at?: string;
   created_by?: string;

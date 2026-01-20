@@ -1,6 +1,6 @@
 // web/src/pages/dashboard/components/panels/RequestTracePanel.tsx
 
-import { Input, Empty, Tag, Timeline, Spin, Button } from "antd";
+import { Input, Empty, Tag, Spin, Button } from "antd";
 import { SearchOutlined, ReloadOutlined, ClockCircleOutlined, CheckCircleOutlined, ExclamationCircleOutlined } from "@ant-design/icons";
 import { useState, useCallback } from "react";
 import { PanelWrapper } from "../PanelWrapper";

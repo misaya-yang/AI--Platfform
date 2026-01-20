@@ -130,18 +130,21 @@ services:
       GATEWAY_PROXY__ENABLED: "true"
       GATEWAY_PROXY__BILLING_ENABLED: "${PROXY_BILLING_ENABLED:-false}"
 
-      # File Upload
-      FILE_STORAGE_PATH: "/app/uploads"
+      # Object Storage (S3/OSS)
+      GATEWAY_STORAGE__BACKEND: "${STORAGE_BACKEND:-s3}"
+      GATEWAY_STORAGE__S3__BUCKET: "${S3_BUCKET:-}"
+      GATEWAY_STORAGE__S3__REGION: "${S3_REGION:-us-east-1}"
+      GATEWAY_STORAGE__S3__ACCESS_KEY: "${S3_ACCESS_KEY:-}"
+      GATEWAY_STORAGE__S3__SECRET_KEY: "${S3_SECRET_KEY:-}"
+      GATEWAY_STORAGE__S3__ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+      GATEWAY_STORAGE__URL_EXPIRY_SECONDS: "${STORAGE_URL_EXPIRY_SECONDS:-3600}"
+
+      # File Upload Limits
       MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
-      FILE_CLEANUP_ENABLED: "true"
-      FILE_TTL_DAYS: "${FILE_TTL_DAYS:-7}"
-      FILE_USER_QUOTA_MB: "${FILE_USER_QUOTA_MB:-500}"
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     volumes:
-      - gateway-uploads:/app/uploads
       - gateway-logs:/app/logs
-      - gateway-images:/app/data/images
     networks:
       - ai-gateway-net
     depends_on:
@@ -201,9 +204,5 @@ volumes:
     name: ai-gateway-redis-data
   qdrant-data:
     name: ai-gateway-qdrant-data
-  gateway-uploads:
-    name: ai-gateway-uploads
   gateway-logs:
     name: ai-gateway-logs
-  gateway-images:
-    name: ai-gateway-images

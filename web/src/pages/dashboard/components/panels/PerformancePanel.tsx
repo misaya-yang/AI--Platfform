@@ -119,8 +119,8 @@ export function PerformancePanel() {
             />
             <YAxis tick={{ fontSize: 11 }} width={40} />
             <Tooltip
-              formatter={(value: number) => [`${value} ms`, ""]}
-              labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
+              formatter={(value) => [`${value ?? 0} ms`, ""]}
+              labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD HH:mm")}
             />
             <Area
               type="monotone"

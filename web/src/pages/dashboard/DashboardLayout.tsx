@@ -2,11 +2,14 @@
 
 import { useState, useCallback, useMemo } from "react";
 import GridLayout from "react-grid-layout";
-import type { Layout } from "react-grid-layout";
+import type { ComponentProps } from "react";
 import { useAppStore } from "@/store/useAppStore";
+
+// Type workaround for react-grid-layout type definition issues
+type GridLayoutComponentProps = ComponentProps<typeof GridLayout>;
 import { DEFAULT_LAYOUTS, DEFAULT_PANELS } from "./types";
-import type { PanelType } from "./types";
-import { LAYOUT, getColors } from "./styles";
+import type { PanelType, LayoutItem } from "./types";
+import { LAYOUT } from "./styles";
 import {
   ServiceHealthPanel,
   PerformancePanel,
@@ -33,7 +36,7 @@ const PANEL_COMPONENTS: Record<PanelType, React.ComponentType> = {
   "request-trace": RequestTracePanel,
 };
 
-function loadSavedLayout(): Layout[] {
+function loadSavedLayout(): LayoutItem[] {
   try {
     const saved = localStorage.getItem(LAYOUT_STORAGE_KEY);
     if (saved) {
@@ -45,7 +48,7 @@ function loadSavedLayout(): Layout[] {
   return DEFAULT_LAYOUTS;
 }
 
-function saveLayout(layout: Layout[]) {
+function saveLayout(layout: LayoutItem[]) {
   try {
     localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
   } catch (e) {
@@ -58,13 +61,13 @@ interface DashboardLayoutProps {
 }
 
 export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
-  const { darkMode } = useAppStore();
-  const colors = getColors(darkMode);
-  const [layouts, setLayouts] = useState<Layout[]>(loadSavedLayout);
+  useAppStore(); // Keep subscription for reactivity
+  const [layouts, setLayouts] = useState<LayoutItem[]>(loadSavedLayout);
 
-  const onLayoutChange = useCallback((newLayout: Layout[]) => {
-    setLayouts(newLayout);
-    saveLayout(newLayout);
+  const onLayoutChange = useCallback((newLayout: LayoutItem[] | unknown) => {
+    const layout = newLayout as LayoutItem[];
+    setLayouts(layout);
+    saveLayout(layout);
   }, []);
 
   // Calculate actual grid width
@@ -81,19 +84,22 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
         minHeight: "100%",
       }}
     >
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <GridLayout
-        className="layout"
-        layout={layouts}
-        cols={12}
-        rowHeight={rowHeight}
-        width={gridWidth}
-        onLayoutChange={onLayoutChange}
-        draggableHandle=".panel-drag-handle"
-        isDraggable
-        isResizable
-        margin={[LAYOUT.GRID_GAP, LAYOUT.GRID_GAP]}
-        containerPadding={[0, 0]}
-        useCSSTransforms
+        {...({
+          className: "layout",
+          layout: layouts,
+          cols: 12,
+          rowHeight,
+          width: gridWidth,
+          onLayoutChange,
+          draggableHandle: ".panel-drag-handle",
+          isDraggable: true,
+          isResizable: true,
+          margin: [LAYOUT.GRID_GAP, LAYOUT.GRID_GAP],
+          containerPadding: [0, 0],
+          useCSSTransforms: true,
+        } as unknown as GridLayoutComponentProps)}
       >
         {DEFAULT_PANELS.filter((panel) => panel.visible).map((panel) => {
           const PanelComponent = PANEL_COMPONENTS[panel.type];

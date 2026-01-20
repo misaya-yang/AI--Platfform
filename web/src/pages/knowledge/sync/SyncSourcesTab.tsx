@@ -19,7 +19,6 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
 import { listBindings, listConnections } from "@/api/confluence";
-import type { ConfluenceBinding } from "@/types/confluence";
 
 import { SyncOverviewCards } from "./SyncOverviewCards";
 import { ConfluenceBindingCard } from "./ConfluenceBindingCard";

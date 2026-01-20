@@ -223,7 +223,6 @@ export function useUpdatePageSyncConfig() {
   return useMutation({
     mutationFn: ({
       pageRecordId,
-      bindingId,
       data,
     }: {
       pageRecordId: string;

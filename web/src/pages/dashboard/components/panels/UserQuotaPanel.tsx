@@ -1,6 +1,6 @@
 // web/src/pages/dashboard/components/panels/UserQuotaPanel.tsx
 
-import { Table, Progress, Tag, Select, Tooltip, Button, Modal, message } from "antd";
+import { Table, Progress, Tag, Select, Tooltip, Button } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { WarningOutlined, ExclamationCircleOutlined, ExpandOutlined } from "@ant-design/icons";
 import { PanelWrapper } from "../PanelWrapper";

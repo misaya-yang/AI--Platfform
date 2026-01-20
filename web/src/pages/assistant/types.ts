@@ -598,7 +598,7 @@ export interface StepFinishedEventData {
 // Manus-style Agentic Task Types
 // =============================================================================
 
-export type ManusTaskStatus = "pending" | "in_progress" | "completed" | "failed";
+export type ManusTaskStatus = "pending" | "in_progress" | "completed" | "failed" | "blocked" | "skipped";
 export type ManusTaskIcon = "search" | "web" | "kb" | "code" | "image" | "doc" | "ppt" | "file" | "brain";
 
 export interface ManusSubTask {
@@ -638,6 +638,14 @@ export interface WorkingMemoryTask {
   endTime?: number;
   durationMs?: number;
   currentTool?: string;
+  // Search-related fields
+  searchStatus?: string;  // "searching" | "completed" | "error"
+  searchQuery?: string;
+  searchSource?: "kb" | "web" | "file";
+  searchProgress?: number;
+  searchResultsFound?: number;
+  searchResultsCount?: number;
+  searchDurationMs?: number;
   subTasks?: Array<{
     id: string;
     name?: string;
@@ -658,7 +666,7 @@ export interface WorkingMemoryCollectedInfo {
 }
 
 export interface WorkingMemory {
-  goal: string;
+  goal?: string;
   tasks: WorkingMemoryTask[];
   collectedInfo: WorkingMemoryCollectedInfo[];
   notes: string[];

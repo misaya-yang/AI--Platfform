@@ -37,7 +37,6 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
       <AnimatePresence mode="popLayout">
         {searchStatus.map((item, index) => {
           const isKB = item.type === "kb";
-          const isWeb = item.type === "web";
           const isFiles = item.type === "files";
           const isSearching = item.state === "searching";
           const isCompleted = item.state === "completed";

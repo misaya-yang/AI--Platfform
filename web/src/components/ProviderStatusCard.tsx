@@ -11,7 +11,6 @@ import {
   ThunderboltOutlined,
   GlobalOutlined,
   ExperimentOutlined,
-  EyeOutlined,
   InfoCircleOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
@@ -20,7 +19,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { api } from "@/lib/api";
 
 // Import unified layout from dashboard styles
-import { LAYOUT, getColors, gridStyles, commonStyles } from "@/pages/dashboard/styles";
+import { LAYOUT, getColors, gridStyles } from "@/pages/dashboard/styles";
 import { PanelWrapper } from "@/pages/dashboard/components/PanelWrapper";
 
 // Provider configuration

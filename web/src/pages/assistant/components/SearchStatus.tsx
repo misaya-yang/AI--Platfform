@@ -5,10 +5,10 @@
  * Shows animated indicators similar to GPT's "Searching..." display.
  */
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Database, Globe, Loader2, CheckCircle2, XCircle, FileText } from "lucide-react";
+import { Database, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type SearchType = "kb" | "web" | "files";

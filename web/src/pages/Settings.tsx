@@ -395,7 +395,7 @@ export function SettingsPage() {
 
           <div className="flex justify-end">
             <Button
-              onClick={() => updateAuthMutation.mutate(authForm)}
+              onClick={() => updateAuthMutation.mutate({ ...authForm, enabled: authForm.jwt_enabled || authForm.api_key_enabled, provider: "custom" })}
               disabled={updateAuthMutation.isPending}
               className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
             >
@@ -490,7 +490,7 @@ export function SettingsPage() {
               </div>
 
               <Button
-                onClick={() => createRateLimitMutation.mutate(rateLimitForm)}
+                onClick={() => createRateLimitMutation.mutate({ ...rateLimitForm, enabled: true })}
                 disabled={createRateLimitMutation.isPending}
                 className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
               >

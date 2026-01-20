@@ -5,7 +5,6 @@ import {
   SSEEventType,
   getArtifactDownloadUrl,
   type AssistantMessage,
-  type AssistantConfig,
   type WebSearchResult,
   type ArtifactInfo,
   getSessionArtifacts
@@ -17,7 +16,6 @@ import {
   getSessionHistory,
   updateSession,
   getSession,
-  addSessionMessage,
   type SessionSummary,
   type SessionConfig,
 } from "@/api/sessions";
@@ -27,9 +25,7 @@ import type {
   RetrievedContext,
   SearchStatusItem,
   RAGEvaluationEventData,
-  RAGCitation,
   RAGEvaluation,
-  CacheMetricsEventData,
   FileProcessedEventData,
   GeneratedArtifact,
   AgentPhaseStatus,
@@ -37,7 +33,6 @@ import type {
   // Agentic types
   TaskPlanningEventData,
   WorkingMemoryUpdateEventData,
-  ToolErrorEventData,
   // Manus-style outline types
   OutlineReadyEventData,
   // Working memory and code execution state types
@@ -114,13 +109,12 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 };
 
 export function useChatSession() {
-  const { t } = useTranslation();
-  
+  useTranslation();
+
   // 使用全局状态存储的 AI助手 专用会话 ID（与 Playground 完全分离）
   const {
     assistantActiveSessionId: activeSessionId,
     setAssistantActiveSessionId: setActiveSessionId,
-    assistantLocalTitles,
     setAssistantLocalTitles,
   } = useAppStore();
   

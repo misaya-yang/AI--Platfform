@@ -118,6 +118,7 @@ export interface ServiceConfig {
 export interface ServiceDefinition {
   service_id: string;
   name: string;
+  display_name?: string;
   description?: string;
   version?: string;
   service_type: ServiceType;
@@ -154,6 +155,9 @@ export interface HealthStatus {
   latency?: number;
   last_check?: string;
   error?: string | null;
+  qps?: number;
+  avg_latency_ms?: number;
+  error_rate?: number;
 }
 
 export interface Task {

@@ -1,6 +1,20 @@
 // web/src/pages/dashboard/types.ts
 
-import type { Layout } from "react-grid-layout";
+// Layout item type for react-grid-layout
+export interface LayoutItem {
+  i: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  minW?: number;
+  minH?: number;
+  maxW?: number;
+  maxH?: number;
+  static?: boolean;
+  isDraggable?: boolean;
+  isResizable?: boolean;
+}
 
 // Source filter type - internal (AI assistant, chat) vs external (API)
 export type SourceFilter = "all" | "internal" | "external";
@@ -166,7 +180,7 @@ export interface TraceSpan {
 }
 
 // Default panel layouts
-export const DEFAULT_LAYOUTS: Layout[] = [
+export const DEFAULT_LAYOUTS: LayoutItem[] = [
   { i: "service-health", x: 0, y: 0, w: 12, h: 4, minW: 6, minH: 3 },
   { i: "performance", x: 0, y: 4, w: 6, h: 5, minW: 4, minH: 4 },
   { i: "token-usage", x: 6, y: 4, w: 6, h: 5, minW: 4, minH: 4 },

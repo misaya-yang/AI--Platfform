@@ -3,6 +3,9 @@
 # =============================================================================
 # Build: docker build -t ai-gateway:latest .
 # Run:   docker run -p 8080:8080 --env-file .env ai-gateway:latest
+#
+# 国内构建（使用镜像源）:
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t ai-gateway:latest .
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -11,6 +14,10 @@
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
+
+# Build arguments for mirror configuration
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=""
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,12 +34,19 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY pyproject.toml README.md ./
 
 # Install dependencies first (better layer caching)
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir hatchling
+# Use mirror if specified via build args
+RUN pip install --no-cache-dir --upgrade pip \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
+    pip install --no-cache-dir hatchling \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 # Copy source code and install with all optional dependencies
 COPY src/ ./src/
-RUN pip install --no-cache-dir ".[all]"
+RUN pip install --no-cache-dir ".[all]" \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Minimal production image
@@ -57,7 +71,7 @@ COPY database/ ./database/
 COPY config/ ./config/
 
 # Create necessary directories
-RUN mkdir -p /app/logs /app/uploads /app/data/images && \
+RUN mkdir -p /app/logs && \
     chown -R appuser:appuser /app
 
 # Switch to non-root user
@@ -68,8 +82,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     GATEWAY_HOST=0.0.0.0 \
-    GATEWAY_PORT=8080 \
-    FILE_STORAGE_PATH=/app/uploads
+    GATEWAY_PORT=8080
 
 # Expose port
 EXPOSE 8080

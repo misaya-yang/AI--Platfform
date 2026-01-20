@@ -56,12 +56,6 @@ function formatNumber(num: number): string {
   return num.toLocaleString();
 }
 
-// 格式化货币
-function formatCurrency(value: number): string {
-  if (value >= 1) return `$${value.toFixed(2)}`;
-  return `$${value.toFixed(4)}`;
-}
-
 // 获取服务配置
 function getServiceConfig(serviceName: string) {
   const name = serviceName?.toLowerCase() || "";
@@ -72,12 +66,12 @@ function getServiceConfig(serviceName: string) {
 }
 
 // 获取服务显示名称
-function getServiceDisplayName(serviceName: string, t: (key: string, fallback?: string) => string): string {
+function getServiceDisplayName(serviceName: string, t: ReturnType<typeof useTranslation>["t"]): string {
   const name = serviceName?.toLowerCase() || "";
-  if (name.includes("assistant")) return t("cost.service.assistant", "AI 助手");
-  if (name.includes("langgraph") || name.includes("agent")) return t("cost.service.agent", "Agent 服务");
-  if (name.includes("proxy")) return t("cost.service.proxy", "代理服务");
-  return serviceName || t("cost.service.unknown", "未知服务");
+  if (name.includes("assistant")) return t("cost.service.assistant", { defaultValue: "AI 助手" });
+  if (name.includes("langgraph") || name.includes("agent")) return t("cost.service.agent", { defaultValue: "Agent 服务" });
+  if (name.includes("proxy")) return t("cost.service.proxy", { defaultValue: "代理服务" });
+  return serviceName || t("cost.service.unknown", { defaultValue: "未知服务" });
 }
 
 // 服务卡片组件
@@ -86,7 +80,7 @@ interface ServiceCardProps {
   totalCost: number;
 }
 
-function ServiceCard({ service, totalCost }: ServiceCardProps) {
+function ServiceCard({ service }: ServiceCardProps) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const config = getServiceConfig(service.service || "");

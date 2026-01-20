@@ -1,8 +1,8 @@
 import { useState, useCallback, useRef } from "react";
-import { 
-  uploadFileWithProgress, 
-  isFileTypeSupported, 
-  type UploadResponse 
+import {
+  uploadFileWithProgress,
+  isFileTypeSupported,
+  type FileUploadResponse
 } from "@/api/files";
 import { usePasteImage } from "@/hooks/usePasteImage";
 
@@ -11,7 +11,7 @@ export interface UploadedFile {
   status: "pending" | "uploading" | "success" | "error";
   progress?: number;
   error?: string;
-  response?: UploadResponse;
+  response?: FileUploadResponse;
 }
 
 export function useFileHandler() {
