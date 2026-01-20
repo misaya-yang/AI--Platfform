@@ -92,6 +92,7 @@ export function ModelForm({
       is_enabled: true,
       sort_order: 0,
     },
+    mode: "onBlur", // Validate on blur for better UX
   });
 
   const providerId = watch("provider_id");
@@ -232,12 +233,22 @@ export function ModelForm({
             {/* Context Window & Max Output */}
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2">
-                <Label htmlFor="context_window">{t("llm.model.contextWindow")}</Label>
+                <Label htmlFor="context_window">
+                  {t("llm.model.contextWindow")} <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   id="context_window"
                   type="number"
-                  {...register("context_window", { valueAsNumber: true })}
+                  {...register("context_window", {
+                    valueAsNumber: true,
+                    required: t("llm.model.validation.contextWindowRequired"),
+                    min: { value: 1, message: t("llm.model.validation.contextWindowMin") },
+                    max: { value: 10000000, message: t("llm.model.validation.contextWindowMax") },
+                  })}
                 />
+                {errors.context_window && (
+                  <p className="text-sm text-destructive">{errors.context_window.message}</p>
+                )}
                 <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
               </div>
               <div className="grid gap-2">
@@ -245,8 +256,14 @@ export function ModelForm({
                 <Input
                   id="max_output_tokens"
                   type="number"
-                  {...register("max_output_tokens", { valueAsNumber: true })}
+                  {...register("max_output_tokens", {
+                    valueAsNumber: true,
+                    min: { value: 1, message: t("llm.model.validation.maxOutputTokensMin") },
+                  })}
                 />
+                {errors.max_output_tokens && (
+                  <p className="text-sm text-destructive">{errors.max_output_tokens.message}</p>
+                )}
                 <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
               </div>
             </div>
@@ -259,8 +276,14 @@ export function ModelForm({
                   id="input_price_per_1k"
                   type="number"
                   step="0.000001"
-                  {...register("input_price_per_1k", { valueAsNumber: true })}
+                  {...register("input_price_per_1k", {
+                    valueAsNumber: true,
+                    min: { value: 0, message: t("llm.model.validation.priceMin") },
+                  })}
                 />
+                {errors.input_price_per_1k && (
+                  <p className="text-sm text-destructive">{errors.input_price_per_1k.message}</p>
+                )}
                 <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
               </div>
               <div className="grid gap-2">
@@ -269,8 +292,14 @@ export function ModelForm({
                   id="output_price_per_1k"
                   type="number"
                   step="0.000001"
-                  {...register("output_price_per_1k", { valueAsNumber: true })}
+                  {...register("output_price_per_1k", {
+                    valueAsNumber: true,
+                    min: { value: 0, message: t("llm.model.validation.priceMin") },
+                  })}
                 />
+                {errors.output_price_per_1k && (
+                  <p className="text-sm text-destructive">{errors.output_price_per_1k.message}</p>
+                )}
                 <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
               </div>
             </div>

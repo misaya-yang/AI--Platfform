@@ -32,7 +32,16 @@
     "notSet": "Not set",
     "retry": "Retry",
     "clear": "Clear",
-    "user": "User"
+    "user": "User",
+    "time": {
+      "justNow": "Just now",
+      "minutesAgo": "{{count}} min ago",
+      "hoursAgo": "{{count}} hr ago",
+      "daysAgo": "{{count}} days ago",
+      "minutesLater": "in {{count}} min",
+      "hoursLater": "in {{count}} hr",
+      "daysLater": "in {{count}} days"
+    }
   },
   "metrics": {
     "title": "Monitoring Dashboard",
@@ -289,6 +298,152 @@
       "error": "Query failed",
       "errorDesc": "Unable to get task info, please check task ID or try again later",
       "retry": "Retry"
+    },
+    "tabs": {
+      "confluence": "Confluence Sync",
+      "scheduled": "Scheduled Tasks",
+      "query": "Task Query"
+    },
+    "confluence": {
+      "connectionPool": "Connection Pool",
+      "bindingDetails": "Binding Details",
+      "selectConnection": "Select Connection",
+      "selectConnectionHint": "Select a connection from the left to view details",
+      "noConnections": "No Connections",
+      "noConnectionsDesc": "Create a Confluence connection to start syncing",
+      "addConnection": "Add Connection",
+      "loadError": "Load Failed",
+      "loadErrorDesc": "Unable to load data, please try again later",
+      "syncMode": "Sync Mode",
+      "manual": "Manual",
+      "auto": "Auto",
+      "minutes": "min",
+      "bindings": "Bindings",
+      "spaces": "spaces",
+      "lastSync": "Last Sync",
+      "test": "Test",
+      "pages": "pages",
+      "syncNow": "Sync Now",
+      "editConfig": "Edit Config",
+      "editSyncConfig": "Edit Sync Config",
+      "pollingInterval": "Sync Interval",
+      "intervalHint": "Recommended: 15-1440 minutes",
+      "noBindings": "No Bindings",
+      "noBindingsDesc": "No spaces bound to this connection",
+      "status": {
+        "active": "Active",
+        "disabled": "Disabled",
+        "error": "Error"
+      },
+      "bindingStatus": {
+        "completed": "Synced",
+        "syncing": "Syncing",
+        "pending": "Pending",
+        "error": "Sync Failed"
+      },
+      "table": {
+        "space": "Space",
+        "syncMode": "Sync Mode",
+        "interval": "Interval",
+        "status": "Status",
+        "lastSync": "Last Sync",
+        "nextSync": "Next Sync",
+        "actions": "Actions"
+      },
+      "connection": {
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "bindings": "Bindings",
+        "lastSync": "Last Sync",
+        "testConnection": "Test Connection",
+        "editConfig": "Edit Config"
+      },
+      "binding": {
+        "spaceName": "Space Name",
+        "syncMode": "Sync Mode",
+        "interval": "Interval",
+        "status": "Status",
+        "lastSync": "Last Sync",
+        "nextSync": "Next Sync",
+        "actions": "Actions",
+        "triggerSync": "Sync Now",
+        "editConfig": "Configure",
+        "noBindings": "No Bindings",
+        "noBindingsDesc": "No spaces bound to this connection"
+      },
+      "scheduler": {
+        "title": "Scheduler Status",
+        "running": "Running",
+        "stopped": "Stopped",
+        "activeTasks": "Active Tasks",
+        "totalTasks": "Total Tasks",
+        "refresh": "Refresh"
+      },
+      "editDialog": {
+        "title": "Edit Sync Configuration",
+        "description": "Configure sync settings for \"{{name}}\"",
+        "syncMode": "Sync Mode",
+        "manual": "Manual Sync",
+        "manualDesc": "Trigger sync manually when needed",
+        "polling": "Auto Sync",
+        "pollingDesc": "Sync automatically at set intervals",
+        "interval": "Sync Interval",
+        "intervals": {
+          "15": "Every 15 minutes",
+          "30": "Every 30 minutes",
+          "60": "Every hour",
+          "180": "Every 3 hours",
+          "360": "Every 6 hours",
+          "720": "Every 12 hours",
+          "1440": "Daily"
+        },
+        "save": "Save",
+        "cancel": "Cancel"
+      },
+      "toast": {
+        "syncTriggered": "Sync triggered",
+        "syncFailed": "Failed to trigger sync",
+        "configUpdated": "Configuration updated",
+        "configUpdateFailed": "Failed to update configuration",
+        "testSuccess": "Connection test successful",
+        "testFailed": "Connection test failed",
+        "pageSyncEnabled": "Page sync enabled",
+        "pageSyncDisabled": "Page sync disabled",
+        "pageSyncUpdateFailed": "Failed to update page sync config",
+        "batchEnabled": "Enabled sync for {{count}} pages",
+        "batchDisabled": "Disabled sync for {{count}} pages",
+        "batchPartialFailed": "{{count}} pages failed to update"
+      },
+      "managePages": "Manage Pages",
+      "pageManage": {
+        "title": "Page Sync Management",
+        "total": "Total",
+        "searchPlaceholder": "Search pages...",
+        "selected": "{{count}} selected",
+        "enableSelected": "Enable Sync",
+        "disableSelected": "Disable Sync",
+        "noSearchResults": "No pages match your search",
+        "noPages": "No pages in this binding",
+        "pageName": "Page Name",
+        "status": "Status",
+        "sync": "Sync",
+        "hint": "Disabled pages will be skipped during next sync without affecting existing synced content"
+      },
+      "pageStatus": {
+        "synced": "Synced",
+        "pending": "Pending",
+        "needs_resync": "Needs Resync",
+        "error": "Error"
+      }
+    },
+    "scheduled": {
+      "comingSoon": "Coming Soon",
+      "comingSoonDesc": "Scheduled tasks feature is under development. You'll be able to configure automated tasks to run on schedule.",
+      "feature": {
+        "dailyNews": "Daily Tech News",
+        "reportGen": "Scheduled Reports",
+        "dataSync": "Data Sync Tasks"
+      }
     }
   },
   "settings": {
@@ -895,7 +1050,19 @@
     "webSearchOff": "Click to enable web search",
     "addPhotosFiles": "Add photos and files",
     "companyKB": "Company Knowledge Base",
-    "webSearchMenu": "Web Search"
+    "webSearchMenu": "Web Search",
+    "processingFiles": "Analyzing uploaded files...",
+    "filesProcessed": "Analyzed {{count}} files",
+    "creatingImage": "Creating image",
+    "phase": {
+      "analyzing": "Analyzing task...",
+      "thinking": "Thinking...",
+      "planning": "Creating plan...",
+      "executing": "Executing...",
+      "observing": "Analyzing results...",
+      "writing": "Writing content...",
+      "completing": "Completing..."
+    }
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -1004,7 +1171,14 @@
       "supportsTools": "Supports Tools",
       "supportsToolsHint": "Model can call functions/tools",
       "enableModel": "Enable Model",
-      "enableModelHint": "When disabled, users cannot select this model"
+      "enableModelHint": "When disabled, users cannot select this model",
+      "validation": {
+        "contextWindowRequired": "Context window is required",
+        "contextWindowMin": "Context window must be at least 1",
+        "contextWindowMax": "Context window cannot exceed 10,000,000",
+        "maxOutputTokensMin": "Max output tokens must be at least 1",
+        "priceMin": "Price cannot be negative"
+      }
     }
   },
   "quota": {
