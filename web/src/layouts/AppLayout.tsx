@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Layout, Menu, Tooltip, Typography, Space, Dropdown } from "antd";
+import { Layout, Typography, Space, Dropdown } from "antd";
 import type { MenuProps } from "antd";
 import {
   DashboardOutlined,
@@ -26,6 +26,7 @@ import { logout } from "@/api/auth";
 import { HelpModal } from "@/components/HelpModal";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
+import { Logo } from "@/components/Logo";
 import { languages } from "@/i18n";
 
 const { Sider, Content, Header } = Layout;
@@ -83,61 +84,10 @@ const navItems = [
   },
 ];
 
-// Logo component - refined version
-function Logo({ collapsed }: { collapsed: boolean }) {
-  return (
-    <div className="flex items-center gap-3">
-      <div className="flex-shrink-0 relative">
-        <div className="absolute inset-0 bg-indigo-500 blur-md opacity-20 animate-pulse"></div>
-        <svg width="34" height="34" viewBox="0 0 32 32" fill="none" className="relative z-10">
-          <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#logoGradient)" />
-          <path
-            d="M16 7L25 12.5V20.5L16 26L7 20.5V12.5L16 7Z"
-            stroke="white"
-            strokeWidth="1.5"
-            strokeOpacity="0.8"
-            fill="none"
-          />
-          <circle cx="16" cy="16" r="4" fill="white" />
-          <defs>
-            <linearGradient id="logoGradient" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-              <stop offset="0" stopColor="#6366F1" />
-              <stop offset="1" stopColor="#8B5CF6" />
-            </linearGradient>
-          </defs>
-        </svg>
-      </div>
-      {!collapsed && (
-        <div className="flex flex-col">
-          <span className="text-base font-bold text-foreground leading-tight tracking-tight">
-            AI Platform
-          </span>
-          <span className="text-[10px] uppercase font-bold text-muted-foreground/60 tracking-widest mt-0.5">
-            Gateway Console
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
+
 
 // Theme toggle button - simple version
-function ThemeToggle({ darkMode, onToggle, tooltip }: { darkMode: boolean; onToggle: () => void; tooltip: string }) {
-  return (
-    <Tooltip title={tooltip}>
-      <button
-        onClick={onToggle}
-        className="flex items-center justify-center w-9 h-9 rounded-md hover:bg-accent transition-colors"
-      >
-        {darkMode ? (
-          <MoonOutlined className="text-lg text-primary" />
-        ) : (
-          <SunOutlined className="text-lg text-amber-500" />
-        )}
-      </button>
-    </Tooltip>
-  );
-}
+
 
 export function AppLayout() {
   const { t, i18n } = useTranslation();
@@ -217,136 +167,149 @@ export function AppLayout() {
     item.permission === null || hasPermission(item.permission)
   );
 
-  const menuItems: MenuProps['items'] = filteredNavItems.map(item => ({
-    key: item.key,
-    icon: item.icon,
-    label: (
-      <NavLink to={item.key} style={{ color: 'inherit' }}>
-        {t(item.labelKey)}
-      </NavLink>
-    ),
-  }));
+
 
   return (
     <Layout className="app-layout" style={{ minHeight: '100vh', minWidth: 1200 }}>
-      {/* 侧边栏 */}
       <Sider
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
         trigger={null}
-        width={220}
-        collapsedWidth={64}
-        className="app-sider"
+        width={260}
+        collapsedWidth={80}
+        className="app-sider border-r border-border bg-card/50 backdrop-blur-xl"
         style={{
           position: 'fixed',
           left: 0,
           top: 0,
           bottom: 0,
           zIndex: 100,
-          background: darkMode ? '#111827' : '#ffffff',
-          borderRight: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
-          transition: 'width 200ms',
+          borderRight: '1px solid var(--border)',
+          transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
+        theme={darkMode ? 'dark' : 'light'}
       >
-        {/* Logo area */}
-        <div style={{
-          padding: collapsed ? '0 12px' : '0 20px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          height: 64,
-          borderBottom: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
-        }}>
-          <Logo collapsed={collapsed} />
-        </div>
-
-        {/* 导航菜单 */}
-        <div style={{
-          flex: 1,
-          overflow: 'auto',
-          padding: '16px 8px',
-        }}>
-          <Menu
-            mode="inline"
-            selectedKeys={[location.pathname]}
-            items={menuItems}
-            style={{
-              border: 'none',
-              background: 'transparent',
-            }}
-          />
-        </div>
-
-        {/* 底部操作区 */}
-        <div style={{
-          padding: '16px',
-          borderTop: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 12,
-        }}>
-          {/* 主题切换 */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: collapsed ? 'center' : 'space-between',
-            padding: collapsed ? '0' : '0 4px',
-          }}>
-            {!collapsed && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {darkMode ? t('theme.dark') : t('theme.light')}
-              </Text>
-            )}
-            <ThemeToggle
-              darkMode={darkMode}
-              onToggle={toggleDarkMode}
-              tooltip={darkMode ? t('theme.switchToLight') : t('theme.switchToDark')}
-            />
+        <div className="flex flex-col h-full bg-sidebar/50">
+          {/* Logo area */}
+          <div className="h-[52px] flex items-center px-6 border-b border-border/40">
+            <Logo collapsed={collapsed} />
           </div>
 
-          {/* Collapse button */}
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="flex items-center justify-center w-full px-3 py-2 rounded-md hover:bg-accent transition-colors cursor-pointer"
-          >
-            {collapsed ? (
-              <MenuUnfoldOutlined className="text-base text-muted-foreground" />
-            ) : (
-              <>
-                <MenuFoldOutlined className="text-base text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">
-                  {t('nav.collapseSidebar')}
+          {/* Custom Navigation Menu */}
+          <div className="flex-1 overflow-y-auto py-6 px-3 space-y-1 scrollbar-hide">
+            {filteredNavItems.map((item) => (
+              <NavLink
+                key={item.key}
+                to={item.key}
+                className={({ isActive }) => `
+                  relative group flex items-center px-4 py-3.5 my-1.5 rounded-xl transition-all duration-300 ease-out
+                  ${isActive
+                    ? 'bg-primary/10 text-primary font-semibold shadow-sm shadow-primary/5'
+                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+                  }
+                  ${collapsed ? 'justify-center px-2' : ''}
+                `}
+              >
+                {({ isActive }) => (
+                  <>
+                    <span className={`
+                      text-xl transition-all duration-300 transform group-hover:scale-110 flex-shrink-0
+                      ${isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground'}
+                    `}>
+                      {item.icon}
+                    </span>
+
+                    {!collapsed && (
+                      <span className={`ml-3.5 truncate transition-all duration-300 ${isActive ? 'translate-x-1' : 'group-hover:translate-x-1'}`}>
+                        {t(item.labelKey)}
+                      </span>
+                    )}
+
+                    {/* Active Indicator (Left Bar) */}
+                    {isActive && !collapsed && (
+                      <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full shadow-[0_0_12px_rgba(var(--primary),0.5)] animate-in slide-in-from-left-2 fade-in duration-300" />
+                    )}
+
+                    {/* Hover Tooltip for Collapsed State */}
+                    {collapsed && (
+                      <div className="absolute left-full ml-4 px-3 py-1.5 bg-popover text-popover-foreground text-sm font-medium rounded-lg shadow-xl opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-200 pointer-events-none whitespace-nowrap z-50 border border-border/50">
+                        {t(item.labelKey)}
+                        <div className="absolute left-0 top-1/2 -translate-y-1/2 -ml-1 w-2 h-2 bg-popover rotate-45 border-l border-b border-border/50" />
+                      </div>
+                    )}
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </div>
+
+          {/* Footer Actions */}
+          <div className="p-4 border-t border-border/40 bg-muted/5 space-y-3">
+            {/* Theme Toggle */}
+            <div className={`
+              flex items-center transition-all duration-300 bg-background/50 rounded-xl p-1 border border-border/20
+              ${collapsed ? 'justify-center flex-col gap-2' : 'justify-between px-3'}
+            `}>
+              {!collapsed && (
+                <span className="text-xs font-medium text-muted-foreground ml-1">
+                  {darkMode ? t('theme.dark') : t('theme.light')}
                 </span>
-              </>
-            )}
-          </button>
+              )}
+              <button
+                onClick={toggleDarkMode}
+                className={`
+                  relative flex items-center justify-center rounded-lg transition-all duration-300 hover:scale-105 active:scale-95
+                  ${collapsed ? 'w-10 h-10' : 'w-8 h-8'}
+                  ${darkMode ? 'bg-indigo-950/30 text-indigo-400' : 'bg-orange-50 text-orange-500'}
+                `}
+              >
+                {darkMode ? <MoonOutlined /> : <SunOutlined />}
+              </button>
+            </div>
+
+            {/* Collapse Button */}
+            <button
+              onClick={() => setCollapsed(!collapsed)}
+              className={`
+                flex items-center justify-center w-full rounded-xl transition-all duration-300
+                hover:bg-primary/5 active:scale-95 text-muted-foreground hover:text-primary
+                ${collapsed ? 'h-10' : 'h-10 gap-3'}
+              `}
+            >
+              {collapsed ? (
+                <MenuUnfoldOutlined className="text-lg" />
+              ) : (
+                <>
+                  <MenuFoldOutlined className="text-lg" />
+                  <span className="text-sm font-medium">{t('nav.collapseSidebar')}</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </Sider>
 
       {/* Main content area */}
       <Layout style={{
-        marginLeft: collapsed ? 64 : 220,
-        transition: 'margin-left 200ms',
-        background: darkMode ? '#111827' : '#F9FAFB',
+        marginLeft: collapsed ? 80 : 260,
+        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+        background: 'transparent',
         minHeight: '100vh',
       }}>
         {/* 顶部导航栏 */}
         <Header style={{
-          padding: '0 24px',
-          background: darkMode ? 'rgba(17, 24, 39, 0.9)' : 'rgba(255, 255, 255, 0.9)',
-          backdropFilter: 'blur(8px)',
-          borderBottom: `1px solid ${darkMode ? '#374151' : '#E5E7EB'}`,
-          boxShadow: darkMode
-            ? '0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.25)'
-            : '0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06)',
+          padding: '0 32px',
+          background: darkMode ? 'rgba(17, 24, 39, 0.8)' : 'rgba(255, 255, 255, 0.8)',
+          backdropFilter: 'blur(12px)',
+          borderBottom: '1px solid var(--border)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           position: 'sticky',
           top: 0,
           zIndex: 50,
-          height: 64,
+          height: 52,
         }}>
           {/* 左侧 - 面包屑/标题 */}
           <div>
@@ -435,9 +398,9 @@ export function AppLayout() {
         }
 
         .app-sider .ant-menu-item-selected {
-          background: ${darkMode 
-            ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.1) 100%)' 
-            : 'linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)'} !important;
+          background: ${darkMode
+          ? 'linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.1) 100%)'
+          : 'linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)'} !important;
           color: #6366F1 !important;
           font-weight: 600 !important;
           box-shadow: ${darkMode ? '0 4px 12px rgba(0,0,0,0.2)' : '0 2px 8px rgba(99, 102, 241, 0.08)'};
