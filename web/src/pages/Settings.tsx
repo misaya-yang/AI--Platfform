@@ -507,34 +507,36 @@ export function SettingsPage() {
               {rateLimits.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t("settings.rateLimit.noRules")}</p>
               ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.scope")}</TableHead>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.scopeId")}</TableHead>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.requests")}</TableHead>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.window")}</TableHead>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.burst")}</TableHead>
-                      <TableHead>{t("settings.rateLimit.tableHeaders.status")}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rateLimits.map((rule: RateLimitRule, idx: number) => (
-                      <TableRow key={idx}>
-                        <TableCell>{rule.scope}</TableCell>
-                        <TableCell>{rule.scope_id || "-"}</TableCell>
-                        <TableCell>{rule.requests}</TableCell>
-                        <TableCell>{rule.window}s</TableCell>
-                        <TableCell>{rule.burst}</TableCell>
-                        <TableCell>
-                          <Badge variant={rule.enabled ? "default" : "secondary"}>
-                            {rule.enabled ? t("common.active") : t("common.disabled")}
-                          </Badge>
-                        </TableCell>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("settings.rateLimit.tableHeaders.scope")}</TableHead>
+                        <TableHead className="hidden md:table-cell">{t("settings.rateLimit.tableHeaders.scopeId")}</TableHead>
+                        <TableHead>{t("settings.rateLimit.tableHeaders.requests")}</TableHead>
+                        <TableHead className="hidden sm:table-cell">{t("settings.rateLimit.tableHeaders.window")}</TableHead>
+                        <TableHead className="hidden lg:table-cell">{t("settings.rateLimit.tableHeaders.burst")}</TableHead>
+                        <TableHead>{t("settings.rateLimit.tableHeaders.status")}</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {rateLimits.map((rule: RateLimitRule) => (
+                        <TableRow key={`${rule.scope}-${rule.scope_id || 'default'}-${rule.requests}`}>
+                          <TableCell>{rule.scope}</TableCell>
+                          <TableCell className="hidden md:table-cell">{rule.scope_id || "-"}</TableCell>
+                          <TableCell>{rule.requests}</TableCell>
+                          <TableCell className="hidden sm:table-cell">{rule.window}s</TableCell>
+                          <TableCell className="hidden lg:table-cell">{rule.burst}</TableCell>
+                          <TableCell>
+                            <Badge variant={rule.enabled ? "default" : "secondary"}>
+                              {rule.enabled ? t("common.active") : t("common.disabled")}
+                            </Badge>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -659,40 +661,42 @@ export function SettingsPage() {
               {apiKeys.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t("settings.apiKeys.noKeys")}</p>
               ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{t("settings.apiKeys.tableHeaders.name")}</TableHead>
-                      <TableHead>{t("settings.apiKeys.tableHeaders.tenant")}</TableHead>
-                      <TableHead>{t("settings.apiKeys.tableHeaders.roles")}</TableHead>
-                      <TableHead>{t("settings.apiKeys.tableHeaders.status")}</TableHead>
-                      <TableHead>{t("settings.apiKeys.tableHeaders.createdAt")}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {apiKeys.map((key: ApiKey) => (
-                      <TableRow key={key.id}>
-                        <TableCell>{key.name}</TableCell>
-                        <TableCell>{key.tenant_id || "-"}</TableCell>
-                        <TableCell>
-                          {(key.roles || []).map((r: string) => (
-                            <Badge key={r} variant="outline" className="mr-1">
-                              {r}
-                            </Badge>
-                          ))}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={key.enabled ? "default" : "secondary"}>
-                            {key.enabled ? t("common.active") : t("common.disabled")}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {key.created_at ? new Date(key.created_at).toLocaleString() : "-"}
-                        </TableCell>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("settings.apiKeys.tableHeaders.name")}</TableHead>
+                        <TableHead className="hidden md:table-cell">{t("settings.apiKeys.tableHeaders.tenant")}</TableHead>
+                        <TableHead className="hidden sm:table-cell">{t("settings.apiKeys.tableHeaders.roles")}</TableHead>
+                        <TableHead>{t("settings.apiKeys.tableHeaders.status")}</TableHead>
+                        <TableHead className="hidden lg:table-cell">{t("settings.apiKeys.tableHeaders.createdAt")}</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {apiKeys.map((key: ApiKey) => (
+                        <TableRow key={key.id}>
+                          <TableCell>{key.name}</TableCell>
+                          <TableCell className="hidden md:table-cell">{key.tenant_id || "-"}</TableCell>
+                          <TableCell className="hidden sm:table-cell">
+                            {(key.roles || []).map((r: string) => (
+                              <Badge key={r} variant="outline" className="mr-1">
+                                {r}
+                              </Badge>
+                            ))}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={key.enabled ? "default" : "secondary"}>
+                              {key.enabled ? t("common.active") : t("common.disabled")}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="hidden lg:table-cell text-xs text-muted-foreground">
+                            {key.created_at ? new Date(key.created_at).toLocaleString() : "-"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
               )}
             </CardContent>
           </Card>
