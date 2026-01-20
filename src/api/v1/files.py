@@ -208,10 +208,24 @@ def get_uploads_path() -> Path:
 
 
 def get_user_uploads_path(user_id: str) -> Path:
-    """Get user-specific uploads directory with validation."""
+    """Get user-specific uploads directory with validation.
+
+    Implements defense-in-depth with both input validation and path verification.
+    """
     # Validate user_id to prevent path traversal
     validated_id = validate_user_id(user_id)
-    path = get_uploads_path() / validated_id
+    base_path = get_uploads_path()
+    path = base_path / validated_id
+
+    # Defense-in-depth: Verify resolved path doesn't escape base directory
+    try:
+        resolved = path.resolve()
+        base_resolved = base_path.resolve()
+        resolved.relative_to(base_resolved)
+    except ValueError:
+        logger.error(f"[Security] Path escape attempt detected for user {user_id[:50]}")
+        raise HTTPException(status_code=400, detail="Invalid path")
+
     path.mkdir(parents=True, exist_ok=True)
     return path
 
