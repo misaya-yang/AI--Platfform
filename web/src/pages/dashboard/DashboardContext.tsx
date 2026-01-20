@@ -1,6 +1,6 @@
 // web/src/pages/dashboard/DashboardContext.tsx
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import dayjs from "dayjs";
 import type { DashboardContext, SourceFilter, ServiceFilter, UserFilter, RefreshInterval } from "./types";
 
@@ -43,22 +43,26 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(timer);
   }, [refreshInterval, triggerRefresh]);
 
-  const value: DashboardContextValue = {
-    dateRange,
-    granularity,
-    source,
-    serviceId,
-    userId,
-    refreshInterval,
-    lastRefresh,
-    setDateRange,
-    setGranularity,
-    setSource,
-    setServiceId,
-    setUserId,
-    setRefreshInterval,
-    triggerRefresh,
-  };
+  // Memoize context value to prevent unnecessary re-renders of consumers
+  const value = useMemo<DashboardContextValue>(
+    () => ({
+      dateRange,
+      granularity,
+      source,
+      serviceId,
+      userId,
+      refreshInterval,
+      lastRefresh,
+      setDateRange,
+      setGranularity,
+      setSource,
+      setServiceId,
+      setUserId,
+      setRefreshInterval,
+      triggerRefresh,
+    }),
+    [dateRange, granularity, source, serviceId, userId, refreshInterval, lastRefresh, triggerRefresh]
+  );
 
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
