@@ -69,6 +69,23 @@ from .guardrails import (
     ValidationResult,
     ToolCallValidation,
 )
+from .scenario_analyzer import (
+    ScenarioAnalyzer,
+    ScenarioType,
+    ScenarioDetectionResult,
+    create_scenario_analyzer,
+)
+from .prompts.system_prompt_v2 import (
+    build_system_prompt_v2,
+    inject_kb_context,
+    inject_web_context,
+    inject_document_context,
+    inject_user_preferences,
+)
+from .scenario_aware_retriever import (
+    ScenarioAwareRetriever,
+    create_scenario_aware_retriever,
+)
 from ..metrics.usage_recorder import get_usage_recorder
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..storage import get_artifact_storage, get_file_storage, ArtifactStorageService
@@ -301,8 +318,8 @@ class AssistantService:
                 print(f"Found {len(event.data.chunks)} relevant chunks")
     """
 
-    # Default system prompt when none provided
-    DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant with access to tools via function calling.
+    # Default system prompt when none provided (Legacy - kept for backwards compatibility)
+    DEFAULT_SYSTEM_PROMPT_LEGACY = """You are a helpful AI assistant with access to tools via function calling.
 
 ## How to Use Tools
 
@@ -337,6 +354,69 @@ When asked to create a document:
 ### General Rules
 - Tell the user when files are ready
 - Do NOT output JSON or function call syntax in your text"""
+
+    # Manus-style modular system prompt (v2) - built dynamically
+    @classmethod
+    def build_default_system_prompt(
+        cls,
+        user_role: str = "user",
+        available_datasets: Optional[List[str]] = None,
+        enabled_tools: Optional[List[str]] = None,
+        scenario_rules: str = "",
+    ) -> str:
+        """
+        Build the default Manus-style system prompt.
+
+        This is the new recommended approach that uses modular prompt design
+        with clear separation of guardrails and agent freedom.
+
+        Args:
+            user_role: User's role for access display
+            available_datasets: List of available KB names
+            enabled_tools: List of enabled tools
+            scenario_rules: Scenario-specific rules
+
+        Returns:
+            Complete Manus-style system prompt
+        """
+        base_prompt = build_system_prompt_v2(
+            user_role=user_role,
+            available_datasets=available_datasets,
+            enabled_tools=enabled_tools,
+            scenario_rules=scenario_rules,
+        )
+
+        # Add tool usage instructions (critical for function calling)
+        tool_instructions = """
+<tool_usage>
+## 工具使用规范
+
+### 关键原则
+**你必须通过 function calling 机制调用工具，而不是在文本中写工具调用代码。**
+- 错误示例：在回复中写 `generate_pptx(title="...", slides=[...])`
+- 正确做法：使用 function calling 功能调用工具
+
+### 调用流程
+1. 简要说明你将要做什么
+2. 调用相应的工具（系统自动处理）
+3. 工具执行后，总结结果告知用户
+
+### 常见工具
+- `generate_pptx`: 生成 PowerPoint 演示文稿
+- `generate_document`: 生成 Word 文档
+- `web_search`: 搜索网络获取最新信息
+- `execute_python`: 执行 Python 代码
+
+### 注意事项
+- 文件生成完成后告知用户
+- 不要在文本中输出 JSON 或函数调用语法
+</tool_usage>"""
+
+        return f"{base_prompt}\n\n{tool_instructions}"
+
+    # Use the new Manus-style prompt as default (lazy initialization in _build_messages)
+    # Set to None to trigger dynamic building with context
+    DEFAULT_SYSTEM_PROMPT = None  # Will be built dynamically with build_default_system_prompt()
 
     # Context injection template
     CONTEXT_TEMPLATE = """## Relevant Context
@@ -444,6 +524,10 @@ Please use this web search context to inform your response when relevant."""
         # Quality Guardrails (ensure content meets minimum quality standards)
         self.quality_guardrails = quality_guardrails or QualityGuardrails()
         self.tool_constraint_validator = tool_constraint_validator or ToolConstraintValidator()
+
+        # Scenario Analyzer for intelligent scenario detection and analysis prompts
+        # This enables "Manus-like" expert analysis capabilities
+        self.scenario_analyzer = create_scenario_analyzer()
 
     def validate_generated_content(
         self,
@@ -619,13 +703,20 @@ Please use this web search context to inform your response when relevant."""
             }
         )
 
-        # Detect office scenario for downstream routing (no behavior change yet)
+        # Enhanced scenario detection using ScenarioAnalyzer
+        # This enables intelligent KB retrieval and expert-level analysis
+        scenario_detection: Optional[ScenarioDetectionResult] = None
         try:
-            from .office.scenario import detect_scenario
-            scenario = detect_scenario(message)
-            logger.info(f"[OFFICE] scenario={scenario.value}")
-        except Exception:
-            scenario = None
+            scenario_detection = self.scenario_analyzer.detect_scenario_fast(message)
+            logger.info(
+                f"[SCENARIO] Detected: primary={scenario_detection.primary_scenario.value}, "
+                f"urgency={scenario_detection.urgency.value}, "
+                f"confidence={scenario_detection.confidence:.2f}, "
+                f"suggested_queries={scenario_detection.suggested_kb_queries[:2]}"
+            )
+        except Exception as e:
+            logger.warning(f"Scenario detection failed: {e}")
+            scenario_detection = None
 
         # Step 0: Load history from session if not provided
         step_start = time.time()
@@ -982,6 +1073,7 @@ Please use this web search context to inform your response when relevant."""
             model_supports_vision=model_supports_vision,
             session_id=session_id,
             user_preferences=user_preferences,
+            scenario_detection=scenario_detection,
         )
 
         # Step 4: Stream from model
@@ -2440,6 +2532,132 @@ Please use this web search context to inform your response when relevant."""
         message_lower = message.lower()
         return any(kw in message_lower for kw in doc_keywords)
 
+    def _build_scenario_prompt(self, scenario: ScenarioDetectionResult) -> str:
+        """Build expert analysis prompt based on detected scenario.
+
+        This method generates scenario-specific prompts that guide the AI to provide
+        expert-level, multi-dimensional analysis - a key feature for "Manus-like" capabilities.
+
+        Args:
+            scenario: The detected scenario with type and metadata.
+
+        Returns:
+            Expert analysis prompt string to inject into system prompt.
+        """
+        from .prompts.scenario_analysis_prompts import SCENARIO_TYPES, EXPERT_TEMPLATES
+
+        scenario_type = scenario.primary_scenario.value
+        scenario_info = SCENARIO_TYPES.get(scenario_type, SCENARIO_TYPES.get("general_inquiry", {}))
+
+        scenario_name = scenario_info.get("name", "通用")
+        dimensions = scenario_info.get("analysis_dimensions", [])
+        expert_template = EXPERT_TEMPLATES.get(scenario_type, EXPERT_TEMPLATES.get("general_inquiry", ""))
+
+        # Build the expert analysis prompt
+        prompt_parts = [
+            f"## 专家分析模式 - {scenario_name}",
+            "",
+            "你现在是一位经验丰富的专家助手。请按照以下框架进行专业分析和回答：",
+            "",
+            "### 分析维度",
+        ]
+
+        for dim in dimensions:
+            prompt_parts.append(f"- {dim}")
+
+        prompt_parts.extend([
+            "",
+            "### 回答框架",
+            expert_template,
+            "",
+            "### 回答要求",
+            "1. **准确诊断**：准确识别问题的本质和根源",
+            "2. **方案实用**：提供具体可操作的建议",
+            "3. **表达专业**：使用恰当的专业术语",
+            "4. **逻辑清晰**：层次分明，条理清楚",
+            "5. **考虑周全**：涵盖边界情况和注意事项",
+        ])
+
+        # Add urgency hint if urgent
+        if scenario.urgency.value == "urgent":
+            prompt_parts.extend([
+                "",
+                "**注意**：用户的问题标记为紧急，请优先给出最关键的解决步骤。",
+            ])
+
+        return "\n".join(prompt_parts)
+
+    def _build_document_analysis_prompt(self, processed_files: ProcessedFiles) -> str:
+        """Build expert document analysis prompt based on document structure.
+
+        This method generates prompts that guide the AI to provide deep document
+        analysis - a key feature for "Manus-like" capabilities.
+
+        Args:
+            processed_files: The processed files with document structure analysis.
+
+        Returns:
+            Document analysis prompt string to inject into system prompt.
+        """
+        structure = processed_files.document_structure
+
+        prompt_parts = [
+            "## 文档分析模式",
+            "",
+            "用户上传了文档供你分析。请使用专业的分析框架进行深度理解和回答。",
+        ]
+
+        # Add structure information if available
+        if structure:
+            prompt_parts.extend([
+                "",
+                "### 文档结构概览",
+                f"- 总字符数：{structure.total_chars:,}",
+                f"- 预计阅读时间：{structure.estimated_reading_time_min} 分钟",
+            ])
+
+            # Add section outline if available
+            if structure.sections:
+                prompt_parts.append(f"- 章节数量：{len(structure.sections)}")
+                if structure.key_topics:
+                    topics_str = "、".join(structure.key_topics[:5])
+                    prompt_parts.append(f"- 主要主题：{topics_str}")
+
+            # Add content characteristics
+            characteristics = []
+            if structure.has_headers:
+                characteristics.append("结构化标题")
+            if structure.has_lists:
+                characteristics.append("列表内容")
+            if structure.has_tables:
+                characteristics.append("表格数据")
+            if structure.has_code_blocks:
+                characteristics.append("代码片段")
+
+            if characteristics:
+                prompt_parts.append(f"- 内容特点：{', '.join(characteristics)}")
+
+        # Add analysis framework
+        prompt_parts.extend([
+            "",
+            "### 分析框架",
+            "根据用户问题，从以下维度进行深度分析：",
+            "",
+            "1. **文档概览**：类型、主题、主要内容",
+            "2. **核心内容**：关键信息、主要观点、重要数据",
+            "3. **结构分析**：文档组织、逻辑脉络",
+            "4. **深度洞察**：隐含信息、潜在价值",
+            "5. **应用建议**：基于文档内容的行动建议",
+            "",
+            "### 回答要求",
+            "- 准确引用文档中的具体内容",
+            "- 对数据和信息进行解读，不只是复述",
+            "- 如果文档未涵盖某方面，明确指出",
+            "- 提供结构化的分析，便于理解",
+        ])
+
+        return "\n".join(prompt_parts)
+
     def _build_messages(
         self,
         message: str,
@@ -2451,6 +2669,7 @@ Please use this web search context to inform your response when relevant."""
         model_supports_vision: bool = False,
         session_id: Optional[str] = None,
         user_preferences: Optional[str] = None,
+        scenario_detection: Optional[ScenarioDetectionResult] = None,
     ) -> List[ChatMessage]:
         """Build the message list for the model.
 
@@ -2464,6 +2683,7 @@ Please use this web search context to inform your response when relevant."""
             model_supports_vision: Whether the model supports vision/multimodal input.
             session_id: Session ID for working memory lookup (Context Engine mode).
             user_preferences: User preferences loaded from MemoryManager (formatted string).
+            scenario_detection: Detected scenario for expert-level analysis prompts.
 
         Returns:
             List of ChatMessage objects ready to send to the model.
@@ -2482,29 +2702,68 @@ Please use this web search context to inform your response when relevant."""
                 user_preferences=user_preferences,
             )
 
-        # Legacy message building (original implementation)
+        # Legacy message building (original implementation) - Now with Manus-style prompts
         messages: List[ChatMessage] = []
 
-        # System prompt
-        system_content = config.system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        # System prompt - Use Manus-style modular prompt builder
+        if config.system_prompt:
+            # User provided custom system prompt, use it directly
+            system_content = config.system_prompt
+            logger.info("[SYSTEM PROMPT] Using custom system prompt from config")
+        else:
+            # Build Manus-style system prompt with scenario rules
+            scenario_rules = ""
+            if scenario_detection and scenario_detection.confidence >= 0.3:
+                scenario_rules = self._build_scenario_prompt(scenario_detection)
+                logger.info(f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}")
 
-        # Inject user preferences (Long-term Memory)
+            # Get dataset names for display
+            dataset_names = None
+            if config.kb_dataset_ids:
+                dataset_names = config.kb_dataset_ids
+
+            system_content = self.build_default_system_prompt(
+                user_role="user",  # Could be enhanced with actual user role
+                available_datasets=dataset_names,
+                scenario_rules=scenario_rules,
+            )
+            logger.info("[SYSTEM PROMPT] Built Manus-style modular prompt")
+
+        # Inject user preferences using new modular function
         if user_preferences:
-            system_content = f"{system_content}\n\n{user_preferences}"
+            system_content = inject_user_preferences(system_content, user_preferences)
             logger.info(f"[MEMORY INJECT] Injected user preferences, length: {len(user_preferences)}")
 
-        # Inject KB context if available
+        # Inject KB context using new modular function
         if retrieved_contexts:
             context_text = self._format_context(retrieved_contexts)
             logger.info(f"[KB INJECT] Injecting context from {len(retrieved_contexts)} datasets, text length: {len(context_text)}")
             logger.debug(f"[KB INJECT] Context preview: {context_text[:500]}...")
-            system_content = system_content + "\n\n" + self.CONTEXT_TEMPLATE.format(context=context_text)
+            system_content = inject_kb_context(system_content, context_text)
         else:
             logger.info("[KB INJECT] No retrieved_contexts to inject")
 
-        # Inject web search context if available
+        # Inject web search context using new modular function
         if web_search_context:
-            system_content = system_content + "\n\n" + self.WEB_CONTEXT_TEMPLATE.format(context=web_search_context)
+            system_content = inject_web_context(system_content, web_search_context)
+
+        # Inject document analysis prompt if document content is present
+        # This enables deep, expert-level document analysis - a key "Manus-like" feature
+        if processed_files and processed_files.text_content:
+            # Build document structure info
+            structure_info = ""
+            if hasattr(processed_files, 'document_structure') and processed_files.document_structure:
+                struct = processed_files.document_structure
+                structure_info = f"总字符数: {struct.total_chars}, 总行数: {struct.total_lines}"
+                if struct.sections:
+                    structure_info += f", 章节数: {len(struct.sections)}"
+
+            system_content = inject_document_context(
+                system_content,
+                content=processed_files.text_content,
+                structure_info=structure_info,
+            )
+            logger.info(f"[DOC INJECT] Injected document context with Manus-style template")
 
         messages.append(ChatMessage(role="system", content=system_content))
         logger.info(f"[SYSTEM PROMPT] Total length: {len(system_content)} chars")
@@ -2638,8 +2897,17 @@ Please use this web search context to inform your response when relevant."""
             logger.info(f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars")
 
         # Build ContextStructure with layered content
+        # Use Manus-style prompt builder if no custom prompt provided
+        effective_system_prompt = config.system_prompt
+        if not effective_system_prompt:
+            effective_system_prompt = self.build_default_system_prompt(
+                user_role="user",
+                available_datasets=config.kb_dataset_ids,
+            )
+            logger.info("[CONTEXT ENGINE] Built Manus-style system prompt")
+
         context_structure = ContextStructure(
-            system_prompt=config.system_prompt or self.DEFAULT_SYSTEM_PROMPT,
+            system_prompt=effective_system_prompt,
             tool_definitions=[],  # Tool definitions handled separately
             user_preferences=effective_user_preferences,
             long_term_memory=config.long_term_memory,

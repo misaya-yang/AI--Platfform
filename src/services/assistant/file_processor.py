@@ -137,6 +137,20 @@ class PDFPageContent:
 
 
 @dataclass
+class DocumentStructure:
+    """Structure analysis result for a document."""
+    total_chars: int = 0
+    total_lines: int = 0
+    sections: List[Dict[str, Any]] = field(default_factory=list)  # [{level, title, line}]
+    has_headers: bool = False
+    has_lists: bool = False
+    has_tables: bool = False
+    has_code_blocks: bool = False
+    estimated_reading_time_min: int = 0
+    key_topics: List[str] = field(default_factory=list)  # Extracted from headers
+
+
+@dataclass
 class ProcessedFiles:
     """Result of file processing for model consumption.
 
@@ -148,6 +162,7 @@ class ProcessedFiles:
         session_kb_id: ID for session-level temporary KB (long documents)
         file_metadata: Metadata about each processed file
         requires_rag: Flag indicating long documents need RAG retrieval
+        document_structure: Structure analysis for deep document understanding
     """
     images: List[ImageContent] = field(default_factory=list)
     pdf_pages: List[PDFPageContent] = field(default_factory=list)
@@ -156,6 +171,7 @@ class ProcessedFiles:
     session_kb_id: Optional[str] = None
     file_metadata: List[Dict[str, Any]] = field(default_factory=list)
     requires_rag: bool = False
+    document_structure: Optional[DocumentStructure] = None
 
     @property
     def has_images(self) -> bool:
@@ -775,6 +791,98 @@ The description should be detailed enough for someone who hasn't seen the image 
             metadata["parse_error"] = str(e)
             return "", False, metadata
 
+    def _analyze_document_structure(self, text_content: str) -> DocumentStructure:
+        """
+        Analyze document structure for deep understanding.
+
+        This lightweight analysis extracts:
+        - Document outline (headers and sections)
+        - Content characteristics (lists, tables, code blocks)
+        - Reading time estimation
+        - Key topics from headers
+
+        Args:
+            text_content: The extracted text content from document
+
+        Returns:
+            DocumentStructure with analysis results
+        """
+        import re
+
+        lines = text_content.split('\n')
+        structure = DocumentStructure(
+            total_chars=len(text_content),
+            total_lines=len(lines),
+        )
+
+        # Detect headers (Markdown style and common patterns)
+        header_patterns = [
+            (r'^#{1,6}\s+(.+)$', 'md'),  # Markdown headers
+            (r'^(.+)\n[=]+$', 'setext1'),  # Setext H1
+            (r'^(.+)\n[-]+$', 'setext2'),  # Setext H2
+            (r'^[一二三四五六七八九十]+[、.]\s*(.+)$', 'cn_num'),  # Chinese numbered
+            (r'^第[一二三四五六七八九十]+[章节部分]+\s*(.+)$', 'cn_chapter'),  # Chinese chapter
+            (r'^\d+[.、]\s*(.+)$', 'numbered'),  # Numbered sections
+        ]
+
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check for headers
+            for pattern, style in header_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    title = match.group(1).strip() if match.groups() else line.strip('#').strip()
+                    level = 1 if style in ('setext1', 'cn_chapter') else (
+                        2 if style == 'setext2' else (
+                            len(line) - len(line.lstrip('#')) if style == 'md' else 2
+                        )
+                    )
+                    structure.sections.append({
+                        "level": level,
+                        "title": title[:100],  # Limit title length
+                        "line": i + 1,
+                    })
+                    structure.has_headers = True
+                    if title and len(title) > 2:
+                        structure.key_topics.append(title[:50])
+                    break
+
+            # Check for lists
+            if not structure.has_lists:
+                if re.match(r'^[-*+]\s+', line) or re.match(r'^\d+[.)]\s+', line):
+                    structure.has_lists = True
+
+            # Check for tables (simple heuristic)
+            if not structure.has_tables:
+                if '|' in line and line.count('|') >= 2:
+                    structure.has_tables = True
+
+            # Check for code blocks
+            if not structure.has_code_blocks:
+                if line.startswith('```') or line.startswith('~~~'):
+                    structure.has_code_blocks = True
+
+        # Estimate reading time (assuming 250 words/min for English, 400 chars/min for Chinese)
+        # Use a blended estimate
+        char_count = structure.total_chars
+        structure.estimated_reading_time_min = max(1, char_count // 400)
+
+        # Limit key topics to top 10
+        structure.key_topics = structure.key_topics[:10]
+
+        logger.info(
+            f"[FileProcessor] Document structure analyzed: "
+            f"sections={len(structure.sections)}, "
+            f"has_headers={structure.has_headers}, "
+            f"has_tables={structure.has_tables}, "
+            f"topics={len(structure.key_topics)}"
+        )
+
+        return structure
+
     async def _process_pdf_as_images(
         self,
         file_path: Path,
@@ -1027,10 +1135,19 @@ The description should be detailed enough for someone who hasn't seen the image 
         if text_parts:
             result.text_content = "\n\n".join(text_parts)
 
+        # Perform document structure analysis for deep understanding
+        # This helps the AI provide better analysis of uploaded documents
+        if result.text_content:
+            try:
+                result.document_structure = self._analyze_document_structure(result.text_content)
+            except Exception as e:
+                logger.warning(f"[FileProcessor] Document structure analysis failed: {e}")
+
         logger.info(
             f"[FileProcessor] Processed {len(file_paths)} files: "
             f"images={len(result.images)}, descriptions={len(result.image_descriptions)}, "
-            f"text_chars={len(result.text_content)}, requires_rag={result.requires_rag}"
+            f"text_chars={len(result.text_content)}, requires_rag={result.requires_rag}, "
+            f"has_structure={result.document_structure is not None}"
         )
 
         return result
