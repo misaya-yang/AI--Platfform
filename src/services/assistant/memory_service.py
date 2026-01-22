@@ -115,7 +115,7 @@ class MemoryService:
             if isinstance(value, str):
                 try:
                     return json.loads(value)
-                except:
+                except (json.JSONDecodeError, ValueError):
                     return value
             return value
             
@@ -150,10 +150,10 @@ class MemoryService:
             if isinstance(val, str):
                 try:
                     val = json.loads(val)
-                except:
+                except (json.JSONDecodeError, ValueError):
                     pass
             memories[row.get("key")] = val
-            
+
         return memories
 
     async def delete_user_memory(self, tenant_id: str, user_id: str, key: str) -> bool:
@@ -164,10 +164,18 @@ class MemoryService:
             tenant_id: Tenant ID for multi-tenant isolation (required)
             user_id: User ID
             key: Memory key
+
+        Returns:
+            True if the operation succeeded (regardless of whether item existed),
+            False if an error occurred.
         """
-        query = "DELETE FROM user_memory WHERE tenant_id = $1 AND user_id = $2 AND key = $3"
-        await self.database.execute(query, tenant_id, user_id, key)
-        return True
+        try:
+            query = "DELETE FROM user_memory WHERE tenant_id = $1 AND user_id = $2 AND key = $3"
+            await self.database.execute(query, tenant_id, user_id, key)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete user memory {user_id}:{key}: {e}")
+            return False
 
     # =========================================================================
     # Session Memory (Context/Task Level)
@@ -234,7 +242,7 @@ class MemoryService:
             if isinstance(value, str):
                 try:
                     return json.loads(value)
-                except:
+                except (json.JSONDecodeError, ValueError):
                     return value
             return value
         return None
@@ -256,10 +264,10 @@ class MemoryService:
             if isinstance(val, str):
                 try:
                     val = json.loads(val)
-                except:
+                except (json.JSONDecodeError, ValueError):
                     pass
             memories[row.get("key")] = val
-            
+
         return memories
 
     async def delete_session_memory(self, tenant_id: str, session_id: str, key: str) -> bool:
@@ -270,10 +278,18 @@ class MemoryService:
             tenant_id: Tenant ID for multi-tenant isolation (required)
             session_id: Session ID
             key: Memory key
+
+        Returns:
+            True if the operation succeeded (regardless of whether item existed),
+            False if an error occurred.
         """
-        query = "DELETE FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
-        await self.database.execute(query, tenant_id, session_id, key)
-        return True
+        try:
+            query = "DELETE FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+            await self.database.execute(query, tenant_id, session_id, key)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete session memory {session_id}:{key}: {e}")
+            return False
 
     async def get_session_context(
         self,
@@ -389,7 +405,7 @@ class MemoryService:
             if isinstance(val, str):
                 try:
                     val = json.loads(val)
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     pass
 
             frequent_memories.append({

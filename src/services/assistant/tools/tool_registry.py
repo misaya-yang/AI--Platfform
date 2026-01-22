@@ -14,6 +14,7 @@ References:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -387,14 +388,32 @@ class ToolRegistry:
                 f"Tool {request.tool_name} requires confirmation but was executed directly"
             )
 
-        # Execute tool
+        # Execute tool with timeout enforcement
         try:
             logger.info(
                 f"Executing tool: {request.tool_name} "
-                f"(call_id={request.call_id})"
+                f"(call_id={request.call_id}, timeout={definition.timeout_seconds}s)"
             )
 
-            result = await executor.execute(request)
+            # Enforce timeout from tool definition
+            try:
+                result = await asyncio.wait_for(
+                    executor.execute(request),
+                    timeout=definition.timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                duration_ms = definition.timeout_seconds * 1000
+                logger.error(
+                    f"Tool {request.tool_name} timed out after {definition.timeout_seconds}s"
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=False,
+                    error=f"Tool execution timed out after {definition.timeout_seconds}s",
+                    duration_ms=duration_ms,
+                )
+
             result.duration_ms = (time.time() - start_time) * 1000
 
             logger.info(

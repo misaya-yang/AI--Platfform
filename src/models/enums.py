@@ -125,6 +125,7 @@ class StreamEventType(str, Enum):
 
     # === Context Retrieved (for RAG visualization) ===
     CONTEXT_RETRIEVED = "context_retrieved"  # RAG context retrieved
+    WEB_SEARCH_RESULTS = "web_search_results"  # Web search results received
     RAG_EVALUATION = "rag_evaluation"        # RAG quality evaluation result
     MEMORY_LOADED = "memory_loaded"          # Memory loading completed
     DONE = "done"                            # Execution complete

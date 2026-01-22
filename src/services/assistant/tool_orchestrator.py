@@ -36,6 +36,7 @@ References:
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 import uuid
@@ -351,17 +352,25 @@ class ToolOrchestrator:
             async_tasks[async_task] = planned_task
 
         # Use as_completed to yield results as they finish
-        for completed_task in asyncio.as_completed(async_tasks.keys()):
+        # Note: We iterate using the tasks directly to preserve the mapping
+        for coro in asyncio.as_completed(list(async_tasks.keys())):
             try:
-                result = await completed_task
+                result = await coro
                 yield result
             except Exception as e:
-                # Find which planned task this was for
-                planned_task = None
-                for task, pt in async_tasks.items():
-                    if task is completed_task:
-                        planned_task = pt
-                        break
+                # Find which planned task this was for using O(1) lookup
+                # Note: as_completed may wrap the original task, so we need
+                # to find by matching. Since exceptions are rare and the dict
+                # is typically small, this is acceptable.
+                planned_task = async_tasks.get(coro)
+
+                # Fallback to linear search if direct lookup fails
+                # (as_completed may return wrapped futures)
+                if planned_task is None:
+                    for task, pt in async_tasks.items():
+                        if task is coro or (hasattr(task, '_coro') and task._coro is getattr(coro, '_coro', None)):
+                            planned_task = pt
+                            break
 
                 # This shouldn't happen as _execute_single_task catches exceptions
                 # but handle it just in case
@@ -420,8 +429,14 @@ class ToolOrchestrator:
                     )
                 else:
                     # Fallback: Create a minimal context if none provided
-                    # WARNING: This fallback uses placeholder values and should be avoided
-                    # in production. Always provide a proper invocation_context.
+                    # In production, this should raise an error to prevent tenant isolation bypass
+                    env = os.getenv("ENVIRONMENT", "development")
+                    if env == "production":
+                        raise ValueError(
+                            f"invocation_context is required in production for task {task.id}. "
+                            "This prevents tenant isolation bypass and ensures proper audit trails."
+                        )
+
                     logger.warning(
                         f"No invocation_context provided for task {task.id}. "
                         "Using fallback context with placeholder values. "
@@ -433,6 +448,8 @@ class ToolOrchestrator:
                         user_id="system",
                         tenant_id="system",
                         request_id=str(uuid.uuid4()),
+                        kb_dataset_ids=[],  # Explicit empty list for safety
+                        user=None,  # No user context in fallback
                     )
                     tool_result = await self.tool_invoker.invoke(
                         tool_name=task.tool,

@@ -117,6 +117,8 @@ class StreamEventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_CALL_RESULT = "tool_call_result"  # AG-UI compatible tool result
+    TOOL_CALL_START = "tool_call_start"    # AG-UI tool call lifecycle start
+    TOOL_CALL_END = "tool_call_end"        # AG-UI tool call lifecycle end
 
     # Context and retrieval events
     CONTEXT_RETRIEVED = "context_retrieved"
@@ -222,7 +224,7 @@ class AssistantConfig:
     max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
 
     # Agent Loop settings (Enterprise unified 8-step flow)
-    use_agent_loop: bool = False  # Disabled by default - use simple flow for faster TTFT
+    use_agent_loop: bool = True  # Enabled for streaming-first TTFT optimization
     use_scenario_retrieval: bool = False  # Disabled - scenario detection still runs but no heavy retrieval
     enable_rag_metrics: bool = False  # Disabled in production for performance
 
@@ -2515,6 +2517,8 @@ Please use this web search context to inform your response when relevant."""
             streaming_first_mode=True,
             # System prompt - if not provided, streaming-first will use minimal prompt
             system_prompt=config.system_prompt,
+            # Web search preference (True=force, False=AI decides) - passed to prompt
+            web_search_enabled=config.web_search_enabled,
             # Legacy settings (only used when streaming_first_mode=False)
             enable_task_planning=config.enable_task_planning,
             enable_scenario_retrieval=config.use_scenario_retrieval,
@@ -2524,7 +2528,7 @@ Please use this web search context to inform your response when relevant."""
             kb_dataset_ids=config.kb_dataset_ids,
             kb_top_k=config.kb_top_k,
             kb_min_relevance=config.kb_score_threshold,
-            max_tool_iterations=10,
+            max_tool_iterations=5,  # Reasonable limit for tool iterations
             max_concurrent_tools=config.max_parallel_tools,
         )
 
@@ -2563,6 +2567,78 @@ Please use this web search context to inform your response when relevant."""
             config=loop_config,
             history=history,
         ):
+            # Special handling for streaming_first_completed event
+            # Split into usage and done events for frontend compatibility
+            if event.event_type == "streaming_first_completed":
+                # Extract usage data
+                usage_data = event.data.get("usage", {}) if isinstance(event.data, dict) else {}
+                yield AssistantStreamEvent(
+                    event_type="usage",
+                    data=usage_data if usage_data else {"input_tokens": 0, "output_tokens": 0},
+                )
+                # Extract duration and emit done event
+                duration_ms = event.data.get("total_time_ms", 0) if isinstance(event.data, dict) else 0
+                content_length = event.data.get("content_length", 0) if isinstance(event.data, dict) else 0
+                yield AssistantStreamEvent(
+                    event_type="done",
+                    data={
+                        "session_id": session_id,
+                        "duration_ms": duration_ms,
+                        "total_length": content_length,
+                    },
+                )
+                continue
+
+            # Handle tool_call_started -> tool_call_start (AG-UI compatible)
+            if event.event_type == "tool_call_started":
+                data = event.data if isinstance(event.data, dict) else {}
+                # Parse arguments string to dict for frontend display
+                args_str = data.get("arguments", "{}")
+                try:
+                    import json
+                    args_dict = json.loads(args_str) if args_str else {}
+                except (json.JSONDecodeError, TypeError):
+                    args_dict = {"raw": args_str} if args_str else {}
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TOOL_CALL_START.value,
+                    data={
+                        "tool_call_id": data.get("tool_id", ""),
+                        "tool_name": data.get("tool_name", ""),
+                        "arguments": args_dict,  # Include parsed arguments for card display
+                        "timestamp": event.timestamp,
+                    },
+                )
+                continue
+
+            # Handle tool_call_completed -> tool_call_end + tool_call_result (AG-UI compatible)
+            if event.event_type == "tool_call_completed":
+                data = event.data if isinstance(event.data, dict) else {}
+                tool_call_id = data.get("tool_id", "")
+                tool_name = data.get("tool_name", "")
+                metadata = data.get("metadata", {})
+                logger.info(f"[TOOL_CALL_COMPLETED] tool={tool_name}, metadata={metadata}, total_results={metadata.get('total_results')}")
+                # Send tool_call_end event
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TOOL_CALL_END.value,
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "timestamp": event.timestamp,
+                    },
+                )
+                # Send tool_call_result event with metadata for frontend display
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                    data={
+                        "tool_call_id": tool_call_id,
+                        "tool_name": tool_name,
+                        "result": data.get("result_preview", ""),
+                        "success": data.get("success", True),
+                        "result_count": metadata.get("total_results"),  # For KB/Web search result count
+                        "timestamp": event.timestamp,
+                    },
+                )
+                continue
+
             # Convert AgentLoopEvent to AssistantStreamEvent
             yield self._convert_agent_loop_event(event)
 

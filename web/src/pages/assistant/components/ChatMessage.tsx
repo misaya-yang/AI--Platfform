@@ -361,11 +361,10 @@ function AttachmentsDisplay({
   );
 }
 
-/** Premium Tool Calls Display - Manus style */
-function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls"] }) {
+/** Single Tool Call Card - Expandable Manus style */
+function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"]>[number]; idx: number }) {
   const { t } = useTranslation();
-
-  if (!toolCalls || toolCalls.length === 0) return null;
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Map tool names to icons
   const getToolIcon = (name: string) => {
@@ -373,7 +372,9 @@ function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls
       retrieve_product_info: <Database className="h-4 w-4" />,
       get_product_details: <FileText className="h-4 w-4" />,
       search_kb: <Database className="h-4 w-4" />,
+      search_knowledge_base: <Database className="h-4 w-4" />,
       web_search: <Globe className="h-4 w-4" />,
+      search_web: <Globe className="h-4 w-4" />,
       execute_python_code: <Cog className="h-4 w-4" />,
       generate_image: <ImageIcon className="h-4 w-4" />,
       generate_pptx: <FileText className="h-4 w-4" />,
@@ -394,7 +395,7 @@ function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls
         return {
           label: t("assistant.toolStatus.running", "执行中"),
           color: "bg-blue-500/10 text-blue-500 border-blue-500/20",
-          dot: "bg-blue-500"
+          dot: "bg-blue-500 animate-pulse"
         };
       case "error":
         return {
@@ -411,6 +412,105 @@ function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls
     }
   };
 
+  const statusConfig = getStatusConfig(tc.status);
+  const hasExpandableContent = tc.arguments && Object.keys(tc.arguments).length > 0;
+
+  return (
+    <motion.div
+      key={tc.id || idx}
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: idx * 0.1 }}
+      className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 border border-violet-500/10 dark:border-violet-400/10 hover:border-violet-500/30 transition-all duration-200"
+    >
+      {/* Glow effect on hover */}
+      <div className="absolute inset-0 bg-gradient-to-r from-violet-500/0 via-purple-500/5 to-fuchsia-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+
+      {/* Clickable header */}
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="relative w-full flex items-start gap-3 p-3 text-left"
+      >
+        {/* Tool icon */}
+        <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 border border-violet-500/20">
+          <div className="text-violet-500 dark:text-violet-400">
+            {getToolIcon(tc.name)}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 min-w-0">
+          {/* Tool name */}
+          <div className="flex items-center justify-between gap-2">
+            <code className="text-sm font-mono font-medium text-slate-700 dark:text-slate-200">
+              {tc.name}
+            </code>
+            {/* Status badge */}
+            <span className={cn(
+              "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+              statusConfig.color
+            )}>
+              <span className={cn("h-1.5 w-1.5 rounded-full", statusConfig.dot)} />
+              {statusConfig.label}
+            </span>
+          </div>
+
+          {/* Arguments preview (collapsed) */}
+          {!isExpanded && tc.arguments && Object.keys(tc.arguments).length > 0 && (
+            <pre className="mt-1.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
+              {JSON.stringify(tc.arguments).length > 60
+                ? JSON.stringify(tc.arguments).slice(0, 60) + "..."
+                : JSON.stringify(tc.arguments)}
+            </pre>
+          )}
+        </div>
+
+        {/* Expand indicator */}
+        <motion.div
+          animate={{ rotate: isExpanded ? 90 : 0 }}
+          transition={{ duration: 0.2 }}
+          className="flex-shrink-0 mt-1"
+        >
+          <ChevronRight className="h-4 w-4 text-slate-300 dark:text-slate-600 group-hover:text-violet-400 transition-colors" />
+        </motion.div>
+      </button>
+
+      {/* Expandable content */}
+      <AnimatePresence>
+        {isExpanded && hasExpandableContent && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 pb-3 pt-0 ml-11">
+              {/* Full arguments */}
+              {tc.arguments && Object.keys(tc.arguments).length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[10px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                    {t("assistant.toolArguments", "参数")}
+                  </div>
+                  <pre className="text-[11px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                    {JSON.stringify(tc.arguments, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+/** Premium Tool Calls Display - Manus style */
+function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls"] }) {
+  const { t } = useTranslation();
+
+  if (!toolCalls || toolCalls.length === 0) return null;
+
   return (
     <div className="mb-4 space-y-2">
       {/* Section header */}
@@ -421,61 +521,9 @@ function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls
 
       {/* Tool call cards */}
       <div className="space-y-2">
-        {toolCalls.map((tc, idx) => {
-          const statusConfig = getStatusConfig(tc.status);
-
-          return (
-            <motion.div
-              key={tc.id || idx}
-              initial={{ opacity: 0, x: -10 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: idx * 0.1 }}
-              className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 border border-violet-500/10 dark:border-violet-400/10 hover:border-violet-500/30 transition-all duration-200"
-            >
-              {/* Glow effect on hover */}
-              <div className="absolute inset-0 bg-gradient-to-r from-violet-500/0 via-purple-500/5 to-fuchsia-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-
-              <div className="relative flex items-start gap-3 p-3">
-                {/* Tool icon */}
-                <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 border border-violet-500/20">
-                  <div className="text-violet-500 dark:text-violet-400">
-                    {getToolIcon(tc.name)}
-                  </div>
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  {/* Tool name */}
-                  <div className="flex items-center justify-between gap-2">
-                    <code className="text-sm font-mono font-medium text-slate-700 dark:text-slate-200">
-                      {tc.name}
-                    </code>
-                    {/* Status badge */}
-                    <span className={cn(
-                      "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
-                      statusConfig.color
-                    )}>
-                      <span className={cn("h-1.5 w-1.5 rounded-full", statusConfig.dot)} />
-                      {statusConfig.label}
-                    </span>
-                  </div>
-
-                  {/* Arguments */}
-                  {tc.arguments && Object.keys(tc.arguments).length > 0 && (
-                    <pre className="mt-1.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
-                      {JSON.stringify(tc.arguments).length > 60
-                        ? JSON.stringify(tc.arguments).slice(0, 60) + "..."
-                        : JSON.stringify(tc.arguments)}
-                    </pre>
-                  )}
-                </div>
-
-                {/* Expand indicator */}
-                <ChevronRight className="h-4 w-4 text-slate-300 dark:text-slate-600 group-hover:text-violet-400 transition-colors flex-shrink-0 mt-1" />
-              </div>
-            </motion.div>
-          );
-        })}
+        {toolCalls.map((tc, idx) => (
+          <ToolCallCard key={tc.id || idx} tc={tc} idx={idx} />
+        ))}
       </div>
     </div>
   );

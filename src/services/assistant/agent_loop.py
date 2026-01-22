@@ -243,6 +243,12 @@ class AgentLoopConfig:
     kb_results_per_query: int = 3  # Results per query
     kb_max_content_length: int = 600  # Reduced for faster processing (was 800)
 
+    # Web search configuration
+    # This is a PREFERENCE signal, not an on/off switch (matching GPT/Manus design)
+    # True = Force web search for all questions
+    # False = AI autonomously decides when web search is needed
+    web_search_enabled: bool = False
+
     # Execution limits
     max_tool_iterations: int = 10
     max_concurrent_tools: int = 5
@@ -936,10 +942,12 @@ class AgentLoop:
             messages: List[Dict[str, Any]] = []
 
             # System prompt - use streaming-first optimized version
+            # Pass user preferences to prompt so AI can make intelligent decisions
             system_prompt = ctx.config.system_prompt
             if not system_prompt:
                 system_prompt = get_streaming_first_prompt(
                     available_datasets=ctx.config.kb_dataset_ids,
+                    web_search_enabled=ctx.config.web_search_enabled,  # AI knows user preference
                 )
 
             messages.append({
@@ -963,17 +971,26 @@ class AgentLoop:
             t1 = time.time()
             logger.info(f"[STREAMING-FIRST] Context build: {(t1-t0)*1000:.0f}ms, {len(messages)} messages, prompt={len(system_prompt)} chars")
 
-            # Step 2: Get tool definitions
+            # Step 2: Get tool definitions (ALL tools available - AI decides when to use)
+            # Design philosophy (matching GPT/Manus):
+            # - Tools are AI capabilities, not on/off switches
+            # - User settings are preferences conveyed via System Prompt
+            # - AI autonomously decides when to use tools based on context
             tools = []
             invocation_context = ToolInvocationContext(
                 session_id=ctx.session_id,
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
                 request_id=ctx.request_id,
+                kb_dataset_ids=ctx.config.kb_dataset_ids or [],  # Pass KB config for auto-injection
+                user=user,  # Pass UserContext for tools that need permissions (e.g., KB search)
             )
             if self.tool_invoker:
                 tool_defs = self.tool_invoker.get_tool_definitions(context=invocation_context)
+                # All tools are always available - AI makes intelligent decisions
+                # based on user preferences communicated via System Prompt
                 tools = [t.to_openai_schema() for t in tool_defs]
+                logger.info(f"[STREAMING-FIRST] All tools available: {[t.name for t in tool_defs]} (web_search_preference={ctx.config.web_search_enabled}, kb_ids={ctx.config.kb_dataset_ids})")
 
             t2 = time.time()
             logger.info(f"[STREAMING-FIRST] Tool defs: {(t2-t1)*1000:.0f}ms, {len(tools)} tools")
@@ -1083,8 +1100,12 @@ class AgentLoop:
                                 context=invocation_context,
                                 cancel_event=task_ctx.cancel_event if task_ctx else None,
                             )
-                            # Check if cancelled
-                            if result.error_type == "cancelled":
+                            # Check if cancelled (via metadata or error message)
+                            is_cancelled = (
+                                result.metadata.get("cancelled", False) or
+                                (result.error and "cancelled" in result.error.lower())
+                            )
+                            if is_cancelled:
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="tool_call_cancelled",
@@ -1096,6 +1117,8 @@ class AgentLoop:
                             tool_result = f"Tool '{tool_name}' not available"
 
                         # Emit tool_call_completed event
+                        # Include metadata for frontend display (e.g., total_results for KB search)
+                        tool_metadata = result.metadata if self.tool_invoker and hasattr(result, 'metadata') else {}
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="tool_call_completed",
@@ -1104,6 +1127,7 @@ class AgentLoop:
                                 "tool_name": tool_name,
                                 "success": True,
                                 "result_preview": str(tool_result)[:500],
+                                "metadata": tool_metadata,
                             },
                         )
 
@@ -1455,6 +1479,7 @@ class AgentLoop:
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
                 request_id=ctx.request_id,
+                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
             )
             available_tools = self.tool_invoker.get_available_tools(invocation_context)
 
@@ -1903,6 +1928,7 @@ class AgentLoop:
                     user_id=ctx.user_id,
                     tenant_id=ctx.tenant_id,
                     request_id=ctx.request_id,
+                    kb_dataset_ids=ctx.config.kb_dataset_ids or [],
                 )
                 available_tools = self.tool_invoker.get_tool_definitions(
                     context=invocation_context
@@ -2057,6 +2083,7 @@ class AgentLoop:
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
                 request_id=ctx.request_id,
+                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
             )
 
             async for result in orchestrator.execute_plan(
@@ -2147,6 +2174,7 @@ class AgentLoop:
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
                 request_id=ctx.request_id,
+                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
             )
 
             async def _invoke_tool():

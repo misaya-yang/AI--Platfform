@@ -74,9 +74,9 @@ KB_SEARCH_DEFINITION = ToolDefinition(
         ToolParameter(
             name="score_threshold",
             type="number",
-            description="Minimum relevance score (0.0-1.0). Default is 0.5.",
+            description="Minimum relevance score (0.0-1.0). Lower values return more results. Default is 0.0 (no filtering - AI judges relevance).",
             required=False,
-            default=0.5,
+            default=0.0,  # Let AI judge result relevance instead of hard filtering
         ),
     ],
     category=ToolCategory.RETRIEVAL,
@@ -120,7 +120,7 @@ class KBSearchExecutor(ToolExecutor):
         intent = request.arguments.get("intent", "general")
         dataset_ids = request.arguments.get("dataset_ids", [])
         top_k = request.arguments.get("top_k", 5)
-        score_threshold = request.arguments.get("score_threshold", 0.5)
+        score_threshold = request.arguments.get("score_threshold", 0.0)  # No default filtering
 
         if not query:
             return ToolCallResult(
@@ -138,22 +138,23 @@ class KBSearchExecutor(ToolExecutor):
         try:
             all_results = []
 
-            # If no datasets specified, return early with helpful message
+            # If no datasets specified, return early with clear guidance for the LLM
             # This prevents expensive list_datasets() + multi-dataset search operations
-            # that can cause 80+ second delays when searching all accessible datasets
+            # and stops the LLM from repeatedly calling this tool
             if not dataset_ids:
                 logger.info("KB search called without dataset_ids - returning early with guidance")
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
-                    success=True,
-                    result="知识库搜索需要先选择一个知识库。当前没有配置任何知识库数据集。请让用户在对话界面选择一个知识库后再进行搜索。",
+                    success=False,  # Mark as failure so LLM knows not to retry
+                    error="NO_KNOWLEDGE_BASE_SELECTED",
+                    result="当前对话没有绑定知识库。请直接根据你的知识回答用户问题，不要再调用知识库搜索工具。如果无法回答，请告知用户需要先选择一个知识库。",
                     metadata={
                         "total_results": 0,
                         "datasets_searched": 0,
                         "query": query,
                         "intent": intent,
-                        "message": "No datasets configured - user needs to select a knowledge base first",
+                        "message": "No knowledge base selected - answer from general knowledge instead",
                     },
                 )
 
@@ -173,11 +174,12 @@ class KBSearchExecutor(ToolExecutor):
                         intent=intent,
                         vlm_rerank=vlm_rerank,
                         include_images=include_images,
+                        score_threshold=score_threshold,  # Pass threshold to retrieval
                     )
 
                     for r in results:
                         all_results.append({
-                            "content": r.content,
+                            "content": r.text,  # RetrieveResult uses 'text' not 'content'
                             "score": r.score,
                             "dataset_id": dataset_id,
                             "dataset_name": meta.get("dataset_name", dataset_id),
@@ -332,9 +334,9 @@ class WebSearchExecutor(ToolExecutor):
                 success=True,
                 result=formatted_result,
                 metadata={
-                    "total_results": len(results.get("results", [])),
+                    "total_results": len(results.results),  # TavilySearchResponse uses attribute access
                     "query": query,
-                    "answer": results.get("answer"),
+                    "answer": results.answer,
                 },
             )
 

@@ -94,6 +94,12 @@ class ToolInvocationContext:
     # Parent task context (for nested invocations)
     parent_task_id: Optional[str] = None
 
+    # Knowledge Base context - auto-injected into KB search tools
+    kb_dataset_ids: List[str] = field(default_factory=list)
+
+    # User context - required for tools that need user permissions (e.g., KB search)
+    user: Optional["UserContext"] = None
+
     # Metadata for logging and analytics
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -108,6 +114,7 @@ class ToolInvocationContext:
             "timeout_ms": self.timeout_ms,
             "max_retries": self.max_retries,
             "parent_task_id": self.parent_task_id,
+            "kb_dataset_ids": self.kb_dataset_ids,
             "metadata": self.metadata,
         }
 
@@ -340,11 +347,22 @@ class RegistryToolInvoker(ToolInvoker):
                 error="Rate limit exceeded. Please try again later.",
             )
 
+        # Auto-inject kb_dataset_ids for KB search tool if not provided
+        # This fixes the issue where LLM calls the tool without knowing which datasets to search
+        final_arguments = arguments.copy()
+        if tool_name == "search_knowledge_base":
+            if not final_arguments.get("dataset_ids") and context.kb_dataset_ids:
+                final_arguments["dataset_ids"] = context.kb_dataset_ids
+                logger.info(
+                    f"Auto-injected kb_dataset_ids into search_knowledge_base: {context.kb_dataset_ids}"
+                )
+
         # Build request
         request = ToolCallRequest(
             call_id=call_id,
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=final_arguments,
+            user=context.user,  # Pass user context for tools that need permissions
             metadata={
                 "session_id": context.session_id,
                 "user_id": context.user_id,

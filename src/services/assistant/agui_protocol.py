@@ -281,12 +281,16 @@ class AGUIEventEmitter:
         Returns:
             Formatted SSE string: "event: {type}\ndata: {json}\n\n"
         """
-        # Add common fields
-        data["request_id"] = self.request_id
-        data["chunk_index"] = self.chunk_index
+        # Create a copy to avoid mutating the input dict
+        # This prevents data corruption if the same dict is reused
+        output_data = {
+            **data,
+            "request_id": self.request_id,
+            "chunk_index": self.chunk_index,
+        }
         self.chunk_index += 1
 
-        json_data = json.dumps(data, ensure_ascii=False, default=str)
+        json_data = json.dumps(output_data, ensure_ascii=False, default=str)
         return f"event: {event_type}\ndata: {json_data}\n\n"
 
     # =========================================================================

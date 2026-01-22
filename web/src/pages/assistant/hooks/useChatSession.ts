@@ -654,10 +654,11 @@ export function useChatSession() {
             const toolStartData = event.data as {
               tool_call_id: string;
               tool_name: string;
+              arguments?: Record<string, unknown>;
               step_id?: string;
               timestamp: number;
             };
-            // Update the parent step with sub-task info
+            // Update the parent step with sub-task info (if step_id exists)
             if (toolStartData.step_id) {
               setWorkingMemory((prev) => prev ? {
                 ...prev,
@@ -677,6 +678,25 @@ export function useChatSession() {
                 ),
               } : null);
             }
+            // Always update message.toolCalls to display tool call cards (Manus style)
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMessage.id
+                  ? {
+                      ...m,
+                      toolCalls: [
+                        ...(m.toolCalls || []),
+                        {
+                          id: toolStartData.tool_call_id,
+                          name: toolStartData.tool_name,
+                          arguments: toolStartData.arguments || {},
+                          status: "running" as const,
+                        },
+                      ],
+                    }
+                  : m
+              )
+            );
             break;
 
           case SSEEventType.TOOL_CALL_END:
@@ -700,11 +720,14 @@ export function useChatSession() {
           case SSEEventType.TOOL_CALL_RESULT:
             const toolResultData = event.data as {
               tool_call_id: string;
+              tool_name?: string;
               result: unknown;
               success: boolean;
+              result_count?: number;  // From backend metadata.total_results
               duration_ms?: number;
               timestamp: number;
             };
+            // Update workingMemory (existing logic)
             setWorkingMemory((prev) => prev ? {
               ...prev,
               tasks: prev.tasks.map((t) => ({
@@ -721,6 +744,53 @@ export function useChatSession() {
                 ),
               })),
             } : null);
+            // Also update message.toolCalls status (Manus style)
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMessage.id
+                  ? {
+                      ...m,
+                      toolCalls: (m.toolCalls || []).map((tc) =>
+                        tc.id === toolResultData.tool_call_id
+                          ? {
+                              ...tc,
+                              status: toolResultData.success ? "completed" : "error",
+                            }
+                          : tc
+                      ),
+                    }
+                  : m
+              )
+            );
+            // Update searchStatus when KB/Web search tool completes
+            // Use tool_name from result data directly (more reliable)
+            {
+              const toolName = toolResultData.tool_name;
+              const isKbTool = toolName === "search_knowledge_base" || toolName === "search_kb";
+              const isWebTool = toolName === "search_web" || toolName === "web_search";
+              if (isKbTool || isWebTool) {
+                const statusType = isKbTool ? "kb" : "web";
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMessage.id && m.searchStatus
+                      ? {
+                          ...m,
+                          searchStatus: m.searchStatus.map((s) =>
+                            s.type === statusType
+                              ? {
+                                  ...s,
+                                  state: toolResultData.success ? "completed" : "error",
+                                  resultCount: toolResultData.result_count ?? s.resultCount,
+                                  durationMs: toolResultData.duration_ms,
+                                }
+                              : s
+                          ),
+                        }
+                      : m
+                  )
+                );
+              }
+            }
             break;
 
           // === Custom File Events ===

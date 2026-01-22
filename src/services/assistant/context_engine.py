@@ -285,7 +285,10 @@ def estimate_tokens(text: str) -> int:
     cjk_tokens = cjk_count * 1.5
     ascii_tokens = ascii_count / 3.5  # ~3.5 chars per token for English
 
-    return int(cjk_tokens + ascii_tokens)
+    # Add 15% safety margin to prevent context overflow
+    # This accounts for tokenizer variations across different models
+    base_estimate = cjk_tokens + ascii_tokens
+    return int(base_estimate * 1.15)
 
 
 def estimate_message_tokens(message: dict) -> int:

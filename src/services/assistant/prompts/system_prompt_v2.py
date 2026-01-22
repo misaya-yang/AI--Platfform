@@ -1127,6 +1127,7 @@ def get_cache_stable_prompt_hash(
 
 def get_streaming_first_prompt(
     available_datasets: Optional[List[str]] = None,
+    web_search_enabled: bool = False,
 ) -> str:
     """
     Get an ultra-minimal system prompt for Streaming-First mode.
@@ -1134,16 +1135,17 @@ def get_streaming_first_prompt(
     This prompt is designed for MAXIMUM TTFT optimization (~500 tokens):
     1. Core identity only - no elaborate instructions
     2. Tool usage hints - LLM decides when to use tools
-    3. NO dynamic content - 100% cache-stable
+    3. User preferences guide AI behavior (not hard restrictions)
 
-    The philosophy: Let the LLM be smart. It knows how to:
-    - Answer simple questions directly
-    - Use tools when it needs more information
-    - Search the knowledge base for company-specific data
-    - Search the web for general knowledge
+    Design Philosophy (matching GPT/Manus):
+    - Tools are AI capabilities, not on/off switches
+    - User settings are preference signals, not prohibitions
+    - web_search_enabled=True: Force web search for all questions
+    - web_search_enabled=False: AI decides when web search is needed
 
     Args:
         available_datasets: Available knowledge base IDs (for context)
+        web_search_enabled: User's web search preference (True=always use, False=AI decides)
 
     Returns:
         Ultra-minimal system prompt (~500 tokens)
@@ -1156,25 +1158,43 @@ You have access to company knowledge bases: {', '.join(available_datasets)}.
 Use the `search_knowledge_base` tool when the user asks about company-specific information.
 """
 
+    # Generate web search guidance based on user preference
+    if web_search_enabled:
+        # User enabled web search = Force web search for all questions
+        web_hint = """
+## Web Search (ENABLED - Always Use)
+The user has enabled web search mode. For ANY question that could benefit from current information,
+you MUST use the `web_search` tool to provide up-to-date, accurate answers.
+Always search first, then synthesize the results into your response.
+"""
+    else:
+        # User didn't enable web search = AI autonomously decides
+        web_hint = """
+## Web Search (Available on Demand)
+Web search is available. Use it intelligently when:
+- The user explicitly asks for current/recent information
+- The question requires real-time data (news, stock prices, weather, events)
+- Your knowledge may be outdated for this specific topic
+- You're uncertain and fresh data would improve your answer
+
+For general knowledge questions you can answer confidently, respond directly without searching.
+"""
+
     return f'''You are an enterprise AI assistant.
+
+## Response Priority (CRITICAL)
+1. For simple questions you can answer confidently: respond directly without tools
+2. If you need to search for information: first acknowledge the request with a brief message, then use the tool
+3. Never make the user wait in silence - always provide immediate feedback
 
 ## Core Principles
 - Be helpful, accurate, and concise
-- Use tools when you need more information
+- Use tools intelligently based on context
 - Cite sources when using retrieved information
 - Admit uncertainty rather than hallucinate
-{kb_hint}
-## Tools
-You have access to various tools. Use them intelligently:
-- **search_knowledge_base**: Search company documents and knowledge bases
-- **web_search**: Search the internet for current information
-- **code_interpreter**: Execute code for analysis and calculations
-
-For simple questions you can answer confidently, respond directly.
-For questions requiring company data or current information, use the appropriate tool.
-
+{kb_hint}{web_hint}
 ## Response Style
 - Use clear, professional language
-- Format responses with markdown when helpful
-- Keep responses focused and actionable
+- Format with markdown when helpful
+- Keep responses focused
 '''

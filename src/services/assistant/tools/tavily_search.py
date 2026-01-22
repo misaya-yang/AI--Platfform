@@ -73,7 +73,8 @@ class TavilySearchTool:
         context = tool.format_for_context(results)
     """
 
-    BASE_URL = "https://api.tavily.com"
+    # Allow override via environment variable for testing/staging
+    BASE_URL = os.getenv("TAVILY_API_URL", "https://api.tavily.com")
     DEFAULT_MAX_RESULTS = 5
     DEFAULT_SEARCH_DEPTH = "basic"  # "basic" or "advanced"
     DEFAULT_TIMEOUT = 30.0

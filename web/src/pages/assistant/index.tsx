@@ -205,7 +205,7 @@ export function AssistantPage() {
       if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
         setSelectedModel(sessionConfig.selected_model);
       }
-      if (sessionConfig.selected_datasets) setSelectedDatasets(sessionConfig.selected_datasets);
+      setSelectedDatasets(sessionConfig.selected_datasets || []);  // Always reset, even if empty
       if (typeof sessionConfig.web_search_enabled === "boolean") setWebSearchEnabled(sessionConfig.web_search_enabled);
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
