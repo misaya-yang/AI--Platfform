@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Select, Row, Col, Statistic } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ResponsiveContainer,
   AreaChart,
   Area,
   XAxis,
@@ -12,6 +11,7 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
@@ -106,32 +106,30 @@ export function PerformancePanel() {
       </Row>
 
       {/* Chart */}
-      <div style={{ width: "100%", height: 200 }}>
-        <ResponsiveContainer minWidth={100} minHeight={100}>
-          <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
-            <XAxis
-              dataKey="date"
-              tick={{ fontSize: 11 }}
-              tickFormatter={(value) =>
-                dayjs(value).format(granularity === "hour" ? "HH:mm" : "MM-DD")
-              }
-            />
-            <YAxis tick={{ fontSize: 11 }} width={40} />
-            <Tooltip
-              formatter={(value) => [`${value ?? 0} ms`, ""]}
-              labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD HH:mm")}
-            />
-            <Area
-              type="monotone"
-              dataKey={selectedMetric === "avg" ? "avgLatency" : selectedMetric}
-              stroke="#3b82f6"
-              fill="rgba(59, 130, 246, 0.2)"
-              strokeWidth={2}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
+      <SafeResponsiveChart height={200} minWidth={100} minHeight={100}>
+        <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11 }}
+            tickFormatter={(value) =>
+              dayjs(value).format(granularity === "hour" ? "HH:mm" : "MM-DD")
+            }
+          />
+          <YAxis tick={{ fontSize: 11 }} width={40} />
+          <Tooltip
+            formatter={(value) => [`${value ?? 0} ms`, ""]}
+            labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD HH:mm")}
+          />
+          <Area
+            type="monotone"
+            dataKey={selectedMetric === "avg" ? "avgLatency" : selectedMetric}
+            stroke="#3b82f6"
+            fill="rgba(59, 130, 246, 0.2)"
+            strokeWidth={2}
+          />
+        </AreaChart>
+      </SafeResponsiveChart>
     </PanelWrapper>
   );
 }

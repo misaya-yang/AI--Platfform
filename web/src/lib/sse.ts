@@ -52,6 +52,17 @@ export type AGUIEventType =
   | "image_generation_result"
   // Status
   | "status"
+  // ReAct Thinking (transparent reasoning)
+  | "thinking_start"
+  | "thinking_delta"
+  | "thinking_end"
+  | "thinking_error"
+  // Phase tracking (AgentLoop optimization)
+  | "phase_started"
+  | "phase_completed"
+  // Error and cancellation
+  | "error"
+  | "cancelled"
   // Special
   | "stream_end"
   | "custom_event"

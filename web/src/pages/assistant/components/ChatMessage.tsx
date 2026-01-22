@@ -32,7 +32,7 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(true);
 
-  if (!searchStatus || searchStatus.length === 0) return null;
+  if (!searchStatus || !Array.isArray(searchStatus) || searchStatus.length === 0) return null;
 
   // Check if all tasks are completed
   const allCompleted = searchStatus.every(item => item.state === "completed");

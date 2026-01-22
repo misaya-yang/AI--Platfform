@@ -147,6 +147,7 @@ class DatabaseStorage:
             await self._auto_apply_account_permission_migration()
             await self._auto_apply_user_extra_permissions_migration()
             await self._auto_apply_api_keys_migration()
+            await self._auto_apply_assistant_memory_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -335,6 +336,48 @@ class DatabaseStorage:
                 logger.info("Migration 020 already applied")
             else:
                 logger.error(f"Failed to apply migration 020: {e}")
+
+    async def _session_memory_schema_missing(self) -> bool:
+        """Check if session_memory table is missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            table_exists = await conn.fetchval("""
+                SELECT tablename FROM pg_tables
+                WHERE schemaname = 'public' AND tablename = 'session_memory'
+            """)
+            return table_exists is None
+
+    async def _auto_apply_assistant_memory_migration(self) -> None:
+        """Apply assistant memory migration (024) when required."""
+        if not self._pool:
+            return
+        try:
+            missing = await self._session_memory_schema_missing()
+        except Exception as e:
+            logger.warning(f"Could not check session_memory schema: {e}")
+            return
+        if not missing:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "024_assistant_memory.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 024 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 024_assistant_memory.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 024 already applied (session_memory table exists)")
+            else:
+                logger.error(f"Failed to apply migration 024: {e}")
 
     # =========================================================================
     # 服务定义表 (services)
@@ -4917,7 +4960,7 @@ class DatabaseStorage:
                 """
                 INSERT INTO session_memory (tenant_id, session_id, key, value, metadata)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (session_id, key)
+                ON CONFLICT (tenant_id, session_id, key)
                 DO UPDATE SET value = $4, metadata = COALESCE($5, session_memory.metadata)
                 """,
                 tenant_id,
@@ -5079,7 +5122,7 @@ class DatabaseStorage:
                 """
                 INSERT INTO user_memory (tenant_id, user_id, key, value, metadata)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (user_id, key)
+                ON CONFLICT (tenant_id, user_id, key)
                 DO UPDATE SET value = $4, metadata = COALESCE($5, user_memory.metadata)
                 """,
                 tenant_id,

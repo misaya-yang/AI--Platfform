@@ -22,6 +22,7 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
 import type { ExecutionStatusType } from "./ExecutionStatus";
+import { copyToClipboard } from "@/lib/clipboard";
 
 // ============================================================================
 // Types
@@ -58,7 +59,6 @@ export interface OutputFile {
   artifact_id?: string;
   download_url?: string;
 }
-
 
 interface ArtifactsPanelProps {
   isOpen: boolean;
@@ -428,7 +428,7 @@ export function ArtifactsPanel({
     const textToCopy = view === "code" ? currentCode : executionOutput;
     if (!textToCopy) return;
     try {
-      await navigator.clipboard.writeText(textToCopy);
+      await copyToClipboard(textToCopy);
       setCopied(true);
       toast.success("Copied to clipboard");
       setTimeout(() => setCopied(false), 2000);

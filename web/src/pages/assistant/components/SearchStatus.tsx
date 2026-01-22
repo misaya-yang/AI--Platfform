@@ -195,7 +195,7 @@ function SearchStatusItem({ item }: { item: SearchStatusItem }) {
 }
 
 export function SearchStatus({ items, className }: SearchStatusProps) {
-  if (items.length === 0) return null;
+  if (!items || !Array.isArray(items) || items.length === 0) return null;
 
   return (
     <div className={cn("flex flex-col gap-2", className)}>

@@ -12,8 +12,10 @@ Endpoints:
 - GET /assistant/sessions/{session_id} - Get session details
 - DELETE /assistant/sessions/{session_id} - Delete session
 - GET /assistant/sessions/{session_id}/history - Get session message history
+- GET /assistant/sessions/{session_id}/metrics - Get session context metrics
 - GET /assistant/artifacts/{artifact_id} - Get artifact metadata
 - GET /assistant/artifacts/{artifact_id}/download - Download artifact file
+- GET /assistant/metrics/tenant - Get tenant-level context metrics
 """
 
 from __future__ import annotations
@@ -766,6 +768,77 @@ async def get_session_history(
 
 
 # =========================================================================
+# Task Management Endpoints (Phase 1 Optimization)
+# =========================================================================
+
+
+class TaskCancelRequest(BaseModel):
+    """Request to cancel a running task."""
+    reason: Optional[str] = None
+
+
+class TaskCancelResponse(BaseModel):
+    """Response for task cancellation."""
+    task_id: str
+    session_id: str
+    cancelled: bool
+    message: str
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
+async def cancel_task(
+    task_id: str,
+    request: Request,
+    body: Optional[TaskCancelRequest] = None,
+    user: UserContext = Depends(get_user_context),
+) -> TaskCancelResponse:
+    """
+    Cancel a running assistant task.
+
+    Requests cancellation of an ongoing streaming response.
+    The actual cancellation may take a moment as the current
+    operation completes gracefully.
+
+    Args:
+        task_id: Task ID (from run_started event)
+        body: Optional cancellation reason
+
+    Returns:
+        TaskCancelResponse with cancellation status
+    """
+    from ...services.assistant.task_manager import get_task_manager
+
+    task_manager = get_task_manager()
+
+    # Get task context to verify existence
+    task_ctx = await task_manager.get_task_context(task_id)
+    if not task_ctx:
+        raise HTTPException(status_code=404, detail="Task not found or already completed")
+
+    # Get session to verify ownership
+    session = await task_manager.get_session(task_ctx.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Security check: Only allow cancelling own tasks
+    if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Request cancellation
+    success = await task_manager.cancel_task(task_ctx.session_id, task_id)
+
+    reason = body.reason if body else None
+    logger.info(f"Task cancellation requested: task_id={task_id}, user={user.user_id}, reason={reason}")
+
+    return TaskCancelResponse(
+        task_id=task_id,
+        session_id=task_ctx.session_id,
+        cancelled=success,
+        message="Cancellation requested" if success else "Task already completed or not cancellable",
+    )
+
+
+# =========================================================================
 # Artifact Management Endpoints
 # =========================================================================
 
@@ -1245,3 +1318,94 @@ async def generate_image(
             duration_ms=(time.time() - start_time) * 1000,
             error=str(e),
         )
+
+
+# =========================================================================
+# Context Metrics Endpoints (Observability)
+# =========================================================================
+
+
+class ContextMetricsResponse(BaseModel):
+    """Response with context metrics for a session."""
+    session_id: str
+    request_count: int
+    avg_tokens: int
+    avg_utilization: float
+    avg_compression_ratio: float
+    avg_cache_hit_rate: float
+    total_tokens_used: Optional[int] = None
+
+
+class TenantMetricsResponse(BaseModel):
+    """Response with aggregated tenant metrics."""
+    tenant_id: str
+    hours: int
+    request_count: int
+    unique_sessions: int
+    total_tokens: int
+    avg_tokens_per_request: Optional[int] = None
+    avg_utilization: Optional[float] = None
+
+
+@router.get(
+    "/sessions/{session_id}/metrics",
+    response_model=ContextMetricsResponse,
+    summary="Get context metrics for a session",
+    description="Returns aggregated context metrics for a specific session including token usage, compression, and cache performance.",
+)
+async def get_session_metrics(
+    session_id: str,
+    user: UserContext = Depends(get_user_context),
+    request: Request = None,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Get context metrics for a session."""
+    from ...services.assistant import get_context_metrics_collector
+
+    # Verify session ownership (security: prevent access to other users' metrics)
+    session_manager = get_session_manager(request)
+    session = await session_manager.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    collector = get_context_metrics_collector()
+    stats = await collector.get_session_stats(session_id, limit=limit)
+
+    return ContextMetricsResponse(
+        session_id=session_id,
+        request_count=stats.get("request_count", 0),
+        avg_tokens=stats.get("avg_tokens", 0),
+        avg_utilization=round(stats.get("avg_utilization", 0), 3),
+        avg_compression_ratio=round(stats.get("avg_compression_ratio", 1.0), 2),
+        avg_cache_hit_rate=round(stats.get("avg_cache_hit_rate", 0), 3),
+        total_tokens_used=stats.get("total_tokens_used"),
+    )
+
+
+@router.get(
+    "/metrics/tenant",
+    response_model=TenantMetricsResponse,
+    summary="Get aggregated metrics for tenant",
+    description="Returns aggregated context metrics for the current tenant over a specified time window.",
+)
+async def get_tenant_metrics(
+    user: UserContext = Depends(get_user_context),
+    hours: int = Query(default=24, ge=1, le=168),
+):
+    """Get aggregated metrics for the current tenant."""
+    from ...services.assistant import get_context_metrics_collector
+
+    collector = get_context_metrics_collector()
+    stats = await collector.get_tenant_stats(user.tenant_id, hours=hours)
+
+    return TenantMetricsResponse(
+        tenant_id=user.tenant_id,
+        hours=hours,
+        request_count=stats.get("request_count", 0),
+        unique_sessions=stats.get("unique_sessions", 0),
+        total_tokens=stats.get("total_tokens", 0),
+        avg_tokens_per_request=stats.get("avg_tokens_per_request"),
+        avg_utilization=round(stats.get("avg_utilization", 0), 3) if stats.get("avg_utilization") else None,
+    )

@@ -365,12 +365,15 @@ export function AgentTaskTimeline({
   thinkingMessage,
   className,
 }: AgentTaskTimelineProps) {
-  if (tasks.length === 0 && !isThinking) {
+  // Defensive check for tasks array
+  const safeTasks = Array.isArray(tasks) ? tasks : [];
+
+  if (safeTasks.length === 0 && !isThinking) {
     return null;
   }
 
-  const completedCount = tasks.filter((t) => t.status === "completed").length;
-  const totalCount = tasks.length;
+  const completedCount = safeTasks.filter((t) => t.status === "completed").length;
+  const totalCount = safeTasks.length;
 
   return (
     <div
@@ -398,11 +401,11 @@ export function AgentTaskTimeline({
 
       {/* Timeline */}
       <div className="p-4 space-y-3">
-        {tasks.map((task, index) => (
+        {safeTasks.map((task, index) => (
           <TaskTimelineItem
             key={task.id}
             task={task}
-            isLast={index === tasks.length - 1 && !isThinking}
+            isLast={index === safeTasks.length - 1 && !isThinking}
           />
         ))}
 

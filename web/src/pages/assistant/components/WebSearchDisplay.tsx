@@ -19,7 +19,7 @@ export function WebSearchDisplay({ results }: WebSearchDisplayProps) {
   const [isOpen, setIsOpen] = useState(false);
   const { t } = useTranslation();
 
-  if (!results || results.length === 0) return null;
+  if (!results || !Array.isArray(results) || results.length === 0) return null;
 
   return (
     <div className="mb-4">

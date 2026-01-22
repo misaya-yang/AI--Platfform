@@ -2,7 +2,8 @@ import { useMemo, useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Card, Col, Empty, Row, Select, Spin, Statistic, Tabs } from "antd";
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { SyncOutlined } from "@ant-design/icons";
 
@@ -248,60 +249,58 @@ export function UserServiceUsageAnalytics({
     }
 
     return (
-      <div style={{ width: "100%", height: 280 }}>
-        <ResponsiveContainer>
-          <LineChart data={data} margin={{ top: 10, right: 24, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={chartGridColor} strokeDasharray="3 3" />
-            <XAxis
-              dataKey="date"
-              tick={{ fontSize: 12 }}
-              tickFormatter={(value) =>
-                dayjs(value).format(granularity === "hour" ? "MM-DD HH:00" : "MM-DD")
-              }
-            />
-            <YAxis
-              yAxisId="left"
-              tick={{ fontSize: 12 }}
-              width={40}
-            />
-            <YAxis
-              yAxisId="right"
-              orientation="right"
-              tick={{ fontSize: 12 }}
-              width={50}
-            />
-            <Tooltip
-              formatter={(value, name) => {
-                if (value === undefined) return [0, name ?? ""];
-                if (name === "requests") return [value, t("dashboard.usageAnalytics.requests", "Requests")];
-                return [formatCost(Number(value)), t("dashboard.usageAnalytics.cost", "Cost")];
-              }}
-              labelFormatter={(label) =>
-                dayjs(label).format(granularity === "hour" ? "YYYY-MM-DD HH:00" : "YYYY-MM-DD")
-              }
-            />
-            <Legend />
-            <Line
-              type="monotone"
-              dataKey="requests"
-              yAxisId="left"
-              stroke="#3b82f6"
-              strokeWidth={2}
-              dot={false}
-              name={t("dashboard.usageAnalytics.requests", "Requests")}
-            />
-            <Line
-              type="monotone"
-              dataKey="cost"
-              yAxisId="right"
-              stroke="#10b981"
-              strokeWidth={2}
-              dot={false}
-              name={t("dashboard.usageAnalytics.cost", "Cost")}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      <SafeResponsiveChart height={280} minWidth={100} minHeight={100}>
+        <LineChart data={data} margin={{ top: 10, right: 24, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={chartGridColor} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 12 }}
+            tickFormatter={(value) =>
+              dayjs(value).format(granularity === "hour" ? "MM-DD HH:00" : "MM-DD")
+            }
+          />
+          <YAxis
+            yAxisId="left"
+            tick={{ fontSize: 12 }}
+            width={40}
+          />
+          <YAxis
+            yAxisId="right"
+            orientation="right"
+            tick={{ fontSize: 12 }}
+            width={50}
+          />
+          <Tooltip
+            formatter={(value, name) => {
+              if (value === undefined) return [0, name ?? ""];
+              if (name === "requests") return [value, t("dashboard.usageAnalytics.requests", "Requests")];
+              return [formatCost(Number(value)), t("dashboard.usageAnalytics.cost", "Cost")];
+            }}
+            labelFormatter={(label) =>
+              dayjs(label).format(granularity === "hour" ? "YYYY-MM-DD HH:00" : "YYYY-MM-DD")
+            }
+          />
+          <Legend />
+          <Line
+            type="monotone"
+            dataKey="requests"
+            yAxisId="left"
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dot={false}
+            name={t("dashboard.usageAnalytics.requests", "Requests")}
+          />
+          <Line
+            type="monotone"
+            dataKey="cost"
+            yAxisId="right"
+            stroke="#10b981"
+            strokeWidth={2}
+            dot={false}
+            name={t("dashboard.usageAnalytics.cost", "Cost")}
+          />
+        </LineChart>
+      </SafeResponsiveChart>
     );
   };
 

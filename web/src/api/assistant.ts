@@ -101,6 +101,14 @@ export const SSEEventType = {
   TASK_PLANNING: "task_planning",
   MEMORY_LOADED: "memory_loaded",
   TOOL_ERROR: "tool_error",
+
+  // === Phase 1 Optimization: Agent Loop Phase Events ===
+  PHASE_STARTED: "phase_started",      // AgentLoop phase started
+  PHASE_COMPLETED: "phase_completed",  // AgentLoop phase completed
+  PHASE_PROGRESS: "phase_progress",    // AgentLoop phase progress update
+
+  // === Phase 1 Optimization: Enhanced Events ===
+  CANCELLED: "cancelled",              // Task cancelled by user
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
@@ -544,6 +552,86 @@ export interface OutputWarningsEvent {
   }>;
 }
 
+// =============================================================================
+// Phase 1 Optimization: Agent Loop Phase Events
+// =============================================================================
+
+/**
+ * Error severity levels for structured error handling.
+ */
+export type ErrorSeverity = 'info' | 'warning' | 'error' | 'fatal';
+
+/**
+ * Agent Loop phase names.
+ */
+export type AgentLoopPhase =
+  | 'memory_loading'
+  | 'scenario_analysis'
+  | 'task_planning'
+  | 'rag_retrieval'
+  | 'context_building'
+  | 'execution'
+  | 'context_compression'
+  | 'generation_storage';
+
+/**
+ * Phase started event - emitted when an AgentLoop phase begins.
+ */
+export interface PhaseStartedEvent {
+  phase_index: number;      // 1-8
+  total_phases: number;     // 8
+  phase_name: AgentLoopPhase;
+  display_name: string;     // Chinese display name
+  status: 'started';
+  timestamp?: number;
+}
+
+/**
+ * Phase completed event - emitted when an AgentLoop phase finishes.
+ */
+export interface PhaseCompletedEvent {
+  phase_index: number;
+  total_phases: number;
+  phase_name: AgentLoopPhase;
+  display_name: string;
+  status: 'completed';
+  duration_ms: number;
+  timestamp?: number;
+}
+
+/**
+ * Run started event with task_id for cancellation tracking.
+ */
+export interface RunStartedWithTaskEvent {
+  session_id: string;
+  task_id: string | null;   // Used for cancellation
+  request_id: string;
+  timestamp?: number;
+}
+
+/**
+ * Structured error event - provides detailed error information.
+ */
+export interface StructuredErrorEvent {
+  code: string;
+  message: string;
+  severity: ErrorSeverity;
+  recoverable: boolean;
+  phase?: AgentLoopPhase;
+  suggestion?: string;
+  details?: Record<string, unknown>;
+  timestamp?: number;
+}
+
+/**
+ * Cancelled event - emitted when a task is cancelled by user.
+ */
+export interface CancelledEvent {
+  reason: string;
+  phase?: AgentLoopPhase;
+  timestamp?: number;
+}
+
 // =========================================================================
 // Session Types
 // =========================================================================
@@ -897,5 +985,37 @@ export interface ImageGenerationResponse {
  */
 export async function generateImage(request: ImageGenerationRequest): Promise<ImageGenerationResponse> {
   const { data } = await api.post<ImageGenerationResponse>("/api/v1/assistant/generate-image", request);
+  return data;
+}
+
+
+// =========================================================================
+// Task Cancellation API (Phase 1 Optimization)
+// =========================================================================
+
+export interface TaskCancelRequest {
+  reason?: string;
+}
+
+export interface TaskCancelResponse {
+  task_id: string;
+  session_id: string;
+  cancelled: boolean;
+  message: string;
+}
+
+/**
+ * Cancel a running assistant task.
+ *
+ * @param taskId - The task ID from the run_started event
+ * @param reason - Optional cancellation reason
+ * @returns TaskCancelResponse with cancellation status
+ */
+export async function cancelTask(taskId: string, reason?: string): Promise<TaskCancelResponse> {
+  const body: TaskCancelRequest = reason ? { reason } : {};
+  const { data } = await api.post<TaskCancelResponse>(
+    `/api/v1/assistant/tasks/${taskId}/cancel`,
+    body
+  );
   return data;
 }

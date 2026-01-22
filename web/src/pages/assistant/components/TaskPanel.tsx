@@ -229,13 +229,15 @@ export function TaskPanel({ goal, tasks, collectedInfo, isVisible }: TaskPanelPr
   const { t } = useTranslation();
 
   // Don't render if not visible or no tasks
-  if (!isVisible || tasks.length === 0) {
+  // Defensive check for tasks array
+  const safeTasks = Array.isArray(tasks) ? tasks : [];
+  if (!isVisible || safeTasks.length === 0) {
     return null;
   }
 
-  const completedTasks = tasks.filter((t) => t.status === "completed").length;
-  const failedTasks = tasks.filter((t) => t.status === "failed").length;
-  const totalTasks = tasks.length;
+  const completedTasks = safeTasks.filter((t) => t.status === "completed").length;
+  const failedTasks = safeTasks.filter((t) => t.status === "failed").length;
+  const totalTasks = safeTasks.length;
 
   return (
     <motion.div
@@ -273,7 +275,7 @@ export function TaskPanel({ goal, tasks, collectedInfo, isVisible }: TaskPanelPr
           <span>{t("assistant.taskList", "Tasks")}</span>
         </div>
         <AnimatePresence mode="popLayout">
-          {Array.from(new Map(tasks.map(task => [task.id, task])).values()).map((task, index) => (
+          {Array.from(new Map(safeTasks.map(task => [task.id, task])).values()).map((task, index) => (
             <TaskItem key={task.id || `task-${index}`} task={task} />
           ))}
         </AnimatePresence>

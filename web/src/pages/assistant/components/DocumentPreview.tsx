@@ -21,8 +21,12 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import DOMPurify from "dompurify";
 import { cn } from "@/lib/utils";
+import { useLatexCopy } from "@/hooks/useLatexCopy";
+import "katex/dist/katex.min.css";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -34,6 +38,8 @@ import {
 // =============================================================================
 // Types
 // =============================================================================
+
+import { copyToClipboard } from "@/lib/clipboard";
 
 export interface DocumentPreviewProps {
   title: string;
@@ -201,6 +207,14 @@ function DocumentContent({
     >
       {format === "markdown" ? (
         <ReactMarkdown
+          remarkPlugins={[
+            // Configure remark-math for inline ($) and display ($$) math
+            [remarkMath, { singleDollarTextMath: true }],
+          ]}
+          rehypePlugins={[
+            // Configure rehype-katex with htmlAndMathml for LaTeX copy support
+            [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
+          ]}
           components={{
             // Custom heading styles
             h1: ({ children }) => (
@@ -258,13 +272,16 @@ export function DocumentPreview({
   defaultExpanded = true,
   maxHeight = 400,
 }: DocumentPreviewProps) {
+  // Enable LaTeX copy support - copies original LaTeX source when selecting formulas
+  useLatexCopy();
+
   const hasContent = Boolean(content && content.trim().length > 0);
   const [isExpanded, setIsExpanded] = useState(hasContent ? defaultExpanded : false);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
     if (content) {
-      await navigator.clipboard.writeText(content);
+      await copyToClipboard(content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }

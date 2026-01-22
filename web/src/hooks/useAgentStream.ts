@@ -28,6 +28,8 @@ import { useAgentTimeline } from "./useAgentTimeline";
 import type { AGUIEvent } from "@/lib/sse";
 import type { TimelineState } from "@/components/agent/AgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
+import { cancelTask } from "@/api/assistant";
+import type { ErrorSeverity, AgentLoopPhase } from "@/api/assistant";
 
 // Re-export for convenience
 export type { AGUIEvent };
@@ -36,7 +38,33 @@ export type { AGUIEvent };
 // Types
 // ============================================================================
 
-export type StreamStatus = "idle" | "connecting" | "streaming" | "completed" | "error";
+export type StreamStatus = "idle" | "connecting" | "streaming" | "completed" | "error" | "cancelled";
+
+/**
+ * Phase progress state for 8-step AgentLoop visualization.
+ */
+export interface PhaseProgress {
+  currentPhase: number;     // 1-8
+  totalPhases: number;      // 8
+  phaseName: string;        // e.g., "memory_loading"
+  displayName: string;      // Chinese display name
+  status: "pending" | "running" | "completed";
+  durationMs?: number;
+}
+
+/**
+ * Structured error from backend.
+ */
+export interface StreamError {
+  code: string;
+  message: string;
+  severity: ErrorSeverity;
+  recoverable: boolean;
+  phase?: AgentLoopPhase;
+  suggestion?: string;
+  details?: Record<string, unknown>;
+  timestamp: number;
+}
 
 export interface ToolCallState {
   id: string;
@@ -59,6 +87,11 @@ export interface AgentStreamState {
   artifacts: ArtifactData[];
   timeline: TimelineState;
   error: string | null;
+  // Phase 1 Optimization: New fields
+  taskId: string | null;            // For cancellation tracking
+  errors: StreamError[];            // Structured errors list
+  phaseProgress: PhaseProgress | null;  // Current phase progress
+  hasFatalError: boolean;           // True if fatal error occurred
   metadata: {
     requestId?: string;
     runId?: string;
@@ -82,9 +115,14 @@ type StreamAction =
   | { type: "TOOL_CALL_RESULT"; payload: { id: string; result: string; status?: string } }
   | { type: "TOOL_CALL_END"; payload: { id: string; error?: string } }
   | { type: "ARTIFACT_ADDED"; payload: ArtifactData }
-  | { type: "RUN_STARTED"; payload: { requestId?: string; runId?: string; threadId?: string } }
+  | { type: "RUN_STARTED"; payload: { requestId?: string; runId?: string; threadId?: string; taskId?: string } }
   | { type: "RUN_FINISHED" }
-  | { type: "RESET" };
+  | { type: "RESET" }
+  // Phase 1 Optimization: New actions
+  | { type: "PHASE_STARTED"; payload: PhaseProgress }
+  | { type: "PHASE_COMPLETED"; payload: { phaseIndex: number; durationMs: number } }
+  | { type: "STRUCTURED_ERROR"; payload: StreamError }
+  | { type: "CANCELLED"; payload: { reason: string } };
 
 // ============================================================================
 // Initial State
@@ -97,6 +135,11 @@ const initialState: Omit<AgentStreamState, "timeline"> = {
   toolCalls: [],
   artifacts: [],
   error: null,
+  // Phase 1 Optimization: New fields
+  taskId: null,
+  errors: [],
+  phaseProgress: null,
+  hasFatalError: false,
   metadata: {},
 };
 
@@ -222,9 +265,12 @@ function streamReducer(
       return {
         ...state,
         status: "streaming",
+        taskId: action.payload.taskId || null,
         metadata: {
           ...state.metadata,
-          ...action.payload,
+          requestId: action.payload.requestId,
+          runId: action.payload.runId,
+          threadId: action.payload.threadId,
         },
       };
 
@@ -232,6 +278,40 @@ function streamReducer(
       return {
         ...state,
         status: "completed",
+        metadata: { ...state.metadata, endTime: Date.now() },
+      };
+
+    // Phase 1 Optimization: New actions
+    case "PHASE_STARTED":
+      return {
+        ...state,
+        phaseProgress: action.payload,
+      };
+
+    case "PHASE_COMPLETED":
+      return {
+        ...state,
+        phaseProgress: state.phaseProgress
+          ? {
+              ...state.phaseProgress,
+              status: "completed",
+              durationMs: action.payload.durationMs,
+            }
+          : null,
+      };
+
+    case "STRUCTURED_ERROR":
+      return {
+        ...state,
+        errors: [...state.errors, action.payload],
+        hasFatalError: state.hasFatalError || action.payload.severity === "fatal",
+      };
+
+    case "CANCELLED":
+      return {
+        ...state,
+        status: "cancelled",
+        error: action.payload.reason,
         metadata: { ...state.metadata, endTime: Date.now() },
       };
 
@@ -288,6 +368,7 @@ export function useAgentStream(options: UseAgentStreamOptions = {}) {
               requestId: event.request_id,
               runId: event.run_id as string,
               threadId: event.thread_id as string,
+              taskId: event.task_id as string,  // For cancellation tracking
             },
           });
           break;
@@ -411,6 +492,57 @@ export function useAgentStream(options: UseAgentStreamOptions = {}) {
           dispatch({ type: "DISCONNECT" });
           break;
 
+        // Phase 1 Optimization: Phase tracking events
+        case "phase_started":
+          dispatch({
+            type: "PHASE_STARTED",
+            payload: {
+              currentPhase: event.phase_index as number,
+              totalPhases: event.total_phases as number,
+              phaseName: event.phase_name as string,
+              displayName: event.display_name as string,
+              status: "running",
+            },
+          });
+          break;
+
+        case "phase_completed":
+          dispatch({
+            type: "PHASE_COMPLETED",
+            payload: {
+              phaseIndex: event.phase_index as number,
+              durationMs: event.duration_ms as number,
+            },
+          });
+          break;
+
+        // Phase 1 Optimization: Structured error events
+        case "error":
+          dispatch({
+            type: "STRUCTURED_ERROR",
+            payload: {
+              code: event.code as string,
+              message: event.message as string,
+              severity: event.severity as ErrorSeverity,
+              recoverable: event.recoverable as boolean,
+              phase: event.phase as AgentLoopPhase | undefined,
+              suggestion: event.suggestion as string | undefined,
+              details: event.details as Record<string, unknown> | undefined,
+              timestamp: Date.now(),
+            },
+          });
+          break;
+
+        // Phase 1 Optimization: Cancellation event
+        case "cancelled":
+          dispatch({
+            type: "CANCELLED",
+            payload: {
+              reason: (event.reason as string) || "User requested cancellation",
+            },
+          });
+          break;
+
         default:
           // Ignore other events
           break;
@@ -528,6 +660,41 @@ export function useAgentStream(options: UseAgentStreamOptions = {}) {
     resetTimeline();
   }, [disconnect, resetTimeline]);
 
+  /**
+   * Cancel the current running task.
+   * Calls the backend cancel API and disconnects the stream.
+   */
+  const cancel = useCallback(async (reason?: string) => {
+    const taskId = state.taskId;
+    if (!taskId) {
+      console.warn("Cannot cancel: no taskId available");
+      return false;
+    }
+
+    try {
+      const result = await cancelTask(taskId, reason);
+      if (result.cancelled) {
+        // Disconnect the stream
+        disconnect();
+        dispatch({
+          type: "CANCELLED",
+          payload: { reason: reason || "User requested cancellation" },
+        });
+      }
+      return result.cancelled;
+    } catch (error) {
+      console.error("Failed to cancel task:", error);
+      // Still disconnect the stream even if API fails
+      disconnect();
+      // Dispatch CANCELLED to keep UI state consistent
+      dispatch({
+        type: "CANCELLED",
+        payload: { reason: "Cancellation failed - stream closed" },
+      });
+      return false;
+    }
+  }, [state.taskId, disconnect]);
+
   // Combine state with timeline
   const fullState: AgentStreamState = {
     ...state,
@@ -537,9 +704,11 @@ export function useAgentStream(options: UseAgentStreamOptions = {}) {
   return {
     state: fullState,
     isStreaming: state.status === "streaming" || state.status === "connecting",
+    isCancellable: state.taskId !== null && (state.status === "streaming" || state.status === "connecting"),
     isConnected,
     connect,
     disconnect,
+    cancel,  // Phase 1 Optimization: Cancel function
     reset,
     processEvent, // Expose for manual event processing
   };

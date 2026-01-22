@@ -1450,7 +1450,10 @@ export function PlaygroundPage() {
             };
             const resp = await fetch(waitPath, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
               body: JSON.stringify(payload),
               signal: abortController.signal,
             });

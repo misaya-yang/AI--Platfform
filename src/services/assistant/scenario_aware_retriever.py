@@ -29,6 +29,7 @@ from .scenario_analyzer import ScenarioType, ScenarioDetectionResult
 
 if TYPE_CHECKING:
     from ..knowledge.knowledge_service import KnowledgeService
+    from ...core.auth.user_resolver import UserContext
 
 logger = get_logger(__name__)
 
@@ -258,6 +259,7 @@ class ScenarioAwareRetriever:
         user_query: str,
         scenario: ScenarioDetectionResult,
         dataset_ids: List[str],
+        user: "UserContext",
         top_k: Optional[int] = None,
     ) -> ScenarioRetrievalContext:
         """
@@ -267,6 +269,7 @@ class ScenarioAwareRetriever:
             user_query: User's original query
             scenario: Detected scenario with entities
             dataset_ids: Knowledge base dataset IDs to search
+            user: User context for authorization
             top_k: Number of top results to return
 
         Returns:
@@ -303,7 +306,7 @@ class ScenarioAwareRetriever:
         retrieval_tasks = []
 
         for query in queries:
-            task = self._retrieve_single(query, dataset_ids)
+            task = self._retrieve_single(query, dataset_ids, user)
             retrieval_tasks.append(task)
 
         # Execute all retrievals in parallel
@@ -359,32 +362,56 @@ class ScenarioAwareRetriever:
         self,
         query: str,
         dataset_ids: List[str],
+        user: "UserContext",
     ) -> List[RetrievalResult]:
-        """Retrieve results for a single query."""
-        try:
-            # Call knowledge service search
-            results = await self.knowledge_service.search(
-                query=query,
-                dataset_ids=dataset_ids,
-                limit=self.results_per_query,
-            )
+        """Retrieve results for a single query across multiple datasets (parallel)."""
 
-            retrieval_results = []
-            for r in results:
-                retrieval_results.append(RetrievalResult(
-                    content=r.get("content", ""),
-                    source=r.get("source", r.get("document_name", "Unknown")),
-                    score=r.get("score", 0.0),
-                    chunk_id=r.get("chunk_id", ""),
-                    dataset_id=r.get("dataset_id", ""),
-                    metadata=r.get("metadata", {}),
-                ))
+        async def _retrieve_from_dataset(dataset_id: str) -> List[RetrievalResult]:
+            """Retrieve from a single dataset."""
+            try:
+                results, _meta = await self.knowledge_service.retrieve(
+                    user=user,
+                    dataset_id=dataset_id,
+                    query=query,
+                    top_k=self.results_per_query,
+                    mode="hybrid",
+                )
 
-            return retrieval_results
+                dataset_results = []
+                for r in results:
+                    if hasattr(r, 'content'):
+                        dataset_results.append(RetrievalResult(
+                            content=r.content or "",
+                            source=r.document_name or r.source or "Unknown",
+                            score=r.score or 0.0,
+                            chunk_id=r.segment_id or "",
+                            dataset_id=dataset_id,
+                            metadata=r.metadata or {},
+                        ))
+                    else:
+                        dataset_results.append(RetrievalResult(
+                            content=r.get("content", ""),
+                            source=r.get("source", r.get("document_name", "Unknown")),
+                            score=r.get("score", 0.0),
+                            chunk_id=r.get("segment_id", r.get("chunk_id", "")),
+                            dataset_id=dataset_id,
+                            metadata=r.get("metadata", {}),
+                        ))
+                return dataset_results
+            except Exception as e:
+                logger.error(f"[SCENARIO RETRIEVE] Dataset {dataset_id} query failed: {e}")
+                return []
 
-        except Exception as e:
-            logger.error(f"[SCENARIO RETRIEVE] Single query failed: {e}")
-            return []
+        # Parallel retrieval from all datasets (major TTFT optimization)
+        tasks = [_retrieve_from_dataset(dataset_id) for dataset_id in dataset_ids]
+        all_results = await asyncio.gather(*tasks)
+
+        # Flatten results
+        retrieval_results = []
+        for results in all_results:
+            retrieval_results.extend(results)
+
+        return retrieval_results
 
     def _rank_results(
         self,

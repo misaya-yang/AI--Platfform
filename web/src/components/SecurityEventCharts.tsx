@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Card, Empty, Spin, Tabs } from "antd";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { SyncOutlined } from "@ant-design/icons";
 
@@ -141,38 +142,36 @@ export function SecurityEventCharts({
 
     const height = Math.max(240, data.length * 34);
     return (
-      <div style={{ width: "100%", height }}>
-        <ResponsiveContainer>
-          <BarChart
-            data={data}
-            layout="vertical"
-            margin={{ top: 10, right: 24, left: 40, bottom: 0 }}
-          >
-            <CartesianGrid stroke={chartGridColor} strokeDasharray="3 3" />
-            <XAxis type="number" tick={{ fontSize: 12 }} />
-            <YAxis
-              dataKey="name"
-              type="category"
-              tick={{ fontSize: 12 }}
-              width={120}
-            />
-            <Tooltip />
-            <Legend />
-            <Bar
-              dataKey="auth_failed"
-              fill="#ef4444"
-              name={t("dashboard.securityEvents.authFailed", "Auth Failed")}
-              radius={[4, 4, 4, 4]}
-            />
-            <Bar
-              dataKey="rate_limited"
-              fill="#f59e0b"
-              name={t("dashboard.securityEvents.rateLimited", "Rate Limited")}
-              radius={[4, 4, 4, 4]}
-            />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
+      <SafeResponsiveChart height={height} minWidth={100} minHeight={100}>
+        <BarChart
+          data={data}
+          layout="vertical"
+          margin={{ top: 10, right: 24, left: 40, bottom: 0 }}
+        >
+          <CartesianGrid stroke={chartGridColor} strokeDasharray="3 3" />
+          <XAxis type="number" tick={{ fontSize: 12 }} />
+          <YAxis
+            dataKey="name"
+            type="category"
+            tick={{ fontSize: 12 }}
+            width={120}
+          />
+          <Tooltip />
+          <Legend />
+          <Bar
+            dataKey="auth_failed"
+            fill="#ef4444"
+            name={t("dashboard.securityEvents.authFailed", "Auth Failed")}
+            radius={[4, 4, 4, 4]}
+          />
+          <Bar
+            dataKey="rate_limited"
+            fill="#f59e0b"
+            name={t("dashboard.securityEvents.rateLimited", "Rate Limited")}
+            radius={[4, 4, 4, 4]}
+          />
+        </BarChart>
+      </SafeResponsiveChart>
     );
   };
 

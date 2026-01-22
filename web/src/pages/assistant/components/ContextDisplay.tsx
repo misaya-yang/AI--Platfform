@@ -20,9 +20,9 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
   const [isOpen, setIsOpen] = useState(false);
   const { t } = useTranslation();
 
-  if (!contexts || contexts.length === 0) return null;
+  if (!contexts || !Array.isArray(contexts) || contexts.length === 0) return null;
 
-  const totalChunks = contexts.reduce((sum, c) => sum + c.chunks.length, 0);
+  const totalChunks = contexts.reduce((sum, c) => sum + (c.chunks?.length || 0), 0);
 
   return (
     <div className="mb-4">
@@ -64,11 +64,11 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                     <FileText className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                     <span>{ctx.dataset_name}</span>
                     <span className="text-slate-400 dark:text-slate-500 font-normal">
-                      ({ctx.took_ms.toFixed(0)}ms)
+                      ({(ctx.took_ms || 0).toFixed(0)}ms)
                     </span>
                   </div>
                   <div className="space-y-2 pl-5">
-                    {ctx.chunks.slice(0, 3).map((chunk, idx) => (
+                    {(ctx.chunks || []).slice(0, 3).map((chunk, idx) => (
                       <motion.div
                         key={idx}
                         initial={{ opacity: 0, x: -10 }}
@@ -135,9 +135,9 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                         </div>
                       </motion.div>
                     ))}
-                    {ctx.chunks.length > 3 && (
+                    {(ctx.chunks?.length || 0) > 3 && (
                       <div className="text-xs text-slate-500 pl-2">
-                        +{ctx.chunks.length - 3} more chunks
+                        +{(ctx.chunks?.length || 0) - 3} more chunks
                       </div>
                     )}
                   </div>

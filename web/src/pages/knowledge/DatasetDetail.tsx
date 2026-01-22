@@ -130,6 +130,8 @@ const QA_SYSTEM_PROMPTS = {
     "你是知识库问答助手。优先基于“上下文”回答；若上下文不足，可根据通用知识给出简要回答，并明确标注“以下为通用知识，非来自知识库”。回答与问题同语言，简洁、准确。",
 };
 
+import { copyToClipboard } from "@/lib/clipboard";
+
 export function KnowledgeDatasetDetailPage() {
   const { datasetId } = useParams();
   const nav = useNavigate();
@@ -315,9 +317,9 @@ export function KnowledgeDatasetDetailPage() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Helper function to copy text with feedback
-  const copyToClipboard = async (text: string, key: string) => {
+  const handleCopy = async (text: string, key: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       setCopiedKey(key);
       setTimeout(() => setCopiedKey(null), 2000);
     } catch (err) {
@@ -2860,7 +2862,7 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs text-muted-foreground font-medium">检索端点</p>
                       <button
-                        onClick={() => copyToClipboard(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve`, "retrieve-url")}
+                        onClick={() => handleCopy(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve`, "retrieve-url")}
                         className="text-muted-foreground hover:text-foreground transition-colors"
                         title={copiedKey === "retrieve-url" ? "已复制" : "复制"}
                       >
@@ -2879,7 +2881,7 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs text-muted-foreground font-medium">QA 端点</p>
                       <button
-                        onClick={() => copyToClipboard(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/qa`, "qa-url")}
+                        onClick={() => handleCopy(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/qa`, "qa-url")}
                         className="text-muted-foreground hover:text-foreground transition-colors"
                         title={copiedKey === "qa-url" ? "已复制" : "复制"}
                       >
@@ -2913,7 +2915,7 @@ export function KnowledgeDatasetDetailPage() {
     "top_k": 5,
     "mode": "hybrid"
   }'`;
-                            copyToClipboard(curlCmd, "curl");
+                            handleCopy(curlCmd, "curl");
                           }}
                           className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
                         >
@@ -2961,7 +2963,7 @@ for chunk in results.get("chunks", []):
     print(f"Score: {chunk['score']:.3f}")
     print(f"Content: {chunk['content'][:200]}...")
     print("-" * 50)`;
-                            copyToClipboard(pythonCode, "python");
+                            handleCopy(pythonCode, "python");
                           }}
                           className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
                         >

@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 
 // ===== Types =====
 
@@ -643,7 +644,7 @@ export function SettingsPage() {
                     size="sm"
                     className="mt-2"
                     onClick={() => {
-                      navigator.clipboard.writeText(newApiKey);
+                      copyToClipboard(newApiKey);
                     }}
                   >
                     {t("common.copy")}

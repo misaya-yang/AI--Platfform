@@ -539,3 +539,351 @@ def extract_citations(
 ) -> List[Citation]:
     """Convenience function to extract citations."""
     return get_rag_evaluator().extract_citations(response, retrieved_chunks, dataset_names)
+
+
+# =============================================================================
+# Retrieval Phase Metrics
+# =============================================================================
+
+
+@dataclass
+class RetrievalMetrics:
+    """
+    Metrics captured during the retrieval phase.
+
+    These metrics are collected before the LLM generates a response,
+    focusing on the quality and efficiency of the retrieval process.
+
+    Attributes:
+        queries_expanded: Number of queries after expansion
+        queries_executed: Number of queries actually executed
+        total_retrieved: Total chunks retrieved (before dedup)
+        after_dedupe: Chunks remaining after deduplication
+        retrieval_time_ms: Time taken for retrieval
+        avg_score: Average relevance score of results
+        top_score: Highest relevance score
+        scenario_type: Detected scenario type (if applicable)
+    """
+    queries_expanded: int = 1
+    queries_executed: int = 1
+    total_retrieved: int = 0
+    after_dedupe: int = 0
+    retrieval_time_ms: float = 0.0
+    avg_score: float = 0.0
+    top_score: float = 0.0
+    scenario_type: str = "general"
+
+    # Additional context
+    dataset_ids: List[str] = field(default_factory=list)
+    user_query: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "queries_expanded": self.queries_expanded,
+            "queries_executed": self.queries_executed,
+            "total_retrieved": self.total_retrieved,
+            "after_dedupe": self.after_dedupe,
+            "retrieval_time_ms": round(self.retrieval_time_ms, 2),
+            "avg_score": round(self.avg_score, 4),
+            "top_score": round(self.top_score, 4),
+            "scenario_type": self.scenario_type,
+            "dataset_ids": self.dataset_ids,
+            "dedup_ratio": round(
+                self.after_dedupe / max(self.total_retrieved, 1), 2
+            ),
+        }
+
+
+# =============================================================================
+# Metrics Persistence
+# =============================================================================
+
+
+class RAGMetricsCollector:
+    """
+    Collect and persist RAG metrics for analytics and monitoring.
+
+    Provides:
+    - Recording of retrieval metrics (during retrieval phase)
+    - Recording of evaluation metrics (after response generation)
+    - Query for historical metrics
+    - Aggregation for analytics
+
+    Usage:
+        ```python
+        collector = RAGMetricsCollector(database=db_storage)
+
+        # Record retrieval metrics
+        await collector.record_retrieval(
+            session_id="session_123",
+            tenant_id="tenant_1",
+            metrics=retrieval_metrics,
+        )
+
+        # Record evaluation metrics
+        await collector.record_evaluation(
+            session_id="session_123",
+            tenant_id="tenant_1",
+            metrics=rag_metrics,
+        )
+        ```
+    """
+
+    def __init__(self, database: Optional[Any] = None):
+        """
+        Initialize the RAGMetricsCollector.
+
+        Args:
+            database: Database storage interface (must have execute method)
+                      If None, metrics are only logged (not persisted)
+        """
+        self.database = database
+        self._buffer: List[Dict[str, Any]] = []
+        self._buffer_size = 100  # Flush after this many records
+
+    async def record_retrieval(
+        self,
+        session_id: str,
+        tenant_id: str,
+        metrics: RetrievalMetrics,
+        user_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """
+        Record retrieval metrics.
+
+        Args:
+            session_id: Session identifier
+            tenant_id: Tenant identifier
+            metrics: RetrievalMetrics instance
+            user_id: Optional user identifier
+            request_id: Optional request identifier for tracing
+        """
+        record = {
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "request_id": request_id,
+            "metric_type": "retrieval",
+            "data": metrics.to_dict(),
+            "timestamp": time.time(),
+        }
+
+        logger.debug(
+            f"RAG retrieval metrics: session={session_id} "
+            f"retrieved={metrics.total_retrieved} after_dedupe={metrics.after_dedupe} "
+            f"time={metrics.retrieval_time_ms:.1f}ms"
+        )
+
+        await self._persist(record)
+
+    async def record_evaluation(
+        self,
+        session_id: str,
+        tenant_id: str,
+        metrics: RAGMetrics,
+        user_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """
+        Record evaluation metrics.
+
+        Args:
+            session_id: Session identifier
+            tenant_id: Tenant identifier
+            metrics: RAGMetrics instance
+            user_id: Optional user identifier
+            request_id: Optional request identifier for tracing
+        """
+        record = {
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "request_id": request_id,
+            "metric_type": "evaluation",
+            "data": metrics.to_dict(),
+            "timestamp": time.time(),
+        }
+
+        logger.debug(
+            f"RAG evaluation metrics: session={session_id} "
+            f"quality={metrics.quality_score:.1f} chunks_used={metrics.chunks_used} "
+            f"grounding={metrics.response_grounding:.2f}"
+        )
+
+        await self._persist(record)
+
+    async def _persist(self, record: Dict[str, Any]) -> None:
+        """Persist a record to the database."""
+        if self.database is None:
+            # No database configured, just buffer for potential export
+            self._buffer.append(record)
+            if len(self._buffer) > self._buffer_size:
+                self._buffer = self._buffer[-self._buffer_size:]
+            return
+
+        try:
+            import json
+            await self.database.execute(
+                """
+                INSERT INTO rag_metrics
+                (session_id, tenant_id, user_id, request_id, metric_type, data, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                """,
+                record["session_id"],
+                record["tenant_id"],
+                record.get("user_id"),
+                record.get("request_id"),
+                record["metric_type"],
+                json.dumps(record["data"]),
+            )
+        except Exception as e:
+            logger.error(f"Failed to persist RAG metrics: {e}")
+            # Buffer the record for retry
+            self._buffer.append(record)
+
+    async def get_recent_metrics(
+        self,
+        tenant_id: str,
+        metric_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recent metrics for a tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+            metric_type: Optional filter for metric type ('retrieval' or 'evaluation')
+            limit: Maximum number of records to return
+
+        Returns:
+            List of metric records
+        """
+        if self.database is None:
+            # Return from buffer
+            filtered = [
+                r for r in self._buffer
+                if r["tenant_id"] == tenant_id
+                and (metric_type is None or r["metric_type"] == metric_type)
+            ]
+            return filtered[-limit:]
+
+        try:
+            query = """
+                SELECT session_id, user_id, request_id, metric_type, data, created_at
+                FROM rag_metrics
+                WHERE tenant_id = $1
+            """
+            params = [tenant_id]
+
+            if metric_type:
+                query += " AND metric_type = $2"
+                params.append(metric_type)
+
+            query += " ORDER BY created_at DESC LIMIT $" + str(len(params) + 1)
+            params.append(limit)
+
+            rows = await self.database.fetch(query, *params)
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to fetch RAG metrics: {e}")
+            return []
+
+    async def get_aggregate_stats(
+        self,
+        tenant_id: str,
+        hours: int = 24,
+    ) -> Dict[str, Any]:
+        """
+        Get aggregate statistics for a tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+            hours: Time window in hours
+
+        Returns:
+            Aggregated statistics
+        """
+        if self.database is None:
+            # Compute from buffer
+            return self._compute_buffer_stats(tenant_id)
+
+        try:
+            query = """
+                SELECT
+                    metric_type,
+                    COUNT(*) as count,
+                    AVG((data->>'quality_score')::float) as avg_quality,
+                    AVG((data->'retrieval'->>'retrieval_time_ms')::float) as avg_retrieval_time
+                FROM rag_metrics
+                WHERE tenant_id = $1
+                    AND created_at > NOW() - make_interval(hours => $2)
+                GROUP BY metric_type
+            """
+            rows = await self.database.fetch(query, tenant_id, hours)
+            return {row["metric_type"]: dict(row) for row in rows}
+        except Exception as e:
+            logger.error(f"Failed to fetch aggregate stats: {e}")
+            return {}
+
+    def _compute_buffer_stats(self, tenant_id: str) -> Dict[str, Any]:
+        """Compute statistics from the buffer."""
+        tenant_records = [
+            r for r in self._buffer if r["tenant_id"] == tenant_id
+        ]
+
+        if not tenant_records:
+            return {}
+
+        stats: Dict[str, Dict[str, Any]] = {}
+        for r in tenant_records:
+            mt = r["metric_type"]
+            if mt not in stats:
+                stats[mt] = {"count": 0, "quality_scores": [], "retrieval_times": []}
+
+            stats[mt]["count"] += 1
+
+            if "quality_score" in r.get("data", {}):
+                stats[mt]["quality_scores"].append(r["data"]["quality_score"])
+
+            if "retrieval_time_ms" in r.get("data", {}).get("retrieval", {}):
+                stats[mt]["retrieval_times"].append(
+                    r["data"]["retrieval"]["retrieval_time_ms"]
+                )
+
+        result = {}
+        for mt, data in stats.items():
+            result[mt] = {
+                "count": data["count"],
+                "avg_quality": (
+                    sum(data["quality_scores"]) / len(data["quality_scores"])
+                    if data["quality_scores"] else None
+                ),
+                "avg_retrieval_time": (
+                    sum(data["retrieval_times"]) / len(data["retrieval_times"])
+                    if data["retrieval_times"] else None
+                ),
+            }
+
+        return result
+
+    def get_buffer(self) -> List[Dict[str, Any]]:
+        """Get the current buffer contents."""
+        return list(self._buffer)
+
+    def clear_buffer(self) -> None:
+        """Clear the buffer."""
+        self._buffer.clear()
+
+
+# Global collector instance
+_collector: Optional[RAGMetricsCollector] = None
+
+
+def get_rag_metrics_collector(database: Optional[Any] = None) -> RAGMetricsCollector:
+    """Get the global RAG metrics collector instance."""
+    global _collector
+    if _collector is None:
+        _collector = RAGMetricsCollector(database=database)
+    return _collector

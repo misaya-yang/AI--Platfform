@@ -13,12 +13,34 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Optional
 
 from ..auth.user_resolver import UserContext
+
+
+def _get_bool_env(key: str, default: bool) -> bool:
+    """Get boolean from environment variable."""
+    val = os.getenv(key, "").lower()
+    if val in ("true", "1", "yes"):
+        return True
+    if val in ("false", "0", "no"):
+        return False
+    return default
+
+
+def _get_int_env(key: str, default: int) -> int:
+    """Get integer from environment variable."""
+    val = os.getenv(key)
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return default
 
 
 @dataclass
@@ -42,21 +64,28 @@ class TierLimit:
 
 @dataclass
 class MultiDimensionRateLimitConfig:
-    """多维度限流配置"""
-    
+    """多维度限流配置
+
+    Environment variables for development override:
+    - RATE_LIMIT_IP_ENABLED: Set to "false" to disable IP rate limiting
+    - RATE_LIMIT_IP_LIMIT: Override IP rate limit (default: 30)
+    - RATE_LIMIT_ANONYMOUS_LIMIT: Override anonymous user limit (default: 10)
+    """
+
     # 全局限流
     global_enabled: bool = True
     global_limit: int = 10000
     global_window: int = 60
-    
-    # IP 限流
-    ip_enabled: bool = True
-    ip_limit: int = 30
+
+    # IP 限流 (生产环境默认启用，可通过环境变量禁用)
+    # Set RATE_LIMIT_IP_ENABLED=false in development
+    ip_enabled: bool = field(default_factory=lambda: _get_bool_env("RATE_LIMIT_IP_ENABLED", True))
+    ip_limit: int = field(default_factory=lambda: _get_int_env("RATE_LIMIT_IP_LIMIT", 30))
     ip_window: int = 60
-    
-    # 用户分层限流
+
+    # 用户分层限流 (可通过环境变量调整 anonymous 限制)
     user_tier_limits: Dict[str, TierLimit] = field(default_factory=lambda: {
-        "anonymous": TierLimit(requests=10, window=60),
+        "anonymous": TierLimit(requests=_get_int_env("RATE_LIMIT_ANONYMOUS_LIMIT", 10), window=60),
         "normal": TierLimit(requests=60, window=60),
         "premium": TierLimit(requests=300, window=60),
         "enterprise": TierLimit(requests=1000, window=60),

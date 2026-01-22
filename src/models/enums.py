@@ -103,8 +103,31 @@ class StreamEventType(str, Enum):
     # === Tool Error Event ===
     TOOL_ERROR = "tool_error"  # Tool execution error with recovery info
 
+    # === ReAct Thinking Events (for transparent reasoning) ===
+    THINKING_START = "thinking_start"    # Start of LLM reasoning
+    THINKING_DELTA = "thinking_delta"    # Streaming thinking content
+    THINKING_END = "thinking_end"        # End of thinking with full content
+    THINKING_ERROR = "thinking_error"    # Thinking generation failed
+
     # === ReAct Phase Status ===
     STATUS = "status"  # Phase status update (analyzing, thinking, executing, observing)
+
+    # === Agent Loop Phase Events (Phase 1 Optimization) ===
+    PHASE_STARTED = "phase_started"      # AgentLoop phase started
+    PHASE_COMPLETED = "phase_completed"  # AgentLoop phase completed
+    PHASE_PROGRESS = "phase_progress"    # AgentLoop phase progress update
+
+    # === Enhanced Error Events (Phase 1 Optimization) ===
+    ERROR = "error"                      # Structured error event with severity
+    BUDGET_WARNING = "budget_warning"    # Token budget warning (80% threshold)
+    BUDGET_EXCEEDED = "budget_exceeded"  # Token budget exceeded, stopping
+    CANCELLED = "cancelled"              # Task cancelled by user
+
+    # === Context Retrieved (for RAG visualization) ===
+    CONTEXT_RETRIEVED = "context_retrieved"  # RAG context retrieved
+    RAG_EVALUATION = "rag_evaluation"        # RAG quality evaluation result
+    MEMORY_LOADED = "memory_loaded"          # Memory loading completed
+    DONE = "done"                            # Execution complete
 
 
 class DatasetVisibility(str, Enum):

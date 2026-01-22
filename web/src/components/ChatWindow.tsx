@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { memo, useState } from "react";
+import { memo, useState, forwardRef } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
@@ -224,34 +224,38 @@ function Avatar({ isUser }: { isUser: boolean }) {
   );
 }
 
+interface ChatMessageItemProps {
+  message: ChatMessage;
+  showToolCalls: boolean;
+  showTimeline?: boolean;
+  index: number;
+}
+
 const ChatMessageItem = memo(
-  function ChatMessageItem({ message, showToolCalls, showTimeline = true, index }: {
-    message: ChatMessage;
-    showToolCalls: boolean;
-    showTimeline?: boolean;
-    index: number;
-  }) {
-    const { t } = useTranslation();
-    const isUser = message.role === "user";
-    const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
-    const hasTimeline = showTimeline && !isUser && message.timeline && message.timeline.steps.length > 0;
-    const hasArtifacts = !isUser && message.artifacts && message.artifacts.length > 0;
+  forwardRef<HTMLDivElement, ChatMessageItemProps>(
+    function ChatMessageItem({ message, showToolCalls, showTimeline = true, index }, ref) {
+      const { t } = useTranslation();
+      const isUser = message.role === "user";
+      const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
+      const hasTimeline = showTimeline && !isUser && message.timeline && message.timeline.steps.length > 0;
+      const hasArtifacts = !isUser && message.artifacts && message.artifacts.length > 0;
 
-    // Timeline expansion state - auto-expand when running
-    const [isTimelineExpanded, setIsTimelineExpanded] = useState(
-      message.timeline?.status === "running"
-    );
+      // Timeline expansion state - auto-expand when running
+      const [isTimelineExpanded, setIsTimelineExpanded] = useState(
+        message.timeline?.status === "running"
+      );
 
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: "easeOut", delay: index * 0.05 }}
-        className={cn(
-          "flex w-full gap-4",
-          isUser ? "flex-row-reverse" : "flex-row"
-        )}
-      >
+      return (
+        <motion.div
+          ref={ref}
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, ease: "easeOut", delay: index * 0.05 }}
+          className={cn(
+            "flex w-full gap-4",
+            isUser ? "flex-row-reverse" : "flex-row"
+          )}
+        >
         {/* Avatar */}
         <Avatar isUser={isUser} />
 
@@ -358,13 +362,11 @@ const ChatMessageItem = memo(
         </div>
       </motion.div>
     );
-  },
-  (prev, next) =>
-    prev.message === next.message &&
-    prev.showToolCalls === next.showToolCalls &&
-    prev.showTimeline === next.showTimeline &&
-    prev.index === next.index
+  })
 );
+
+// Custom memo comparison to prevent unnecessary re-renders
+ChatMessageItem.displayName = "ChatMessageItem";
 
 export interface ChatWindowProps {
   messages: ChatMessage[];

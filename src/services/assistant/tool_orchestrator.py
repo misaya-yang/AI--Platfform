@@ -12,10 +12,15 @@ Key Features:
 - Update working memory with task status
 - Limit concurrent executions with semaphore
 - Resolve parameter references between tasks
+- Unified tool execution via ToolInvoker abstraction
 
 Usage:
     ```python
-    orchestrator = ToolOrchestrator(tool_registry, max_parallel=5)
+    # Using ToolInvoker (recommended)
+    orchestrator = ToolOrchestrator(tool_invoker=invoker, max_parallel=5)
+
+    # Using ToolRegistry (backward compatible)
+    orchestrator = ToolOrchestrator(tool_registry=registry, max_parallel=5)
 
     async for result in orchestrator.execute_plan(plan, working_memory):
         print(f"Task {result.task_id} completed: {result.success}")
@@ -43,6 +48,7 @@ from .working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
     from .tools.tool_registry import ToolRegistry, ToolCallRequest
+    from .tool_invoker import ToolInvoker, ToolInvocationContext
 
 logger = get_logger(__name__)
 
@@ -147,6 +153,15 @@ class ToolOrchestrator:
 
     Usage:
         ```python
+        # Recommended: Using ToolInvoker for unified execution
+        from src.services.assistant.tool_invoker import create_tool_invoker
+
+        orchestrator = ToolOrchestrator(
+            tool_invoker=create_tool_invoker(),
+            max_parallel=5
+        )
+
+        # Backward compatible: Using ToolRegistry directly
         from src.services.assistant.tools.tool_registry import get_tool_registry
 
         orchestrator = ToolOrchestrator(
@@ -172,19 +187,35 @@ class ToolOrchestrator:
 
     def __init__(
         self,
-        tool_registry: "ToolRegistry",
+        tool_registry: Optional["ToolRegistry"] = None,
+        tool_invoker: Optional["ToolInvoker"] = None,
         max_parallel: int = 5,
+        invocation_context: Optional["ToolInvocationContext"] = None,
     ):
         """
         Initialize the ToolOrchestrator.
 
         Args:
-            tool_registry: Registry containing tool definitions and executors
+            tool_registry: Registry containing tool definitions and executors (legacy)
+            tool_invoker: ToolInvoker for unified execution (recommended)
             max_parallel: Maximum number of concurrent tool executions (default 5)
+            invocation_context: Default context for tool invocations
+
+        Note:
+            Either tool_invoker or tool_registry must be provided.
+            If both are provided, tool_invoker takes precedence.
+            If neither is provided, a default invoker will be created.
         """
+        self.tool_invoker = tool_invoker
         self.tool_registry = tool_registry
         self.max_parallel = max_parallel
         self.semaphore = asyncio.Semaphore(max_parallel)
+        self._default_invocation_context = invocation_context
+
+        # If no invoker provided, create one from registry or default
+        if self.tool_invoker is None:
+            from .tool_invoker import create_tool_invoker
+            self.tool_invoker = create_tool_invoker(tool_registry=tool_registry)
 
         logger.info(f"ToolOrchestrator initialized with max_parallel={max_parallel}")
 
@@ -192,6 +223,7 @@ class ToolOrchestrator:
         self,
         plan: ExecutionPlan,
         working_memory: WorkingMemory,
+        invocation_context: Optional["ToolInvocationContext"] = None,
     ) -> AsyncGenerator[ToolExecutionResult, None]:
         """
         Execute plan respecting dependencies, yielding results as they complete.
@@ -203,16 +235,19 @@ class ToolOrchestrator:
         Args:
             plan: The execution plan containing tasks and parallel groups
             working_memory: Working memory to update with task status
+            invocation_context: Context for tool invocations (session info, etc.)
 
         Yields:
             ToolExecutionResult for each completed task
 
         Example:
             ```python
-            async for result in orchestrator.execute_plan(plan, memory):
+            async for result in orchestrator.execute_plan(plan, memory, context):
                 print(f"Task {result.task_id}: {'success' if result.success else 'failed'}")
             ```
         """
+        # Use provided context or default
+        ctx = invocation_context or self._default_invocation_context
         logger.info(
             f"Starting plan execution: {plan.goal} "
             f"({len(plan.tasks)} tasks in {len(plan.parallel_groups)} groups)"
@@ -252,6 +287,7 @@ class ToolOrchestrator:
                 tasks_in_group,
                 prior_results,
                 working_memory,
+                ctx,
             ):
                 # Store result for parameter resolution in later groups
                 prior_results[result.task_id] = result
@@ -281,6 +317,7 @@ class ToolOrchestrator:
         tasks: List[PlannedTask],
         prior_results: Dict[str, ToolExecutionResult],
         working_memory: WorkingMemory,
+        invocation_context: Optional["ToolInvocationContext"] = None,
     ) -> AsyncGenerator[ToolExecutionResult, None]:
         """
         Execute a group of tasks in parallel using asyncio.as_completed.
@@ -292,6 +329,7 @@ class ToolOrchestrator:
             tasks: List of tasks to execute in parallel
             prior_results: Results from previously completed tasks (for param resolution)
             working_memory: Working memory to update with task status
+            invocation_context: Context for tool invocations
 
         Yields:
             ToolExecutionResult for each completed task
@@ -308,7 +346,7 @@ class ToolOrchestrator:
             working_memory.update_task(planned_task.id, TaskStatus.IN_PROGRESS)
 
             # Create the coroutine with semaphore protection
-            coro = self._execute_single_task(planned_task, prior_results)
+            coro = self._execute_single_task(planned_task, prior_results, invocation_context)
             async_task = asyncio.create_task(coro)
             async_tasks[async_task] = planned_task
 
@@ -343,13 +381,20 @@ class ToolOrchestrator:
         self,
         task: PlannedTask,
         prior_results: Dict[str, ToolExecutionResult],
+        invocation_context: Optional["ToolInvocationContext"] = None,
     ) -> ToolExecutionResult:
         """
         Execute a single task with semaphore protection.
 
+        Uses ToolInvoker for unified execution with support for:
+        - Timeout handling
+        - Retry logic
+        - Metrics collection
+
         Args:
             task: The planned task to execute
             prior_results: Results from previously completed tasks
+            invocation_context: Context for tool invocation
 
         Returns:
             ToolExecutionResult with execution outcome
@@ -366,18 +411,34 @@ class ToolOrchestrator:
                     f"params={resolved_params}"
                 )
 
-                # Import here to avoid circular dependency
-                from .tools.tool_registry import ToolCallRequest
-
-                # Create tool call request
-                request = ToolCallRequest(
-                    call_id=str(uuid.uuid4()),
-                    tool_name=task.tool,
-                    arguments=resolved_params,
-                )
-
-                # Execute via tool registry
-                tool_result = await self.tool_registry.execute(request)
+                # Execute via ToolInvoker (unified execution layer)
+                if invocation_context is not None:
+                    tool_result = await self.tool_invoker.invoke(
+                        tool_name=task.tool,
+                        arguments=resolved_params,
+                        context=invocation_context,
+                    )
+                else:
+                    # Fallback: Create a minimal context if none provided
+                    # WARNING: This fallback uses placeholder values and should be avoided
+                    # in production. Always provide a proper invocation_context.
+                    logger.warning(
+                        f"No invocation_context provided for task {task.id}. "
+                        "Using fallback context with placeholder values. "
+                        "This may affect audit trails and multi-tenant isolation."
+                    )
+                    from .tool_invoker import ToolInvocationContext
+                    fallback_context = ToolInvocationContext(
+                        session_id=f"orchestrator_{task.id}",
+                        user_id="system",
+                        tenant_id="system",
+                        request_id=str(uuid.uuid4()),
+                    )
+                    tool_result = await self.tool_invoker.invoke(
+                        tool_name=task.tool,
+                        arguments=resolved_params,
+                        context=fallback_context,
+                    )
 
                 duration_ms = (time.time() - start_time) * 1000
 
@@ -554,28 +615,38 @@ class ToolOrchestrator:
 
 def create_tool_orchestrator(
     tool_registry: Optional["ToolRegistry"] = None,
+    tool_invoker: Optional["ToolInvoker"] = None,
     max_parallel: int = 5,
+    invocation_context: Optional["ToolInvocationContext"] = None,
 ) -> ToolOrchestrator:
     """
     Factory function to create a ToolOrchestrator instance.
 
     Args:
-        tool_registry: Tool registry to use. If None, uses global registry.
+        tool_registry: Tool registry to use (legacy, for backward compatibility)
+        tool_invoker: ToolInvoker to use (recommended for new code)
         max_parallel: Maximum concurrent tool executions (default 5)
+        invocation_context: Default context for tool invocations
 
     Returns:
         Configured ToolOrchestrator instance
 
     Example:
         ```python
+        # Recommended: Using ToolInvoker
+        from src.services.assistant.tool_invoker import create_tool_invoker
+        orchestrator = create_tool_orchestrator(
+            tool_invoker=create_tool_invoker(),
+            max_parallel=10
+        )
+
+        # Backward compatible: Using ToolRegistry
         orchestrator = create_tool_orchestrator(max_parallel=10)
         ```
     """
-    if tool_registry is None:
-        from .tools.tool_registry import get_tool_registry
-        tool_registry = get_tool_registry()
-
     return ToolOrchestrator(
         tool_registry=tool_registry,
+        tool_invoker=tool_invoker,
         max_parallel=max_parallel,
+        invocation_context=invocation_context,
     )

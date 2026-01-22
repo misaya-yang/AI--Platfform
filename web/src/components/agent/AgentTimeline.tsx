@@ -29,6 +29,8 @@ import {
   ListChecks,
   Sparkles,
   Clock,
+  XCircle,
+  StopCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
@@ -86,20 +88,36 @@ export interface TimelineStep {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Phase progress for 8-step AgentLoop visualization.
+ */
+export interface PhaseProgress {
+  currentPhase: number;     // 1-8
+  totalPhases: number;      // 8
+  phaseName: string;        // e.g., "memory_loading"
+  displayName: string;      // Chinese display name
+  status: "pending" | "running" | "completed";
+  durationMs?: number;
+}
+
 export interface TimelineState {
   runId: string;
-  status: "idle" | "running" | "completed" | "error";
+  status: "idle" | "running" | "completed" | "error" | "cancelled";
   steps: TimelineStep[];
   currentStepId?: string;
   startTime?: number;
   endTime?: number;
   metadata?: Record<string, unknown>;
+  // Phase 1 Optimization: Phase progress
+  phaseProgress?: PhaseProgress;
 }
 
 interface AgentTimelineProps {
   state: TimelineState;
   onArtifactClick?: (artifact: TimelineArtifact) => void;
   onStepClick?: (step: TimelineStep) => void;
+  onCancel?: () => void;  // Phase 1 Optimization: Cancel callback
+  isCancellable?: boolean;  // Phase 1 Optimization: Can be cancelled
   className?: string;
   defaultExpanded?: boolean;
   compact?: boolean;
@@ -212,6 +230,57 @@ function StepProgress({ progress }: { progress: number }) {
         className="h-full bg-gradient-to-r from-blue-500 to-violet-500 rounded-full"
         transition={{ duration: 0.3 }}
       />
+    </div>
+  );
+}
+
+/**
+ * Phase 1 Optimization: 8-step AgentLoop progress bar
+ */
+function PhaseProgressBar({ progress }: { progress: PhaseProgress }) {
+  const { currentPhase, totalPhases, displayName, status } = progress;
+
+  return (
+    <div className="w-full space-y-1">
+      {/* Phase label */}
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-slate-600 dark:text-slate-400">
+          {displayName}
+        </span>
+        <span className="text-slate-500 dark:text-slate-500">
+          {currentPhase}/{totalPhases}
+        </span>
+      </div>
+      {/* Progress segments */}
+      <div className="flex gap-0.5 h-1.5">
+        {Array.from({ length: totalPhases }, (_, i) => {
+          const phaseIndex = i + 1;
+          const isCompleted = phaseIndex < currentPhase;
+          const isCurrent = phaseIndex === currentPhase;
+          const isPending = phaseIndex > currentPhase;
+
+          return (
+            <motion.div
+              key={phaseIndex}
+              className={cn(
+                "flex-1 rounded-full transition-colors duration-300",
+                isCompleted && "bg-green-500",
+                isCurrent && status === "running" && "bg-blue-500",
+                isCurrent && status === "completed" && "bg-green-500",
+                isPending && "bg-slate-200 dark:bg-slate-700"
+              )}
+              initial={false}
+              animate={{
+                scale: isCurrent && status === "running" ? [1, 1.05, 1] : 1,
+              }}
+              transition={{
+                repeat: isCurrent && status === "running" ? Infinity : 0,
+                duration: 1,
+              }}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -486,12 +555,15 @@ export function AgentTimeline({
   state,
   onArtifactClick,
   onStepClick,
+  onCancel,
+  isCancellable = false,
   className,
   defaultExpanded = false,
   compact = false,
 }: AgentTimelineProps) {
   const { t } = useTranslation();
   const [isCollapsed, setIsCollapsed] = React.useState(false);
+  const [isCancelling, setIsCancelling] = React.useState(false);
 
   const totalDuration =
     state.startTime && state.endTime
@@ -501,7 +573,20 @@ export function AgentTimeline({
   const completedSteps = state.steps.filter((s) => s.status === "completed").length;
   const totalSteps = state.steps.length;
 
-  if (state.steps.length === 0) {
+  // Handle cancel button click
+  const handleCancel = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (onCancel && !isCancelling) {
+      setIsCancelling(true);
+      try {
+        await onCancel();
+      } finally {
+        setIsCancelling(false);
+      }
+    }
+  };
+
+  if (state.steps.length === 0 && !state.phaseProgress) {
     return null;
   }
 
@@ -529,6 +614,8 @@ export function AgentTimeline({
               <CheckCircle2 className="h-4 w-4 text-green-500" />
             ) : state.status === "error" ? (
               <AlertCircle className="h-4 w-4 text-red-500" />
+            ) : state.status === "cancelled" ? (
+              <XCircle className="h-4 w-4 text-orange-500" />
             ) : (
               <Clock className="h-4 w-4 text-slate-400" />
             )}
@@ -540,7 +627,9 @@ export function AgentTimeline({
                   ? t("agent.timeline.completed", "Agent Completed")
                   : state.status === "error"
                     ? t("agent.timeline.error", "Agent Error")
-                    : t("agent.timeline.idle", "Agent")}
+                    : state.status === "cancelled"
+                      ? t("agent.timeline.cancelled", "Agent Cancelled")
+                      : t("agent.timeline.idle", "Agent")}
             </span>
           </div>
 
@@ -559,14 +648,46 @@ export function AgentTimeline({
           )}
         </div>
 
-        {/* Collapse toggle */}
-        <motion.div
-          animate={{ rotate: isCollapsed ? -90 : 0 }}
-          transition={{ duration: 0.2 }}
-        >
-          <ChevronDown className="h-4 w-4 text-slate-400" />
-        </motion.div>
+        <div className="flex items-center gap-2">
+          {/* Cancel button */}
+          {isCancellable && state.status === "running" && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onClick={handleCancel}
+              disabled={isCancelling}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium",
+                "bg-orange-50 dark:bg-orange-900/30 text-orange-600 dark:text-orange-400",
+                "hover:bg-orange-100 dark:hover:bg-orange-900/50 transition-colors",
+                "disabled:opacity-50 disabled:cursor-not-allowed"
+              )}
+            >
+              {isCancelling ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <StopCircle className="h-3 w-3" />
+              )}
+              <span>{t("agent.timeline.cancel", "Cancel")}</span>
+            </motion.button>
+          )}
+
+          {/* Collapse toggle */}
+          <motion.div
+            animate={{ rotate: isCollapsed ? -90 : 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <ChevronDown className="h-4 w-4 text-slate-400" />
+          </motion.div>
+        </div>
       </div>
+
+      {/* Phase Progress Bar */}
+      {state.phaseProgress && state.status === "running" && (
+        <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+          <PhaseProgressBar progress={state.phaseProgress} />
+        </div>
+      )}
 
       {/* Timeline content */}
       <AnimatePresence>

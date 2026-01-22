@@ -212,10 +212,14 @@ export function AssistantPage() {
     }
   }, [handleSelectSession, models, cancelImageMode]);
 
-  // Handle new chat - reset all state including image mode
+  // Handle new chat - reset all state including feature toggles
   const onNewChat = useCallback(() => {
     cancelImageMode(); // Reset image mode
     handleNewChat();
+    // Reset feature toggles to defaults
+    setSelectedDatasets([]);  // Clear selected knowledge bases
+    setWebSearchEnabled(false);  // Disable web search
+    // Keep model and temperature as user preferences
   }, [handleNewChat, cancelImageMode]);
 
   // Handle Send

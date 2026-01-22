@@ -90,6 +90,59 @@ from .agui_protocol import (
     StatusEvent,
     create_agui_emitter,
 )
+# Enterprise Agent Loop Components
+from .tool_invoker import (
+    ToolInvoker,
+    ToolInvocationContext,
+    RegistryToolInvoker,
+    create_tool_invoker,
+)
+from .task_manager import (
+    TaskManager,
+    SessionResources,
+    TaskContext,
+    get_task_manager,
+    init_task_manager,
+    shutdown_task_manager,
+)
+from .agent_loop import (
+    AgentLoop,
+    AgentLoopConfig,
+    AgentLoopContext,
+    AgentLoopEvent,
+    AgentLoopPhase,
+    ErrorSeverity,
+    StructuredError,
+    PHASE_DISPLAY_NAMES,
+    PHASE_INDEX,
+    TOTAL_PHASES,
+    create_agent_loop,
+)
+from .rag_metrics import (
+    RetrievalMetrics,
+    RAGMetricsCollector,
+    get_rag_metrics_collector,
+)
+from .context_metrics import (
+    ContextMetrics,
+    ContextMetricsBuilder,
+    ContextMetricsCollector,
+    MetricLayer,
+    LayerMetrics,
+    CompressionMetrics,
+    CacheMetrics as KVCacheMetrics,  # Renamed to avoid conflict with cache_optimizer.CacheMetrics
+    MemoryMetrics,
+    get_context_metrics_collector,
+    init_context_metrics_collector,
+)
+# Query Intent Analyzer (Self-RAG style adaptive retrieval)
+from .query_intent_analyzer import (
+    QueryType,
+    RetrievalDecision,
+    QueryIntent,
+    QueryIntentAnalyzer,
+    create_query_intent_analyzer,
+)
 
 __all__ = [
     "AssistantService",
@@ -173,4 +226,46 @@ __all__ = [
     "ArtifactEvent",
     "StatusEvent",
     "create_agui_emitter",
+    # Enterprise Agent Loop Components
+    "ToolInvoker",
+    "ToolInvocationContext",
+    "RegistryToolInvoker",
+    "create_tool_invoker",
+    "TaskManager",
+    "SessionResources",
+    "TaskContext",
+    "get_task_manager",
+    "init_task_manager",
+    "shutdown_task_manager",
+    "AgentLoop",
+    "AgentLoopConfig",
+    "AgentLoopContext",
+    "AgentLoopEvent",
+    "AgentLoopPhase",
+    "ErrorSeverity",
+    "StructuredError",
+    "PHASE_DISPLAY_NAMES",
+    "PHASE_INDEX",
+    "TOTAL_PHASES",
+    "create_agent_loop",
+    "RetrievalMetrics",
+    "RAGMetricsCollector",
+    "get_rag_metrics_collector",
+    # Context Metrics (Observability)
+    "ContextMetrics",
+    "ContextMetricsBuilder",
+    "ContextMetricsCollector",
+    "MetricLayer",
+    "LayerMetrics",
+    "CompressionMetrics",
+    "KVCacheMetrics",  # Renamed from CacheMetrics to avoid conflict
+    "MemoryMetrics",
+    "get_context_metrics_collector",
+    "init_context_metrics_collector",
+    # Query Intent Analyzer (Self-RAG style)
+    "QueryType",
+    "RetrievalDecision",
+    "QueryIntent",
+    "QueryIntentAnalyzer",
+    "create_query_intent_analyzer",
 ]

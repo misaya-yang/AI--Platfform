@@ -22,6 +22,8 @@ References:
 
 from __future__ import annotations
 
+import asyncio
+
 from ...core.observability.logging import get_logger
 import time
 import uuid
@@ -77,6 +79,7 @@ from .scenario_analyzer import (
 )
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
+    get_ttft_optimized_prompt,
     inject_kb_context,
     inject_web_context,
     inject_document_context,
@@ -108,8 +111,12 @@ class StreamEventType(str, Enum):
     # Core streaming events
     TEXT_DELTA = "text_delta"
     THINKING_DELTA = "thinking_delta"
+    THINKING_START = "thinking_start"
+    THINKING_END = "thinking_end"
+    THINKING_ERROR = "thinking_error"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    TOOL_CALL_RESULT = "tool_call_result"  # AG-UI compatible tool result
 
     # Context and retrieval events
     CONTEXT_RETRIEVED = "context_retrieved"
@@ -178,12 +185,13 @@ class AssistantConfig:
     temperature: float = 0.7
     max_tokens: Optional[int] = None
 
-    # Knowledge base settings
+    # Knowledge base settings (TTFT-optimized defaults)
     kb_dataset_ids: List[str] = field(default_factory=list)
     kb_mode: RAGMode = RAGMode.AUTO
-    kb_top_k: int = 5
-    kb_score_threshold: float = 0.0  # 0.0 = no filtering (was 0.5 which filtered too aggressively)
+    kb_top_k: int = 3  # Reduced from 5 for faster retrieval and fewer tokens
+    kb_score_threshold: float = 0.65  # Increased from 0.5 for higher quality results
     kb_include_images: bool = False
+    kb_max_content_length: int = 400  # Max chars per chunk to reduce context size
 
     # Web search settings
     web_search_enabled: bool = False
@@ -204,14 +212,23 @@ class AssistantConfig:
     output_format: OutputFormat = OutputFormat.TEXT
 
     # Context Engine settings (Phase 5: KV-Cache optimization)
-    use_context_engine: bool = False  # Enable Context Engine for optimized caching
+    use_context_engine: bool = True  # ENABLED: Use Context Engine for KV-Cache optimization
     user_preferences: Optional[str] = None  # User-level preferences for context
     long_term_memory: Optional[str] = None  # Persistent user knowledge
 
     # Task Planning settings (Phase 2.4: Multi-step task planning)
-    enable_task_planning: bool = False  # Enable task decomposition and parallel execution
+    enable_task_planning: bool = False  # Disabled by default - enable for complex multi-step tasks only
     confirm_plan: bool = False  # When True, pause and require user confirmation before executing template plans
     max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
+
+    # Agent Loop settings (Enterprise unified 8-step flow)
+    use_agent_loop: bool = False  # Disabled by default - use simple flow for faster TTFT
+    use_scenario_retrieval: bool = False  # Disabled - scenario detection still runs but no heavy retrieval
+    enable_rag_metrics: bool = False  # Disabled in production for performance
+
+    # Memory and ReAct settings (Manus architecture core features)
+    enable_memory_loading: bool = False  # Disabled by default - reduces TTFT significantly
+    enable_react_loop: bool = False  # Disabled by default - simple generation for most queries
 
 
 @dataclass
@@ -688,6 +705,19 @@ Please use this web search context to inform your response when relevant."""
         # ========== LATENCY DEBUG: Track timing for each step ==========
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
 
+        # ========== Agent Loop Mode (Experimental) ==========
+        # If use_agent_loop is enabled, delegate to the unified 8-step AgentLoop
+        if config.use_agent_loop:
+            async for event in self._execute_agent_loop(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                history=history,
+            ):
+                yield event
+            return
+
         # ========== ReAct Phase 1: ANALYZING ==========
         # Detect task type for appropriate ReAct phase handling
         is_document_task = self._is_document_generation_task(message)
@@ -718,11 +748,15 @@ Please use this web search context to inform your response when relevant."""
             logger.warning(f"Scenario detection failed: {e}")
             scenario_detection = None
 
-        # Step 0: Load history from session if not provided
+        # Step 0: Load history from session if not provided (with timeout for TTFT optimization)
         step_start = time.time()
         if history is None and self.session_manager:
             try:
-                session = await self.session_manager.get(session_id)
+                # Add 500ms timeout to prevent slow DB queries from blocking TTFT
+                session = await asyncio.wait_for(
+                    self.session_manager.get(session_id),
+                    timeout=0.5  # 500ms timeout
+                )
                 if session and session.history:
                     history = [
                         {"role": m.role, "content": m.content}
@@ -730,6 +764,9 @@ Please use this web search context to inform your response when relevant."""
                     ]
                 else:
                     history = []
+            except asyncio.TimeoutError:
+                logger.warning(f"[LATENCY] Session history load timed out (>500ms), skipping")
+                history = []
             except Exception as e:
                 logger.warning(f"Failed to load session history: {e}")
                 history = []
@@ -781,8 +818,6 @@ Please use this web search context to inform your response when relevant."""
 
                 # Fire-and-forget with error logging: don't await, let it run in background
                 # This saves 0.5-1s of latency by not blocking on DB write
-                import asyncio
-
                 async def _persist_user_message():
                     try:
                         await self.session_manager.add_message(
@@ -802,7 +837,6 @@ Please use this web search context to inform your response when relevant."""
         # PARALLEL EXECUTION: Memory Loading + KB Retrieval (latency optimization)
         # This reduces first-token latency by running these operations concurrently
         # ==========================================================================
-        import asyncio
         step_start = time.time()
 
         user_preferences: Optional[str] = None
@@ -1124,6 +1158,9 @@ Please use this web search context to inform your response when relevant."""
         next_iteration_tool_config = None # Initialize variable for tool forcing
         current_thinking_level = thinking_level # Track thinking level for current iteration
 
+        # TTFT (Time To First Token) measurement
+        first_token_time: Optional[float] = None
+
         while iteration < max_tool_iterations:
             iteration += 1
             tool_calls_accumulated: Dict[int, Dict[str, Any]] = {}
@@ -1162,6 +1199,11 @@ Please use this web search context to inform your response when relevant."""
                     tool_config=next_iteration_tool_config # Pass tool_config if set
                 ):
                     if delta.content:
+                        # TTFT measurement: log time to first token
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                            ttft_ms = (first_token_time - start_time) * 1000
+                            logger.info(f"[TTFT] First token received after {ttft_ms:.0f}ms")
                         total_content += delta.content
                         yield AssistantStreamEvent(
                             event_type="text_delta",
@@ -1888,6 +1930,11 @@ Please use this web search context to inform your response when relevant."""
                     "抱歉，我无法生成有效的回复。请尝试重新提问或换一种方式描述您的需求。"
                 )
             total_content = fallback_message
+            # TTFT measurement for fallback (first_token_time would be None)
+            if first_token_time is None:
+                first_token_time = time.time()
+                ttft_ms = (first_token_time - start_time) * 1000
+                logger.info(f"[TTFT] Fallback message after {ttft_ms:.0f}ms (no content from model)")
             yield AssistantStreamEvent(
                 event_type="text_delta",
                 data=fallback_message
@@ -2022,10 +2069,10 @@ Please use this web search context to inform your response when relevant."""
                 prefs = extract_preferences(message)
                 for key, value in prefs.items():
                     await self.memory_service.set_user_memory(
+                        tenant_id=user.tenant_id,
                         user_id=user.user_id,
                         key=f"preference:{key}",
                         value=value,
-                        tenant_id=user.tenant_id,
                         metadata={"source": "auto_extract"},
                     )
             except Exception as e:
@@ -2329,7 +2376,6 @@ Please use this web search context to inform your response when relevant."""
                 return None
 
         # PARALLEL retrieval using asyncio.gather - significant latency improvement
-        import asyncio
         results = await asyncio.gather(
             *[retrieve_single_dataset(ds_id) for ds_id in dataset_ids],
             return_exceptions=True
@@ -2358,7 +2404,9 @@ Please use this web search context to inform your response when relevant."""
         # Use MemoryService if available (preferred)
         if self.memory_service:
             try:
-                memories = await self.memory_service.list_user_memories(user.user_id, limit=20)
+                memories = await self.memory_service.list_user_memories(
+                    tenant_id=user.tenant_id, user_id=user.user_id, limit=20
+                )
                 if memories:
                     # Format as bullet points
                     memory_lines = []
@@ -2426,8 +2474,136 @@ Please use this web search context to inform your response when relevant."""
         
         if session_id not in self._working_memories:
             self._working_memories[session_id] = WorkingMemory(session_id=session_id)
-            
+
         return self._working_memories[session_id]
+
+    async def _execute_agent_loop(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        """
+        Execute using the unified 8-step AgentLoop.
+
+        This is the new enterprise-grade execution path that integrates:
+        - ScenarioAwareRetriever for intelligent RAG
+        - TaskManager for session isolation
+        - ToolInvoker for unified tool execution
+        - RAGMetrics for quality tracking
+
+        Args:
+            user: User context
+            session_id: Session identifier
+            message: User's message
+            config: Assistant configuration
+            history: Optional conversation history
+
+        Yields:
+            AssistantStreamEvent objects
+        """
+        from .agent_loop import AgentLoop, AgentLoopConfig, AgentLoopEvent
+
+        # Create AgentLoop configuration with Streaming-First mode enabled
+        loop_config = AgentLoopConfig(
+            model_id=config.model_id,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens or 4096,
+            # Streaming-First mode - skip all pre-processing for fast TTFT
+            streaming_first_mode=True,
+            # System prompt - if not provided, streaming-first will use minimal prompt
+            system_prompt=config.system_prompt,
+            # Legacy settings (only used when streaming_first_mode=False)
+            enable_task_planning=config.enable_task_planning,
+            enable_scenario_retrieval=config.use_scenario_retrieval,
+            enable_rag_metrics=config.enable_rag_metrics,
+            enable_memory_loading=config.enable_memory_loading,
+            enable_react_loop=config.enable_react_loop,
+            kb_dataset_ids=config.kb_dataset_ids,
+            kb_top_k=config.kb_top_k,
+            kb_min_relevance=config.kb_score_threshold,
+            max_tool_iterations=10,
+            max_concurrent_tools=config.max_parallel_tools,
+        )
+
+        logger.info(
+            f"[AGENT LOOP] streaming_first_mode={loop_config.streaming_first_mode}, "
+            f"model={loop_config.model_id}"
+        )
+
+        # Create AgentLoop instance (system_prompt passed via loop_config)
+        agent_loop = AgentLoop(
+            model_registry=self.model_registry,
+            kb_service=self.kb_service,
+            memory_service=self.memory_service if hasattr(self, 'memory_service') else None,
+        )
+
+        # Load history if not provided
+        if history is None and self.session_manager:
+            try:
+                session = await self.session_manager.get(session_id)
+                if session and session.history:
+                    history = [
+                        {"role": m.role, "content": m.content}
+                        for m in session.history
+                    ]
+                else:
+                    history = []
+            except Exception as e:
+                logger.warning(f"Failed to load session history: {e}")
+                history = []
+
+        # Execute the agent loop
+        async for event in agent_loop.execute(
+            session_id=session_id,
+            user=user,
+            message=message,
+            config=loop_config,
+            history=history,
+        ):
+            # Convert AgentLoopEvent to AssistantStreamEvent
+            yield self._convert_agent_loop_event(event)
+
+    def _convert_agent_loop_event(
+        self,
+        event: "AgentLoopEvent",
+    ) -> AssistantStreamEvent:
+        """Convert AgentLoopEvent to AssistantStreamEvent for compatibility."""
+        from .agent_loop import AgentLoopPhase
+
+        # Map event types
+        event_type_map = {
+            "text_delta": StreamEventType.TEXT_DELTA,
+            "status": StreamEventType.STATUS,
+            "tool_result": StreamEventType.TOOL_CALL_RESULT,
+            "retrieval_complete": StreamEventType.CONTEXT_RETRIEVED,
+            "rag_evaluation": StreamEventType.RAG_EVALUATION,
+            "complete": StreamEventType.DONE,
+            "error": StreamEventType.ERROR,
+            # ReAct thinking events (Phase 3: Agent Intelligence)
+            "thinking_delta": StreamEventType.THINKING_DELTA,
+            "thinking_start": StreamEventType.THINKING_START,
+            "thinking_end": StreamEventType.THINKING_END,
+            "thinking_error": StreamEventType.THINKING_ERROR,
+        }
+
+        mapped_type = event_type_map.get(event.event_type, event.event_type)
+
+        # Add phase info to data if it's a dict
+        data = event.data
+        if isinstance(data, dict):
+            data = {**data, "agent_loop_phase": event.phase.value}
+        elif event.event_type == "text_delta":
+            # For text_delta, data is the text content directly
+            data = event.data
+
+        return AssistantStreamEvent(
+            event_type=mapped_type,
+            data=data,
+            timestamp=event.timestamp,
+        )
 
     async def _execute_with_planning(
         self,
@@ -2712,10 +2888,14 @@ Please use this web search context to inform your response when relevant."""
             logger.info("[SYSTEM PROMPT] Using custom system prompt from config")
         else:
             # Build Manus-style system prompt with scenario rules
+            # Only inject scenario framework when agent_loop is enabled (complex tasks)
+            # For simple queries, skip scenario injection to follow "minimal effective context" principle
             scenario_rules = ""
-            if scenario_detection and scenario_detection.confidence >= 0.3:
+            if config.use_agent_loop and scenario_detection and scenario_detection.confidence >= 0.6:
                 scenario_rules = self._build_scenario_prompt(scenario_detection)
                 logger.info(f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}")
+            elif scenario_detection:
+                logger.info(f"[SCENARIO SKIP] Skipping scenario injection (agent_loop={config.use_agent_loop}, confidence={scenario_detection.confidence:.2f})")
 
             # Get dataset names for display
             dataset_names = None
@@ -2897,14 +3077,15 @@ Please use this web search context to inform your response when relevant."""
             logger.info(f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars")
 
         # Build ContextStructure with layered content
-        # Use Manus-style prompt builder if no custom prompt provided
+        # Use TTFT-optimized prompt when context engine is enabled (no timestamps!)
         effective_system_prompt = config.system_prompt
         if not effective_system_prompt:
-            effective_system_prompt = self.build_default_system_prompt(
+            # Use TTFT-optimized prompt for KV-Cache stability
+            effective_system_prompt = get_ttft_optimized_prompt(
                 user_role="user",
                 available_datasets=config.kb_dataset_ids,
             )
-            logger.info("[CONTEXT ENGINE] Built Manus-style system prompt")
+            logger.info("[CONTEXT ENGINE] Built TTFT-optimized system prompt (no timestamps)")
 
         context_structure = ContextStructure(
             system_prompt=effective_system_prompt,
@@ -3172,10 +3353,10 @@ Please use this web search context to inform your response when relevant."""
             if self.memory_service:
                 try:
                     await self.memory_service.set_session_memory(
+                        tenant_id=user.tenant_id,
                         session_id=session_id,
                         key="pending_plan",
                         value=plan.to_dict(),
-                        tenant_id=user.tenant_id,
                         metadata={"scenario": scenario.value},
                     )
                 except Exception as e:
@@ -3349,8 +3530,21 @@ Please use this web search context to inform your response when relevant."""
             return ["Missing citations for RAG response."]
         return []
 
-    def _format_context(self, contexts: List[RetrievedContext]) -> str:
-        """Format retrieved contexts for injection into the prompt."""
+    def _format_context(
+        self,
+        contexts: List[RetrievedContext],
+        max_content_length: int = 400,  # TTFT optimization: truncate long chunks
+    ) -> str:
+        """
+        Format retrieved contexts for injection into the prompt.
+
+        Args:
+            contexts: List of retrieved context objects
+            max_content_length: Maximum characters per chunk (default 400 for TTFT optimization)
+
+        Returns:
+            Formatted context string
+        """
         parts = []
         for ctx in contexts:
             parts.append(f"### From: {ctx.dataset_name}")
@@ -3358,6 +3552,10 @@ Please use this web search context to inform your response when relevant."""
                 content = chunk["content"]
                 score = chunk.get("score", 0)
                 source = chunk.get("source_url", "")
+
+                # TTFT optimization: truncate long content to reduce tokens
+                if len(content) > max_content_length:
+                    content = content[:max_content_length] + "..."
 
                 if source:
                     parts.append(f"\n[{i}] (relevance: {score:.2f}) [Source: {source}]\n{content}")

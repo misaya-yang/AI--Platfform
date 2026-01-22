@@ -3,7 +3,6 @@
 import { Progress } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ResponsiveContainer,
   LineChart,
   Line,
   XAxis,
@@ -11,6 +10,7 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
@@ -239,26 +239,24 @@ export function TokenUsagePanel() {
       </div>
 
       {/* Trend chart */}
-      <div style={{ width: "100%", height: 100 }}>
-        <ResponsiveContainer minWidth={100} minHeight={80}>
-          <LineChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={gridColor} strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="date" hide />
-            <YAxis hide />
-            <Tooltip
-              formatter={(value) => [formatTokens(Number(value ?? 0)), "Tokens"]}
-              labelFormatter={(label: string) => dayjs(label).format("MM-DD")}
-            />
-            <Line
-              type="monotone"
-              dataKey="tokens"
-              stroke="#8b5cf6"
-              strokeWidth={2}
-              dot={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      <SafeResponsiveChart height={100} minWidth={100} minHeight={80}>
+        <LineChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={gridColor} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="date" hide />
+          <YAxis hide />
+          <Tooltip
+            formatter={(value) => [formatTokens(Number(value ?? 0)), "Tokens"]}
+            labelFormatter={(label: string) => dayjs(label).format("MM-DD")}
+          />
+          <Line
+            type="monotone"
+            dataKey="tokens"
+            stroke="#8b5cf6"
+            strokeWidth={2}
+            dot={false}
+          />
+        </LineChart>
+      </SafeResponsiveChart>
     </PanelWrapper>
   );
 }

@@ -105,6 +105,7 @@ class UpdateMemoryExecutor(ToolExecutor):
         try:
             if action == "delete":
                 await self.memory_service.delete_user_memory(
+                    tenant_id=request.user.tenant_id,
                     user_id=request.user.user_id,
                     key=key,
                 )
@@ -119,10 +120,10 @@ class UpdateMemoryExecutor(ToolExecutor):
                     )
                 
                 await self.memory_service.set_user_memory(
+                    tenant_id=request.user.tenant_id,
                     user_id=request.user.user_id,
                     key=key,
                     value=value,
-                    tenant_id=request.user.tenant_id,
                 )
                 result_msg = f"Memory updated: {key} = {value}"
 

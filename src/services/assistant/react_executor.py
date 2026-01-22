@@ -28,7 +28,7 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, TYPE_CHE
 
 from ...core.observability.logging import get_logger
 from ...models.enums import StreamEventType
-from .working_memory import WorkingMemory, TaskStatus
+from .working_memory import WorkingMemory, TaskStatus, TaskItem
 from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask
 
 if TYPE_CHECKING:
@@ -188,9 +188,9 @@ class ReActExecutor:
                     context=context,
                 )
 
-                # Update working memory with plan
+                # Update working memory with plan (using TaskItem objects)
                 working_memory.tasks = [
-                    {"id": t.id, "description": t.description, "status": TaskStatus.PENDING.value}
+                    TaskItem(id=t.id, description=t.description, status=TaskStatus.PENDING)
                     for t in plan.tasks
                 ]
 
@@ -300,7 +300,7 @@ class ReActExecutor:
                     data=working_memory.to_dict()
                 )
 
-                # Legacy status event for backwards compatibility
+                # === THINK Phase: Generate reasoning about the task ===
                 yield ReActEvent(
                     event_type="status",
                     data={
@@ -309,6 +309,11 @@ class ReActExecutor:
                         "task_id": task_id,
                     }
                 )
+
+                # Use LLM to reason about the task (if available)
+                if self.llm_caller:
+                    async for event in self._think_about_task(task, working_memory, state, context):
+                        yield event
 
                 # ACT: Execute the task
                 if task.tool and self.tool_executor:
@@ -447,6 +452,161 @@ class ReActExecutor:
                     "iteration": state.iteration,
                 })
 
+    async def _stream_thinking(
+        self,
+        messages: List[Dict[str, Any]],
+        task_id: str,
+        max_tokens: int = 200,
+        temperature: float = 0.7,
+    ) -> AsyncGenerator[ReActEvent, None]:
+        """
+        Stream thinking content from LLM with unified event emission.
+
+        This is the common helper for all thinking generation methods.
+        Handles streaming, content extraction, and error handling.
+
+        Args:
+            messages: LLM messages to send
+            task_id: Task identifier for event tracking
+            max_tokens: Maximum tokens for response
+            temperature: LLM temperature
+
+        Yields:
+            ReActEvent (thinking_start, thinking_delta, thinking_end, thinking_error)
+        """
+        if not self.llm_caller:
+            return
+
+        # Signal start of thinking
+        yield ReActEvent(
+            event_type="thinking_start",
+            data={"task_id": task_id, "timestamp": time.time()}
+        )
+
+        thinking_content = ""
+        try:
+            # Stream from LLM
+            async for delta in self.llm_caller(messages, max_tokens=max_tokens, temperature=temperature):
+                content = ""
+                if hasattr(delta, 'content') and delta.content:
+                    content = delta.content
+                elif isinstance(delta, dict) and delta.get('content'):
+                    content = delta['content']
+                elif isinstance(delta, str):
+                    content = delta
+
+                if content:
+                    thinking_content += content
+                    yield ReActEvent(
+                        event_type="thinking_delta",
+                        data={"content": content, "task_id": task_id}
+                    )
+
+            # Signal end of thinking
+            yield ReActEvent(
+                event_type="thinking_end",
+                data={
+                    "task_id": task_id,
+                    "content": thinking_content,
+                    "timestamp": time.time(),
+                }
+            )
+
+        except Exception as e:
+            logger.warning(f"Thinking generation failed for {task_id}: {e}")
+            yield ReActEvent(
+                event_type="thinking_error",
+                data={"task_id": task_id, "error": str(e)}
+            )
+
+    async def _think_about_task(
+        self,
+        task: PlannedTask,
+        working_memory: WorkingMemory,
+        state: ReActState,
+        context: Dict[str, Any],
+    ) -> AsyncGenerator[ReActEvent, None]:
+        """
+        Generate LLM reasoning about the current task.
+
+        This implements the THINK phase of ReAct:
+        - Analyze what needs to be done
+        - Consider context and constraints
+        - Decide on approach
+        - Stream thinking to user for visibility
+        """
+        if not self.llm_caller:
+            return
+
+        # Build thinking prompt
+        thinking_prompt = self._build_thinking_prompt(task, working_memory, state, context)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是一个智能助手的思考模块。在执行任务前，简洁分析任务要求并规划执行策略。"
+                    "输出格式：用1-2句话说明你的理解和计划，保持简洁专业。"
+                    "不要自我介绍，直接输出分析内容。"
+                ),
+            },
+            {"role": "user", "content": thinking_prompt},
+        ]
+
+        # Use common streaming helper
+        thinking_content = ""
+        async for event in self._stream_thinking(messages, task.id, max_tokens=200, temperature=0.7):
+            yield event
+            # Capture content for working memory
+            if event.event_type == "thinking_end":
+                thinking_content = event.data.get("content", "")
+
+        # Store thinking in state and working memory
+        if thinking_content:
+            state.thinking_content = thinking_content
+            working_memory.add_note(f"[思考] {task.description}: {thinking_content[:200]}")
+
+    def _build_thinking_prompt(
+        self,
+        task: PlannedTask,
+        working_memory: WorkingMemory,
+        state: ReActState,
+        context: Dict[str, Any],
+    ) -> str:
+        """Build the prompt for task reasoning."""
+        parts = []
+
+        # Current goal
+        if working_memory.goal:
+            parts.append(f"**用户目标:** {working_memory.goal}")
+
+        # Current task
+        parts.append(f"\n**当前任务:** {task.description}")
+        if task.tool:
+            parts.append(f"**计划工具:** {task.tool}")
+        if task.parameters:
+            params_str = ", ".join(f"{k}={v}" for k, v in task.parameters.items())
+            parts.append(f"**工具参数:** {params_str}")
+
+        # Progress
+        completed_tasks = [t for t in working_memory.tasks if t.status == TaskStatus.COMPLETED]
+        if completed_tasks:
+            completed_names = [t.description or t.id for t in completed_tasks]
+            parts.append(f"\n**已完成:** {', '.join(completed_names)}")
+
+        # Previous errors
+        if state.errors:
+            parts.append(f"\n**注意前序错误:** {'; '.join(state.errors[-2:])}")
+
+        # RAG context (if any)
+        rag_context = context.get("rag_context")
+        if rag_context:
+            parts.append(f"\n**参考知识:**\n{rag_context[:500]}...")
+
+        parts.append("\n请简要分析任务并说明执行计划。")
+
+        return "\n".join(parts)
+
     def _get_tool_icon(self, tool_name: str) -> str:
         """Map tool name to icon for frontend display."""
         tool_icons = {
@@ -478,15 +638,15 @@ class ReActExecutor:
         Direct execution for document generation and simple tasks.
 
         Implements the two-stage document generation flow:
-        1. THINK: Generate content in chat (streaming)
-        2. ACT: Call generate_document tool with full content
+        1. THINK: Generate reasoning and content strategy
+        2. ACT: Execute or generate response
         """
         is_doc_task = self._is_document_generation_task(user_message)
 
         if is_doc_task:
             # Document generation: Two-stage flow
 
-            # Stage 1: THINK - Generate content
+            # Stage 1: THINK - Analyze requirements
             yield ReActEvent(
                 event_type="status",
                 data={
@@ -495,11 +655,16 @@ class ReActExecutor:
                 }
             )
 
-            # Add task to working memory
+            # Use LLM to reason about document requirements
+            if self.llm_caller:
+                async for event in self._think_about_document(user_message, context):
+                    yield event
+
+            # Add task to working memory (using TaskItem objects)
             working_memory.tasks = [
-                {"id": "analyze", "description": "分析需求", "status": TaskStatus.COMPLETED.value},
-                {"id": "write", "description": "撰写内容", "status": TaskStatus.IN_PROGRESS.value},
-                {"id": "generate", "description": "生成文档", "status": TaskStatus.PENDING.value},
+                TaskItem(id="analyze", description="分析需求", status=TaskStatus.COMPLETED),
+                TaskItem(id="write", description="撰写内容", status=TaskStatus.IN_PROGRESS),
+                TaskItem(id="generate", description="生成文档", status=TaskStatus.PENDING),
             ]
             yield ReActEvent(
                 event_type="working_memory_update",
@@ -513,9 +678,6 @@ class ReActExecutor:
                     "message": "撰写文档内容...",
                 }
             )
-
-            # The actual content generation will be handled by the LLM caller
-            # We just set up the context and let the main stream handle it
 
             # Update task status
             self._update_task_status(working_memory, "write", TaskStatus.COMPLETED)
@@ -538,7 +700,7 @@ class ReActExecutor:
                 data=working_memory.to_dict()
             )
         else:
-            # Simple task: Direct response
+            # Simple task: Direct response with thinking
             yield ReActEvent(
                 event_type="status",
                 data={
@@ -546,6 +708,78 @@ class ReActExecutor:
                     "message": "思考回答...",
                 }
             )
+
+            # Use LLM to reason about simple tasks too
+            if self.llm_caller:
+                async for event in self._think_about_simple_task(user_message, context):
+                    yield event
+
+    async def _think_about_document(
+        self,
+        user_message: str,
+        context: Dict[str, Any],
+    ) -> AsyncGenerator[ReActEvent, None]:
+        """
+        Generate thinking about document requirements.
+
+        Args:
+            user_message: The user's document request
+            context: Additional context
+
+        Yields:
+            ReActEvent with thinking content
+        """
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是文档助手的分析模块。分析用户的文档需求，简要说明：\n"
+                    "1. 文档类型和目的\n"
+                    "2. 关键内容要点\n"
+                    "3. 结构建议\n"
+                    "用2-3句话概括，保持简洁专业。"
+                ),
+            },
+            {"role": "user", "content": f"用户请求: {user_message}"},
+        ]
+
+        # Use common streaming helper
+        async for event in self._stream_thinking(messages, "document_analysis", max_tokens=150, temperature=0.5):
+            yield event
+
+    async def _think_about_simple_task(
+        self,
+        user_message: str,
+        context: Dict[str, Any],
+    ) -> AsyncGenerator[ReActEvent, None]:
+        """
+        Generate thinking about simple tasks.
+
+        Args:
+            user_message: The user's request
+            context: Additional context
+
+        Yields:
+            ReActEvent with thinking content
+        """
+        # Check if RAG context is available
+        rag_context = context.get("rag_context", "")
+        rag_hint = f"\n参考知识库内容: {rag_context[:300]}..." if rag_context else ""
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是智能助手的思考模块。简要分析用户问题，说明你的理解和回答策略。"
+                    "用1-2句话，保持简洁。"
+                ),
+            },
+            {"role": "user", "content": f"用户问题: {user_message}{rag_hint}"},
+        ]
+
+        # Use common streaming helper
+        async for event in self._stream_thinking(messages, "simple_task", max_tokens=100, temperature=0.5):
+            yield event
 
     def _update_task_status(
         self,
@@ -555,8 +789,8 @@ class ReActExecutor:
     ):
         """Update task status in working memory."""
         for task in working_memory.tasks:
-            if task.get("id") == task_id:
-                task["status"] = status.value if isinstance(status, TaskStatus) else status
+            if task.id == task_id:
+                task.status = status
                 break
 
 

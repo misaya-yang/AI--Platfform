@@ -3,7 +3,6 @@
 import { Row, Col, Select } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ResponsiveContainer,
   BarChart,
   Bar,
   XAxis,
@@ -11,6 +10,7 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { useState } from "react";
 import { PanelWrapper } from "../PanelWrapper";
@@ -186,24 +186,22 @@ export function SecurityEventsPanel() {
       </Row>
 
       {/* Chart */}
-      <div style={{ width: "100%", height: 120, marginBottom: 12, minWidth: 100 }}>
-        <ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
-          <BarChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
-            <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
-            <XAxis
-              dataKey="date"
-              tick={{ fontSize: 10 }}
-              tickFormatter={(v) => dayjs(v).format(granularity === "hour" ? "HH:mm" : "MM-DD")}
-            />
-            <YAxis tick={{ fontSize: 10 }} width={30} />
-            <Tooltip
-              labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
-            />
-            <Bar dataKey="auth_failed" name="认证失败" fill="#ef4444" stackId="a" />
-            <Bar dataKey="rate_limited" name="限流" fill="#f59e0b" stackId="a" />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
+      <SafeResponsiveChart height={120} minWidth={100} minHeight={100} style={{ marginBottom: 12 }}>
+        <BarChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 10 }}
+            tickFormatter={(v) => dayjs(v).format(granularity === "hour" ? "HH:mm" : "MM-DD")}
+          />
+          <YAxis tick={{ fontSize: 10 }} width={30} />
+          <Tooltip
+            labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
+          />
+          <Bar dataKey="auth_failed" name="认证失败" fill="#ef4444" stackId="a" />
+          <Bar dataKey="rate_limited" name="限流" fill="#f59e0b" stackId="a" />
+        </BarChart>
+      </SafeResponsiveChart>
 
       {/* Top users */}
       <div>

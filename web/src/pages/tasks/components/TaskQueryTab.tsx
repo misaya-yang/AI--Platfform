@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useTask, useTaskResult } from "@/hooks/useTasks";
+import { copyToClipboard } from "@/lib/clipboard";
 
 const STATUS_CONFIG: Record<
   string,
@@ -107,7 +108,7 @@ export function TaskQueryTab() {
 
   const handleCopyId = useCallback(() => {
     if (searchedId) {
-      navigator.clipboard.writeText(searchedId);
+      copyToClipboard(searchedId);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }

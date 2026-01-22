@@ -243,6 +243,87 @@ class ContextEngine:
 
 
 # =============================================================================
+# Token Estimation Utilities
+# =============================================================================
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Fast token estimation for context management.
+
+    Uses a simple heuristic that works well for mixed Chinese/English text:
+    - Chinese characters: ~1.5 tokens per character
+    - English/ASCII: ~4 characters per token
+    - Average: ~3 characters per token for mixed content
+
+    This is intentionally conservative to avoid context overflow.
+    For production precision, use tiktoken or provider-specific tokenizers.
+
+    Args:
+        text: The text to estimate tokens for
+
+    Returns:
+        Estimated number of tokens (conservative estimate)
+
+    Example:
+        >>> estimate_tokens("Hello, world!")  # ~4 tokens
+        >>> estimate_tokens("你好世界")        # ~3 tokens
+    """
+    if not text:
+        return 0
+
+    # Count CJK characters (Chinese, Japanese, Korean)
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or
+                    '\u3040' <= c <= '\u30ff' or  # Japanese hiragana/katakana
+                    '\uac00' <= c <= '\ud7af')     # Korean
+
+    # Non-CJK characters
+    ascii_count = len(text) - cjk_count
+
+    # Estimate: CJK ~1.5 tokens/char, ASCII ~0.25 tokens/char
+    # Using conservative estimates to avoid overflow
+    cjk_tokens = cjk_count * 1.5
+    ascii_tokens = ascii_count / 3.5  # ~3.5 chars per token for English
+
+    return int(cjk_tokens + ascii_tokens)
+
+
+def estimate_message_tokens(message: dict) -> int:
+    """
+    Estimate tokens for a single chat message.
+
+    Includes overhead for message formatting (role, etc.).
+
+    Args:
+        message: A message dict with 'role' and 'content' keys
+
+    Returns:
+        Estimated tokens for this message
+    """
+    content = message.get("content", "")
+    if isinstance(content, list):
+        # Handle multi-part content (text + images)
+        text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+        content = " ".join(text_parts)
+
+    # Add overhead for message formatting (~4 tokens per message)
+    return estimate_tokens(str(content)) + 4
+
+
+def estimate_history_tokens(history: list) -> int:
+    """
+    Estimate total tokens for conversation history.
+
+    Args:
+        history: List of message dicts
+
+    Returns:
+        Total estimated tokens
+    """
+    return sum(estimate_message_tokens(msg) for msg in history)
+
+
+# =============================================================================
 # Module-level convenience functions
 # =============================================================================
 
@@ -257,3 +338,88 @@ def create_context_engine(provider: str) -> ContextEngine:
         A configured ContextEngine instance.
     """
     return ContextEngine(provider=provider)
+
+
+def serialize_tools_deterministic(tools: List[Dict[str, Any]]) -> str:
+    """
+    Serialize tool definitions deterministically for KV-cache optimization.
+
+    Ensures consistent serialization order by:
+    1. Sorting tools by name
+    2. Removing variable fields (timestamps, etc.)
+    3. Sorting keys within each tool definition
+
+    This guarantees identical tool serialization across requests,
+    maximizing cache hit rates for the static prefix.
+
+    Args:
+        tools: List of tool definition dictionaries
+
+    Returns:
+        Deterministically serialized JSON string of tools
+    """
+    import json
+
+    if not tools:
+        return ""
+
+    # Sort tools by name for consistent ordering
+    sorted_tools = sorted(tools, key=lambda t: t.get("name", ""))
+
+    # Remove variable fields and sort keys
+    stable_tools = []
+    variable_fields = {"created_at", "updated_at", "last_used", "usage_count"}
+
+    for tool in sorted_tools:
+        stable_tool = {
+            k: v for k, v in sorted(tool.items())
+            if k not in variable_fields
+        }
+        stable_tools.append(stable_tool)
+
+    return json.dumps(stable_tools, sort_keys=True, ensure_ascii=False, indent=2)
+
+
+def format_long_term_memory(memory_context: Dict[str, Any]) -> str:
+    """
+    Format long-term memory context for inclusion in system prompt.
+
+    Structures frequent memories and learned patterns into a
+    concise context section that helps personalize responses.
+
+    Args:
+        memory_context: Dictionary with preferences and frequent_memories
+
+    Returns:
+        Formatted string for system prompt inclusion
+    """
+    if not memory_context:
+        return ""
+
+    parts = []
+
+    # Format preferences
+    preferences = memory_context.get("preferences", {})
+    if preferences:
+        pref_items = []
+        for key, value in sorted(preferences.items()):
+            if value and key not in ("language",):  # Skip obvious defaults
+                pref_items.append(f"- {key}: {value}")
+        if pref_items:
+            parts.append("### Preferences\n" + "\n".join(pref_items))
+
+    # Format frequent memories (learned patterns)
+    frequent = memory_context.get("frequent_memories", [])
+    if frequent:
+        memory_items = []
+        for mem in frequent[:5]:  # Top 5 only
+            key = mem.get("key", "")
+            value = mem.get("value", "")
+            if key and value and key != "preferences":
+                # Truncate long values
+                val_str = str(value)[:100] if len(str(value)) > 100 else str(value)
+                memory_items.append(f"- {key}: {val_str}")
+        if memory_items:
+            parts.append("### Learned Context\n" + "\n".join(memory_items))
+
+    return "\n\n".join(parts) if parts else ""

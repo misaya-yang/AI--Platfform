@@ -98,6 +98,29 @@ class ChatMessage:
     images: Optional[List[str]] = None  # Base64 or URLs for vision models
     thought_signature: Optional[str] = None  # Gemini 3 thought signature
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ChatMessage":
+        """Create ChatMessage from dictionary."""
+        return cls(
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            name=data.get("name"),
+            tool_calls=data.get("tool_calls"),
+            tool_call_id=data.get("tool_call_id"),
+            images=data.get("images"),
+            thought_signature=data.get("thought_signature"),
+        )
+
+
+def _normalize_message(msg) -> ChatMessage:
+    """Convert message to ChatMessage if it's a dict."""
+    if isinstance(msg, ChatMessage):
+        return msg
+    elif isinstance(msg, dict):
+        return ChatMessage.from_dict(msg)
+    else:
+        raise TypeError(f"Expected ChatMessage or dict, got {type(msg)}")
+
 
 @dataclass
 class ModelConfig:
@@ -523,7 +546,8 @@ class ModelRegistry:
     ) -> Dict[str, Any]:
         """Build OpenAI-compatible request body."""
         formatted_messages = []
-        for msg in messages:
+        for raw_msg in messages:
+            msg = _normalize_message(raw_msg)
             m: Dict[str, Any] = {"role": msg.role, "content": msg.content}
             if msg.name:
                 m["name"] = msg.name
@@ -577,7 +601,8 @@ class ModelRegistry:
         system_prompt = None
         formatted_messages = []
 
-        for msg in messages:
+        for raw_msg in messages:
+            msg = _normalize_message(raw_msg)
             if msg.role == "system":
                 system_prompt = msg.content
                 continue
@@ -669,7 +694,8 @@ class ModelRegistry:
         contents = []
         system_instruction = None
 
-        for msg in messages:
+        for raw_msg in messages:
+            msg = _normalize_message(raw_msg)
             if msg.role == "system":
                 system_instruction = msg.content
                 continue

@@ -3,7 +3,6 @@
 import { Row, Col } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ResponsiveContainer,
   AreaChart,
   Area,
   XAxis,
@@ -14,6 +13,7 @@ import {
   Pie,
   Cell,
 } from "recharts";
+import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
@@ -179,27 +179,25 @@ export function CostAnalysisPanel() {
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
             服务分布
           </div>
-          <div style={{ width: "100%", height: 120 }}>
-            <ResponsiveContainer minWidth={80} minHeight={80}>
-              <PieChart>
-                <Pie
-                  data={pieData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={30}
-                  outerRadius={50}
-                  dataKey="value"
-                  label={({ percent }) => `${((percent || 0) * 100).toFixed(0)}%`}
-                  labelLine={false}
-                >
-                  {pieData.map((_, index) => (
-                    <Cell key={index} fill={pieColors[index % pieColors.length]} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value) => formatCost(Number(value || 0))} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
+          <SafeResponsiveChart height={120} minWidth={80} minHeight={80}>
+            <PieChart>
+              <Pie
+                data={pieData}
+                cx="50%"
+                cy="50%"
+                innerRadius={30}
+                outerRadius={50}
+                dataKey="value"
+                label={({ percent }) => `${((percent || 0) * 100).toFixed(0)}%`}
+                labelLine={false}
+              >
+                {pieData.map((_, index) => (
+                  <Cell key={index} fill={pieColors[index % pieColors.length]} />
+                ))}
+              </Pie>
+              <Tooltip formatter={(value) => formatCost(Number(value || 0))} />
+            </PieChart>
+          </SafeResponsiveChart>
           {/* Legend */}
           <div style={{ marginTop: 8 }}>
             {pieData.slice(0, 3).map((item, index) => (
@@ -223,30 +221,28 @@ export function CostAnalysisPanel() {
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
             成本趋势
           </div>
-          <div style={{ width: "100%", height: 150 }}>
-            <ResponsiveContainer minWidth={100} minHeight={100}>
-              <AreaChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 10 }}
-                  tickFormatter={(v) => dayjs(v).format("MM-DD")}
-                />
-                <YAxis tick={{ fontSize: 10 }} width={35} />
-                <Tooltip
-                  formatter={(value) => [formatCost(Number(value || 0)), "成本"]}
-                  labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD")}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="cost"
-                  stroke="#10b981"
-                  fill="rgba(16, 185, 129, 0.2)"
-                  strokeWidth={2}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          <SafeResponsiveChart height={150} minWidth={100} minHeight={100}>
+            <AreaChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
+              <XAxis
+                dataKey="date"
+                tick={{ fontSize: 10 }}
+                tickFormatter={(v) => dayjs(v).format("MM-DD")}
+              />
+              <YAxis tick={{ fontSize: 10 }} width={35} />
+              <Tooltip
+                formatter={(value) => [formatCost(Number(value || 0)), "成本"]}
+                labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD")}
+              />
+              <Area
+                type="monotone"
+                dataKey="cost"
+                stroke="#10b981"
+                fill="rgba(16, 185, 129, 0.2)"
+                strokeWidth={2}
+              />
+            </AreaChart>
+          </SafeResponsiveChart>
         </Col>
       </Row>
     </PanelWrapper>

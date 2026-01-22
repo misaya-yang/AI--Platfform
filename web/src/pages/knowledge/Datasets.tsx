@@ -44,6 +44,7 @@ import { deleteDataset } from "@/api/knowledge";
 import type { Dataset } from "@/types/knowledge";
 import { useAppStore } from "@/store/useAppStore";
 import { colors } from "@/theme/themeConfig";
+import { copyToClipboard } from "@/lib/clipboard";
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -121,7 +122,7 @@ function DatasetCard({
 
   const copyId = (e: React.MouseEvent) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(dataset.dataset_id);
+    copyToClipboard(dataset.dataset_id);
     setCopied(true);
     message.success("ID 已复制到剪贴板");
     setTimeout(() => setCopied(false), 2000);

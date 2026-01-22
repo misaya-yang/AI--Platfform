@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _get_int_env(key: str, default: int) -> int:
+    """Get integer from environment variable."""
+    val = os.getenv(key)
+    if val:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return default
 
 
 class DatabaseSettings(BaseModel):
@@ -136,12 +148,14 @@ class LangGraphSettings(BaseModel):
     # GATEWAY_LANGGRAPH__AUTH_TOKEN=your-internal-api-token
     auth_token: str = ""
 
-    # 用户层级限流配置
+    # 用户层级限流配置 (requests per window seconds)
+    # 生产环境使用安全默认值
+    # 开发环境可通过环境变量调整: RATE_LIMIT_ANONYMOUS_LIMIT=1000
     tier_limits: Dict[str, Dict[str, int]] = Field(default_factory=lambda: {
-        "anonymous": {"requests": 10, "window": 60},
-        "normal": {"requests": 60, "window": 60},
-        "premium": {"requests": 300, "window": 60},
-        "enterprise": {"requests": 1000, "window": 60},
+        "anonymous": {"requests": _get_int_env("RATE_LIMIT_ANONYMOUS_LIMIT", 10), "window": 60},
+        "normal": {"requests": _get_int_env("RATE_LIMIT_NORMAL_LIMIT", 60), "window": 60},
+        "premium": {"requests": _get_int_env("RATE_LIMIT_PREMIUM_LIMIT", 300), "window": 60},
+        "enterprise": {"requests": _get_int_env("RATE_LIMIT_ENTERPRISE_LIMIT", 1000), "window": 60},
     })
 
 

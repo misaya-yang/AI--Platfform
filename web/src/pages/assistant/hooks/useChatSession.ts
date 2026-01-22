@@ -20,6 +20,7 @@ import {
   type SessionConfig,
 } from "@/api/sessions";
 import { useAppStore } from "@/store/useAppStore";
+import { generateUUID } from "@/lib/utils";
 import type {
   ChatMessage as ChatMessageType,
   RetrievedContext,
@@ -84,7 +85,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
     }
 
     // Restore web search results
-    if (msg.metadata.web_search_results && msg.metadata.web_search_results.results) {
+    if (msg.metadata.web_search_results && Array.isArray(msg.metadata.web_search_results.results)) {
       baseMessage.webSearchResults = msg.metadata.web_search_results.results;
       searchStatusItems.push({
         type: "web" as const,
@@ -322,7 +323,7 @@ export function useChatSession() {
     
     // 1. Setup UI for new message
     const userMessage: ChatMessageType = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       role: "user",
       content: messageContent,
       attachments: attachments.length > 0 ? attachments : undefined,
@@ -347,7 +348,7 @@ export function useChatSession() {
     }
 
     const assistantMessage: ChatMessageType = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       role: "assistant",
       content: "",
       isStreaming: true,
@@ -443,11 +444,8 @@ export function useChatSession() {
             break;
 
           case SSEEventType.STATUS:
-            // 状态事件也算"首次响应"，因为用户能看到处理状态
-            if (firstTokenMs === undefined) {
-              firstTokenMs = now - startTime;
-              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, firstTokenMs } : m));
-            }
+            // 状态事件不计入 TTFT - TTFT 只测量真正的文本内容出现时间
+            // STATUS 事件是预处理阶段（如 "分析任务需求..."），不是最终内容
             const statusData = event.data as {
               status?: string;
               message: string;
@@ -492,21 +490,22 @@ export function useChatSession() {
             break;
           
           case "context_retrieved":
-            // KB 检索完成也算"首次响应"
-            if (firstTokenMs === undefined) {
-              firstTokenMs = now - startTime;
-            }
+            // KB 检索完成不计入 TTFT - 这是后台预处理阶段
             const ctxData = event.data as RetrievedContext;
+            // Ensure chunks array exists to prevent undefined access
+            if (ctxData && !ctxData.chunks) {
+              ctxData.chunks = [];
+            }
             contexts.push(ctxData);
-            const totalResults = contexts.reduce((sum, c) => sum + c.chunks.length, 0);
-            const totalDuration = contexts.reduce((sum, c) => sum + c.took_ms, 0);
+            const totalResults = contexts.reduce((sum, c) => sum + (c.chunks?.length || 0), 0);
+            const totalDuration = contexts.reduce((sum, c) => sum + (c.took_ms || 0), 0);
             updateSearchStatus("kb", { state: "completed", resultCount: totalResults, durationMs: totalDuration });
             setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, contexts, searchStatus, firstTokenMs } : m));
             break;
 
           case "web_search_results":
             const webData = event.data as any;
-            if (webData.results) {
+            if (webData.results && Array.isArray(webData.results)) {
               webSearchResults = webData.results;
               updateSearchStatus("web", { state: "completed", resultCount: webData.results.length, durationMs: webData.response_time_ms });
               setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, webSearchResults, searchStatus } : m));
@@ -651,11 +650,7 @@ export function useChatSession() {
 
           // === AG-UI Tool Call Events ===
           case SSEEventType.TOOL_CALL_START:
-            // 工具调用也算"首次响应"，因为用户能看到有事情在发生
-            if (firstTokenMs === undefined) {
-              firstTokenMs = now - startTime;
-              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, firstTokenMs } : m));
-            }
+            // 工具调用不计入 TTFT - TTFT 只测量文本内容出现时间
             const toolStartData = event.data as {
               tool_call_id: string;
               tool_name: string;

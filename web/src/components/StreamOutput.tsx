@@ -6,6 +6,7 @@ import rehypeKatex from "rehype-katex";
 import { marked } from "marked";
 import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import "katex/dist/katex.min.css";
+import { useLatexCopy } from "@/hooks/useLatexCopy";
 
 /**
  * Custom URL transform that allows data: URLs for base64 images.
@@ -269,7 +270,8 @@ const MemoizedMarkdownBlock = memo(
         ]}
         rehypePlugins={[
           // Configure rehype-katex for better error handling
-          [rehypeKatex, { throwOnError: false, strict: false }],
+          // output: 'htmlAndMathml' includes <annotation> with original LaTeX for copy support
+          [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
         ]}
         // Allow data: URLs for base64 images (filtered by default for security)
         urlTransform={allowDataUrlTransform}
@@ -331,6 +333,9 @@ export const StreamOutput = memo(function StreamOutput({
   isStreaming = false,
   id = "msg"
 }: StreamOutputProps) {
+  // Enable LaTeX copy support - copies original LaTeX source when selecting formulas
+  useLatexCopy();
+
   // Filter out accidental JSON tool output before parsing
   const filteredText = useMemo(() => filterToolJsonOutput(text), [text]);
 

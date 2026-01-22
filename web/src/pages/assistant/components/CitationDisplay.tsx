@@ -216,7 +216,7 @@ export function CitationDisplay({ citations, evaluation, className }: CitationDi
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
 
-  if (!citations || citations.length === 0) return null;
+  if (!citations || !Array.isArray(citations) || citations.length === 0) return null;
 
   // Show all citations (retrieved sources), not just "used" ones
   // This makes sense because users want to see all sources that were retrieved and considered

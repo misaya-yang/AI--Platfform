@@ -1,11 +1,12 @@
 import { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { 
-  generateImage, 
+import {
+  generateImage,
   getArtifactDownloadUrl,
-  createArtifact 
+  createArtifact
 } from "@/api/assistant";
 import { addSessionMessage } from "@/api/sessions";
+import { generateUUID } from "@/lib/utils";
 import type { ChatMessage } from "../types";
 import type { Artifact } from "@/components/artifacts";
 
@@ -61,13 +62,13 @@ export function useImageGeneration(
     }
 
     const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       role: "user",
       content: `🎨 ${t("assistant.generateImagePrompt", "Generate image")}: ${prompt}`,
     };
 
     const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: generateUUID(),
       role: "assistant",
       content: "",
       isGeneratingImage: true,

@@ -51,6 +51,10 @@ type TimelineAction =
   | { type: "DOCUMENT_GENERATION_START"; payload: AGUIEvent }
   | { type: "DOCUMENT_GENERATION_RESULT"; payload: AGUIEvent }
   | { type: "OUTLINE_READY"; payload: AGUIEvent }
+  // Phase 1 Optimization: Phase tracking
+  | { type: "PHASE_STARTED"; payload: AGUIEvent }
+  | { type: "PHASE_COMPLETED"; payload: AGUIEvent }
+  | { type: "CANCELLED"; payload: AGUIEvent }
   | { type: "RESET" };
 
 // ============================================================================
@@ -65,6 +69,8 @@ const initialState: TimelineState = {
   startTime: undefined,
   endTime: undefined,
   metadata: undefined,
+  // Phase 1 Optimization: Phase progress
+  phaseProgress: undefined,
 };
 
 // ============================================================================
@@ -89,9 +95,12 @@ function mapStepType(type: string): StepType {
   return typeMap[type] || "planning";
 }
 
-/** Safely convert AG-UI timestamp (seconds) to milliseconds */
+/** Safely convert AG-UI timestamp to milliseconds */
 function toMs(timestamp: number | undefined): number {
-  return timestamp ? toMs(timestamp) : Date.now();
+  if (!timestamp) return Date.now();
+  // If timestamp looks like seconds (< year 2100 in seconds), convert to ms
+  // Otherwise assume it's already in milliseconds
+  return timestamp < 4102444800 ? timestamp * 1000 : timestamp;
 }
 
 function updateStepStatus(
@@ -538,12 +547,48 @@ function timelineReducer(
       return {
         ...state,
         steps: updateStepStatus(state.steps, stepId, {
-          message: `大纲: ${title} (${(sections as string[])?.length} 章节)`,
+          message: `大纲: ${title || '未知'} (${(sections as string[])?.length || 0} 章节)`,
           metadata: {
             ...(state.steps.find((s) => s.id === stepId)?.metadata || {}),
             outline: { title, sections },
           },
         }),
+      };
+    }
+
+    // Phase 1 Optimization: Phase tracking events
+    case "PHASE_STARTED": {
+      const { phase_index, total_phases, phase_name, display_name } = action.payload;
+      return {
+        ...state,
+        phaseProgress: {
+          currentPhase: phase_index as number,
+          totalPhases: total_phases as number,
+          phaseName: phase_name as string,
+          displayName: display_name as string,
+          status: "running",
+        },
+      };
+    }
+
+    case "PHASE_COMPLETED": {
+      const { duration_ms } = action.payload;
+      if (!state.phaseProgress) return state;
+      return {
+        ...state,
+        phaseProgress: {
+          ...state.phaseProgress,
+          status: "completed",
+          durationMs: duration_ms as number,
+        },
+      };
+    }
+
+    case "CANCELLED": {
+      return {
+        ...state,
+        status: "cancelled" as TimelineState["status"],
+        endTime: Date.now(),
       };
     }
 
@@ -625,6 +670,16 @@ export function useAgentTimeline() {
         break;
       case "outline_ready":
         dispatch({ type: "OUTLINE_READY", payload: event });
+        break;
+      // Phase 1 Optimization: Phase tracking events
+      case "phase_started":
+        dispatch({ type: "PHASE_STARTED", payload: event });
+        break;
+      case "phase_completed":
+        dispatch({ type: "PHASE_COMPLETED", payload: event });
+        break;
+      case "cancelled":
+        dispatch({ type: "CANCELLED", payload: event });
         break;
       // Ignore text events - they don't affect timeline
       case "text_message_start":
