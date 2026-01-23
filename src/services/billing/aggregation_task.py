@@ -58,6 +58,8 @@ class AggregationTask:
 
         async with self.db._pool.acquire() as conn:
             # Aggregate by tenant, user, model, assistant, service
+            # Use COALESCE to convert NULLs to empty strings for proper UNIQUE constraint matching
+            # The constraint uq_usage_daily_aggregates_dimensions requires non-NULL values
             aggregation_query = """
                 INSERT INTO usage_daily_aggregates (
                     tenant_id, user_id, model, assistant_id, service_id,
@@ -67,10 +69,10 @@ class AggregationTask:
                 )
                 SELECT
                     tenant_id,
-                    user_id,
-                    model,
-                    assistant_id,
-                    service_id,
+                    COALESCE(user_id, '') as user_id,
+                    COALESCE(model, '') as model,
+                    COALESCE(assistant_id, '') as assistant_id,
+                    COALESCE(service_id, '') as service_id,
                     $1::date as date,
                     COUNT(*) as request_count,
                     COUNT(*) FILTER (WHERE status = 'success') as success_count,
@@ -83,7 +85,7 @@ class AggregationTask:
                 FROM usage_records
                 WHERE created_at >= $1::date
                   AND created_at < ($1::date + interval '1 day')
-                GROUP BY tenant_id, user_id, model, assistant_id, service_id
+                GROUP BY tenant_id, COALESCE(user_id, ''), COALESCE(model, ''), COALESCE(assistant_id, ''), COALESCE(service_id, '')
                 ON CONFLICT (tenant_id, user_id, model, assistant_id, service_id, date)
                 DO UPDATE SET
                     request_count = EXCLUDED.request_count,

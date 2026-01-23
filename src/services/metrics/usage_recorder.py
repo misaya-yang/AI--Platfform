@@ -479,6 +479,8 @@ class UsageRecorder:
                 tenant_id, user_id, model, assistant_id, service_id, bucket_start = key
                 bucket_date = bucket_start.date()
 
+                # Use empty string instead of NULL for proper UNIQUE constraint matching
+                # The constraint uq_usage_hourly_aggregates_dimensions requires non-NULL values
                 await conn.execute(
                     """
                     INSERT INTO usage_hourly_aggregates (
@@ -490,8 +492,7 @@ class UsageRecorder:
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
                     )
-                    ON CONFLICT (tenant_id, COALESCE(user_id, ''), COALESCE(model, ''),
-                                 COALESCE(assistant_id, ''), COALESCE(service_id, ''), bucket_start)
+                    ON CONFLICT (tenant_id, user_id, model, assistant_id, service_id, bucket_start)
                     DO UPDATE SET
                         request_count = usage_hourly_aggregates.request_count + EXCLUDED.request_count,
                         success_count = usage_hourly_aggregates.success_count + EXCLUDED.success_count,
@@ -512,10 +513,10 @@ class UsageRecorder:
                         updated_at = CURRENT_TIMESTAMP
                     """,
                     tenant_id,
-                    user_id or None,
-                    model or None,
-                    assistant_id or None,
-                    service_id or None,
+                    user_id or '',  # Use empty string instead of None
+                    model or '',
+                    assistant_id or '',
+                    service_id or '',
                     bucket_start,
                     bucket_date,
                     agg["request_count"],
