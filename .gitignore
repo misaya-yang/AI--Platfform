@@ -70,6 +70,8 @@ docs/plans/
 # Generated documentation output
 docs/output/
 docs/tools/
+docs/plans/
+docs
 
 # ======================== Logs & Temp Files ========================
 *.log
