@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from urllib.parse import unquote, urlparse
@@ -208,19 +208,35 @@ async def create_document_text(
 async def upload_document(
     dataset_id: str,
     file: UploadFile = File(...),
+    processing_mode: str = Form("text_only"),  # text_only | scanned | multimodal
     svc: KnowledgeService = Depends(get_knowledge_service),
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
 ):
+    """
+    Upload a document to the knowledge base.
+    
+    Args:
+        dataset_id: Target dataset ID
+        file: Document file (PDF, DOCX, TXT, etc.)
+        processing_mode: Processing mode - one of:
+            - text_only: Traditional OCR + text embedding (default)
+            - scanned: Page-as-Image vision embedding (for scanned PDFs)
+            - multimodal: Combined text + image embedding
+    """
     try:
         content = await file.read()
-        logger.info("Upload started: file=%s, size=%d, dataset=%s", file.filename, len(content), dataset_id)
+        logger.info(
+            "Upload started: file=%s, size=%d, dataset=%s, mode=%s", 
+            file.filename, len(content), dataset_id, processing_mode
+        )
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
             filename=file.filename or "upload",
             content_bytes=content,
             mime_type=file.content_type,
+            processing_mode=processing_mode,
         )
         logger.info("Document created: id=%s, enqueueing for ingestion...", doc["document_id"])
         await worker.enqueue(dataset_id, doc["document_id"])

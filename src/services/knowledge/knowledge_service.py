@@ -217,10 +217,13 @@ class KnowledgeService:
         return await self.document_service.create_document_from_text(user, dataset_id, title, content, metadata)
     
     async def create_document_from_upload(
-        self, user: UserContext, dataset_id: str, filename: str, content: bytes, metadata: Optional[Dict] = None
+        self, user: UserContext, dataset_id: str, filename: str, content: bytes, metadata: Optional[Dict] = None,
+        processing_mode: str = "text_only",
     ) -> Dict[str, Any]:
         """Create document from upload (delegated to DocumentService)."""
-        return await self.document_service.create_document_from_upload(user, dataset_id, filename, content, metadata)
+        return await self.document_service.create_document_from_upload(
+            user, dataset_id, filename, content, metadata, processing_mode=processing_mode
+        )
     
     async def create_document_from_url(
         self, user: UserContext, dataset_id: str, url: str, title: Optional[str] = None, metadata: Optional[Dict] = None
@@ -949,14 +952,35 @@ class KnowledgeService:
         content_bytes: bytes,
         mime_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        processing_mode: str = "text_only",  # text_only | scanned | multimodal
     ) -> Dict[str, Any]:
-
+        """
+        Create a document from file upload.
+        
+        Args:
+            user: User context
+            dataset_id: Target dataset ID
+            filename: Original filename
+            content_bytes: File content bytes
+            mime_type: MIME type
+            metadata: Optional metadata
+            processing_mode: Processing mode - text_only, scanned, or multimodal
+        """
+        from .processing_mode import ProcessingMode, parse_processing_mode
 
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc_id = str(uuid.uuid4())
 
         name = (filename or "").strip().lower()
         mime = (mime_type or "").strip().lower()
+        
+        # Parse and validate processing mode
+        mode = parse_processing_mode(processing_mode)
+        logger.info(f"Creating document with processing_mode={mode.value}")
+
+        # Prepare initial metadata with processing mode
+        doc_metadata = metadata or {}
+        doc_metadata["processing_mode"] = mode.value
 
         # Save document record immediately so frontend can show it while processing
         initial_doc = {
@@ -966,19 +990,66 @@ class KnowledgeService:
             "source_type": "upload",
             "mime_type": mime_type or "application/octet-stream",
             "size_bytes": len(content_bytes),
-            "status": "parsing",
+            "status": "queued",  # Changed from "parsing" - will be processed by worker
             "progress": 0,
             "content": "",
-            "metadata": metadata or {},
+            "metadata": doc_metadata,
         }
         await self.db.save_document(initial_doc)
 
+        # ============================================================
+        # FAST PATH: For 'scanned' mode, skip extraction and upload directly
+        # Processing will be done by VisionPDFProcessor in the worker
+        # ============================================================
+        if mode == ProcessingMode.SCANNED:
+            logger.info(f"[Upload] Scanned mode: saving file directly, processing deferred to worker")
+            
+            # Save original file to storage
+            if self.image_storage_service:
+                dataset = await self._get_dataset_or_404(dataset_id)
+                tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
+                
+                try:
+                    original_key = await self.image_storage_service.upload_original_file(
+                        tenant_id=tenant_id,
+                        document_id=doc_id,
+                        filename=filename,
+                        content=content_bytes,
+                        content_type=mime_type or "application/octet-stream",
+                    )
+                    doc_metadata["original_file_key"] = original_key
+                    doc_metadata["original_filename"] = filename
+                    doc_metadata["original_mime_type"] = mime_type or "application/octet-stream"
+                except Exception as e:
+                    logger.warning(f"Failed to save original file to storage: {e}")
+            
+            # Update document with metadata
+            doc = {
+                "document_id": doc_id,
+                "dataset_id": dataset_id,
+                "title": filename or doc_id,
+                "source_type": "upload",
+                "mime_type": mime_type or "application/octet-stream",
+                "size_bytes": len(content_bytes),
+                "status": "queued",
+                "progress": 0,
+                "content": "",  # No text for scanned mode
+                "metadata": doc_metadata,
+            }
+            await self.db.save_document(doc)
+            
+            logger.info(f"[Upload] Scanned document {doc_id} saved, ready for worker processing")
+            return await self.db.get_document(doc_id) or doc
+
+        # ============================================================
+        # STANDARD PATH: text_only and multimodal modes
+        # ============================================================
         extracted_images: List[IngestionExtractedImage] = []
         text: str = ""
         detected_mime: str = ""
 
         # Use unified DocumentImageExtractor for all file types when multimodal is available
-        if self.multimodal_embedding and self.image_storage_service:
+        if mode == ProcessingMode.MULTIMODAL and self.multimodal_embedding and self.image_storage_service:
             try:
                 logger.info(f"Processing document with unified image extraction: {filename}")
                 extraction_result = await self.document_image_extractor.extract(
@@ -1793,33 +1864,60 @@ class KnowledgeService:
                     )
                     
                     async def embed_single_batch(batch_idx: int, batch: list) -> tuple[int, list, list]:
-                        """Embed one batch and return (index, vectors, batch_data)"""
+                        """Embed one batch with retry, return (index, vectors, batch_data)"""
                         texts = [text for _, text, _, _, _ in batch]
+                        MAX_EMBED_RETRIES = 3
                         
                         async with semaphore:
-                            try:
-                                vectors = await asyncio.wait_for(
-                                    embedder.embed_documents(texts),
-                                    timeout=embed_timeout,
-                                )
-                                return (batch_idx, vectors, batch)
-                            except Exception as embed_err:
-                                text_lengths = [len(t) for t in texts]
-                                logger.error(
-                                    f"Embedding failed for batch {batch_idx + 1}: {embed_err}. "
-                                    f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
-                                )
-                                raise
+                            for retry in range(MAX_EMBED_RETRIES):
+                                try:
+                                    vectors = await asyncio.wait_for(
+                                        embedder.embed_documents(texts),
+                                        timeout=embed_timeout,
+                                    )
+                                    return (batch_idx, vectors, batch)
+                                except asyncio.TimeoutError:
+                                    if retry < MAX_EMBED_RETRIES - 1:
+                                        wait_time = 2 ** retry  # 1s, 2s
+                                        logger.warning(
+                                            f"Embedding batch {batch_idx + 1} timeout (attempt {retry + 1}), "
+                                            f"retrying in {wait_time}s..."
+                                        )
+                                        await asyncio.sleep(wait_time)
+                                    else:
+                                        text_lengths = [len(t) for t in texts]
+                                        logger.error(
+                                            f"Embedding failed for batch {batch_idx + 1} after {MAX_EMBED_RETRIES} attempts. "
+                                            f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
+                                        )
+                                        # Return empty vectors for failed batch instead of crashing
+                                        return (batch_idx, [None] * len(batch), batch)
+                                except Exception as embed_err:
+                                    text_lengths = [len(t) for t in texts]
+                                    logger.error(
+                                        f"Embedding failed for batch {batch_idx + 1}: {embed_err}. "
+                                        f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
+                                    )
+                                    # Return empty vectors for failed batch instead of crashing
+                                    return (batch_idx, [None] * len(batch), batch)
+                            # Should not reach here, but just in case
+                            return (batch_idx, [None] * len(batch), batch)
                     
                     # Launch all embedding tasks concurrently
                     tasks = [embed_single_batch(idx, batch) for idx, batch in batches]
                     
                     # Process results as they complete (for progressive updates)
+                    failed_batches = 0
                     for coro in asyncio.as_completed(tasks):
                         batch_idx, vectors, batch = await coro
                         
-                        # Build segments for this batch
+                        # Build segments for this batch (skip if vectors are None)
                         for j, (pos, chunk_text, token_count, content_hash, chunk_meta) in enumerate(batch):
+                            # Skip if embedding failed for this chunk
+                            if vectors[j] is None:
+                                failed_batches += 1
+                                continue
+                            
                             seg_id = str(uuid.uuid4())
                             seg_metadata = dict(chunk_meta) if chunk_meta else {}
                             seg_metadata["position"] = pos
@@ -1856,6 +1954,9 @@ class KnowledgeService:
                                     "metadata": seg_metadata,
                                 }
                             )
+                    
+                    if failed_batches > 0:
+                        logger.warning(f"Skipped {failed_batches} chunks due to embedding failures")
 
                         embedded += len(batch)
                         progress = 35 + (embedded / max(total, 1)) * 55
@@ -2604,6 +2705,12 @@ class KnowledgeService:
         mmr: Optional[bool] = None,
         mmr_lambda: Optional[float] = None,
         mmr_threshold: Optional[float] = None,
+        # Islamic enhancement parameters
+        multi_query: Optional[bool] = None,
+        authority_sort: Optional[bool] = None,
+        # Additional filters (not implemented in core retrieve, for API compatibility)
+        source_type_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
     ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
         dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
 
@@ -3512,13 +3619,21 @@ class KnowledgeService:
         # Also fetch more if we're applying separate thresholds or boosting
         effective_top_k = top_k * 3 if (content_type_filter or use_separate_thresholds) else top_k * 2
 
+        # Filter out kwargs that retrieve() doesn't support
+        # These are multimodal-specific or UI-specific parameters
+        unsupported_kwargs = {
+            'image_search_enabled', 'vlm_rerank_weight', 'image_boost', 
+            'image_score_threshold', 'use_separate_thresholds',
+        }
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in unsupported_kwargs}
+        
         # Perform standard retrieval (now with unified multimodal embedding)
         results, meta = await self.retrieve(
             user=user,
             dataset_id=dataset_id,
             query=query,
             top_k=effective_top_k,
-            **kwargs,
+            **filtered_kwargs,
         )
 
         # Debug: Log content types from base retrieve

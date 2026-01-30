@@ -173,6 +173,9 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   
+  // Processing mode for upload: text_only | scanned | multimodal
+  const [uploadProcessingMode, setUploadProcessingMode] = useState<"text_only" | "scanned" | "multimodal">("text_only");
+  
   // Chunking config for upload
   const [uploadChunkMode, setUploadChunkMode] = useState("automatic");
   const [uploadChunkSize, setUploadChunkSize] = useState(500);
@@ -767,7 +770,7 @@ export function KnowledgeDatasetDetailPage() {
         let failCount = 0;
         for (const file of filesToUpload) {
           try {
-            await uploadDocument(datasetId, file);
+            await uploadDocument(datasetId, file, uploadProcessingMode);
             successCount++;
           } catch (err) {
             failCount++;
@@ -3490,7 +3493,58 @@ for chunk in results.get("chunks", []):
                 </div>
               </div>
 
-              {/* Chunking Mode Selection - Card Grid */}
+              {/* Processing Mode Selection - First Step */}
+              <div className="border rounded-lg p-4 bg-primary/5">
+                <Label className="text-sm font-medium text-foreground mb-3 block">
+                  {t("knowledge.detail.processingMode")}
+                </Label>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { 
+                      id: "text_only" as const, 
+                      name: t("knowledge.detail.processingModes.text_only"),
+                      desc: t("knowledge.detail.processingModes.text_onlyDesc"),
+                      icon: "📝"
+                    },
+                    { 
+                      id: "scanned" as const, 
+                      name: t("knowledge.detail.processingModes.scanned"),
+                      desc: t("knowledge.detail.processingModes.scannedDesc"),
+                      icon: "📷"
+                    },
+                    { 
+                      id: "multimodal" as const, 
+                      name: t("knowledge.detail.processingModes.multimodal"),
+                      desc: t("knowledge.detail.processingModes.multimodalDesc"),
+                      icon: "🔀"
+                    },
+                  ].map((mode) => (
+                    <div
+                      key={mode.id}
+                      className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                        uploadProcessingMode === mode.id
+                          ? "border-primary bg-primary/10 ring-2 ring-primary/50"
+                          : "border-border hover:border-primary/30 bg-card"
+                      }`}
+                      onClick={() => setUploadProcessingMode(mode.id)}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-lg">{mode.icon}</span>
+                        <h4 className="text-sm font-medium">{mode.name}</h4>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{mode.desc}</p>
+                    </div>
+                  ))}
+                </div>
+                {uploadProcessingMode === "scanned" && (
+                  <div className="mt-3 p-2 bg-amber-500/10 rounded text-xs text-amber-700 dark:text-amber-400">
+                    {t("knowledge.detail.scannedModeNote")}
+                  </div>
+                )}
+              </div>
+
+              {/* Chunking Mode Selection - Card Grid (hidden for scanned mode) */}
+              {uploadProcessingMode !== "scanned" && (
               <div className="border rounded-lg p-4">
                 <Label className="text-sm font-medium text-foreground mb-3 block">{t("knowledge.detail.chunkingMethod")}</Label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
@@ -3854,6 +3908,7 @@ for chunk in results.get("chunks", []):
                   )}
                 </div>
               </div>
+              )}
 
               {/* Advanced Settings - Collapsible */}
               <div className="border rounded-lg">

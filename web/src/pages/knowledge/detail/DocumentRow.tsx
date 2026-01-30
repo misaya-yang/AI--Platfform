@@ -125,7 +125,12 @@ export function DocumentRow({
         </div>
 
         <div className="w-28 flex justify-center">
-          <StatusBadge status={doc.status} error={doc.error} progress={doc.progress} />
+          <StatusBadge 
+            status={doc.status} 
+            error={doc.error} 
+            progress={doc.progress} 
+            metadata={doc.metadata}
+          />
         </div>
 
         <div className="w-28 text-sm text-muted-foreground text-center">{t("knowledge.documentRow.defaultCategory")}</div>

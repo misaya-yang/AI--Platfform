@@ -79,9 +79,22 @@ export async function createDocumentFromUrl(datasetId: string, payload: { url: s
   return data;
 }
 
-export async function uploadDocument(datasetId: string, file: File) {
+/**
+ * Processing mode for document upload
+ * - text_only: Traditional OCR + text embedding (default)
+ * - scanned: Page-as-Image vision embedding (for scanned PDFs)
+ * - multimodal: Combined text + image embedding
+ */
+export type ProcessingMode = "text_only" | "scanned" | "multimodal";
+
+export async function uploadDocument(
+  datasetId: string,
+  file: File,
+  processingMode: ProcessingMode = "text_only"
+) {
   const form = new FormData();
   form.append("file", file);
+  form.append("processing_mode", processingMode);
   // Don't set Content-Type manually - axios will auto-set it with correct boundary
   const { data } = await api.post<Document>(
     `/api/v1/knowledge/${datasetId}/documents/upload`,

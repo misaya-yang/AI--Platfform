@@ -14,11 +14,22 @@ type StatusBadgeProps = {
   status: string;
   error?: string;
   progress?: number;
+  metadata?: {
+    processing_mode?: string;
+    pages_processed?: number;
+    total_pages?: number;
+    segments_created?: number;
+  };
 };
 
-export function StatusBadge({ status, error, progress }: StatusBadgeProps) {
+export function StatusBadge({ status, error, progress, metadata }: StatusBadgeProps) {
   const { t } = useTranslation();
   const s = (status || "").toLowerCase();
+  
+  // Get page progress for scanned documents
+  const pagesProcessed = metadata?.pages_processed;
+  const totalPages = metadata?.total_pages;
+  const hasPageProgress = typeof pagesProcessed === "number" && typeof totalPages === "number" && totalPages > 0;
 
   const configs: Record<
     string,
@@ -33,6 +44,20 @@ export function StatusBadge({ status, error, progress }: StatusBadgeProps) {
       icon: <AlertCircle className="h-3 w-3" />,
       label: t("knowledge.status.failed"),
       className: "bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30",
+    },
+    queued: {
+      icon: <Loader2 className="h-3 w-3" />,
+      label: t("knowledge.status.queued"),
+      className: "bg-slate-500/15 text-slate-700 dark:text-slate-400 border-slate-500/30",
+    },
+    processing: {
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: hasPageProgress
+        ? t("knowledge.status.processingPages", { current: pagesProcessed, total: totalPages })
+        : progress
+          ? t("knowledge.status.processingProgress", { progress: Math.round(progress) })
+          : t("knowledge.status.processing"),
+      className: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
     },
     embedding: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,

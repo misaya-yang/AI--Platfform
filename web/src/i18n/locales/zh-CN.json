@@ -709,6 +709,10 @@
     "status": {
       "completed": "已完成",
       "failed": "失败",
+      "queued": "等待处理",
+      "processing": "处理中",
+      "processingProgress": "处理中 {{progress}}%",
+      "processingPages": "处理中 {{current}}/{{total}} 页",
       "embedding": "向量化中",
       "embeddingProgress": "向量化中 {{progress}}%",
       "embeddingImages": "图片向量化中",
@@ -1072,6 +1076,16 @@
       "clickOrDragUpload": "点击或拖拽上传",
       "selectedFiles": "已选文件 ({{count}})",
       "selectFilesHint": "请选择要上传的文件",
+      "processingMode": "处理模式",
+      "processingModes": {
+        "text_only": "纯文本",
+        "text_onlyDesc": "OCR + 文本嵌入（默认）",
+        "scanned": "扫描件",
+        "scannedDesc": "页面即图片，视觉嵌入",
+        "multimodal": "多模态",
+        "multimodalDesc": "文本 + 图片双重嵌入"
+      },
+      "scannedModeNote": "扫描模式使用视觉嵌入处理每一页，适合版式复杂的扫描PDF。无需分块配置。",
       "chunkingMethod": "切片方式",
       "uploadChunkModes": {
         "automatic": "智能切分",

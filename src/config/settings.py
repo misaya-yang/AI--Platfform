@@ -196,7 +196,7 @@ class KnowledgeSettings(BaseModel):
     text_embedding_model: str = "gemini-embedding-001"
     text_embedding_dimension: int = 1024
     text_embedding_batch_size: int = 50  # Gemini supports 100, use 50 for safety
-    text_embedding_max_concurrent: int = 10
+    text_embedding_max_concurrent: int = 5  # Reduced from 10 to avoid API overload
     
     # =============================================
     # Multimodal Embedding Configuration (for image+text datasets)

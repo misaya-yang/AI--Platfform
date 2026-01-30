@@ -711,6 +711,10 @@
     "status": {
       "completed": "Completed",
       "failed": "Failed",
+      "queued": "Queued",
+      "processing": "Processing",
+      "processingProgress": "Processing {{progress}}%",
+      "processingPages": "Processing {{current}}/{{total}} pages",
       "embedding": "Embedding",
       "embeddingProgress": "Embedding {{progress}}%",
       "embeddingImages": "Embedding Images",
@@ -1074,6 +1078,16 @@
       "clickOrDragUpload": "Click or drag to upload",
       "selectedFiles": "Selected Files ({{count}})",
       "selectFilesHint": "Please select files to upload",
+      "processingMode": "Processing Mode",
+      "processingModes": {
+        "text_only": "Pure Text",
+        "text_onlyDesc": "OCR + text embedding (default)",
+        "scanned": "Scanned PDF",
+        "scannedDesc": "Page-as-Image vision embedding",
+        "multimodal": "Multimodal",
+        "multimodalDesc": "Text + image dual embedding"
+      },
+      "scannedModeNote": "Scanned mode uses vision embedding for each page. Suitable for scanned PDFs with complex layouts. No chunking required.",
       "chunkingMethod": "Chunking Method",
       "uploadChunkModes": {
         "automatic": "Smart Chunking",

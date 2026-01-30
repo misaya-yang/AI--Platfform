@@ -405,7 +405,25 @@ def create_app() -> FastAPI:
                 image_storage_service=image_storage_service,
                 vlm_service=knowledge_vlm_service,
             )
-            app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
+            
+            # Initialize VisionPDFProcessor for scanned document processing
+            vision_processor = None
+            if multimodal_embedding:
+                try:
+                    from .services.knowledge.vision_pdf_processor import VisionPDFProcessor
+                    vision_processor = VisionPDFProcessor(
+                        embedder=multimodal_embedding,
+                        vector_store=app.state.knowledge_service.vector_store,
+                        database=container.database,
+                    )
+                    logger.info("VisionPDFProcessor initialized for scanned document support")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize VisionPDFProcessor: {e}")
+            
+            app.state.knowledge_worker = KnowledgeWorker(
+                app.state.knowledge_service,
+                vision_processor=vision_processor,
+            )
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
 
             # 恢复服务重启前未完成的任务（使用 0 分钟阈值，立即恢复所有处理中的任务）
