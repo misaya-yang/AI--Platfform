@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Edit3, Eye, EyeOff, Trash2, ImageIcon, ExternalLink } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import type { Segment } from "@/types/knowledge";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +23,7 @@ export function SegmentCard({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [imageError, setImageError] = useState(false);
@@ -41,7 +43,7 @@ export function SegmentCard({
             </span>
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="text-xs font-mono bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800">
-                图片
+                {t("knowledge.segment.image")}
               </Badge>
               {segment.image_filename && (
                 <span className="text-xs text-muted-foreground truncate max-w-[200px]" title={segment.image_filename}>
@@ -64,7 +66,7 @@ export function SegmentCard({
                 className="px-2.5 py-1 text-xs font-medium text-primary hover:text-primary/90 hover:bg-primary/10 rounded-md transition-colors inline-flex items-center gap-1"
               >
                 <ExternalLink className="h-3 w-3" />
-                查看原图
+                {t("knowledge.segment.viewOriginal")}
               </a>
             )}
             <button
@@ -88,7 +90,7 @@ export function SegmentCard({
               {imageError ? (
                 <div className="flex flex-col items-center justify-center h-48 bg-rose-50/50 dark:bg-rose-950/20 rounded-lg border border-rose-200/50 dark:border-rose-800/50">
                   <ImageIcon className="w-8 h-8 text-rose-400 mb-2" />
-                  <span className="text-sm text-rose-600 dark:text-rose-400">图片加载失败</span>
+                  <span className="text-sm text-rose-600 dark:text-rose-400">{t("knowledge.segment.imageLoadFailed")}</span>
                   {segment.image_url && (
                     <a
                       href={segment.image_url}
@@ -96,7 +98,7 @@ export function SegmentCard({
                       rel="noopener noreferrer"
                       className="mt-2 text-xs text-primary hover:underline"
                     >
-                      尝试直接打开
+                      {t("knowledge.segment.tryOpenDirectly")}
                     </a>
                   )}
                 </div>
@@ -115,7 +117,7 @@ export function SegmentCard({
           ) : (
             <div className="flex flex-col items-center justify-center h-32 bg-muted/30 rounded-lg">
               <ImageIcon className="w-8 h-8 text-muted-foreground/50 mb-2" />
-              <span className="text-sm text-muted-foreground">图片 URL 不可用</span>
+              <span className="text-sm text-muted-foreground">{t("knowledge.segment.imageUrlUnavailable")}</span>
             </div>
           )}
 
@@ -124,13 +126,13 @@ export function SegmentCard({
             <div className="mt-3 pt-3 border-t border-border/40">
               {segment.image_media_type && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-                  <span className="font-medium">类型:</span>
+                  <span className="font-medium">{t("knowledge.segment.mediaType")}</span>
                   <code className="px-1.5 py-0.5 bg-muted rounded text-xs">{segment.image_media_type}</code>
                 </div>
               )}
               {segment.text && (
                 <div className="mt-2">
-                  <span className="text-xs font-medium text-muted-foreground block mb-1">上下文:</span>
+                  <span className="text-xs font-medium text-muted-foreground block mb-1">{t("knowledge.segment.context")}</span>
                   <p className={`text-sm text-foreground/70 whitespace-pre-wrap leading-relaxed bg-muted/30 rounded-md p-2 ${
                     expanded ? "" : "line-clamp-2"
                   }`}>
@@ -141,7 +143,7 @@ export function SegmentCard({
                       onClick={() => setExpanded(true)}
                       className="mt-1 text-xs text-primary hover:text-primary/90"
                     >
-                      显示全部...
+                      {t("knowledge.segment.showAll")}
                     </button>
                   )}
                 </div>
@@ -163,7 +165,7 @@ export function SegmentCard({
           </span>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-xs font-mono bg-white/70 dark:bg-gray-800/70">
-              {charCount} 字符
+              {t("knowledge.segment.characters", { count: charCount })}
             </Badge>
             {segment.token_count && (
               <Badge variant="outline" className="text-xs font-mono bg-white/70 dark:bg-gray-800/70">
@@ -178,7 +180,7 @@ export function SegmentCard({
             onClick={onEdit}
           >
             <Edit3 className="h-3 w-3 inline mr-1" />
-            编辑
+            {t("common.edit")}
           </button>
           <button
             className="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
@@ -186,11 +188,11 @@ export function SegmentCard({
           >
             {expanded ? (
               <>
-                <EyeOff className="h-3 w-3 inline mr-1" />收起
+                <EyeOff className="h-3 w-3 inline mr-1" />{t("knowledge.segment.collapse")}
               </>
             ) : (
               <>
-                <Eye className="h-3 w-3 inline mr-1" />展开
+                <Eye className="h-3 w-3 inline mr-1" />{t("knowledge.segment.expand")}
               </>
             )}
           </button>
@@ -216,7 +218,7 @@ export function SegmentCard({
             onClick={() => setExpanded(true)}
             className="mt-2 text-xs text-primary hover:text-primary/90"
           >
-            显示全部内容...
+            {t("knowledge.segment.showAllContent")}
           </button>
         )}
       </div>

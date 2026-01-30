@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { History } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import type { Document } from "@/types/knowledge";
 import { StatusBadge } from "@/pages/knowledge/detail/StatusBadge";
@@ -39,6 +40,7 @@ export function DocumentRow({
   onVersionRestored?: () => void;
   showCheckbox?: boolean;
 }) {
+  const { t, i18n } = useTranslation();
   const [loading, setLoading] = useState(false);
   const [reindexOpen, setReindexOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -126,11 +128,11 @@ export function DocumentRow({
           <StatusBadge status={doc.status} error={doc.error} progress={doc.progress} />
         </div>
 
-        <div className="w-28 text-sm text-muted-foreground text-center">默认分类</div>
+        <div className="w-28 text-sm text-muted-foreground text-center">{t("knowledge.documentRow.defaultCategory")}</div>
 
         <div className="w-40 text-sm text-muted-foreground text-center">
           {doc.created_at
-            ? new Date(doc.created_at).toLocaleString("zh-CN", {
+            ? new Date(doc.created_at).toLocaleString(i18n.language === "zh-CN" ? "zh-CN" : "en-US", {
                 year: "numeric",
                 month: "2-digit",
                 day: "2-digit",
@@ -149,7 +151,7 @@ export function DocumentRow({
             }}
             disabled={loading}
           >
-            切片
+            {t("knowledge.documentRow.segments")}
           </button>
           <button
             className="text-amber-600 hover:text-amber-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-0.5"
@@ -158,10 +160,10 @@ export function DocumentRow({
               setVersionHistoryOpen(true);
             }}
             disabled={loading}
-            title="版本历史"
+            title={t("knowledge.documentRow.versionHistoryTitle")}
           >
             <History className="h-3.5 w-3.5" />
-            历史
+            {t("knowledge.documentRow.history")}
           </button>
           <button
             className="text-primary hover:text-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -170,9 +172,9 @@ export function DocumentRow({
               setReindexOpen(true);
             }}
             disabled={loading}
-            title="重新索引"
+            title={t("knowledge.documentRow.reindexTitle")}
           >
-            {loading ? "..." : "重建"}
+            {loading ? "..." : t("knowledge.documentRow.rebuild")}
           </button>
           <button
             className="text-rose-500 hover:text-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -182,7 +184,7 @@ export function DocumentRow({
             }}
             disabled={loading}
           >
-            删除
+            {t("common.delete")}
           </button>
         </div>
       </div>
@@ -190,25 +192,25 @@ export function DocumentRow({
       <AlertDialog open={reindexOpen} onOpenChange={setReindexOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认重新构建索引？</AlertDialogTitle>
+            <AlertDialogTitle>{t("knowledge.documentRow.confirmReindex")}</AlertDialogTitle>
             <AlertDialogDescription className="space-y-2">
               <span className="block">
-                这将重新解析文档 "{doc.title}" 并生成新的切片和向量索引。
+                {t("knowledge.documentRow.reindexDesc", { title: doc.title })}
               </span>
               <span className="block text-xs text-muted-foreground">
-                将使用知识库当前的分段配置。如需修改配置，请先在"配置"页面调整。
+                {t("knowledge.documentRow.reindexHint")}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 setReindexOpen(false);
                 handleAction(onReindex);
               }}
             >
-              确认重建
+              {t("knowledge.documentRow.confirmRebuild")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -217,13 +219,13 @@ export function DocumentRow({
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认删除文档？</AlertDialogTitle>
+            <AlertDialogTitle>{t("knowledge.documentRow.confirmDeleteDoc")}</AlertDialogTitle>
             <AlertDialogDescription>
-              文档 "{doc.title}" 将被永久删除，且无法恢复。
+              {t("knowledge.documentRow.deleteDocDesc", { title: doc.title })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               className="bg-rose-600 hover:bg-rose-700"
               onClick={() => {
@@ -231,7 +233,7 @@ export function DocumentRow({
                 handleAction(onDelete);
               }}
             >
-              确认删除
+              {t("knowledge.documentRow.confirmDelete")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -240,7 +242,7 @@ export function DocumentRow({
       <DocumentVersionHistory
         datasetId={datasetId}
         documentId={doc.document_id}
-        documentTitle={doc.title || "未命名文档"}
+        documentTitle={doc.title || t("knowledge.documentRow.untitledDocument")}
         open={versionHistoryOpen}
         onOpenChange={setVersionHistoryOpen}
         onRestored={onVersionRestored}

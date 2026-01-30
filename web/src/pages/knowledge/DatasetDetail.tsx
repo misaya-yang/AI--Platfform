@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -56,6 +57,7 @@ import {
   updateSegment,
   uploadDocument,
   uploadImages,
+  batchUploadDocuments,
   createDocumentFromText,
   createDocumentFromUrl,
   deleteDataset,
@@ -123,14 +125,19 @@ const QA_MODEL_OPTIONS = [
   { value: "deepseek-reasoner", label: "DeepSeek Reasoner" },
 ];
 
-const QA_SYSTEM_PROMPTS = {
-  strict:
-    "你是知识库问答测试助手。只能基于“上下文”回答问题。若上下文不足或无关，回复“在当前知识库中未检索到相关信息”。回答与问题同语言，简洁、准确，不要编造。",
-  flexible:
-    "你是知识库问答助手。优先基于“上下文”回答；若上下文不足，可根据通用知识给出简要回答，并明确标注“以下为通用知识，非来自知识库”。回答与问题同语言，简洁、准确。",
+const QA_SYSTEM_PROMPT_KEYS = {
+  strict: "knowledge.detail.qaStrictPrompt",
+  flexible: "knowledge.detail.qaFlexiblePrompt",
 };
 
 import { copyToClipboard } from "@/lib/clipboard";
+
+const EMBEDDING_MODELS = [
+  { provider: "gemini", model: "gemini-embedding-001", name: "Gemini Embedding 001", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v4", name: "通义向量 v4", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v3", name: "通义向量 v3", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v2", name: "通义向量 v2", dimension: 1536 },
+];
 
 export function KnowledgeDatasetDetailPage() {
   const { datasetId } = useParams();
@@ -281,6 +288,11 @@ export function KnowledgeDatasetDetailPage() {
   const [editChunkSize, setEditChunkSize] = useState(500);
   const [editChunkOverlap, setEditChunkOverlap] = useState(50);
 
+  // Config editing - Embedding
+  const [embeddingEditing, setEmbeddingEditing] = useState(false);
+  const [embeddingSaving, setEmbeddingSaving] = useState(false);
+  const [editEmbeddingModel, setEditEmbeddingModel] = useState("");
+
   // Config editing - Retrieval
   const [retrievalEditing, setRetrievalEditing] = useState(false);
   const [editRetrievalMode, setEditRetrievalMode] = useState<"vector" | "keyword" | "hybrid">("hybrid");
@@ -316,6 +328,8 @@ export function KnowledgeDatasetDetailPage() {
   // API copy feedback
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
+  const { t } = useTranslation();
+
   // Helper function to copy text with feedback
   const handleCopy = async (text: string, key: string) => {
     try {
@@ -324,7 +338,7 @@ export function KnowledgeDatasetDetailPage() {
       setTimeout(() => setCopiedKey(null), 2000);
     } catch (err) {
       console.error("Failed to copy:", err);
-      toast.error("复制失败", "请手动复制");
+      toast.error(t("knowledge.detail.copyFailed"), t("knowledge.detail.copyManually"));
     }
   };
 
@@ -477,7 +491,7 @@ export function KnowledgeDatasetDetailPage() {
       setDatasetConfig(config);
     } catch (e) {
       console.error("Failed to save config:", e);
-      toast.error("保存配置失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.saveConfigFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setConfigSaving(false);
     }
@@ -519,9 +533,39 @@ export function KnowledgeDatasetDetailPage() {
       setDatasetConfig(config);
     } catch (e) {
       console.error("Failed to save retrieval config:", e);
-      toast.error("保存检索配置失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.saveRetrievalFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setConfigSaving(false);
+    }
+  }
+
+  async function handleSaveEmbeddingConfig() {
+    if (!datasetId || !editEmbeddingModel) return;
+    setEmbeddingSaving(true);
+    try {
+      const [provider, model] = editEmbeddingModel.split(":");
+      const embModel = EMBEDDING_MODELS.find((m) => m.provider === provider && m.model === model);
+      await updateDataset(datasetId, {
+        embedding_provider: provider,
+        embedding_model: model,
+        embedding_dimension: embModel?.dimension || 1024,
+      });
+      setEmbeddingEditing(false);
+      // Reload dataset + config
+      dsQuery.refetch();
+      const config = await getDatasetConfig(datasetId);
+      setDatasetConfig(config);
+      toast.success(t("knowledge.detail.embeddingUpdated"));
+    } catch (e: unknown) {
+      console.error("Failed to save embedding config:", e);
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("reindex")) {
+        toast.error(t("knowledge.detail.cannotChangeDimension"), t("knowledge.detail.cannotChangeDimensionHint"));
+      } else {
+        toast.error(t("knowledge.detail.saveEmbeddingFailed"), msg);
+      }
+    } finally {
+      setEmbeddingSaving(false);
     }
   }
 
@@ -537,7 +581,7 @@ export function KnowledgeDatasetDetailPage() {
       setPreviewChunksResult(result.chunks);
     } catch (e) {
       console.error("Failed to preview chunks:", e);
-      toast.error("预览分块失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.previewChunkFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setPreviewLoading(false);
     }
@@ -574,7 +618,7 @@ export function KnowledgeDatasetDetailPage() {
       // Show result
       if (result.failed_count > 0) {
         toast.warning(
-          `图片上传完成: ${result.success_count} 成功, ${result.failed_count} 失败`,
+          t("knowledge.detail.imageUploadDone", { success: result.success_count, failed: result.failed_count }),
           result.errors.map((e) => `${e.filename}: ${e.error}`).join("; ")
         );
       }
@@ -583,12 +627,12 @@ export function KnowledgeDatasetDetailPage() {
         setContentTypeFilter("image");
         // Show success message if no failures
         if (result.failed_count === 0) {
-          toast.success(`成功上传 ${result.success_count} 张图片`, "正在处理中...");
+          toast.success(t("knowledge.detail.imageUploadSuccess", { count: result.success_count }), t("knowledge.detail.imageProcessing"));
         }
       }
     } catch (e) {
       console.error("Failed to upload images:", e);
-      toast.error("图片上传失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.imageUploadFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setUploading(false);
       // Reset the input
@@ -643,6 +687,19 @@ export function KnowledgeDatasetDetailPage() {
         break;
     }
     
+    // Metadata enrichment
+    if (uploadMetadataEnabled) {
+      baseConfig.extract_metadata = true;
+      const fields: string[] = [];
+      if (uploadExtractTitle) fields.push("title");
+      if (uploadExtractKeywords) fields.push("keywords");
+      if (uploadDetectLanguage) fields.push("language");
+      if (uploadExtractSummary) fields.push("summary");
+      if (uploadExtractEntities) fields.push("entities");
+      fields.push("date", "word_count", "char_count");
+      baseConfig.metadata_fields = fields;
+    }
+
     return baseConfig;
   }
 
@@ -650,6 +707,7 @@ export function KnowledgeDatasetDetailPage() {
   async function handleConfirmUpload() {
     if (!datasetId || pendingFiles.length === 0) return;
 
+    const filesToUpload = [...pendingFiles];
     setUploading(true);
 
     try {
@@ -669,19 +727,68 @@ export function KnowledgeDatasetDetailPage() {
       // Small delay to ensure config is persisted before upload triggers ingest
       await new Promise(resolve => setTimeout(resolve, 200));
 
-      // Upload files one by one
-      for (const file of pendingFiles) {
-        await uploadDocument(datasetId, file);
-      }
-
-      await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+      // Close dialog immediately — progress will show in the document list
+      setUploadDialogOpen(false);
       setPendingFiles([]);
+      setUploading(false);
+
+      // Use batch upload for multiple files (more efficient parallel processing)
+      const BATCH_UPLOAD_THRESHOLD = 3; // Use batch API when 3+ files
+      
+      if (filesToUpload.length >= BATCH_UPLOAD_THRESHOLD) {
+        // Batch upload - single request, parallel server-side processing
+        try {
+          const result = await batchUploadDocuments(datasetId, filesToUpload);
+          
+          // Refresh document list to show progress
+          await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+          
+          if (result.rejected > 0) {
+            toast.warning(
+              t("knowledge.detail.batchUploadDone", { 
+                success: result.accepted, 
+                failed: result.rejected 
+              }),
+              result.errors.map(e => `${e.filename}: ${e.error}`).join("; ")
+            );
+          } else {
+            toast.success(
+              t("knowledge.detail.batchUploadSuccess", { count: result.accepted }),
+              t("knowledge.detail.batchProcessing")
+            );
+          }
+        } catch (err) {
+          console.error("Batch upload failed:", err);
+          toast.error(t("knowledge.detail.uploadFailed"), err instanceof Error ? err.message : String(err));
+        }
+      } else {
+        // Sequential upload for small batches (1-2 files)
+        let successCount = 0;
+        let failCount = 0;
+        for (const file of filesToUpload) {
+          try {
+            await uploadDocument(datasetId, file);
+            successCount++;
+          } catch (err) {
+            failCount++;
+            console.error(`Upload failed for ${file.name}:`, err);
+          }
+          // Refresh list after each file so progress is visible
+          await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
+        }
+
+        if (failCount > 0) {
+          toast.warning(t("knowledge.detail.uploadDone", { success: successCount, failed: failCount }));
+        } else if (successCount > 0) {
+          toast.success(t("knowledge.detail.filesUploaded", { count: successCount }), t("knowledge.detail.docProcessing"));
+        }
+      }
     } catch (err) {
       console.error("Upload failed:", err);
       setUploadDialogOpen(false);
-      toast.error("上传失败", err instanceof Error ? err.message : String(err));
-    } finally {
+      setPendingFiles([]);
       setUploading(false);
+      toast.error(t("knowledge.detail.uploadFailed"), err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -715,7 +822,7 @@ export function KnowledgeDatasetDetailPage() {
       setUrlInput("");
       setUrlTitle("");
     } catch (e) {
-      toast.error("URL获取失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.urlFetchFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setUrlSaving(false);
     }
@@ -726,6 +833,10 @@ export function KnowledgeDatasetDetailPage() {
 
     try {
       await reindexDocument(datasetId, doc.document_id);
+      toast.success(
+        t("knowledge.detail.reindexSuccess") || "重建索引成功",
+        t("knowledge.detail.reindexSuccessDesc") || `文档"${doc.title}"已加入处理队列`
+      );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
       // 触发一次刷新
       setTimeout(() => {
@@ -733,7 +844,7 @@ export function KnowledgeDatasetDetailPage() {
       }, 1000);
     } catch (e) {
       console.error("Reindex failed:", e);
-      toast.error("重建索引失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.reindexFailed"), e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -797,13 +908,13 @@ export function KnowledgeDatasetDetailPage() {
       setSelectedDocIds(new Set());
       // Show result
       if (result.failed_count > 0) {
-        toast.warning(`批量重建索引完成`, `${result.success_count} 成功, ${result.failed_count} 失败`);
+        toast.warning(t("knowledge.detail.batchReindexDone"), `${result.success_count} / ${result.failed_count}`);
       } else {
-        toast.success(`批量重建索引完成`, `${result.success_count} 个文档已加入处理队列`);
+        toast.success(t("knowledge.detail.batchReindexDone"), t("knowledge.detail.batchReindexSuccess", { count: result.success_count }));
       }
     } catch (e) {
       console.error("Batch reindex failed:", e);
-      toast.error("批量重建索引失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.batchReindexFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setBatchLoading(false);
     }
@@ -823,13 +934,13 @@ export function KnowledgeDatasetDetailPage() {
       }
       // Show result
       if (result.failed_count > 0) {
-        toast.warning(`批量删除完成`, `${result.success_count} 成功, ${result.failed_count} 失败`);
+        toast.warning(t("knowledge.detail.batchDeleteDone"), `${result.success_count} / ${result.failed_count}`);
       } else {
-        toast.success(`批量删除完成`, `已删除 ${result.success_count} 个文档`);
+        toast.success(t("knowledge.detail.batchDeleteDone"), t("knowledge.detail.batchDeleteSuccess", { count: result.success_count }));
       }
     } catch (e) {
       console.error("Batch delete failed:", e);
-      toast.error("批量删除失败", e instanceof Error ? e.message : String(e));
+      toast.error(t("knowledge.detail.batchDeleteFailed"), e instanceof Error ? e.message : String(e));
     } finally {
       setBatchLoading(false);
     }
@@ -1039,8 +1150,8 @@ export function KnowledgeDatasetDetailPage() {
     [qaMessages]
   );
   const qaSystemPrompt = useMemo(
-    () => (qaStrictMode ? QA_SYSTEM_PROMPTS.strict : QA_SYSTEM_PROMPTS.flexible),
-    [qaStrictMode]
+    () => t(qaStrictMode ? QA_SYSTEM_PROMPT_KEYS.strict : QA_SYSTEM_PROMPT_KEYS.flexible),
+    [qaStrictMode, t]
   );
 
   const dataset = dsQuery.data;
@@ -1087,14 +1198,14 @@ export function KnowledgeDatasetDetailPage() {
                 className="text-primary hover:text-primary/90 font-medium text-sm flex items-center gap-1"
               >
                 <ArrowLeft className="h-4 w-4" />
-                知识库
+                {t("knowledge.detail.knowledgeBase")}
               </button>
               <span className="text-muted-foreground/70">/</span>
-              <span className="font-semibold text-foreground">{dataset?.name || "加载中..."}</span>
+              <span className="font-semibold text-foreground">{dataset?.name || t("knowledge.detail.loading")}</span>
               {dataset?.visibility && (
                 <Badge variant="outline" className="text-xs bg-muted/40 text-muted-foreground border-border flex items-center gap-1">
                   {visibilityIcons[dataset.visibility]}
-                  <span>{dataset.visibility === "private" ? "私有" : dataset.visibility === "tenant" ? "租户" : "公开"}</span>
+                  <span>{dataset.visibility === "private" ? t("knowledge.detail.visPrivate") : dataset.visibility === "tenant" ? t("knowledge.detail.visTenant") : t("knowledge.detail.visPublic")}</span>
                 </Badge>
               )}
             </div>
@@ -1109,7 +1220,7 @@ export function KnowledgeDatasetDetailPage() {
                   qc.invalidateQueries({ queryKey: ["kb-dataset", datasetId] });
                 }}
                 className="h-9 w-9 bg-card"
-                title="刷新数据"
+                title={t("knowledge.detail.refreshData")}
               >
                 <RefreshCcw className={`h-4 w-4 ${docsQuery.isFetching ? "animate-spin" : ""}`} />
               </Button>
@@ -1117,13 +1228,13 @@ export function KnowledgeDatasetDetailPage() {
                 <DropdownMenuTrigger asChild>
                   <Button className="bg-primary hover:bg-primary/90 text-white">
                     <Edit3 className="h-4 w-4 mr-1.5" />
-                    编辑
+                    {t("knowledge.detail.edit")}
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuItem onClick={() => setSettingsOpen(true)} className="cursor-pointer">
                     <Edit3 className="h-4 w-4 mr-2" />
-                    编辑信息
+                    {t("knowledge.detail.editInfo")}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
@@ -1131,7 +1242,7 @@ export function KnowledgeDatasetDetailPage() {
                     onClick={() => setDeleteConfirmOpen(true)}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    删除知识库
+                    {t("knowledge.detail.deleteKB")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1141,13 +1252,13 @@ export function KnowledgeDatasetDetailPage() {
           {/* Tabs */}
           <div className="flex items-center gap-1 -mb-px mt-1">
             {[
-              { key: "documents", label: "文档管理", icon: FileText },
-              { key: "retrieval", label: "召回测试", icon: Search },
-              { key: "qa", label: "QA 测试", icon: MessageSquare },
-              { key: "sources", label: "数据来源", icon: Cloud },
+              { key: "documents", label: t("knowledge.detail.tabDocuments"), icon: FileText },
+              { key: "retrieval", label: t("knowledge.detail.tabRetrieval"), icon: Search },
+              { key: "qa", label: t("knowledge.detail.tabQA"), icon: MessageSquare },
+              { key: "sources", label: t("knowledge.detail.tabSources"), icon: Cloud },
               { key: "confluence", label: "Confluence", icon: ExternalLink },
-              { key: "settings", label: "配置", icon: Sliders },
-              { key: "permissions", label: "权限", icon: Lock },
+              { key: "settings", label: t("knowledge.detail.tabSettings"), icon: Sliders },
+              { key: "permissions", label: t("knowledge.detail.tabPermissions"), icon: Lock },
             ].map((tab) => (
               <button
                 key={tab.key}
@@ -1177,10 +1288,10 @@ export function KnowledgeDatasetDetailPage() {
             {/* 内容类型子Tab - 圆角药丸风格 */}
             <div className="inline-flex bg-muted/50 rounded-full p-1">
               {[
-                { key: "all" as const, label: "全部", icon: LayoutList, count: contentTypeCounts.all },
-                { key: "document" as const, label: "文档", icon: FileText, count: contentTypeCounts.document },
-                { key: "data" as const, label: "数据", icon: Table2, count: contentTypeCounts.data },
-                { key: "image" as const, label: "图片", icon: ImageIcon, count: contentTypeCounts.image },
+                { key: "all" as const, label: t("knowledge.detail.contentTypeAll"), icon: LayoutList, count: contentTypeCounts.all },
+                { key: "document" as const, label: t("knowledge.detail.contentTypeDocument"), icon: FileText, count: contentTypeCounts.document },
+                { key: "data" as const, label: t("knowledge.detail.contentTypeData"), icon: Table2, count: contentTypeCounts.data },
+                { key: "image" as const, label: t("knowledge.detail.contentTypeImage"), icon: ImageIcon, count: contentTypeCounts.image },
               ].map((tab) => (
                 <button
                   key={tab.key}
@@ -1210,18 +1321,18 @@ export function KnowledgeDatasetDetailPage() {
                 {/* 筛选下拉 */}
                 <Select value={searchField} onValueChange={(v) => setSearchField(v as "name" | "id")}>
                   <SelectTrigger className="w-28 bg-card h-9">
-                    <SelectValue placeholder="数据名" />
+                    <SelectValue placeholder={t("knowledge.detail.searchByName")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="name">数据名</SelectItem>
-                    <SelectItem value="id">ID</SelectItem>
+                    <SelectItem value="name">{t("knowledge.detail.searchByName")}</SelectItem>
+                    <SelectItem value="id">{t("knowledge.detail.searchByID")}</SelectItem>
                   </SelectContent>
                 </Select>
 
                 {/* 搜索框 */}
                 <div className="relative">
                   <Input
-                    placeholder={searchField === "name" ? "搜索文件名称" : "搜索文档ID"}
+                    placeholder={searchField === "name" ? t("knowledge.detail.searchNamePlaceholder") : t("knowledge.detail.searchIdPlaceholder")}
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-64 h-9 bg-card pr-8"
@@ -1233,22 +1344,22 @@ export function KnowledgeDatasetDetailPage() {
               <div className="flex items-center gap-2">
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}>
                   <SelectTrigger className="w-28 bg-card h-9">
-                    <SelectValue placeholder="全部状态" />
+                    <SelectValue placeholder={t("knowledge.detail.allStatus")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">全部状态</SelectItem>
-                    <SelectItem value="completed">已完成</SelectItem>
-                    <SelectItem value="uploaded">已上传</SelectItem>
-                    <SelectItem value="processing">处理中</SelectItem>
-                    <SelectItem value="failed">失败</SelectItem>
+                    <SelectItem value="all">{t("knowledge.detail.allStatus")}</SelectItem>
+                    <SelectItem value="completed">{t("knowledge.detail.statusCompleted")}</SelectItem>
+                    <SelectItem value="uploaded">{t("knowledge.detail.statusUploaded")}</SelectItem>
+                    <SelectItem value="processing">{t("knowledge.detail.statusProcessing")}</SelectItem>
+                    <SelectItem value="failed">{t("knowledge.detail.statusFailed")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select value={formatFilter} onValueChange={setFormatFilter}>
                   <SelectTrigger className="w-32 bg-card h-9">
-                    <SelectValue placeholder="全部数据格式" />
+                    <SelectValue placeholder={t("knowledge.detail.allFormats")} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">全部格式</SelectItem>
+                    <SelectItem value="all">{t("knowledge.detail.allFormats")}</SelectItem>
                     <SelectItem value="pdf">PDF</SelectItem>
                     <SelectItem value="docx">Word</SelectItem>
                     <SelectItem value="txt">TXT</SelectItem>
@@ -1264,7 +1375,7 @@ export function KnowledgeDatasetDetailPage() {
                   <RefreshCcw className={`h-4 w-4 ${docsQuery.isFetching ? "animate-spin" : ""}`} />
                 </Button>
                 <Button variant="outline" className="h-9 bg-card">
-                  Meta信息
+                  {t("knowledge.detail.metaInfo")}
                 </Button>
                 {/* 批量操作下拉菜单 */}
                 <DropdownMenu>
@@ -1274,7 +1385,7 @@ export function KnowledgeDatasetDetailPage() {
                       className={`h-9 ${batchMode ? "bg-primary text-white" : "bg-card"}`}
                     >
                       <ListChecks className="h-4 w-4 mr-1.5" />
-                      批量操作
+                      {t("knowledge.detail.batchOperations")}
                       {selectedDocIds.size > 0 && (
                         <Badge variant="secondary" className="ml-1.5 h-5 px-1.5 text-xs">
                           {selectedDocIds.size}
@@ -1288,12 +1399,12 @@ export function KnowledgeDatasetDetailPage() {
                       {batchMode ? (
                         <>
                           <X className="h-4 w-4 mr-2" />
-                          退出批量模式
+                          {t("knowledge.detail.exitBatchMode")}
                         </>
                       ) : (
                         <>
                           <CheckSquare className="h-4 w-4 mr-2" />
-                          进入批量模式
+                          {t("knowledge.detail.enterBatchMode")}
                         </>
                       )}
                     </DropdownMenuItem>
@@ -1304,22 +1415,22 @@ export function KnowledgeDatasetDetailPage() {
                           {selectedDocIds.size === filteredDocs.length ? (
                             <>
                               <Square className="h-4 w-4 mr-2" />
-                              取消全选
+                              {t("knowledge.detail.deselectAll")}
                             </>
                           ) : (
                             <>
                               <CheckSquare className="h-4 w-4 mr-2" />
-                              全选当前页
+                              {t("knowledge.detail.selectAll")}
                             </>
                           )}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => selectByStatus("uploaded")}>
                           <Upload className="h-4 w-4 mr-2" />
-                          选择已上传
+                          {t("knowledge.detail.selectUploaded")}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => selectByStatus("failed")}>
                           <X className="h-4 w-4 mr-2" />
-                          选择失败的
+                          {t("knowledge.detail.selectFailed")}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
@@ -1328,7 +1439,7 @@ export function KnowledgeDatasetDetailPage() {
                           className="text-primary"
                         >
                           <Zap className="h-4 w-4 mr-2" />
-                          批量重建索引 ({selectedDocIds.size})
+                          {t("knowledge.detail.batchReindex", { count: selectedDocIds.size })}
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={() => setBatchDeleteOpen(true)}
@@ -1336,7 +1447,7 @@ export function KnowledgeDatasetDetailPage() {
                           className="text-destructive"
                         >
                           <Trash2 className="h-4 w-4 mr-2" />
-                          批量删除 ({selectedDocIds.size})
+                          {t("knowledge.detail.batchDelete", { count: selectedDocIds.size })}
                         </DropdownMenuItem>
                       </>
                     )}
@@ -1367,27 +1478,27 @@ export function KnowledgeDatasetDetailPage() {
                       className="h-9 bg-primary hover:bg-primary/90 text-white"
                     >
                       <Plus className="h-4 w-4 mr-1.5" />
-                      添加数据
+                      {t("knowledge.detail.addData")}
                       <ChevronDown className="h-4 w-4 ml-1" />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={() => fileRef.current?.click()}>
                       <Upload className="h-4 w-4 mr-2" />
-                      上传文件
+                      {t("knowledge.detail.uploadFile")}
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => document.getElementById("image-upload-input")?.click()}>
                       <ImageIcon className="h-4 w-4 mr-2" />
-                      上传图片
+                      {t("knowledge.detail.uploadImage")}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setUrlDialogOpen(true)}>
                       <Globe className="h-4 w-4 mr-2" />
-                      添加 URL
+                      {t("knowledge.detail.addUrl")}
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => setTextDialogOpen(true)}>
                       <FileText className="h-4 w-4 mr-2" />
-                      添加文本
+                      {t("knowledge.detail.addText")}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -1406,12 +1517,12 @@ export function KnowledgeDatasetDetailPage() {
                     />
                   </div>
                 )}
-                <div className="flex-1">数据名称</div>
-                <div className="w-24 text-center">数据大小</div>
-                <div className="w-28 text-center">状态</div>
-                <div className="w-28 text-center">所属类目</div>
-                <div className="w-40 text-center">上传时间</div>
-                <div className="w-48 text-center">操作</div>
+                <div className="flex-1">{t("knowledge.detail.headerName")}</div>
+                <div className="w-24 text-center">{t("knowledge.detail.headerSize")}</div>
+                <div className="w-28 text-center">{t("knowledge.detail.headerStatus")}</div>
+                <div className="w-28 text-center">{t("knowledge.detail.headerCategory")}</div>
+                <div className="w-40 text-center">{t("knowledge.detail.headerUploadTime")}</div>
+                <div className="w-48 text-center">{t("knowledge.detail.headerActions")}</div>
               </div>
 
               {/* 文档列表 */}
@@ -1434,8 +1545,8 @@ export function KnowledgeDatasetDetailPage() {
                 {filteredDocs.length === 0 && !docsQuery.isLoading && (
                   <div className="text-center py-16">
                     <FileText className="h-12 w-12 mx-auto text-muted-foreground/50 mb-3" />
-                    <p className="text-muted-foreground">暂无文档</p>
-                    <p className="text-sm text-muted-foreground/70 mt-1">上传文件或输入文本开始</p>
+                    <p className="text-muted-foreground">{t("knowledge.detail.noDocuments")}</p>
+                    <p className="text-sm text-muted-foreground/70 mt-1">{t("knowledge.detail.noDocumentsHint")}</p>
                   </div>
                 )}
               </div>
@@ -1452,7 +1563,7 @@ export function KnowledgeDatasetDetailPage() {
                       className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-all shadow-sm"
                     >
                       <ArrowLeft className="h-4 w-4" />
-                      <span>返回列表</span>
+                      <span>{t("knowledge.detail.backToList")}</span>
                     </button>
                     <div className="w-px h-6 bg-border" />
                     <div className="flex items-center gap-3">
@@ -1460,17 +1571,17 @@ export function KnowledgeDatasetDetailPage() {
                         <Hash className="h-4 w-4 text-primary" />
                       </div>
                       <div>
-                        <h3 className="font-semibold text-foreground">切片列表</h3>
+                        <h3 className="font-semibold text-foreground">{t("knowledge.detail.segmentList")}</h3>
                         <p className="text-xs text-muted-foreground">{selectedDoc.title}</p>
                       </div>
                     </div>
-                    <Badge className="bg-primary/10 text-primary/90 border-primary/20">{segments.length} 个切片</Badge>
+                    <Badge className="bg-primary/10 text-primary/90 border-primary/20">{t("knowledge.detail.segmentCount", { count: segments.length })}</Badge>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
                       <Input
-                        placeholder="搜索切片内容..."
+                        placeholder={t("knowledge.detail.searchSegments")}
                         value={segmentSearch}
                         onChange={(e) => setSegmentSearch(e.target.value)}
                         className="pl-9 w-56 h-9 text-sm bg-card border-border"
@@ -1486,8 +1597,8 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-muted/40 to-muted flex items-center justify-center mb-4">
                         <Hash className="h-8 w-8 text-muted-foreground/70" />
                       </div>
-                      <p className="text-muted-foreground font-medium">暂无切片</p>
-                      <p className="text-sm text-muted-foreground/70 mt-1">文档处理完成后将显示切片</p>
+                      <p className="text-muted-foreground font-medium">{t("knowledge.detail.noSegments")}</p>
+                      <p className="text-sm text-muted-foreground/70 mt-1">{t("knowledge.detail.noSegmentsHint")}</p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1514,21 +1625,21 @@ export function KnowledgeDatasetDetailPage() {
             {/* 左侧：知识库配置调试 */}
             <div className="col-span-4">
               <Card className="p-5 bg-card">
-                <h3 className="font-semibold text-foreground mb-6">知识库配置调试</h3>
+                <h3 className="font-semibold text-foreground mb-6">{t("knowledge.detail.retrievalConfig")}</h3>
 
                 <div className="space-y-6">
                   {/* 选择排序模型 */}
                   <div>
                     <Label className="text-sm text-muted-foreground flex items-center gap-1">
-                      选择排序模型
+                      {t("knowledge.detail.selectRerankModel")}
                       <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <Select defaultValue="official">
                       <SelectTrigger className="mt-2 bg-card">
-                        <SelectValue placeholder="官方排序" />
+                        <SelectValue placeholder={t("knowledge.detail.officialRerank")} />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="official">官方排序</SelectItem>
+                        <SelectItem value="official">{t("knowledge.detail.officialRerank")}</SelectItem>
                         <SelectItem value="gte-rerank">GTE Rerank</SelectItem>
                         <SelectItem value="bge-reranker">BGE Reranker</SelectItem>
                       </SelectContent>
@@ -1538,7 +1649,7 @@ export function KnowledgeDatasetDetailPage() {
                   {/* 相似度阈值 - 阿里云风格 */}
                   <div>
                     <Label className="text-sm text-muted-foreground flex items-center gap-1">
-                      相似度阈值
+                      {t("knowledge.detail.similarityThreshold")}
                       <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <div className="mt-2 flex items-center gap-3">
@@ -1570,7 +1681,7 @@ export function KnowledgeDatasetDetailPage() {
                   {/* 最大召回数量 - 阿里云风格 */}
                   <div>
                     <Label className="text-sm text-muted-foreground flex items-center gap-1">
-                      最大召回数量
+                      {t("knowledge.detail.maxRecall")}
                       <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
                     <div className="mt-2 flex items-center gap-3">
@@ -1600,9 +1711,9 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 输入 */}
                   <div>
-                    <Label className="text-sm text-muted-foreground">输入</Label>
+                    <Label className="text-sm text-muted-foreground">{t("knowledge.detail.inputLabel")}</Label>
                     <Textarea
-                      placeholder="请输入文本"
+                      placeholder={t("knowledge.detail.inputPlaceholder")}
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       rows={4}
@@ -1636,9 +1747,9 @@ export function KnowledgeDatasetDetailPage() {
                     className="w-full h-10 bg-primary/10 hover:bg-primary/20 text-primary font-medium border-0"
                   >
                     {hitLoading ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 测试中...</>
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.testing")}</>
                     ) : (
-                      <><Target className="h-4 w-4 mr-2" /> 测试</>
+                      <><Target className="h-4 w-4 mr-2" /> {t("knowledge.detail.test")}</>
                     )}
                   </Button>
 
@@ -1646,11 +1757,11 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="p-4 bg-gradient-to-r from-muted/70 to-primary/5 rounded-lg border border-border">
                       <h4 className="text-xs font-semibold text-foreground/80 mb-3 flex items-center gap-2">
                         <BarChart3 className="h-3.5 w-3.5" />
-                        检索统计
+                        {t("knowledge.detail.retrievalStats")}
                       </h4>
                       <div className="grid grid-cols-2 gap-3 text-xs">
                         <div className="flex items-center justify-between p-2 bg-card rounded border">
-                          <span className="text-muted-foreground">模式</span>
+                          <span className="text-muted-foreground">{t("knowledge.detail.mode")}</span>
                           <Badge variant="outline" className="font-mono">
                             {String(hitMeta.mode)}
                           </Badge>
@@ -1658,18 +1769,18 @@ export function KnowledgeDatasetDetailPage() {
                         <div className="flex items-center justify-between p-2 bg-card rounded border">
                           <span className="text-muted-foreground">Rerank</span>
                           <Badge className={hitMeta.rerank ? "bg-emerald-100 text-emerald-700" : "bg-secondary/60 text-muted-foreground"}>
-                            {hitMeta.rerank ? "启用" : "禁用"}
+                            {hitMeta.rerank ? t("knowledge.detail.enabled") : t("knowledge.detail.disabled")}
                           </Badge>
                         </div>
                         <div className="flex items-center justify-between p-2 bg-card rounded border">
                           <span className="text-muted-foreground">MMR</span>
                           <Badge className={hitMeta.mmr ? "bg-accent/10 text-accent/90" : "bg-secondary/60 text-muted-foreground"}>
-                            {hitMeta.mmr ? "启用" : "禁用"}
+                            {hitMeta.mmr ? t("knowledge.detail.enabled") : t("knowledge.detail.disabled")}
                           </Badge>
                         </div>
                         {hitMeta.score_threshold !== undefined && hitMeta.score_threshold !== null && (
                           <div className="flex items-center justify-between p-2 bg-card rounded border">
-                            <span className="text-muted-foreground">阈值</span>
+                            <span className="text-muted-foreground">{t("knowledge.detail.threshold")}</span>
                             <span className="font-mono text-foreground/80">{String(hitMeta.score_threshold)}</span>
                           </div>
                         )}
@@ -1680,18 +1791,18 @@ export function KnowledgeDatasetDetailPage() {
                         {typeof hitMeta.vector_hits_count === 'number' && (
                           <div className="p-2 bg-primary/5 rounded text-center">
                             <div className="text-lg font-bold text-primary/90">{hitMeta.vector_hits_count}</div>
-                            <div className="text-xs text-primary">向量命中</div>
+                            <div className="text-xs text-primary">{t("knowledge.detail.vectorHits")}</div>
                             {typeof hitMeta.vector_hits_raw_count === 'number' && hitMeta.vector_hits_raw_count !== hitMeta.vector_hits_count && (
-                              <div className="text-xs text-primary/70">原始: {hitMeta.vector_hits_raw_count}</div>
+                              <div className="text-xs text-primary/70">{t("knowledge.detail.vectorRaw", { count: hitMeta.vector_hits_raw_count })}</div>
                             )}
                           </div>
                         )}
                         {typeof hitMeta.keyword_hits_count === 'number' && (
-                          <div className="p-2 bg-amber-50 rounded text-center">
-                            <div className="text-lg font-bold text-amber-700">{hitMeta.keyword_hits_count}</div>
-                            <div className="text-xs text-amber-600">关键词命中</div>
+                          <div className="p-2 bg-amber-500/10 dark:bg-amber-500/15 rounded text-center">
+                            <div className="text-lg font-bold text-amber-700 dark:text-amber-400">{hitMeta.keyword_hits_count}</div>
+                            <div className="text-xs text-amber-600 dark:text-amber-500">{t("knowledge.detail.keywordHits")}</div>
                             {typeof hitMeta.keyword_hits_raw_count === 'number' && hitMeta.keyword_hits_raw_count !== hitMeta.keyword_hits_count && (
-                              <div className="text-xs text-amber-400">原始: {hitMeta.keyword_hits_raw_count}</div>
+                              <div className="text-xs text-amber-400">{t("knowledge.detail.keywordRaw", { count: hitMeta.keyword_hits_raw_count })}</div>
                             )}
                           </div>
                         )}
@@ -1699,12 +1810,12 @@ export function KnowledgeDatasetDetailPage() {
 
                       {typeof hitMeta.collection_name === 'string' && hitMeta.collection_name && (
                         <div className="mt-2 text-xs text-muted-foreground/70 truncate font-mono">
-                          集合: {hitMeta.collection_name}
+                          {t("knowledge.detail.collection", { name: hitMeta.collection_name })}
                         </div>
                       )}
                       {typeof hitMeta.error === 'string' && hitMeta.error && (
-                        <div className="mt-2 p-2 bg-red-50 text-red-600 rounded text-xs">
-                          错误: {hitMeta.error}
+                        <div className="mt-2 p-2 bg-red-500/10 dark:bg-red-500/15 text-red-600 dark:text-red-400 rounded text-xs">
+                          {t("knowledge.detail.error", { msg: hitMeta.error })}
                         </div>
                       )}
                     </div>
@@ -1718,18 +1829,18 @@ export function KnowledgeDatasetDetailPage() {
               <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-sm">
                 <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center justify-between sticky top-0">
                   <div className="flex items-center gap-3">
-                    <h3 className="font-bold text-foreground">召回结果</h3>
+                    <h3 className="font-bold text-foreground">{t("knowledge.detail.retrievalResults")}</h3>
                     {hitResults.length > 0 && (
                       <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200">
-                        {hitResults.length} 条
+                        {t("knowledge.detail.resultCount", { count: hitResults.length })}
                       </Badge>
                     )}
                   </div>
                   {hitResults.length > 0 && (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>最高分: {Math.max(...hitResults.map(h => h.score)).toFixed(4)}</span>
+                      <span>{t("knowledge.detail.highestScore", { score: Math.max(...hitResults.map(h => h.score)).toFixed(4) })}</span>
                       <span>·</span>
-                      <span>最低分: {Math.min(...hitResults.map(h => h.score)).toFixed(4)}</span>
+                      <span>{t("knowledge.detail.lowestScore", { score: Math.min(...hitResults.map(h => h.score)).toFixed(4) })}</span>
                     </div>
                   )}
                 </div>
@@ -1748,15 +1859,15 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="w-20 h-20 mx-auto rounded-2xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center mb-4">
                         <Search className="h-10 w-10 text-emerald-400" />
                       </div>
-                      <p className="text-lg font-medium text-muted-foreground">暂无结果</p>
+                      <p className="text-lg font-medium text-muted-foreground">{t("knowledge.detail.noResults")}</p>
                       <p className="text-sm text-muted-foreground/70 mt-2 max-w-sm mx-auto">
                         {Object.keys(hitMeta).length > 0
-                          ? `向量命中: ${hitMeta.vector_hits_count ?? 0}, 关键词命中: ${hitMeta.keyword_hits_count ?? 0}`
-                          : "输入查询内容并运行测试，查看检索效果"
+                          ? t("knowledge.detail.vectorHitsCount", { vector: hitMeta.vector_hits_count ?? 0, keyword: hitMeta.keyword_hits_count ?? 0 })
+                          : t("knowledge.detail.noResultsHint")
                         }
                       </p>
                       {typeof hitMeta.error === 'string' && hitMeta.error && (
-                        <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 max-w-md mx-auto">
+                        <div className="mt-4 p-3 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg text-sm text-red-600 dark:text-red-400 max-w-md mx-auto">
                           {hitMeta.error}
                         </div>
                       )}
@@ -1779,15 +1890,15 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
                       <Sliders className="h-4 w-4 text-primary" />
                     </div>
-                    QA 配置
+                    {t("knowledge.detail.qaConfig")}
                   </h3>
-                  <p className="text-xs text-muted-foreground mt-1">配置检索参数与模型，右侧进行流式对话测试</p>
+                  <p className="text-xs text-muted-foreground mt-1">{t("knowledge.detail.qaConfigHint")}</p>
                 </div>
 
                 <div className="p-5 space-y-6">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium text-foreground/80">模型</Label>
+                      <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaModel")}</Label>
                       <Badge variant="outline" className="text-xs">DeepSeek</Badge>
                     </div>
                     <Select value={qaModel} onValueChange={setQaModel}>
@@ -1804,7 +1915,7 @@ export function KnowledgeDatasetDetailPage() {
                     </Select>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <Label className="text-xs text-muted-foreground">温度</Label>
+                        <Label className="text-xs text-muted-foreground">{t("knowledge.detail.qaTemperature")}</Label>
                         <Input
                           type="number"
                           step={0.1}
@@ -1838,7 +1949,7 @@ export function KnowledgeDatasetDetailPage() {
 
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium text-foreground/80">检索设置</Label>
+                      <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaRetrievalSettings")}</Label>
                       <Badge variant="outline" className="text-xs font-mono">{mode}</Badge>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
@@ -1854,15 +1965,15 @@ export function KnowledgeDatasetDetailPage() {
                         />
                       </div>
                       <div>
-                        <Label className="text-xs font-medium text-muted-foreground">检索模式</Label>
+                        <Label className="text-xs font-medium text-muted-foreground">{t("knowledge.detail.qaRetrievalMode")}</Label>
                         <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
                           <SelectTrigger className="mt-1.5 border-border">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="hybrid">Hybrid (混合)</SelectItem>
-                            <SelectItem value="dense">Dense Only (向量)</SelectItem>
-                            <SelectItem value="bm25">BM25 Only (关键词)</SelectItem>
+                            <SelectItem value="hybrid">{t("knowledge.detail.qaHybrid")}</SelectItem>
+                            <SelectItem value="dense">{t("knowledge.detail.qaDenseOnly")}</SelectItem>
+                            <SelectItem value="bm25">{t("knowledge.detail.qaBm25Only")}</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -1871,13 +1982,13 @@ export function KnowledgeDatasetDetailPage() {
                     {mode === "hybrid" && (
                       <div className="space-y-4 p-3 bg-primary/5 rounded-lg border border-primary/20">
                         <div className="flex items-center justify-between text-xs text-muted-foreground">
-                          <span className="font-medium">权重配置</span>
+                          <span className="font-medium">{t("knowledge.detail.qaWeightConfig")}</span>
                           <Select value={fusionMethod} onValueChange={(v) => setFusionMethod(v as typeof fusionMethod)}>
                             <SelectTrigger className="h-7 w-28 text-xs">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="weighted">加权平均</SelectItem>
+                              <SelectItem value="weighted">{t("knowledge.detail.qaWeightedAvg")}</SelectItem>
                               <SelectItem value="rrf">RRF</SelectItem>
                             </SelectContent>
                           </Select>
@@ -1885,7 +1996,7 @@ export function KnowledgeDatasetDetailPage() {
 
                         <div>
                           <div className="flex items-center justify-between mb-1">
-                            <Label className="text-xs text-primary/90">Dense (向量)</Label>
+                            <Label className="text-xs text-primary/90">{t("knowledge.detail.qaDenseWeight")}</Label>
                             <span className="text-xs font-mono text-primary">{(denseWeight * 100).toFixed(0)}%</span>
                           </div>
                           <input
@@ -1904,7 +2015,7 @@ export function KnowledgeDatasetDetailPage() {
 
                         <div>
                           <div className="flex items-center justify-between mb-1">
-                            <Label className="text-xs text-amber-700">BM25 (关键词)</Label>
+                            <Label className="text-xs text-amber-700">{t("knowledge.detail.qaBm25Weight")}</Label>
                             <span className="text-xs font-mono text-amber-600">{(bm25Weight * 100).toFixed(0)}%</span>
                           </div>
                           <input
@@ -1925,7 +2036,7 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   <div className="space-y-3">
-                    <Label className="text-sm font-medium text-foreground/80">策略</Label>
+                    <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaStrategy")}</Label>
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={rerank} onCheckedChange={setRerank} />
@@ -1937,44 +2048,44 @@ export function KnowledgeDatasetDetailPage() {
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaShowSources} onCheckedChange={setQaShowSources} />
-                        <span className="text-sm font-medium text-foreground/80">显示引用</span>
+                        <span className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaShowSources")}</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaAutoScroll} onCheckedChange={setQaAutoScroll} />
-                        <span className="text-sm font-medium text-foreground/80">自动滚动</span>
+                        <span className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaAutoScroll")}</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
                         <Switch checked={qaStrictMode} onCheckedChange={setQaStrictMode} />
-                        <span className="text-sm font-medium text-foreground/80">严格模式</span>
+                        <span className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaStrictMode")}</span>
                       </label>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      严格模式仅基于知识库回答；关闭时允许通用知识补充。
+                      {t("knowledge.detail.qaStrictModeHint")}
                     </p>
                   </div>
 
                   <div className="space-y-3 rounded-xl border border-border/60 bg-muted/40 p-4">
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>会话统计</span>
+                      <span>{t("knowledge.detail.qaSessionStats")}</span>
                       {lastQaResponse?.timing?.total_ms && (
-                        <span className="font-mono">最近 {lastQaResponse.timing.total_ms}ms</span>
+                        <span className="font-mono">{t("knowledge.detail.qaRecentTiming", { ms: lastQaResponse.timing.total_ms })}</span>
                       )}
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="rounded-lg border border-border bg-card p-3">
-                        <p className="text-xs text-muted-foreground">消息数</p>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.qaMessages")}</p>
                         <p className="text-lg font-semibold text-foreground">{qaMessages.length}</p>
                       </div>
                       <div className="rounded-lg border border-border bg-card p-3">
-                        <p className="text-xs text-muted-foreground">对话轮次</p>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.qaRounds")}</p>
                         <p className="text-lg font-semibold text-foreground">{qaTurns}</p>
                       </div>
                       <div className="rounded-lg border border-border bg-card p-3">
-                        <p className="text-xs text-muted-foreground">最近 Tokens</p>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.qaRecentTokens")}</p>
                         <p className="text-lg font-semibold text-foreground">{lastQaResponse?.tokens_used ?? "-"}</p>
                       </div>
                       <div className="rounded-lg border border-border bg-card p-3">
-                        <p className="text-xs text-muted-foreground">检索片段</p>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.qaRetrievalSegments")}</p>
                         <p className="text-lg font-semibold text-foreground">{lastQaResponse?.context_segments?.length ?? 0}</p>
                       </div>
                     </div>
@@ -1984,7 +2095,7 @@ export function KnowledgeDatasetDetailPage() {
                       onClick={handleClearQaChat}
                       disabled={qaMessages.length === 0}
                     >
-                      清空对话
+                      {t("knowledge.detail.qaClearChat")}
                     </Button>
                   </div>
                 </div>
@@ -1994,7 +2105,7 @@ export function KnowledgeDatasetDetailPage() {
                 <Card className="p-0 overflow-hidden border-border">
                   <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center gap-2">
                     <Clock className="h-4 w-4 text-muted-foreground/70" />
-                    <h4 className="text-sm font-semibold text-foreground/80">最近问题</h4>
+                    <h4 className="text-sm font-semibold text-foreground/80">{t("knowledge.detail.qaRecentQuestions")}</h4>
                   </div>
                   <div className="p-4 space-y-2 max-h-64 overflow-auto">
                     {qaHistory.slice().reverse().map((h, i) => (
@@ -2009,7 +2120,7 @@ export function KnowledgeDatasetDetailPage() {
                             {h.response.timing.total_ms}ms
                           </Badge>
                           <span className="text-xs text-muted-foreground/70">
-                            {h.response.context_segments.length} 片段
+                            {t("knowledge.detail.qaSegmentsCount", { count: h.response.context_segments.length })}
                           </span>
                           <span className="text-xs text-muted-foreground/70 font-mono">
                             {h.response.model}
@@ -2031,14 +2142,14 @@ export function KnowledgeDatasetDetailPage() {
                       <MessageSquare className="h-4 w-4 text-primary" />
                     </div>
                     <div>
-                      <h3 className="font-semibold text-foreground">QA 对话</h3>
-                      <p className="text-xs text-muted-foreground">流式回答 + 引用上下文</p>
+                      <h3 className="font-semibold text-foreground">{t("knowledge.detail.qaConversation")}</h3>
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.qaStreamHint")}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 text-xs">
                     <Badge variant="outline" className="font-mono">{qaModel}</Badge>
                     {qaLoading && (
-                      <Badge className="bg-primary/5 text-primary border-primary/20">生成中</Badge>
+                      <Badge className="bg-primary/5 text-primary border-primary/20">{t("knowledge.detail.qaGenerating")}</Badge>
                     )}
                   </div>
                 </div>
@@ -2049,15 +2160,15 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="w-20 h-20 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4">
                         <Sparkles className="h-10 w-10 text-primary/70" />
                       </div>
-                      <p className="text-lg font-medium text-foreground/80">开始一段 QA 测试</p>
+                      <p className="text-lg font-medium text-foreground/80">{t("knowledge.detail.qaStartTitle")}</p>
                       <p className="text-sm text-muted-foreground/70 mt-1 max-w-md">
-                        输入问题后将触发检索与模型回答，支持流式展示与引用片段
+                        {t("knowledge.detail.qaStartHint")}
                       </p>
                       <div className="mt-5 flex flex-wrap gap-2 justify-center">
                         {[
-                          "知识库覆盖了哪些核心主题？",
-                          "总结一下文档中的主要结论。",
-                          "给我一个基于资料的步骤清单。",
+                          t("knowledge.detail.qaSuggestion1"),
+                          t("knowledge.detail.qaSuggestion2"),
+                          t("knowledge.detail.qaSuggestion3"),
                         ].map((suggestion) => (
                           <button
                             key={suggestion}
@@ -2076,7 +2187,7 @@ export function KnowledgeDatasetDetailPage() {
                         const bubbleStyles = isUser
                           ? "bg-primary text-white rounded-tr-sm"
                           : msg.status === "error"
-                            ? "bg-red-50 text-red-700 border border-red-200"
+                            ? "bg-red-500/10 dark:bg-red-500/15 text-red-700 dark:text-red-400 border border-red-500/20"
                             : "bg-card text-foreground/80 border border-border";
 
                         return (
@@ -2093,7 +2204,7 @@ export function KnowledgeDatasetDetailPage() {
                                     ) : (
                                       <div className="flex items-center gap-2 text-sm text-muted-foreground">
                                         <Loader2 className="h-4 w-4 animate-spin" />
-                                        正在生成回答...
+                                        {t("knowledge.detail.qaGeneratingAnswer")}
                                       </div>
                                     )
                                   ) : (
@@ -2109,13 +2220,13 @@ export function KnowledgeDatasetDetailPage() {
                                       </Badge>
                                       <span className="flex items-center gap-1">
                                         <Zap className="h-3 w-3" />
-                                        检索 {msg.response.timing.retrieval_ms}ms
+                                        {t("knowledge.detail.qaRetrievalTiming", { ms: msg.response.timing.retrieval_ms })}
                                       </span>
                                       <span className="flex items-center gap-1">
                                         <Brain className="h-3 w-3" />
                                         LLM {msg.response.timing.llm_ms}ms
                                       </span>
-                                      <span>总计 {msg.response.timing.total_ms}ms</span>
+                                      <span>{t("knowledge.detail.qaTotalTiming", { ms: msg.response.timing.total_ms })}</span>
                                       {msg.response.tokens_used && <span>Tokens {msg.response.tokens_used}</span>}
                                     </div>
 
@@ -2123,7 +2234,7 @@ export function KnowledgeDatasetDetailPage() {
                                       <details className="rounded-lg border border-border bg-muted/40">
                                         <summary className="cursor-pointer px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
                                           <Database className="h-3.5 w-3.5" />
-                                          引用片段 ({msg.response.context_segments.length})
+                                          {t("knowledge.detail.qaSourceSegments", { count: msg.response.context_segments.length })}
                                         </summary>
                                         <div className="px-3 pb-3 space-y-2">
                                           {msg.response.context_segments.map((seg, segIndex) => (
@@ -2157,7 +2268,7 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="border-t border-border/60 bg-card p-4">
                   <div className="flex flex-col gap-3 sm:flex-row">
                     <Textarea
-                      placeholder="输入你的问题，Shift+Enter 换行..."
+                      placeholder={t("knowledge.detail.qaInputPlaceholder")}
                       value={qaQueryInput}
                       onChange={(e) => setQaQueryInput(e.target.value)}
                       onKeyDown={handleQaKeyDown}
@@ -2170,14 +2281,14 @@ export function KnowledgeDatasetDetailPage() {
                       className="h-11 bg-primary hover:bg-primary/90 text-white"
                     >
                       {qaLoading ? (
-                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 生成中</>
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.qaGeneratingBtn")}</>
                       ) : (
-                        <><Send className="h-4 w-4 mr-2" /> 发送</>
+                        <><Send className="h-4 w-4 mr-2" /> {t("knowledge.detail.qaSend")}</>
                       )}
                     </Button>
                   </div>
                   <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground/70">
-                    <span>Enter 发送，Shift+Enter 换行</span>
+                    <span>{t("knowledge.detail.qaInputHint")}</span>
                     <span className="font-mono">TopK {topK} · {mode}</span>
                   </div>
                 </div>
@@ -2194,7 +2305,7 @@ export function KnowledgeDatasetDetailPage() {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <Sliders className="h-5 w-5 text-amber-600" />
-                  分块配置
+                  {t("knowledge.detail.configChunking")}
                 </h3>
                 {!configEditing && (
                   <Button
@@ -2203,7 +2314,7 @@ export function KnowledgeDatasetDetailPage() {
                     onClick={() => setConfigEditing(true)}
                   >
                     <Edit3 className="h-3 w-3 mr-1" />
-                    编辑
+                    {t("knowledge.detail.edit")}
                   </Button>
                 )}
               </div>
@@ -2215,7 +2326,7 @@ export function KnowledgeDatasetDetailPage() {
               ) : configEditing ? (
                 <div className="space-y-4">
                   <div>
-                    <Label className="text-sm">分块模式</Label>
+                    <Label className="text-sm">{t("knowledge.detail.chunkMode")}</Label>
                     <Select value={editChunkingMode} onValueChange={setEditChunkingMode}>
                       <SelectTrigger className="mt-1">
                         <SelectValue />
@@ -2223,57 +2334,51 @@ export function KnowledgeDatasetDetailPage() {
                       <SelectContent>
                         <SelectItem value="automatic">
                           <div className="flex flex-col">
-                            <span>智能切分</span>
-                            <span className="text-xs text-muted-foreground">自动检测最优策略</span>
+                            <span>{t("knowledge.detail.chunkAutomatic")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkAutomaticHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="fixed_size">
                           <div className="flex flex-col">
-                            <span>按长度切分</span>
-                            <span className="text-xs text-muted-foreground">固定字符数分块</span>
+                            <span>{t("knowledge.detail.chunkFixedSize")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkFixedSizeHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="paragraph">
                           <div className="flex flex-col">
-                            <span>按段落切分</span>
-                            <span className="text-xs text-muted-foreground">尊重段落边界</span>
+                            <span>{t("knowledge.detail.chunkParagraph")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkParagraphHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="heading">
                           <div className="flex flex-col">
-                            <span>按标题切分</span>
-                            <span className="text-xs text-muted-foreground">按章节/标题划分</span>
+                            <span>{t("knowledge.detail.chunkHeading")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkHeadingHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="hierarchical">
                           <div className="flex flex-col">
-                            <span>父子分块</span>
-                            <span className="text-xs text-muted-foreground">大块包含小块，保留上下文</span>
+                            <span>{t("knowledge.detail.chunkHierarchical")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkHierarchicalHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="recursive">
                           <div className="flex flex-col">
-                            <span>递归切分</span>
-                            <span className="text-xs text-muted-foreground">多层级递归分割</span>
+                            <span>{t("knowledge.detail.chunkRecursive")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkRecursiveHint")}</span>
                           </div>
                         </SelectItem>
                         <SelectItem value="separator">
                           <div className="flex flex-col">
-                            <span>按符号切分</span>
-                            <span className="text-xs text-muted-foreground">自定义分隔符</span>
+                            <span>{t("knowledge.detail.chunkSeparator")}</span>
+                            <span className="text-xs text-muted-foreground">{t("knowledge.detail.chunkSeparatorHint")}</span>
                           </div>
                         </SelectItem>
                       </SelectContent>
                     </Select>
                     {/* 模式说明 */}
                     <p className="text-xs text-muted-foreground mt-1">
-                      {editChunkingMode === "automatic" && "根据文档结构自动选择最优切分策略"}
-                      {editChunkingMode === "fixed_size" && "按固定字符数切分，适合规整内容"}
-                      {editChunkingMode === "paragraph" && "保持段落完整性，适合文章报告"}
-                      {editChunkingMode === "heading" && "按标题/章节划分，适合结构化文档"}
-                      {editChunkingMode === "hierarchical" && "父块提供上下文，子块用于精确检索"}
-                      {editChunkingMode === "recursive" && "递归分层切分，高质量分块"}
-                      {editChunkingMode === "separator" && "使用自定义分隔符切分"}
+                      {t(`knowledge.detail.chunkModeDesc.${editChunkingMode}`)}
                     </p>
                   </div>
 
@@ -2283,9 +2388,9 @@ export function KnowledgeDatasetDetailPage() {
                       <div>
                         <div className="flex justify-between items-center">
                           <Label className="text-sm">
-                            {editChunkingMode === "hierarchical" ? "子块大小" : "块大小"}
+                            {editChunkingMode === "hierarchical" ? t("knowledge.detail.childBlockSize") : t("knowledge.detail.blockSize")}
                           </Label>
-                          <span className="text-sm text-muted-foreground">{editChunkSize} 字符</span>
+                          <span className="text-sm text-muted-foreground">{t("knowledge.detail.characters", { count: editChunkSize })}</span>
                         </div>
                         <input
                           type="range"
@@ -2299,8 +2404,8 @@ export function KnowledgeDatasetDetailPage() {
                       </div>
                       <div>
                         <div className="flex justify-between items-center">
-                          <Label className="text-sm">重叠大小</Label>
-                          <span className="text-sm text-muted-foreground">{editChunkOverlap} 字符</span>
+                          <Label className="text-sm">{t("knowledge.detail.overlapSize")}</Label>
+                          <span className="text-sm text-muted-foreground">{t("knowledge.detail.characters", { count: editChunkOverlap })}</span>
                         </div>
                         <input
                           type="range"
@@ -2318,13 +2423,13 @@ export function KnowledgeDatasetDetailPage() {
                   {/* hierarchical模式特有参数 */}
                   {editChunkingMode === "hierarchical" && (
                     <div className="p-3 bg-accent/10 rounded-lg space-y-3">
-                      <Label className="text-sm font-medium text-accent">父子分块配置</Label>
+                      <Label className="text-sm font-medium text-accent">{t("knowledge.detail.parentChildConfig")}</Label>
                       <div>
                         <div className="flex justify-between items-center">
-                          <Label className="text-xs text-muted-foreground">父块大小</Label>
-                          <span className="text-xs text-muted-foreground">2000 字符</span>
+                          <Label className="text-xs text-muted-foreground">{t("knowledge.detail.parentBlockSize")}</Label>
+                          <span className="text-xs text-muted-foreground">{t("knowledge.detail.characters", { count: 2000 })}</span>
                         </div>
-                        <p className="text-xs text-muted-foreground/70 mt-1">父块包含多个子块，提供更完整的上下文</p>
+                        <p className="text-xs text-muted-foreground/70 mt-1">{t("knowledge.detail.parentBlockHint")}</p>
                       </div>
                     </div>
                   )}
@@ -2334,7 +2439,7 @@ export function KnowledgeDatasetDetailPage() {
                       disabled={configSaving}
                       className="bg-primary hover:bg-primary/90"
                     >
-                      {configSaving ? "保存中..." : "保存配置"}
+                      {configSaving ? t("knowledge.detail.saving") : t("knowledge.detail.saveConfig")}
                     </Button>
                     <Button
                       variant="outline"
@@ -2347,38 +2452,61 @@ export function KnowledgeDatasetDetailPage() {
                         }
                       }}
                     >
-                      取消
+                      {t("knowledge.detail.cancel")}
                     </Button>
                   </div>
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
-                    ⚠️ 修改分块配置后需要重新索引文档才能生效
+                  <div className="p-3 bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/20 rounded-lg text-sm text-amber-700 dark:text-amber-400">
+                    {t("knowledge.detail.chunkConfigWarning")}
                   </div>
                 </div>
               ) : datasetConfig ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">分块模式</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.chunking?.mode || "automatic"}
+                  {/* 分块模式标签 */}
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-amber-500/15 bg-gradient-to-r from-amber-500/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-amber-500/10 dark:bg-amber-500/15 flex items-center justify-center flex-shrink-0">
+                      <Sliders className="h-4 w-4 text-amber-500" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.currentMode")}</p>
+                      <p className="font-semibold text-foreground">
+                        {t(`knowledge.detail.chunkModeLabels.${datasetConfig.chunking?.mode || "automatic"}`) || datasetConfig.chunking?.mode}
                       </p>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">块大小</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.chunking?.chunk_size || 500}
+                    <Badge variant="outline" className="text-xs border-amber-500/30 text-amber-600 dark:text-amber-400 bg-amber-500/5">
+                      {t(`knowledge.detail.chunkModeShort.${datasetConfig.chunking?.mode || "automatic"}`)}
+                    </Badge>
+                  </div>
+
+                  {/* 参数网格 */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="relative p-3.5 rounded-xl border border-border/50 bg-muted/30 group hover:border-primary/20 transition-colors">
+                      <div className="flex items-baseline justify-between">
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.blockSize")}</p>
+                        <span className="text-[10px] text-muted-foreground/60">chars</span>
+                      </div>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums tracking-tight">
+                        {datasetConfig.chunking?.chunk_size || 2000}
                       </p>
+                      <div className="mt-2 h-1 rounded-full bg-muted overflow-hidden">
+                        <div className="h-full rounded-full bg-primary/40" style={{ width: `${Math.min(((datasetConfig.chunking?.chunk_size || 2000) / 4000) * 100, 100)}%` }} />
+                      </div>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">重叠大小</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.chunking?.chunk_overlap || 50}
+                    <div className="relative p-3.5 rounded-xl border border-border/50 bg-muted/30 group hover:border-primary/20 transition-colors">
+                      <div className="flex items-baseline justify-between">
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.overlapSize")}</p>
+                        <span className="text-[10px] text-muted-foreground/60">chars</span>
+                      </div>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums tracking-tight">
+                        {datasetConfig.chunking?.chunk_overlap || 300}
                       </p>
+                      <div className="mt-2 h-1 rounded-full bg-muted overflow-hidden">
+                        <div className="h-full rounded-full bg-amber-500/40" style={{ width: `${Math.min(((datasetConfig.chunking?.chunk_overlap || 300) / (datasetConfig.chunking?.chunk_size || 2000)) * 100, 100)}%` }} />
+                      </div>
                     </div>
                   </div>
                 </div>
               ) : (
-                <p className="text-muted-foreground">无法加载配置</p>
+                <p className="text-muted-foreground">{t("knowledge.detail.cannotLoadConfig")}</p>
               )}
             </Card>
 
@@ -2387,7 +2515,7 @@ export function KnowledgeDatasetDetailPage() {
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <Search className="h-5 w-5 text-emerald-600" />
-                  检索配置
+                  {t("knowledge.detail.configRetrieval")}
                 </h3>
                 {!retrievalEditing && (
                   <Button
@@ -2396,7 +2524,7 @@ export function KnowledgeDatasetDetailPage() {
                     onClick={() => setRetrievalEditing(true)}
                   >
                     <Edit3 className="h-3.5 w-3.5 mr-1" />
-                    编辑
+                    {t("knowledge.detail.edit")}
                   </Button>
                 )}
               </div>
@@ -2409,15 +2537,15 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="space-y-4">
                   {/* 检索模式 */}
                   <div>
-                    <Label className="text-sm">检索模式</Label>
+                    <Label className="text-sm">{t("knowledge.detail.retrievalMode")}</Label>
                     <Select value={editRetrievalMode} onValueChange={(v) => setEditRetrievalMode(v as typeof editRetrievalMode)}>
                       <SelectTrigger className="mt-1">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="hybrid">混合检索 (推荐)</SelectItem>
-                        <SelectItem value="vector">向量检索</SelectItem>
-                        <SelectItem value="keyword">关键词检索 (BM25)</SelectItem>
+                        <SelectItem value="hybrid">{t("knowledge.detail.hybridRecommended")}</SelectItem>
+                        <SelectItem value="vector">{t("knowledge.detail.vectorRetrieval")}</SelectItem>
+                        <SelectItem value="keyword">{t("knowledge.detail.keywordRetrieval")}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -2425,7 +2553,7 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Top K */}
                   <div>
                     <div className="flex justify-between items-center">
-                      <Label className="text-sm">返回数量 (Top K)</Label>
+                      <Label className="text-sm">{t("knowledge.detail.topK")}</Label>
                       <span className="text-sm text-muted-foreground">{editTopK}</span>
                     </div>
                     <input
@@ -2441,7 +2569,7 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Score Threshold */}
                   <div>
                     <div className="flex justify-between items-center">
-                      <Label className="text-sm">相关性阈值 (Score Threshold)</Label>
+                      <Label className="text-sm">{t("knowledge.detail.scoreThreshold")}</Label>
                       <span className="text-sm text-muted-foreground">{(editScoreThreshold * 100).toFixed(0)}%</span>
                     </div>
                     <input
@@ -2453,29 +2581,29 @@ export function KnowledgeDatasetDetailPage() {
                       className="w-full mt-2"
                     />
                     <p className="text-xs text-muted-foreground mt-1">
-                      过滤低于此分数的结果，推荐 30% 以上
+                      {t("knowledge.detail.scoreThresholdHint")}
                     </p>
                   </div>
 
                   {/* 融合配置 - 仅hybrid模式 */}
                   {editRetrievalMode === "hybrid" && (
                     <div className="p-3 bg-primary/5 rounded-lg space-y-3">
-                      <Label className="text-sm font-medium text-primary">融合策略</Label>
+                      <Label className="text-sm font-medium text-primary">{t("knowledge.detail.fusionStrategy")}</Label>
                       <Select value={editFusionStrategy} onValueChange={(v) => setEditFusionStrategy(v as typeof editFusionStrategy)}>
                         <SelectTrigger className="bg-card">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="rrf">RRF (Reciprocal Rank Fusion)</SelectItem>
-                          <SelectItem value="weighted">加权融合</SelectItem>
+                          <SelectItem value="weighted">{t("knowledge.detail.weightedFusion")}</SelectItem>
                         </SelectContent>
                       </Select>
 
                       {/* 权重滑块 */}
                       <div className="space-y-2">
                         <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>向量权重: {(editDenseWeight * 100).toFixed(0)}%</span>
-                          <span>BM25权重: {(editBm25Weight * 100).toFixed(0)}%</span>
+                          <span>{t("knowledge.detail.vectorWeight", { pct: (editDenseWeight * 100).toFixed(0) })}</span>
+                          <span>{t("knowledge.detail.bm25WeightPct", { pct: (editBm25Weight * 100).toFixed(0) })}</span>
                         </div>
                         <input
                           type="range"
@@ -2490,8 +2618,8 @@ export function KnowledgeDatasetDetailPage() {
                           className="w-full"
                         />
                         <div className="flex justify-between text-xs">
-                          <span className="text-primary">向量 (语义)</span>
-                          <span className="text-amber-600">BM25 (关键词)</span>
+                          <span className="text-primary">{t("knowledge.detail.vectorSemantic")}</span>
+                          <span className="text-amber-600">{t("knowledge.detail.bm25Keyword")}</span>
                         </div>
                       </div>
                     </div>
@@ -2500,8 +2628,8 @@ export function KnowledgeDatasetDetailPage() {
                   {/* Rerank */}
                   <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                     <div>
-                      <p className="font-medium text-foreground">Rerank 重排序</p>
-                      <p className="text-xs text-muted-foreground">使用交叉编码器优化排序</p>
+                      <p className="font-medium text-foreground">{t("knowledge.detail.rerankReorder")}</p>
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.rerankHint")}</p>
                     </div>
                     <Switch
                       checked={editRerankEnabled}
@@ -2510,13 +2638,13 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
                   {editRerankEnabled && (
                     <div className="ml-3">
-                      <Label className="text-xs text-muted-foreground">Rerank 模型</Label>
+                      <Label className="text-xs text-muted-foreground">{t("knowledge.detail.rerankModelLabel")}</Label>
                       <Select value={editRerankModel} onValueChange={setEditRerankModel}>
                         <SelectTrigger className="mt-1 h-8 text-sm">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="gte-rerank">GTE Rerank (阿里)</SelectItem>
+                          <SelectItem value="gte-rerank">{t("knowledge.detail.gteRerank")}</SelectItem>
                           <SelectItem value="bge-reranker-v2-m3">BGE Reranker</SelectItem>
                         </SelectContent>
                       </Select>
@@ -2526,8 +2654,8 @@ export function KnowledgeDatasetDetailPage() {
                   {/* MMR */}
                   <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                     <div>
-                      <p className="font-medium text-foreground">MMR 多样性</p>
-                      <p className="text-xs text-muted-foreground">最大边际相关性去重</p>
+                      <p className="font-medium text-foreground">{t("knowledge.detail.mmrDiversity")}</p>
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.mmrHint")}</p>
                     </div>
                     <Switch
                       checked={editMmrEnabled}
@@ -2537,7 +2665,7 @@ export function KnowledgeDatasetDetailPage() {
                   {editMmrEnabled && (
                     <div className="ml-3">
                       <div className="flex justify-between items-center">
-                        <Label className="text-xs text-muted-foreground">Lambda (相关性 vs 多样性)</Label>
+                        <Label className="text-xs text-muted-foreground">{t("knowledge.detail.mmrLambda")}</Label>
                         <span className="text-xs text-muted-foreground">{editMmrLambda.toFixed(2)}</span>
                       </div>
                       <input
@@ -2549,8 +2677,8 @@ export function KnowledgeDatasetDetailPage() {
                         className="w-full mt-1"
                       />
                       <div className="flex justify-between text-xs mt-1">
-                        <span className="text-accent">多样性优先</span>
-                        <span className="text-green-600">相关性优先</span>
+                        <span className="text-accent">{t("knowledge.detail.diversityFirst")}</span>
+                        <span className="text-green-600">{t("knowledge.detail.relevanceFirst")}</span>
                       </div>
                     </div>
                   )}
@@ -2562,7 +2690,7 @@ export function KnowledgeDatasetDetailPage() {
                       disabled={configSaving}
                       className="bg-emerald-600 hover:bg-emerald-700"
                     >
-                      {configSaving ? "保存中..." : "保存配置"}
+                      {configSaving ? t("knowledge.detail.saving") : t("knowledge.detail.saveConfig")}
                     </Button>
                     <Button
                       variant="outline"
@@ -2578,114 +2706,240 @@ export function KnowledgeDatasetDetailPage() {
                         }
                       }}
                     >
-                      取消
+                      {t("knowledge.detail.cancel")}
                     </Button>
                   </div>
                 </div>
               ) : datasetConfig ? (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">检索模式</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {{vector: "向量检索", dense: "向量检索", keyword: "关键词检索", bm25: "关键词检索", hybrid: "混合检索"}[datasetConfig.retrieval?.mode || "hybrid"]}
+                  {/* 检索模式标签 */}
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-emerald-500/15 bg-gradient-to-r from-emerald-500/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 dark:bg-emerald-500/15 flex items-center justify-center flex-shrink-0">
+                      <Search className="h-4 w-4 text-emerald-500" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.retrievalMode")}</p>
+                      <p className="font-semibold text-foreground">
+                        {t(`knowledge.detail.retrievalModes.${datasetConfig.retrieval?.mode || "hybrid"}`)}
                       </p>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">默认 Top K</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.retrieval?.top_k || 5}
-                      </p>
+                    <Badge variant="outline" className="text-xs border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/5">
+                      {{vector: "Dense", dense: "Dense", keyword: "BM25", bm25: "BM25", hybrid: "Hybrid"}[datasetConfig.retrieval?.mode || "hybrid"]}
+                    </Badge>
+                  </div>
+
+                  {/* 参数网格 */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
+                      <p className="text-xs text-muted-foreground">Top K</p>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{datasetConfig.retrieval?.top_k || 5}</p>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">相关性阈值</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {((datasetConfig.retrieval?.score_threshold ?? 0.3) * 100).toFixed(0)}%
-                      </p>
+                    <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.scoreThreshold")}</p>
+                      <p className="text-xl font-bold text-foreground mt-1 tabular-nums">{((datasetConfig.retrieval?.score_threshold ?? 0.3) * 100).toFixed(0)}%</p>
                     </div>
                   </div>
 
-                  {/* 融合权重显示 */}
+                  {/* 融合权重 - hybrid模式 */}
                   {(datasetConfig.retrieval?.mode === "hybrid") && (
-                    <div className="p-3 bg-primary/5 rounded-lg">
-                      <p className="text-xs text-primary mb-2">融合权重</p>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 bg-primary/20 rounded-full h-2">
-                          <div
-                            className="bg-primary h-2 rounded-full"
-                            style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
-                          />
+                    <div className="p-3.5 rounded-xl border border-primary/15 bg-gradient-to-r from-primary/5 to-transparent">
+                      <div className="flex items-center justify-between mb-2.5">
+                        <p className="text-xs font-medium text-primary">{t("knowledge.detail.fusionWeight")}</p>
+                        <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                          <span>{t("knowledge.detail.vectorWeight", { pct: ((datasetConfig.retrieval.fusion?.alpha || 0.7) * 100).toFixed(0) })}</span>
+                          <span className="text-muted-foreground/40">|</span>
+                          <span>BM25 {((1 - (datasetConfig.retrieval.fusion?.alpha || 0.7)) * 100).toFixed(0)}%</span>
                         </div>
-                        <span className="text-xs text-muted-foreground">
-                          向量 {((datasetConfig.retrieval.fusion?.alpha || 0.7) * 100).toFixed(0)}%
-                        </span>
+                      </div>
+                      <div className="h-2 rounded-full bg-muted/60 overflow-hidden flex">
+                        <div
+                          className="h-full bg-primary/60 rounded-l-full transition-all"
+                          style={{ width: `${(datasetConfig.retrieval.fusion?.alpha || 0.7) * 100}%` }}
+                        />
+                        <div
+                          className="h-full bg-amber-500/40 rounded-r-full transition-all"
+                          style={{ width: `${(1 - (datasetConfig.retrieval.fusion?.alpha || 0.7)) * 100}%` }}
+                        />
                       </div>
                     </div>
                   )}
 
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
-                      <div>
-                        <p className="font-medium text-foreground">Rerank</p>
-                        <p className="text-xs text-muted-foreground">重排序优化结果</p>
+                  {/* Rerank & MMR */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className={`p-3.5 rounded-xl border transition-colors ${
+                      datasetConfig.retrieval?.rerank?.enabled
+                        ? "border-emerald-500/20 bg-emerald-500/5"
+                        : "border-border/50 bg-muted/20"
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-foreground">Rerank</p>
+                        <div className={`w-2 h-2 rounded-full ${datasetConfig.retrieval?.rerank?.enabled ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
                       </div>
-                      <Badge variant={datasetConfig.retrieval?.rerank?.enabled ? "default" : "outline"}>
-                        {datasetConfig.retrieval?.rerank?.enabled ? "启用" : "禁用"}
-                      </Badge>
+                      <p className="text-xs text-muted-foreground mt-0.5">{t("knowledge.detail.rerankOptimize")}</p>
+                      {datasetConfig.retrieval?.rerank?.enabled && datasetConfig.retrieval?.rerank?.model && (
+                        <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1.5 font-mono">{datasetConfig.retrieval.rerank.model}</p>
+                      )}
                     </div>
-                    <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
-                      <div>
-                        <p className="font-medium text-foreground">MMR</p>
-                        <p className="text-xs text-muted-foreground">最大边际相关性</p>
+                    <div className={`p-3.5 rounded-xl border transition-colors ${
+                      datasetConfig.retrieval?.mmr?.enabled
+                        ? "border-emerald-500/20 bg-emerald-500/5"
+                        : "border-border/50 bg-muted/20"
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-foreground">MMR</p>
+                        <div className={`w-2 h-2 rounded-full ${datasetConfig.retrieval?.mmr?.enabled ? "bg-emerald-500" : "bg-muted-foreground/30"}`} />
                       </div>
-                      <Badge variant={datasetConfig.retrieval?.mmr?.enabled ? "default" : "outline"}>
-                        {datasetConfig.retrieval?.mmr?.enabled ? "启用" : "禁用"}
-                      </Badge>
+                      <p className="text-xs text-muted-foreground mt-0.5">{t("knowledge.detail.mmrDedup")}</p>
+                      {datasetConfig.retrieval?.mmr?.enabled && (
+                        <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1.5 font-mono">λ = {(datasetConfig.retrieval.mmr.lambda ?? 0.5).toFixed(2)}</p>
+                      )}
                     </div>
                   </div>
                 </div>
               ) : (
-                <p className="text-muted-foreground">无法加载配置</p>
+                <p className="text-muted-foreground">{t("knowledge.detail.cannotLoadConfig")}</p>
               )}
             </Card>
 
             {/* Embedding 配置 */}
             <Card className="p-5">
-              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-primary" />
-                Embedding 配置
-              </h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-foreground flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-primary" />
+                  {t("knowledge.detail.embeddingConfig")}
+                </h3>
+                {!embeddingEditing ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      const p = datasetConfig?.embedding?.provider || "dashscope";
+                      const m = datasetConfig?.embedding?.model || "text-embedding-v4";
+                      setEditEmbeddingModel(`${p}:${m}`);
+                      setEmbeddingEditing(true);
+                    }}
+                  >
+                    <Edit3 className="h-3.5 w-3.5 mr-1" />
+                    {t("knowledge.detail.modify")}
+                  </Button>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setEmbeddingEditing(false)}
+                      disabled={embeddingSaving}
+                    >
+                      {t("knowledge.detail.cancel")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-7 px-3 text-xs"
+                      onClick={handleSaveEmbeddingConfig}
+                      disabled={embeddingSaving}
+                    >
+                      {embeddingSaving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                      {t("knowledge.detail.save")}
+                    </Button>
+                  </div>
+                )}
+              </div>
 
-              {datasetConfig && (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="p-3 bg-muted/40 rounded-lg">
+              {datasetConfig && !embeddingEditing && (
+                <div className="space-y-3">
+                  {/* Model label row */}
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-primary/15 bg-gradient-to-r from-primary/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-primary/10 dark:bg-primary/15 flex items-center justify-center flex-shrink-0">
+                      <span className="text-sm font-bold text-primary">
+                        {datasetConfig.embedding?.provider === "gemini" ? "G" : "A"}
+                      </span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.currentModel")}</p>
+                      <p className="font-semibold text-foreground truncate">
+                        {datasetConfig.embedding?.model || t("knowledge.detail.notSet")}
+                      </p>
+                    </div>
+                    <Badge variant="outline" className="text-xs border-primary/30 text-primary flex-shrink-0">
+                      {t("knowledge.detail.dimension", { dim: datasetConfig.embedding?.dimension || "?" })}
+                    </Badge>
+                  </div>
+
+                  {/* Provider + Collection */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
                       <p className="text-xs text-muted-foreground">Provider</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.embedding?.provider}
+                      <p className="text-sm font-medium text-foreground mt-1">
+                        {datasetConfig.embedding?.provider === "gemini" ? t("knowledge.detail.googleGemini") : datasetConfig.embedding?.provider === "dashscope" ? t("knowledge.detail.aliDashscope") : datasetConfig.embedding?.provider}
                       </p>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">Model</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.embedding?.model}
-                      </p>
-                    </div>
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">Dimension</p>
-                      <p className="font-medium text-foreground mt-1">
-                        {datasetConfig.embedding?.dimension || "未设置"}
+                    <div className="p-3.5 rounded-xl border border-border/50 bg-muted/30">
+                      <p className="text-xs text-muted-foreground">Collection</p>
+                      <p className="text-xs font-mono text-foreground mt-1 truncate">
+                        {datasetConfig.embedding?.collection_name || t("knowledge.detail.notCreated")}
                       </p>
                     </div>
                   </div>
-                  {datasetConfig.embedding?.collection_name && (
-                    <div className="p-3 bg-muted/40 rounded-lg">
-                      <p className="text-xs text-muted-foreground">Collection</p>
-                      <p className="font-mono text-sm text-foreground mt-1 truncate">
-                        {datasetConfig.embedding.collection_name}
+                </div>
+              )}
+
+              {datasetConfig && embeddingEditing && (
+                <div className="space-y-4">
+                  {/* Warning for existing documents */}
+                  {(datasetConfig.statistics?.document_count ?? 0) > 0 && (
+                    <div className="p-3 rounded-lg bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/20 text-sm">
+                      <p className="font-medium text-amber-700 dark:text-amber-400">
+                        {t("knowledge.detail.docCountWarning", { count: datasetConfig.statistics?.document_count })}
+                      </p>
+                      <p className="text-xs text-amber-600 dark:text-amber-400/70 mt-1">
+                        {t("knowledge.detail.dimensionChangeWarning")}
                       </p>
                     </div>
                   )}
+
+                  <div>
+                    <Label className="text-sm font-medium">{t("knowledge.detail.embeddingConfig")}</Label>
+                    <Select value={editEmbeddingModel} onValueChange={setEditEmbeddingModel}>
+                      <SelectTrigger className="mt-2">
+                        <SelectValue placeholder={t("knowledge.detail.selectEmbedding")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {EMBEDDING_MODELS.map((m) => (
+                          <SelectItem key={`${m.provider}:${m.model}`} value={`${m.provider}:${m.model}`}>
+                            <div className="flex items-center gap-2">
+                              <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary flex-shrink-0">
+                                {m.provider === "gemini" ? "G" : "A"}
+                              </span>
+                              <span>{m.name}</span>
+                              <span className="text-muted-foreground text-xs">({t("knowledge.detail.dimension", { dim: m.dimension })})</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Preview selected model info */}
+                  {editEmbeddingModel && (() => {
+                    const [p, m] = editEmbeddingModel.split(":");
+                    const sel = EMBEDDING_MODELS.find((em) => em.provider === p && em.model === m);
+                    const currentDim = datasetConfig.embedding?.dimension;
+                    const newDim = sel?.dimension;
+                    const dimChanged = currentDim && newDim && currentDim !== newDim;
+                    return sel ? (
+                      <div className={`p-3 rounded-lg border text-sm ${dimChanged ? "border-red-500/20 bg-red-500/5" : "border-border/50 bg-muted/20"}`}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-muted-foreground">Dimension</span>
+                          <span className={`font-mono font-medium ${dimChanged ? "text-red-500" : "text-foreground"}`}>
+                            {currentDim} → {newDim}
+                            {dimChanged && ` ${t("knowledge.detail.needsReindex")}`}
+                          </span>
+                        </div>
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
               )}
             </Card>
@@ -2694,43 +2948,43 @@ export function KnowledgeDatasetDetailPage() {
             <Card className="p-5">
               <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                 <BarChart3 className="h-5 w-5 text-accent" />
-                统计信息
+                {t("knowledge.detail.statistics")}
               </h3>
 
               {datasetConfig?.statistics ? (
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-primary/5 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-primary/90">
+                  <div className="p-4 bg-primary/10 dark:bg-primary/15 rounded-lg text-center border border-primary/10 dark:border-primary/20">
+                    <p className="text-2xl font-bold text-primary">
                       {datasetConfig.statistics.document_count ?? 0}
                     </p>
-                    <p className="text-xs text-primary mt-1">文档总数</p>
+                    <p className="text-xs text-primary/70 mt-1">{t("knowledge.detail.totalDocuments")}</p>
                   </div>
-                  <div className="p-4 bg-emerald-50 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-emerald-700">
+                  <div className="p-4 bg-emerald-500/10 dark:bg-emerald-500/15 rounded-lg text-center border border-emerald-500/10 dark:border-emerald-500/20">
+                    <p className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">
                       {datasetConfig.statistics.segment_count ?? 0}
                     </p>
-                    <p className="text-xs text-emerald-600 mt-1">片段总数</p>
+                    <p className="text-xs text-emerald-600/70 dark:text-emerald-400/70 mt-1">{t("knowledge.detail.totalSegments")}</p>
                   </div>
-                  <div className="p-4 bg-amber-50 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-amber-700">
+                  <div className="p-4 bg-amber-500/10 dark:bg-amber-500/15 rounded-lg text-center border border-amber-500/10 dark:border-amber-500/20">
+                    <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">
                       {datasetConfig.statistics.available_segment_count ?? 0}
                     </p>
-                    <p className="text-xs text-amber-600 mt-1">可用片段</p>
+                    <p className="text-xs text-amber-600/70 dark:text-amber-400/70 mt-1">{t("knowledge.detail.availableSegments")}</p>
                   </div>
-                  <div className="p-4 bg-accent/10 rounded-lg text-center">
-                    <p className="text-2xl font-bold text-accent/90">
+                  <div className="p-4 bg-accent/10 dark:bg-accent/15 rounded-lg text-center border border-accent/10 dark:border-accent/20">
+                    <p className="text-2xl font-bold text-accent">
                       {datasetConfig.statistics.hit_count ?? 0}
                     </p>
-                    <p className="text-xs text-accent mt-1">命中次数</p>
+                    <p className="text-xs text-accent/70 mt-1">{t("knowledge.detail.hitCount")}</p>
                   </div>
                 </div>
               ) : (
-                <p className="text-muted-foreground text-center py-4">加载统计信息...</p>
+                <p className="text-muted-foreground text-center py-4">{t("knowledge.detail.loadingStats")}</p>
               )}
 
               {datasetConfig?.statistics?.segment_count === 0 && (
-                <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
-                  ⚠️ 该知识库暂无片段。请确保文档已成功处理完成。
+                <div className="mt-4 p-3 bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/20 rounded-lg text-sm text-amber-700 dark:text-amber-400">
+                  {t("knowledge.detail.noSegmentsWarning")}
                 </div>
               )}
             </Card>
@@ -2739,13 +2993,13 @@ export function KnowledgeDatasetDetailPage() {
             <Card className="p-5 col-span-2">
               <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                 <Eye className="h-5 w-5 text-accent" />
-                分块预览
+                {t("knowledge.detail.chunkPreviewLabel")}
               </h3>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-3">
                   <Textarea
-                    placeholder="在此输入文本，测试当前分块配置的效果..."
+                    placeholder={t("knowledge.detail.chunkPreviewPlaceholder")}
                     value={previewText}
                     onChange={(e) => setPreviewText(e.target.value)}
                     rows={8}
@@ -2758,13 +3012,13 @@ export function KnowledgeDatasetDetailPage() {
                       className="bg-accent hover:bg-accent/90"
                     >
                       {previewLoading ? (
-                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> 处理中...</>
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.processing")}</>
                       ) : (
-                        <><Play className="h-4 w-4 mr-2" /> 预览分块</>
+                        <><Play className="h-4 w-4 mr-2" /> {t("knowledge.detail.previewChunks")}</>
                       )}
                     </Button>
                     <span className="text-xs text-muted-foreground">
-                      使用当前配置: {editChunkingMode}, 块大小 {editChunkSize}, 重叠 {editChunkOverlap}
+                      {t("knowledge.detail.previewConfigInfo", { mode: editChunkingMode, size: editChunkSize, overlap: editChunkOverlap })}
                     </span>
                   </div>
                 </div>
@@ -2772,13 +3026,13 @@ export function KnowledgeDatasetDetailPage() {
                   {previewChunksResult.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-xs text-muted-foreground mb-2">
-                        共 {previewChunksResult.length} 个分块
+                        {t("knowledge.detail.totalChunks", { count: previewChunksResult.length })}
                       </div>
                       {previewChunksResult.map((chunk, i) => (
                         <div key={i} className="p-2 bg-card rounded border text-xs">
                           <div className="flex items-center gap-2 mb-1">
                             <Badge variant="secondary">#{i + 1}</Badge>
-                            <span className="text-muted-foreground/70">{chunk.char_count} 字符</span>
+                            <span className="text-muted-foreground/70">{t("knowledge.detail.characters", { count: chunk.char_count })}</span>
                             <span className="text-muted-foreground/70">~{chunk.token_count} tokens</span>
                           </div>
                           <div className="text-foreground/80 whitespace-pre-wrap line-clamp-3">
@@ -2789,7 +3043,7 @@ export function KnowledgeDatasetDetailPage() {
                     </div>
                   ) : (
                     <div className="text-center text-muted-foreground/70 py-8">
-                      输入文本并点击"预览分块"查看效果
+                      {t("knowledge.detail.previewHint")}
                     </div>
                   )}
                 </div>
@@ -2801,28 +3055,28 @@ export function KnowledgeDatasetDetailPage() {
               <Card className="p-5 col-span-2">
                 <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                   <HelpCircle className="h-5 w-5 text-muted-foreground" />
-                  调试信息
+                  {t("knowledge.detail.debugInfo")}
                 </h3>
 
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <div className={`p-3 rounded-lg ${debugInfo.has_segments ? "bg-emerald-50" : "bg-red-50"}`}>
-                      <p className="text-xs text-muted-foreground">数据库片段</p>
-                      <p className={`font-medium ${debugInfo.has_segments ? "text-emerald-700" : "text-red-700"}`}>
-                        {debugInfo.has_segments ? "✓ 存在" : "✗ 无片段"}
+                    <div className={`p-3 rounded-lg ${debugInfo.has_segments ? "bg-emerald-500/10 dark:bg-emerald-500/15" : "bg-red-500/10 dark:bg-red-500/15"}`}>
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.dbSegments")}</p>
+                      <p className={`font-medium ${debugInfo.has_segments ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                        {debugInfo.has_segments ? t("knowledge.detail.segmentsExist") : t("knowledge.detail.noSegmentsExist")}
                       </p>
                     </div>
-                    <div className={`p-3 rounded-lg ${debugInfo.has_collection ? "bg-emerald-50" : "bg-red-50"}`}>
-                      <p className="text-xs text-muted-foreground">向量集合</p>
-                      <p className={`font-medium ${debugInfo.has_collection ? "text-emerald-700" : "text-red-700"}`}>
-                        {debugInfo.has_collection ? "✓ 已创建" : "✗ 未创建"}
+                    <div className={`p-3 rounded-lg ${debugInfo.has_collection ? "bg-emerald-500/10 dark:bg-emerald-500/15" : "bg-red-500/10 dark:bg-red-500/15"}`}>
+                      <p className="text-xs text-muted-foreground">{t("knowledge.detail.vectorCollection")}</p>
+                      <p className={`font-medium ${debugInfo.has_collection ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                        {debugInfo.has_collection ? t("knowledge.detail.collectionCreated") : t("knowledge.detail.collectionNotCreated")}
                       </p>
                     </div>
                   </div>
 
                   {Array.isArray(debugInfo.sample_segments) && debugInfo.sample_segments.length > 0 && (
                     <div>
-                      <p className="text-xs text-muted-foreground mb-2">示例片段</p>
+                      <p className="text-xs text-muted-foreground mb-2">{t("knowledge.detail.sampleSegments")}</p>
                       <div className="space-y-2">
                         {(debugInfo.sample_segments as Array<Record<string, unknown>>).slice(0, 2).map((seg, i) => (
                           <div key={i} className="p-2 bg-muted/40 rounded text-xs font-mono">
@@ -2835,12 +3089,12 @@ export function KnowledgeDatasetDetailPage() {
                   )}
 
                   {!debugInfo.has_segments && (
-                    <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-                      <p className="font-medium">问题诊断：</p>
+                    <div className="p-3 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg text-sm text-red-700 dark:text-red-400">
+                      <p className="font-medium">{t("knowledge.detail.diagnostics")}</p>
                       <ul className="list-disc list-inside mt-1 space-y-1">
-                        <li>请检查文档状态是否为"已完成"</li>
-                        <li>检查 DashScope/OpenAI API Key 是否正确配置</li>
-                        <li>尝试重新索引文档</li>
+                        <li>{t("knowledge.detail.diagnosticStatus")}</li>
+                        <li>{t("knowledge.detail.diagnosticApiKey")}</li>
+                        <li>{t("knowledge.detail.diagnosticReindex")}</li>
                       </ul>
                     </div>
                   )}
@@ -2852,7 +3106,7 @@ export function KnowledgeDatasetDetailPage() {
             <Card className="p-5 col-span-2">
               <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                 <Code className="h-5 w-5 text-violet-500" />
-                API 调用
+                {t("knowledge.detail.apiCall")}
               </h3>
 
               <div className="space-y-4">
@@ -2860,11 +3114,11 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-muted-foreground font-medium">检索端点</p>
+                      <p className="text-xs text-muted-foreground font-medium">{t("knowledge.detail.retrieveEndpoint")}</p>
                       <button
                         onClick={() => handleCopy(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/retrieve`, "retrieve-url")}
                         className="text-muted-foreground hover:text-foreground transition-colors"
-                        title={copiedKey === "retrieve-url" ? "已复制" : "复制"}
+                        title={copiedKey === "retrieve-url" ? t("knowledge.detail.copied") : t("knowledge.detail.copy")}
                       >
                         {copiedKey === "retrieve-url" ? (
                           <Check className="h-3.5 w-3.5 text-green-500" />
@@ -2879,11 +3133,11 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-muted-foreground font-medium">QA 端点</p>
+                      <p className="text-xs text-muted-foreground font-medium">{t("knowledge.detail.qaEndpoint")}</p>
                       <button
                         onClick={() => handleCopy(`${getApiBaseUrl()}/api/v1/knowledge/${datasetId}/qa`, "qa-url")}
                         className="text-muted-foreground hover:text-foreground transition-colors"
-                        title={copiedKey === "qa-url" ? "已复制" : "复制"}
+                        title={copiedKey === "qa-url" ? t("knowledge.detail.copied") : t("knowledge.detail.copy")}
                       >
                         {copiedKey === "qa-url" ? (
                           <Check className="h-3.5 w-3.5 text-green-500" />
@@ -2903,7 +3157,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="bg-slate-900 text-white">
                     <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-700">
                       <Terminal className="h-4 w-4 text-slate-400" />
-                      <span className="text-sm font-medium">请求示例</span>
+                      <span className="text-sm font-medium">{t("knowledge.detail.requestExample")}</span>
                       <div className="ml-auto flex items-center gap-1">
                         <button
                           onClick={() => {
@@ -2911,7 +3165,7 @@ export function KnowledgeDatasetDetailPage() {
   -H 'Content-Type: application/json' \\
   -H 'Authorization: Bearer YOUR_API_KEY' \\
   -d '{
-    "query": "你的查询问题",
+    "query": "your query",
     "top_k": 5,
     "mode": "hybrid"
   }'`;
@@ -2920,16 +3174,16 @@ export function KnowledgeDatasetDetailPage() {
                           className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
                         >
                           {copiedKey === "curl" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                          {copiedKey === "curl" ? "已复制" : "复制"}
+                          {copiedKey === "curl" ? t("knowledge.detail.copied") : t("knowledge.detail.copy")}
                         </button>
                       </div>
                     </div>
                     <pre className="p-4 text-xs overflow-x-auto font-mono leading-relaxed">
-                      <code className="text-green-400"># 检索知识库</code>
+                      <code className="text-green-400">{t("knowledge.detail.retrieveComment")}</code>
                       {"\n"}curl -X POST <span className="text-yellow-300">'{getApiBaseUrl()}/api/v1/knowledge/{datasetId}/retrieve'</span> \
                       {"\n"}  -H <span className="text-cyan-300">'Content-Type: application/json'</span> \
                       {"\n"}  -H <span className="text-cyan-300">'Authorization: Bearer YOUR_API_KEY'</span> \
-                      {"\n"}  -d <span className="text-orange-300">{'\'{\n    "query": "你的查询问题",\n    "top_k": 5,\n    "mode": "hybrid"\n  }\''}</span>
+                      {"\n"}  -d <span className="text-orange-300">{'\'{\n    "query": "your query",\n    "top_k": 5,\n    "mode": "hybrid"\n  }\''}</span>
                     </pre>
                   </div>
                 </div>
@@ -2951,7 +3205,7 @@ headers = {
     "Authorization": "Bearer YOUR_API_KEY"
 }
 payload = {
-    "query": "你的查询问题",
+    "query": "your query",
     "top_k": 5,
     "mode": "hybrid"  # vector, keyword, or hybrid
 }
@@ -2968,7 +3222,7 @@ for chunk in results.get("chunks", []):
                           className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded transition-colors flex items-center gap-1"
                         >
                           {copiedKey === "python" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                          {copiedKey === "python" ? "已复制" : "复制"}
+                          {copiedKey === "python" ? t("knowledge.detail.copied") : t("knowledge.detail.copy")}
                         </button>
                       </div>
                     </div>
@@ -2980,7 +3234,7 @@ for chunk in results.get("chunks", []):
                       {"\n"}    <span className="text-cyan-300">"Authorization"</span>: <span className="text-yellow-300">"Bearer YOUR_API_KEY"</span>
                       {"\n"}{"}"}
                       {"\n"}payload = {"{"}
-                      {"\n"}    <span className="text-cyan-300">"query"</span>: <span className="text-yellow-300">"你的查询问题"</span>,
+                      {"\n"}    <span className="text-cyan-300">"query"</span>: <span className="text-yellow-300">"your query"</span>,
                       {"\n"}    <span className="text-cyan-300">"top_k"</span>: <span className="text-orange-300">5</span>,
                       {"\n"}    <span className="text-cyan-300">"mode"</span>: <span className="text-yellow-300">"hybrid"</span>
                       {"\n"}{"}"}
@@ -2994,10 +3248,9 @@ for chunk in results.get("chunks", []):
                 <div className="p-3 bg-violet-50 border border-violet-200 rounded-lg text-sm text-violet-700 flex items-start gap-2">
                   <ExternalLink className="h-4 w-4 mt-0.5 flex-shrink-0" />
                   <div>
-                    <p className="font-medium">集成说明</p>
+                    <p className="font-medium">{t("knowledge.detail.integrationGuide")}</p>
                     <p className="text-xs mt-1 text-violet-600">
-                      知识库可通过 AI 助手直接使用，或在 LangGraph 代理中作为工具调用。
-                      检索结果支持多模态内容，包括文本和关联图片。
+                      {t("knowledge.detail.integrationHint")}
                     </p>
                   </div>
                 </div>
@@ -3041,20 +3294,20 @@ for chunk in results.get("chunks", []):
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <Globe className="h-5 w-5 text-blue-500" />
-                  访问权限
+                  {t("knowledge.detail.accessPermission")}
                 </h3>
               </div>
 
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  设置知识库的可见性级别，控制谁可以查看和使用此知识库
+                  {t("knowledge.detail.accessPermissionHint")}
                 </p>
 
                 <div className="grid grid-cols-3 gap-4">
                   {[
-                    { id: "private", name: "私有", desc: "仅创建者可访问", icon: Lock },
-                    { id: "tenant", name: "团队", desc: "同租户所有成员可查看", icon: Users },
-                    { id: "public", name: "公开", desc: "所有人可查看", icon: Globe },
+                    { id: "private", name: t("knowledge.detail.permPrivate"), desc: t("knowledge.detail.permPrivateDesc"), icon: Lock },
+                    { id: "tenant", name: t("knowledge.detail.permTenant"), desc: t("knowledge.detail.permTenantDesc"), icon: Users },
+                    { id: "public", name: t("knowledge.detail.permPublic"), desc: t("knowledge.detail.permPublicDesc"), icon: Globe },
                   ].map((opt) => {
                     const Icon = opt.icon;
                     const currentVisibility = dsQuery.data?.visibility || "private";
@@ -3072,9 +3325,9 @@ for chunk in results.get("chunks", []):
                             try {
                               await updateDataset(datasetId!, { visibility: opt.id as "private" | "tenant" | "public" });
                               dsQuery.refetch();
-                              toast.success("权限已更新");
+                              toast.success(t("knowledge.detail.permUpdated"));
                             } catch (e) {
-                              toast.error("更新权限失败", e instanceof Error ? e.message : String(e));
+                              toast.error(t("knowledge.detail.permUpdateFailed"), e instanceof Error ? e.message : String(e));
                             }
                           }
                         }}
@@ -3096,25 +3349,25 @@ for chunk in results.get("chunks", []):
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <User className="h-5 w-5 text-emerald-500" />
-                  权限信息
+                  {t("knowledge.detail.permInfo")}
                 </h3>
               </div>
 
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-3 bg-muted/40 rounded-lg">
-                    <Label className="text-xs text-muted-foreground">创建者</Label>
-                    <p className="text-sm font-medium mt-1">{dsQuery.data?.created_by || "未知"}</p>
+                    <Label className="text-xs text-muted-foreground">{t("knowledge.detail.creator")}</Label>
+                    <p className="text-sm font-medium mt-1">{dsQuery.data?.created_by || t("knowledge.detail.unknown")}</p>
                   </div>
                   <div className="p-3 bg-muted/40 rounded-lg">
-                    <Label className="text-xs text-muted-foreground">当前可见性</Label>
+                    <Label className="text-xs text-muted-foreground">{t("knowledge.detail.currentVisibility")}</Label>
                     <div className="flex items-center gap-2 mt-1">
                       {visibilityIcons[dsQuery.data?.visibility as keyof typeof visibilityIcons] || <Lock className="h-4 w-4" />}
                       <span className="text-sm font-medium">
-                        {dsQuery.data?.visibility === "private" && "私有"}
-                        {dsQuery.data?.visibility === "tenant" && "团队"}
-                        {dsQuery.data?.visibility === "public" && "公开"}
-                        {!dsQuery.data?.visibility && "私有"}
+                        {dsQuery.data?.visibility === "private" && t("knowledge.detail.permPrivate")}
+                        {dsQuery.data?.visibility === "tenant" && t("knowledge.detail.permTenant")}
+                        {dsQuery.data?.visibility === "public" && t("knowledge.detail.permPublic")}
+                        {!dsQuery.data?.visibility && t("knowledge.detail.permPrivate")}
                       </span>
                     </div>
                   </div>
@@ -3122,11 +3375,11 @@ for chunk in results.get("chunks", []):
 
                 <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg">
                   <p className="text-sm text-blue-700 dark:text-blue-300">
-                    <span className="font-medium">提示：</span>
-                    {dsQuery.data?.visibility === "private" && "私有知识库仅创建者本人可访问，可在AI助手和LangGraph中使用。"}
-                    {dsQuery.data?.visibility === "tenant" && "团队知识库对同租户的所有成员可见，成员可在AI助手和LangGraph中使用。"}
-                    {dsQuery.data?.visibility === "public" && "公开知识库对所有用户可见，任何人都可以在AI助手和LangGraph中使用。"}
-                    {!dsQuery.data?.visibility && "私有知识库仅创建者本人可访问，可在AI助手和LangGraph中使用。"}
+                    <span className="font-medium">{t("knowledge.detail.hint")}</span>
+                    {dsQuery.data?.visibility === "private" && t("knowledge.detail.permPrivateHint")}
+                    {dsQuery.data?.visibility === "tenant" && t("knowledge.detail.permTenantHint")}
+                    {dsQuery.data?.visibility === "public" && t("knowledge.detail.permPublicHint")}
+                    {!dsQuery.data?.visibility && t("knowledge.detail.permPrivateHint")}
                   </p>
                 </div>
               </div>
@@ -3137,7 +3390,7 @@ for chunk in results.get("chunks", []):
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-semibold text-foreground flex items-center gap-2">
                   <HelpCircle className="h-5 w-5 text-amber-500" />
-                  使用说明
+                  {t("knowledge.detail.usageGuide")}
                 </h3>
               </div>
 
@@ -3147,8 +3400,8 @@ for chunk in results.get("chunks", []):
                     <Bot className="h-3.5 w-3.5 text-primary" />
                   </div>
                   <div>
-                    <p className="font-medium text-foreground">AI 助手</p>
-                    <p className="mt-0.5">在AI助手中选择此知识库后，将自动进行RAG检索增强生成。</p>
+                    <p className="font-medium text-foreground">{t("knowledge.detail.aiAssistant")}</p>
+                    <p className="mt-0.5">{t("knowledge.detail.aiAssistantHint")}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
@@ -3156,8 +3409,8 @@ for chunk in results.get("chunks", []):
                     <Brain className="h-3.5 w-3.5 text-emerald-500" />
                   </div>
                   <div>
-                    <p className="font-medium text-foreground">LangGraph 代理</p>
-                    <p className="mt-0.5">在创建LangGraph代理时配置知识库检索工具，使用此知识库的dataset_id。</p>
+                    <p className="font-medium text-foreground">{t("knowledge.detail.langGraphAgent")}</p>
+                    <p className="mt-0.5">{t("knowledge.detail.langGraphAgentHint")}</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
@@ -3165,8 +3418,8 @@ for chunk in results.get("chunks", []):
                     <Code className="h-3.5 w-3.5 text-violet-500" />
                   </div>
                   <div>
-                    <p className="font-medium text-foreground">API 调用</p>
-                    <p className="mt-0.5">通过 <code className="text-xs bg-muted px-1 py-0.5 rounded">/api/v1/knowledge/{dsQuery.data?.dataset_id || "{dataset_id}"}/retrieve</code> 端点直接检索。</p>
+                    <p className="font-medium text-foreground">{t("knowledge.detail.apiCall")}</p>
+                    <p className="mt-0.5">{t("knowledge.detail.apiCallHint")} <code className="text-xs bg-muted px-1 py-0.5 rounded">/api/v1/knowledge/{dsQuery.data?.dataset_id || "{dataset_id}"}/retrieve</code></p>
                   </div>
                 </div>
               </div>
@@ -3179,7 +3432,8 @@ for chunk in results.get("chunks", []):
 
       {/* Upload Config Dialog - Single page compact layout */}
       <Dialog open={uploadDialogOpen} onOpenChange={(open) => {
-        if (!open && !uploading) {
+        if (!open && uploading) return;
+        if (!open) {
           setUploadDialogOpen(false);
           setPendingFiles([]);
         } else {
@@ -3188,17 +3442,10 @@ for chunk in results.get("chunks", []):
       }}>
         <DialogContent className="max-w-4xl bg-card max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader className="flex-shrink-0">
-            <DialogTitle className="text-xl font-semibold">上传文档</DialogTitle>
+            <DialogTitle className="text-xl font-semibold">{t("knowledge.detail.uploadDialogTitle")}</DialogTitle>
           </DialogHeader>
 
-          {uploading ? (
-            <div className="py-12 text-center flex flex-col items-center justify-center">
-              <Loader2 className="h-12 w-12 text-primary animate-spin mb-4" />
-              <p className="text-lg font-medium">正在上传并处理文档...</p>
-              <p className="text-sm text-muted-foreground mt-2">这可能需要几分钟，请勿关闭窗口</p>
-            </div>
-          ) : (
-            <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+          <div className="flex-1 overflow-y-auto space-y-4 pr-1">
               {/* Compact File Upload Area */}
               <div className="flex gap-4">
                 {/* Upload zone - compact */}
@@ -3213,13 +3460,13 @@ for chunk in results.get("chunks", []):
                   }}
                 >
                   <Upload className="h-8 w-8 mx-auto text-muted-foreground/70 mb-2" />
-                  <p className="text-sm text-muted-foreground">点击或拖拽上传</p>
+                  <p className="text-sm text-muted-foreground">{t("knowledge.detail.clickOrDragUpload")}</p>
                   <p className="text-xs text-muted-foreground/70 mt-1">PDF、Word、TXT、MD</p>
                 </div>
 
                 {/* File list - horizontal compact */}
                 <div className="flex-1 min-w-0">
-                  <Label className="text-sm font-medium text-foreground/80">已选文件 ({pendingFiles.length})</Label>
+                  <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.selectedFiles", { count: pendingFiles.length })}</Label>
                   <div className="mt-2 flex flex-wrap gap-2 max-h-24 overflow-auto">
                     {pendingFiles.map((file, i) => (
                       <Badge key={i} variant="secondary" className="flex items-center gap-1 py-1 px-2 max-w-[200px]">
@@ -3237,7 +3484,7 @@ for chunk in results.get("chunks", []):
                       </Badge>
                     ))}
                     {pendingFiles.length === 0 && (
-                      <p className="text-sm text-muted-foreground/70">请选择要上传的文件</p>
+                      <p className="text-sm text-muted-foreground/70">{t("knowledge.detail.selectFilesHint")}</p>
                     )}
                   </div>
                 </div>
@@ -3245,18 +3492,18 @@ for chunk in results.get("chunks", []):
 
               {/* Chunking Mode Selection - Card Grid */}
               <div className="border rounded-lg p-4">
-                <Label className="text-sm font-medium text-foreground mb-3 block">切片方式</Label>
+                <Label className="text-sm font-medium text-foreground mb-3 block">{t("knowledge.detail.chunkingMethod")}</Label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
                   {[
-                    { id: "automatic", name: "智能切分", desc: "自动检测最优策略" },
-                    { id: "fixed_size", name: "按长度切分", desc: "固定字符数分块" },
-                    { id: "paragraph", name: "按段落切分", desc: "保持段落完整性" },
-                    { id: "heading", name: "按标题切分", desc: "按章节标题划分" },
-                    { id: "hierarchical", name: "父子切分", desc: "大块含小块结构" },
-                    { id: "separator", name: "按分隔符切分", desc: "自定义分隔符" },
-                    { id: "regex", name: "正则切分", desc: "正则表达式匹配" },
-                    { id: "recursive", name: "递归切分", desc: "层级递归分割" },
-                    { id: "qa", name: "QA切分", desc: "问答对格式" },
+                    { id: "automatic", name: t("knowledge.detail.uploadChunkModes.automatic"), desc: t("knowledge.detail.uploadChunkModes.automaticDesc") },
+                    { id: "fixed_size", name: t("knowledge.detail.uploadChunkModes.fixed_size"), desc: t("knowledge.detail.uploadChunkModes.fixed_sizeDesc") },
+                    { id: "paragraph", name: t("knowledge.detail.uploadChunkModes.paragraph"), desc: t("knowledge.detail.uploadChunkModes.paragraphDesc") },
+                    { id: "heading", name: t("knowledge.detail.uploadChunkModes.heading"), desc: t("knowledge.detail.uploadChunkModes.headingDesc") },
+                    { id: "hierarchical", name: t("knowledge.detail.uploadChunkModes.hierarchical"), desc: t("knowledge.detail.uploadChunkModes.hierarchicalDesc") },
+                    { id: "separator", name: t("knowledge.detail.uploadChunkModes.separator"), desc: t("knowledge.detail.uploadChunkModes.separatorDesc") },
+                    { id: "regex", name: t("knowledge.detail.uploadChunkModes.regex"), desc: t("knowledge.detail.uploadChunkModes.regexDesc") },
+                    { id: "recursive", name: t("knowledge.detail.uploadChunkModes.recursive"), desc: t("knowledge.detail.uploadChunkModes.recursiveDesc") },
+                    { id: "qa", name: t("knowledge.detail.uploadChunkModes.qa"), desc: t("knowledge.detail.uploadChunkModes.qaDesc") },
                   ].map((mode) => (
                     <div
                       key={mode.id}
@@ -3278,7 +3525,7 @@ for chunk in results.get("chunks", []):
                   {/* Automatic mode */}
                   {uploadChunkMode === "automatic" && (
                     <p className="text-sm text-muted-foreground">
-                      自动模式会根据文档类型智能选择最佳切分策略，无需额外配置
+                      {t("knowledge.detail.autoModeHint")}
                     </p>
                   )}
 
@@ -3287,7 +3534,7 @@ for chunk in results.get("chunks", []):
                     <div className="space-y-4">
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">块大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.chunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3302,7 +3549,7 @@ for chunk in results.get("chunks", []):
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">重叠大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.overlapSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkOverlap}</span>
                         </div>
                         <input
@@ -3323,7 +3570,7 @@ for chunk in results.get("chunks", []):
                     <div className="space-y-4">
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">最大块大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.maxChunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3338,7 +3585,7 @@ for chunk in results.get("chunks", []):
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">最小段落长度</Label>
+                          <Label className="text-sm">{t("knowledge.detail.minParagraphLength")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadMinParagraphLength}</span>
                         </div>
                         <input
@@ -3359,7 +3606,7 @@ for chunk in results.get("chunks", []):
                           onChange={(e) => setUploadMergeShortParagraphs(e.target.checked)}
                           className="w-4 h-4 rounded text-primary"
                         />
-                        <Label htmlFor="merge-short" className="text-sm cursor-pointer">合并短段落</Label>
+                        <Label htmlFor="merge-short" className="text-sm cursor-pointer">{t("knowledge.detail.mergeShortParagraphs")}</Label>
                       </div>
                     </div>
                   )}
@@ -3368,21 +3615,21 @@ for chunk in results.get("chunks", []):
                   {uploadChunkMode === "heading" && (
                     <div className="space-y-4">
                       <div>
-                        <Label className="text-sm mb-2 block">标题级别</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.headingLevel")}</Label>
                         <Select value={uploadHeadingLevel} onValueChange={(v) => setUploadHeadingLevel(v as "h1" | "h2" | "h3")}>
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="h1">H1 - 一级标题</SelectItem>
-                            <SelectItem value="h2">H2 - 二级标题</SelectItem>
-                            <SelectItem value="h3">H3 - 三级标题</SelectItem>
+                            <SelectItem value="h1">{t("knowledge.detail.h1Title")}</SelectItem>
+                            <SelectItem value="h2">{t("knowledge.detail.h2Title")}</SelectItem>
+                            <SelectItem value="h3">{t("knowledge.detail.h3Title")}</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">最大块大小</Label>
+                          <Label className="text-sm">{t("knowledge.detail.maxChunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3403,12 +3650,12 @@ for chunk in results.get("chunks", []):
                     <div className="space-y-4">
                       <div className="p-3 bg-primary/5 rounded-lg mb-2">
                         <p className="text-sm text-primary/90">
-                          层级切分会生成父块和子块，父块用于提供上下文，子块用于精确检索
+                          {t("knowledge.detail.hierarchicalHint")}
                         </p>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">父块大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.parentSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadParentChunkSize}</span>
                         </div>
                         <input
@@ -3423,7 +3670,7 @@ for chunk in results.get("chunks", []):
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">子块大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.childSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChildChunkSize}</span>
                         </div>
                         <input
@@ -3438,7 +3685,7 @@ for chunk in results.get("chunks", []):
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">子块重叠 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.childOverlapLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChildOverlap}</span>
                         </div>
                         <input
@@ -3458,13 +3705,13 @@ for chunk in results.get("chunks", []):
                   {uploadChunkMode === "separator" && (
                     <div className="space-y-4">
                       <div>
-                        <Label className="text-sm mb-2 block">分隔符</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.separatorLabel")}</Label>
                         <Input
                           value={uploadSeparator}
                           onChange={(e) => setUploadSeparator(e.target.value)}
-                          placeholder="例如: \n\n 或 ---"
+                          placeholder={t("knowledge.detail.separatorPlaceholder")}
                         />
-                        <p className="text-xs text-muted-foreground mt-1">支持转义字符：\n(换行) \t(制表符)</p>
+                        <p className="text-xs text-muted-foreground mt-1">{t("knowledge.detail.separatorHint")}</p>
                       </div>
                       <div className="flex items-center gap-2">
                         <input
@@ -3474,11 +3721,11 @@ for chunk in results.get("chunks", []):
                           onChange={(e) => setUploadKeepSeparator(e.target.checked)}
                           className="w-4 h-4 rounded text-primary"
                         />
-                        <Label htmlFor="keep-sep" className="text-sm cursor-pointer">保留分隔符</Label>
+                        <Label htmlFor="keep-sep" className="text-sm cursor-pointer">{t("knowledge.detail.keepSeparator")}</Label>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">最大块大小</Label>
+                          <Label className="text-sm">{t("knowledge.detail.maxChunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3498,33 +3745,33 @@ for chunk in results.get("chunks", []):
                   {uploadChunkMode === "regex" && (
                     <div className="space-y-4">
                       <div>
-                        <Label className="text-sm mb-2 block">正则表达式模式</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.regexPattern")}</Label>
                         <Input
                           value={uploadRegexPattern}
                           onChange={(e) => setUploadRegexPattern(e.target.value)}
-                          placeholder="例如: (?=第[一二三四五六七八九十]+章)"
+                          placeholder={t("knowledge.detail.regexPlaceholder")}
                         />
                         <p className="text-xs text-muted-foreground mt-1">
-                          使用正向前瞻 (?=...) 保留匹配内容，使用普通模式则删除匹配内容
+                          {t("knowledge.detail.regexHint")}
                         </p>
                       </div>
                       <div>
-                        <Label className="text-sm mb-2 block">预设模式</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.presetPatterns")}</Label>
                         <Select onValueChange={(v) => setUploadRegexPattern(v)}>
                           <SelectTrigger>
-                            <SelectValue placeholder="选择预设模式" />
+                            <SelectValue placeholder={t("knowledge.detail.selectPreset")} />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="(?=第[一二三四五六七八九十]+章)">按"第X章"切分</SelectItem>
-                            <SelectItem value="(?=\\d+\\.)">按数字编号切分</SelectItem>
-                            <SelectItem value="(?=#{1,3}\\s)">按 Markdown 标题切分</SelectItem>
-                            <SelectItem value="\n\n+">按空行切分</SelectItem>
+                            <SelectItem value="(?=第[一二三四五六七八九十]+章)">{t("knowledge.detail.presetChapter")}</SelectItem>
+                            <SelectItem value="(?=\\d+\\.)">{t("knowledge.detail.presetNumber")}</SelectItem>
+                            <SelectItem value="(?=#{1,3}\\s)">{t("knowledge.detail.presetMarkdown")}</SelectItem>
+                            <SelectItem value="\n\n+">{t("knowledge.detail.presetBlankLine")}</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">最大块大小</Label>
+                          <Label className="text-sm">{t("knowledge.detail.maxChunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3544,11 +3791,11 @@ for chunk in results.get("chunks", []):
                   {uploadChunkMode === "recursive" && (
                     <div className="space-y-4">
                       <p className="text-sm text-muted-foreground mb-2">
-                        递归切分会按段落、句子逐级细分，确保每个块不超过限制
+                        {t("knowledge.detail.recursiveHint")}
                       </p>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">块大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.chunkSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkSize}</span>
                         </div>
                         <input
@@ -3563,7 +3810,7 @@ for chunk in results.get("chunks", []):
                       </div>
                       <div>
                         <div className="flex justify-between items-center mb-2">
-                          <Label className="text-sm">重叠大小 (字符数)</Label>
+                          <Label className="text-sm">{t("knowledge.detail.overlapSizeLabel")}</Label>
                           <span className="text-sm font-medium text-primary">{uploadChunkOverlap}</span>
                         </div>
                         <input
@@ -3582,13 +3829,13 @@ for chunk in results.get("chunks", []):
                   {/* QA mode */}
                   {uploadChunkMode === "qa" && (
                     <div className="space-y-4">
-                      <div className="p-3 bg-amber-50 rounded-lg">
-                        <p className="text-sm text-amber-700">
-                          QA切分会将文档转换为问答对格式，适合FAQ类文档
+                      <div className="p-3 bg-amber-500/10 dark:bg-amber-500/15 rounded-lg">
+                        <p className="text-sm text-amber-700 dark:text-amber-400">
+                          {t("knowledge.detail.qaHint")}
                         </p>
                       </div>
                       <div>
-                        <Label className="text-sm mb-2 block">问题标识符</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.questionPrefix")}</Label>
                         <Input
                           value={uploadQuestionPrefix}
                           onChange={(e) => setUploadQuestionPrefix(e.target.value)}
@@ -3596,7 +3843,7 @@ for chunk in results.get("chunks", []):
                         />
                       </div>
                       <div>
-                        <Label className="text-sm mb-2 block">答案标识符</Label>
+                        <Label className="text-sm mb-2 block">{t("knowledge.detail.answerPrefix")}</Label>
                         <Input
                           value={uploadAnswerPrefix}
                           onChange={(e) => setUploadAnswerPrefix(e.target.value)}
@@ -3617,7 +3864,7 @@ for chunk in results.get("chunks", []):
                     if (el) el.classList.toggle('hidden');
                   }}
                 >
-                  <span className="text-sm font-medium text-foreground">高级设置</span>
+                  <span className="text-sm font-medium text-foreground">{t("knowledge.detail.advancedSettings")}</span>
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />
                 </button>
                 <div id="advanced-settings" className="hidden px-4 pb-4 space-y-4">
@@ -3625,8 +3872,8 @@ for chunk in results.get("chunks", []):
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
-                        <Label className="text-sm font-medium">元数据增强</Label>
-                        <p className="text-xs text-muted-foreground">自动提取和丰富文档元数据</p>
+                        <Label className="text-sm font-medium">{t("knowledge.detail.metadataEnhancement")}</Label>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.metadataEnhancementHint")}</p>
                       </div>
                       <Switch
                         checked={uploadMetadataEnabled}
@@ -3642,7 +3889,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadExtractTitle(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">自动提取文档标题</span>
+                          <span className="text-sm">{t("knowledge.detail.extractTitle")}</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
@@ -3651,7 +3898,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadExtractSummary(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">自动生成摘要</span>
+                          <span className="text-sm">{t("knowledge.detail.extractSummary")}</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
@@ -3660,7 +3907,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadExtractKeywords(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">自动提取关键词</span>
+                          <span className="text-sm">{t("knowledge.detail.extractKeywords")}</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
@@ -3669,7 +3916,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadExtractEntities(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">自动识别命名实体</span>
+                          <span className="text-sm">{t("knowledge.detail.extractEntities")}</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
@@ -3678,7 +3925,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadDetectLanguage(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">自动检测语言</span>
+                          <span className="text-sm">{t("knowledge.detail.detectLanguage")}</span>
                         </label>
                       </div>
                     )}
@@ -3688,8 +3935,8 @@ for chunk in results.get("chunks", []):
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
-                        <Label className="text-sm font-medium">表格处理增强</Label>
-                        <p className="text-xs text-muted-foreground">优化表格内容的解析和检索</p>
+                        <Label className="text-sm font-medium">{t("knowledge.detail.tableProcessing")}</Label>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.tableProcessingHint")}</p>
                       </div>
                       <Switch
                         checked={uploadTableEnabled}
@@ -3699,15 +3946,15 @@ for chunk in results.get("chunks", []):
                     {uploadTableEnabled && (
                       <div className="pl-4 border-l-2 border-primary/20 space-y-3 mt-3">
                         <div>
-                          <Label className="text-sm mb-2 block">表格处理模式</Label>
+                          <Label className="text-sm mb-2 block">{t("knowledge.detail.tableMode")}</Label>
                           <Select value={uploadTableMode} onValueChange={(v) => setUploadTableMode(v as typeof uploadTableMode)}>
                             <SelectTrigger>
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="markdown">转换为 Markdown 表格</SelectItem>
-                              <SelectItem value="row_based">按行拆分（每行一个块）</SelectItem>
-                              <SelectItem value="structured">结构化 JSON</SelectItem>
+                              <SelectItem value="markdown">{t("knowledge.detail.tableMarkdown")}</SelectItem>
+                              <SelectItem value="row_based">{t("knowledge.detail.tableRowBased")}</SelectItem>
+                              <SelectItem value="structured">{t("knowledge.detail.tableStructured")}</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
@@ -3718,7 +3965,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadTableIncludeHeaders(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">每行包含表头信息</span>
+                          <span className="text-sm">{t("knowledge.detail.tableIncludeHeaders")}</span>
                         </label>
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input
@@ -3727,7 +3974,7 @@ for chunk in results.get("chunks", []):
                             onChange={(e) => setUploadTableGenerateSummary(e.target.checked)}
                             className="w-4 h-4 rounded text-primary"
                           />
-                          <span className="text-sm">生成表格摘要</span>
+                          <span className="text-sm">{t("knowledge.detail.tableGenerateSummary")}</span>
                         </label>
                       </div>
                     )}
@@ -3737,8 +3984,8 @@ for chunk in results.get("chunks", []):
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <div className="flex items-center justify-between mb-3">
                       <div>
-                        <Label className="text-sm font-medium">排序模型</Label>
-                        <p className="text-xs text-muted-foreground">使用交叉编码器优化检索排序</p>
+                        <Label className="text-sm font-medium">{t("knowledge.detail.rerankModelConfig")}</Label>
+                        <p className="text-xs text-muted-foreground">{t("knowledge.detail.rerankModelConfigHint")}</p>
                       </div>
                       <Switch
                         checked={rerankEnabled}
@@ -3751,7 +3998,7 @@ for chunk in results.get("chunks", []):
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="gte-rerank">通义排序 (gte-rerank)</SelectItem>
+                          <SelectItem value="gte-rerank">{t("knowledge.detail.gteRerankLabel")}</SelectItem>
                           <SelectItem value="bge-reranker-v2-m3">BGE Reranker v2</SelectItem>
                         </SelectContent>
                       </Select>
@@ -3763,29 +4010,33 @@ for chunk in results.get("chunks", []):
               {/* Current embedding model info */}
               <div className="p-3 bg-primary/5 rounded-lg border border-primary/20 flex items-center gap-3">
                 <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-                  {dataset?.embedding_provider === "openai" ? "O" : "阿"}
+                  {dataset?.embedding_provider === "gemini" ? "G" : "A"}
                 </div>
                 <div className="text-sm">
                   <span className="font-medium">{dataset?.embedding_model || "text-embedding-v4"}</span>
-                  <span className="text-muted-foreground ml-2">{dataset?.embedding_dimension || 1024}维</span>
+                  <span className="text-muted-foreground ml-2">{t("knowledge.detail.dimension", { dim: dataset?.embedding_dimension || 1024 })}</span>
                 </div>
               </div>
             </div>
-          )}
 
           <DialogFooter className="mt-4 pt-4 border-t flex-shrink-0">
-            <Button variant="outline" onClick={() => {
-              setUploadDialogOpen(false);
-              setPendingFiles([]);
-            }}>
-              取消
+            <Button
+              variant="outline"
+              disabled={uploading}
+              onClick={() => {
+                if (uploading) return;
+                setUploadDialogOpen(false);
+                setPendingFiles([]);
+              }}
+            >
+              {t("knowledge.detail.uploadCancel")}
             </Button>
             <Button
               onClick={handleConfirmUpload}
-              disabled={uploading || pendingFiles.length === 0}
+              disabled={pendingFiles.length === 0}
               className="bg-primary hover:bg-primary/90 text-white"
             >
-              {uploading ? "上传中..." : `上传 ${pendingFiles.length} 个文件`}
+              {t("knowledge.detail.uploadConfirm", { count: pendingFiles.length })}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3794,24 +4045,24 @@ for chunk in results.get("chunks", []):
       <Dialog open={textDialogOpen} onOpenChange={setTextDialogOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>创建文本文档</DialogTitle>
+            <DialogTitle>{t("knowledge.detail.createTextDoc")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>标题</Label>
+              <Label>{t("knowledge.detail.titleLabel")}</Label>
               <Input
                 value={textTitle}
                 onChange={(e) => setTextTitle(e.target.value)}
-                placeholder="文档标题"
+                placeholder={t("knowledge.detail.titlePlaceholder")}
                 className="mt-1"
               />
             </div>
             <div>
-              <Label>内容</Label>
+              <Label>{t("knowledge.detail.contentLabel")}</Label>
               <Textarea
                 value={textContent}
                 onChange={(e) => setTextContent(e.target.value)}
-                placeholder="输入文档内容..."
+                placeholder={t("knowledge.detail.contentPlaceholder")}
                 rows={12}
                 className="mt-1"
               />
@@ -3819,14 +4070,14 @@ for chunk in results.get("chunks", []):
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setTextDialogOpen(false)}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button
               onClick={handleCreateText}
               disabled={textSaving || !textTitle.trim() || !textContent.trim()}
               className="bg-primary hover:bg-primary/90"
             >
-              {textSaving ? "创建中..." : "创建"}
+              {textSaving ? t("knowledge.detail.creating") : t("knowledge.detail.create")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3835,11 +4086,11 @@ for chunk in results.get("chunks", []):
       <Dialog open={urlDialogOpen} onOpenChange={setUrlDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>添加URL文档</DialogTitle>
+            <DialogTitle>{t("knowledge.detail.addUrlDoc")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>URL地址 <span className="text-red-500">*</span></Label>
+              <Label>{t("knowledge.detail.urlLabel")} <span className="text-red-500">*</span></Label>
               <Input
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
@@ -3848,25 +4099,25 @@ for chunk in results.get("chunks", []):
               />
             </div>
             <div>
-              <Label>文档标题 (可选)</Label>
+              <Label>{t("knowledge.detail.urlTitleOptional")}</Label>
               <Input
                 value={urlTitle}
                 onChange={(e) => setUrlTitle(e.target.value)}
-                placeholder="留空则自动使用URL作为标题"
+                placeholder={t("knowledge.detail.urlTitlePlaceholder")}
                 className="mt-1"
               />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setUrlDialogOpen(false)}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button
               onClick={handleCreateFromUrl}
               disabled={urlSaving || !urlInput.trim()}
               className="bg-primary hover:bg-primary/90"
             >
-              {urlSaving ? "获取中..." : "添加"}
+              {urlSaving ? t("knowledge.detail.fetching") : t("knowledge.detail.add")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3875,15 +4126,15 @@ for chunk in results.get("chunks", []):
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>编辑片段</DialogTitle>
+            <DialogTitle>{t("knowledge.detail.editSegment")}</DialogTitle>
           </DialogHeader>
           <Textarea value={editText} onChange={(e) => setEditText(e.target.value)} rows={12} />
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditOpen(false)}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button onClick={saveEdit} disabled={editSaving} className="bg-primary hover:bg-primary/90">
-              {editSaving ? "保存中..." : "保存"}
+              {editSaving ? t("knowledge.detail.saving") : t("knowledge.detail.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3892,11 +4143,11 @@ for chunk in results.get("chunks", []):
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>编辑知识库</DialogTitle>
+            <DialogTitle>{t("knowledge.detail.editKB")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>名称</Label>
+              <Label>{t("knowledge.detail.nameLabel")}</Label>
               <Input
                 value={settingsName}
                 onChange={(e) => setSettingsName(e.target.value)}
@@ -3904,7 +4155,7 @@ for chunk in results.get("chunks", []):
               />
             </div>
             <div>
-              <Label>描述</Label>
+              <Label>{t("knowledge.detail.descLabel")}</Label>
               <Textarea
                 value={settingsDesc}
                 onChange={(e) => setSettingsDesc(e.target.value)}
@@ -3915,10 +4166,10 @@ for chunk in results.get("chunks", []):
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSettingsOpen(false)}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button onClick={handleSaveSettings} disabled={settingsSaving} className="bg-primary hover:bg-primary/90">
-              {settingsSaving ? "保存中..." : "保存"}
+              {settingsSaving ? t("knowledge.detail.saving") : t("knowledge.detail.save")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3927,17 +4178,17 @@ for chunk in results.get("chunks", []):
       <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-red-600">确认删除</DialogTitle>
+            <DialogTitle className="text-red-600">{t("knowledge.detail.deleteConfirmTitle")}</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            确定要删除知识库 <strong>{dataset?.name}</strong> 吗？此操作不可撤销。
+            {t("knowledge.detail.deleteConfirmText", { name: dataset?.name })}
           </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button variant="destructive" onClick={handleDeleteDataset} disabled={deleting}>
-              {deleting ? "删除中..." : "确认删除"}
+              {deleting ? t("knowledge.detail.deleting") : t("knowledge.detail.confirmDelete")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3949,17 +4200,17 @@ for chunk in results.get("chunks", []):
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Zap className="h-5 w-5 text-primary" />
-              批量重建索引
+              {t("knowledge.detail.batchReindexTitle")}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              确定要对选中的 <strong className="text-primary">{selectedDocIds.size}</strong> 个文档重建索引吗？
+              {t("knowledge.detail.batchReindexText", { count: selectedDocIds.size })}
             </p>
             <div className="bg-muted/50 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
-              <p>• 将重新解析文档并生成新的切片和向量索引</p>
-              <p>• 使用知识库当前的分段配置</p>
-              <p>• 处理过程中文档状态会变为"处理中"</p>
+              <p>• {t("knowledge.detail.batchReindexHint1")}</p>
+              <p>• {t("knowledge.detail.batchReindexHint2")}</p>
+              <p>• {t("knowledge.detail.batchReindexHint3")}</p>
             </div>
             {/* 选中的文档列表预览 */}
             <div className="max-h-32 overflow-auto border border-border rounded-lg">
@@ -3973,23 +4224,23 @@ for chunk in results.get("chunks", []):
               })}
               {selectedDocIds.size > 10 && (
                 <div className="px-3 py-1.5 text-sm text-muted-foreground">
-                  ... 还有 {selectedDocIds.size - 10} 个文档
+                  {t("knowledge.detail.moreDocuments", { count: selectedDocIds.size - 10 })}
                 </div>
               )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBatchReindexOpen(false)} disabled={batchLoading}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button onClick={handleBatchReindex} disabled={batchLoading} className="bg-primary hover:bg-primary/90">
               {batchLoading ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  处理中...
+                  {t("knowledge.detail.processing")}
                 </>
               ) : (
-                `确认重建 (${selectedDocIds.size})`
+                t("knowledge.detail.confirmReindex", { count: selectedDocIds.size })
               )}
             </Button>
           </DialogFooter>
@@ -4002,16 +4253,16 @@ for chunk in results.get("chunks", []):
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
               <Trash2 className="h-5 w-5" />
-              批量删除文档
+              {t("knowledge.detail.batchDeleteTitle")}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              确定要删除选中的 <strong className="text-destructive">{selectedDocIds.size}</strong> 个文档吗？
+              {t("knowledge.detail.batchDeleteText", { count: selectedDocIds.size })}
             </p>
             <div className="bg-destructive/10 rounded-lg p-3 text-xs text-destructive space-y-1">
-              <p>⚠️ 此操作不可撤销</p>
-              <p>• 将永久删除文档及其所有切片和向量索引</p>
+              <p>{t("knowledge.detail.batchDeleteWarning")}</p>
+              <p>• {t("knowledge.detail.batchDeleteHint")}</p>
             </div>
             {/* 选中的文档列表预览 */}
             <div className="max-h-32 overflow-auto border border-border rounded-lg">
@@ -4025,23 +4276,23 @@ for chunk in results.get("chunks", []):
               })}
               {selectedDocIds.size > 10 && (
                 <div className="px-3 py-1.5 text-sm text-muted-foreground">
-                  ... 还有 {selectedDocIds.size - 10} 个文档
+                  {t("knowledge.detail.moreDocuments", { count: selectedDocIds.size - 10 })}
                 </div>
               )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBatchDeleteOpen(false)} disabled={batchLoading}>
-              取消
+              {t("knowledge.detail.cancel")}
             </Button>
             <Button variant="destructive" onClick={handleBatchDelete} disabled={batchLoading}>
               {batchLoading ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  删除中...
+                  {t("knowledge.detail.deleting")}
                 </>
               ) : (
-                `确认删除 (${selectedDocIds.size})`
+                t("knowledge.detail.confirmBatchDelete", { count: selectedDocIds.size })
               )}
             </Button>
           </DialogFooter>

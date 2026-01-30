@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     last_used_at TIMESTAMPTZ,
     use_count BIGINT NOT NULL DEFAULT 0 CHECK (use_count >= 0),
+    -- Key identification (from 003_proxy_enhancements)
+    key_id VARCHAR(32),
+    key_prefix VARCHAR(12),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -146,6 +149,17 @@ CREATE TABLE IF NOT EXISTS users (
     quota_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Account security fields (from 005_account_permission_system)
+    password_hash VARCHAR(255),
+    force_password_change BOOLEAN NOT NULL DEFAULT TRUE,
+    password_changed_at TIMESTAMPTZ,
+    login_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    last_login_at TIMESTAMPTZ,
+    last_login_ip VARCHAR(45),
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by VARCHAR(255),
+    department VARCHAR(50),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_active_at TIMESTAMPTZ
@@ -297,12 +311,15 @@ CREATE TABLE IF NOT EXISTS datasets (
     description TEXT,
     tenant_id VARCHAR(255) NOT NULL DEFAULT '',
     visibility VARCHAR(50) NOT NULL DEFAULT 'private', -- private|tenant|public
-    embedding_provider VARCHAR(50) NOT NULL DEFAULT 'openai',
-    embedding_model VARCHAR(100) NOT NULL DEFAULT 'text-embedding-3-small',
-    embedding_dimension INTEGER NOT NULL DEFAULT 1536 CHECK (embedding_dimension > 0),
+    embedding_provider VARCHAR(50) NOT NULL DEFAULT 'gemini',
+    embedding_model VARCHAR(100) NOT NULL DEFAULT 'gemini-embedding-001',
+    embedding_dimension INTEGER NOT NULL DEFAULT 1024 CHECK (embedding_dimension > 0),
     embedding_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    needs_reindex BOOLEAN NOT NULL DEFAULT FALSE,
     index_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     collection_name VARCHAR(255),
+    -- KBMS enhancement (from 002_kbms_enhancements)
+    kb_type VARCHAR(50) NOT NULL DEFAULT 'document',
     created_by VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -321,6 +338,33 @@ CREATE TABLE IF NOT EXISTS documents (
     error TEXT,
     content TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Enable/disable fields (from 002_kbms_enhancements)
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    disabled_at TIMESTAMPTZ,
+    disabled_by VARCHAR(255),
+    -- Archive fields (from 002_kbms_enhancements)
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+    archived_reason VARCHAR(255),
+    archived_by VARCHAR(255),
+    archived_at TIMESTAMPTZ,
+    -- Processing fields (from 002_kbms_enhancements)
+    process_rule_id VARCHAR(255),
+    word_count INTEGER DEFAULT 0,
+    segment_count INTEGER DEFAULT 0,
+    tokens INTEGER DEFAULT 0,
+    batch VARCHAR(255),
+    doc_type VARCHAR(50),
+    doc_form VARCHAR(50) DEFAULT 'text_model',
+    doc_language VARCHAR(50),
+    created_by VARCHAR(255),
+    -- Confluence fields (from 004_confluence_integration)
+    confluence_page_id VARCHAR(255),
+    confluence_binding_id VARCHAR(255),
+    confluence_version INTEGER,
+    confluence_web_url TEXT,
+    -- Version control fields (from 025_document_version_control)
+    current_version INTEGER DEFAULT 1,
+    version_count INTEGER DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at TIMESTAMPTZ,
@@ -347,6 +391,30 @@ CREATE TABLE IF NOT EXISTS segments (
     has_images BOOLEAN NOT NULL DEFAULT FALSE,
     image_count INTEGER NOT NULL DEFAULT 0 CHECK (image_count >= 0),
     vlm_description TEXT,
+    -- Islamic knowledge traceability fields
+    source_type VARCHAR(50) DEFAULT 'unknown',          -- quran|hadith|tafseer|fiqh|general_islamic|unknown
+    source_reference JSONB NOT NULL DEFAULT '{}'::jsonb, -- Structured citation data
+    citation_text VARCHAR(500) DEFAULT '',               -- Pre-formatted citation string
+    page_number INTEGER,                                 -- Source page number
+    section_header VARCHAR(500) DEFAULT '',               -- Section/chapter heading
+    language VARCHAR(10) DEFAULT 'en',                   -- ar|en|ar_en
+    contextual_prefix TEXT DEFAULT '',                    -- Anthropic contextual retrieval prefix
+    -- Incremental update detection (from 023_segment_content_hash)
+    content_hash VARCHAR(64),
+    -- Full-text search (from 028_segments_fulltext_search)
+    text_search tsvector,
+    -- KBMS enhancement fields (from 002_kbms_enhancements)
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    disabled_at TIMESTAMPTZ,
+    disabled_by VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'completed',
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    word_count INTEGER DEFAULT 0,
+    keywords JSONB DEFAULT '[]',
+    answer TEXT,
+    index_node_id VARCHAR(255),
+    index_node_hash VARCHAR(255),
+    created_by VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(document_id, position)
@@ -370,6 +438,23 @@ CREATE INDEX IF NOT EXISTS idx_segment_images_segment ON segment_images(segment_
 CREATE INDEX IF NOT EXISTS idx_segment_images_image ON segment_images(image_segment_id);
 CREATE INDEX IF NOT EXISTS idx_segments_content_type ON segments(content_type);
 CREATE INDEX IF NOT EXISTS idx_segments_has_images ON segments(has_images) WHERE has_images = TRUE;
+CREATE INDEX IF NOT EXISTS idx_segments_text_search ON segments USING GIN (text_search);
+CREATE INDEX IF NOT EXISTS idx_segments_source_type ON segments(source_type);
+
+-- Trigger: auto-populate text_search tsvector on INSERT/UPDATE
+CREATE OR REPLACE FUNCTION segments_text_search_update() RETURNS trigger AS $$
+BEGIN
+    NEW.text_search := to_tsvector('simple', COALESCE(NEW.text, ''));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_segments_text_search ON segments;
+CREATE TRIGGER trg_segments_text_search
+    BEFORE INSERT OR UPDATE OF text ON segments
+    FOR EACH ROW
+    EXECUTE FUNCTION segments_text_search_update();
+CREATE INDEX IF NOT EXISTS idx_segments_language ON segments(language);
 
 CREATE TABLE IF NOT EXISTS dataset_permissions (
     id BIGSERIAL PRIMARY KEY,
@@ -650,6 +735,738 @@ COMMENT ON COLUMN langgraph_threads.updated_at IS '更新时间（由触发器�
 COMMENT ON COLUMN langgraph_threads.last_accessed_at IS '最后访问时间。';
 
 -- ============================================================
+-- 15. 使用记录表（细粒度，保留30天）
+-- Source: 017_usage_metrics
+-- ============================================================
+CREATE TABLE IF NOT EXISTS usage_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    request_id VARCHAR(64),
+    service_id VARCHAR(64),
+    assistant_id VARCHAR(64),
+    model VARCHAR(128) NOT NULL,
+    provider VARCHAR(64),
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER GENERATED ALWAYS AS (input_tokens + output_tokens) STORED,
+    input_cost_cents INTEGER NOT NULL DEFAULT 0,
+    output_cost_cents INTEGER NOT NULL DEFAULT 0,
+    total_cost_cents INTEGER GENERATED ALWAYS AS (input_cost_cents + output_cost_cents) STORED,
+    latency_ms INTEGER,
+    first_token_ms INTEGER,
+    status VARCHAR(32) DEFAULT 'success',
+    request_type VARCHAR(32),
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+COMMENT ON TABLE usage_records IS '使用记录表：细粒度请求记录（保留30天）';
+
+-- ============================================================
+-- 16. 每日聚合表（永久保留）
+-- Source: 017_usage_metrics + 027_fix_usage_daily_aggregates_constraint
+-- ============================================================
+CREATE TABLE IF NOT EXISTS usage_daily_aggregates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    model VARCHAR(128) NOT NULL DEFAULT '',
+    assistant_id VARCHAR(64) NOT NULL DEFAULT '',
+    service_id VARCHAR(64) NOT NULL DEFAULT '',
+    date DATE NOT NULL,
+    request_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    total_input_tokens BIGINT DEFAULT 0,
+    total_output_tokens BIGINT DEFAULT 0,
+    total_cost_cents BIGINT DEFAULT 0,
+    avg_latency_ms INTEGER DEFAULT 0,
+    p50_latency_ms INTEGER DEFAULT 0,
+    p95_latency_ms INTEGER DEFAULT 0,
+    p99_latency_ms INTEGER DEFAULT 0,
+    avg_first_token_ms INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT uq_usage_daily_aggregates_dimensions
+        UNIQUE (tenant_id, user_id, model, assistant_id, service_id, date)
+);
+
+COMMENT ON TABLE usage_daily_aggregates IS '每日聚合表：按维度聚合的每日使用统计（永久保留）';
+
+-- ============================================================
+-- 17. 每小时聚合表（保留7天）
+-- Source: 017_usage_metrics + 027_fix_usage_daily_aggregates_constraint
+-- ============================================================
+CREATE TABLE IF NOT EXISTS usage_hourly_aggregates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    model VARCHAR(128) NOT NULL DEFAULT '',
+    assistant_id VARCHAR(64) NOT NULL DEFAULT '',
+    service_id VARCHAR(64) NOT NULL DEFAULT '',
+    bucket_start TIMESTAMPTZ NOT NULL,
+    date DATE NOT NULL,
+    request_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    total_input_tokens BIGINT DEFAULT 0,
+    total_output_tokens BIGINT DEFAULT 0,
+    total_cost_cents BIGINT DEFAULT 0,
+    avg_latency_ms INTEGER DEFAULT 0,
+    avg_first_token_ms INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT uq_usage_hourly_aggregates_dimensions
+        UNIQUE (tenant_id, user_id, model, assistant_id, service_id, bucket_start)
+);
+
+COMMENT ON TABLE usage_hourly_aggregates IS '每小时聚合表：按维度聚合的小时级使用统计（保留7天）';
+
+-- ============================================================
+-- 18. 用户配额表
+-- Source: 017_usage_metrics
+-- ============================================================
+CREATE TABLE IF NOT EXISTS user_quotas (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    daily_token_limit BIGINT,
+    monthly_token_limit BIGINT,
+    monthly_cost_limit_cents BIGINT,
+    requests_per_minute INTEGER,
+    requests_per_day INTEGER,
+    current_daily_tokens BIGINT DEFAULT 0,
+    current_monthly_tokens BIGINT DEFAULT 0,
+    current_monthly_cost_cents BIGINT DEFAULT 0,
+    current_daily_requests INTEGER DEFAULT 0,
+    daily_reset_at TIMESTAMPTZ,
+    monthly_reset_at TIMESTAMPTZ,
+    is_blocked BOOLEAN DEFAULT FALSE,
+    blocked_reason VARCHAR(256),
+    blocked_at TIMESTAMPTZ,
+    warning_threshold INTEGER DEFAULT 80,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, user_id)
+);
+
+COMMENT ON TABLE user_quotas IS '用户配额表：配额限制与当前用量追踪';
+
+-- ============================================================
+-- 19. 模型定价表
+-- Source: 017_usage_metrics
+-- ============================================================
+CREATE TABLE IF NOT EXISTS model_pricing (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model VARCHAR(128) NOT NULL,
+    provider VARCHAR(64),
+    display_name VARCHAR(256),
+    input_price_per_1k DECIMAL(10, 6) NOT NULL,
+    output_price_per_1k DECIMAL(10, 6) NOT NULL,
+    context_window INTEGER,
+    max_output_tokens INTEGER,
+    supports_vision BOOLEAN DEFAULT FALSE,
+    supports_tools BOOLEAN DEFAULT TRUE,
+    supports_streaming BOOLEAN DEFAULT TRUE,
+    is_active BOOLEAN DEFAULT TRUE,
+    effective_from TIMESTAMPTZ DEFAULT NOW(),
+    effective_to TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (model)
+);
+
+COMMENT ON TABLE model_pricing IS '模型定价表：按模型的 token 定价配置';
+
+-- ============================================================
+-- 20. 配额告警记录表
+-- Source: 017_usage_metrics
+-- ============================================================
+CREATE TABLE IF NOT EXISTS quota_alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    alert_type VARCHAR(64) NOT NULL,
+    threshold_value BIGINT,
+    current_value BIGINT,
+    limit_value BIGINT,
+    message TEXT,
+    is_acknowledged BOOLEAN DEFAULT FALSE,
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by VARCHAR(64),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+COMMENT ON TABLE quota_alerts IS '配额告警记录表：配额超限或接近限额的告警';
+
+-- ============================================================
+-- 21. 安全事件每日聚合表
+-- Source: 018_security_events + 030_fix_timestamp_and_security_constraint
+-- ============================================================
+CREATE TABLE IF NOT EXISTS security_event_daily_aggregates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    service_id VARCHAR(64) NOT NULL DEFAULT '',
+    event_type VARCHAR(32) NOT NULL,
+    date DATE NOT NULL,
+    event_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT uq_security_event_daily_dimensions
+        UNIQUE (tenant_id, user_id, service_id, event_type, date)
+);
+
+COMMENT ON TABLE security_event_daily_aggregates IS '安全事件每日聚合表：认证失败、限流事件统计';
+
+-- ============================================================
+-- 22. Session Memory 表（会话级记忆）
+-- Source: 024_assistant_memory + 026_memory_tenant_isolation
+-- ============================================================
+CREATE TABLE IF NOT EXISTS session_memory (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(100) NOT NULL,
+    session_id VARCHAR(100) NOT NULL,
+    key VARCHAR(255) NOT NULL,
+    value JSONB NOT NULL,
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT session_memory_tenant_session_key_unique
+        UNIQUE (tenant_id, session_id, key)
+);
+
+COMMENT ON TABLE session_memory IS '会话记忆表：跨重连持久化的会话级键值存储';
+
+-- ============================================================
+-- 23. User Memory 表（用户级长期记忆）
+-- Source: 024_assistant_memory + 026_memory_tenant_isolation
+-- ============================================================
+CREATE TABLE IF NOT EXISTS user_memory (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(100) NOT NULL,
+    user_id VARCHAR(100) NOT NULL,
+    key VARCHAR(255) NOT NULL,
+    value JSONB NOT NULL,
+    metadata JSONB,
+    access_count INTEGER DEFAULT 0,
+    last_accessed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT user_memory_tenant_user_key_unique
+        UNIQUE (tenant_id, user_id, key)
+);
+
+COMMENT ON TABLE user_memory IS '用户记忆表：跨会话持久化的偏好、模式与知识';
+
+-- ============================================================
+-- 24. KBMS 增强表
+-- Source: 002_kbms_enhancements
+-- ============================================================
+
+-- 子块表：用于 parent-child 检索
+CREATE TABLE IF NOT EXISTS child_chunks (
+    id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    tenant_id VARCHAR(255) NOT NULL DEFAULT '',
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    document_id VARCHAR(255) NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    segment_id VARCHAR(255) NOT NULL REFERENCES segments(segment_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    index_node_id VARCHAR(255),
+    index_node_hash VARCHAR(255),
+    type VARCHAR(50) NOT NULL DEFAULT 'automatic',
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    indexing_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT
+);
+
+COMMENT ON TABLE child_chunks IS '子块表：parent-child 检索策略中的 child chunk';
+
+-- 数据集关键词表
+CREATE TABLE IF NOT EXISTS dataset_keyword_tables (
+    id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    dataset_id VARCHAR(255) NOT NULL UNIQUE REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    keyword_table TEXT NOT NULL DEFAULT '{}',
+    data_source_type VARCHAR(50) NOT NULL DEFAULT 'database',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE dataset_keyword_tables IS '数据集关键词表：BM25 等关键词检索索引';
+
+-- 数据集处理规则表
+CREATE TABLE IF NOT EXISTS dataset_process_rules (
+    id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    mode VARCHAR(50) NOT NULL DEFAULT 'automatic',
+    rules JSONB NOT NULL DEFAULT '{}',
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE dataset_process_rules IS '数据集处理规则：分块策略与预处理配置';
+
+-- 数据集查询记录表
+CREATE TABLE IF NOT EXISTS dataset_queries (
+    id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    source VARCHAR(50) NOT NULL DEFAULT 'api',
+    source_app_id VARCHAR(255),
+    created_by_role VARCHAR(50),
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE dataset_queries IS '数据集查询记录：检索请求日志';
+
+-- ============================================================
+-- 25. 代理路由与计费
+-- Source: 003_proxy_enhancements
+-- ============================================================
+
+-- 代理路由表
+CREATE TABLE IF NOT EXISTS proxy_routes (
+    id SERIAL PRIMARY KEY,
+    route_name VARCHAR(255) NOT NULL UNIQUE,
+    route_pattern VARCHAR(500) NOT NULL,
+    service_id VARCHAR(255) REFERENCES services(service_id) ON DELETE CASCADE,
+    priority INTEGER NOT NULL DEFAULT 0,
+    methods VARCHAR(20)[] NOT NULL DEFAULT ARRAY['GET','POST','PUT','PATCH','DELETE']::VARCHAR(20)[],
+    upstream_url VARCHAR(500),
+    path_rewrite VARCHAR(255),
+    strip_prefix BOOLEAN NOT NULL DEFAULT TRUE,
+    auth_required BOOLEAN NOT NULL DEFAULT TRUE,
+    rate_limit_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    rate_limit_requests INTEGER DEFAULT 100,
+    rate_limit_window INTEGER DEFAULT 60,
+    timeout_seconds INTEGER DEFAULT 60,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE proxy_routes IS '代理路由表：URL 路由到上游服务的映射';
+
+-- 计费事件表
+CREATE TABLE IF NOT EXISTS billing_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_id VARCHAR(255) NOT NULL UNIQUE,
+    request_id VARCHAR(255) NOT NULL,
+    service_id VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255),
+    tenant_id VARCHAR(255),
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+    model VARCHAR(255),
+    assistant_id VARCHAR(255),
+    duration_ms NUMERIC(12,2) CHECK (duration_ms IS NULL OR duration_ms >= 0),
+    status VARCHAR(50) NOT NULL DEFAULT 'completed',
+    cost_amount NUMERIC(12,6),
+    cost_currency VARCHAR(10) DEFAULT 'USD',
+    metadata JSONB NOT NULL DEFAULT '{}',
+    event_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE billing_events IS '计费事件表：每次请求的 token 用量与费用记录';
+
+-- ============================================================
+-- 26. Confluence 集成
+-- Source: 004_confluence_integration + 007/008/010/011/012/013/016
+-- ============================================================
+
+-- Confluence 连接表
+CREATE TABLE IF NOT EXISTS confluence_connections (
+    connection_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    tenant_id VARCHAR(255) NOT NULL DEFAULT '',
+    name VARCHAR(255) NOT NULL,
+    domain VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    api_token TEXT NOT NULL,
+    base_url VARCHAR(512),
+    sync_mode VARCHAR(50) NOT NULL DEFAULT 'manual',
+    polling_interval_minutes INTEGER DEFAULT 60,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    last_sync_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    owner_id VARCHAR(255)
+);
+
+COMMENT ON TABLE confluence_connections IS 'Confluence 连接配置：Atlassian 实例连接信息';
+
+-- Confluence Space 绑定表
+CREATE TABLE IF NOT EXISTS confluence_space_bindings (
+    binding_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    connection_id VARCHAR(255) NOT NULL REFERENCES confluence_connections(connection_id) ON DELETE CASCADE,
+    dataset_id VARCHAR(255) NOT NULL REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    space_key VARCHAR(255) NOT NULL,
+    space_id VARCHAR(255),
+    space_name VARCHAR(255),
+    include_patterns JSONB DEFAULT '[]',
+    exclude_patterns JSONB DEFAULT '[]',
+    max_depth INTEGER DEFAULT 10,
+    include_attachments BOOLEAN DEFAULT FALSE,
+    include_comments BOOLEAN DEFAULT FALSE,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    last_sync_at TIMESTAMPTZ,
+    synced_page_count INTEGER DEFAULT 0,
+    total_page_count INTEGER DEFAULT 0,
+    last_error TEXT,
+    created_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    tenant_id VARCHAR(255),
+    root_page_id VARCHAR(255),
+    root_page_title VARCHAR(512),
+    sync_images BOOLEAN DEFAULT FALSE,
+    image_max_size_bytes INTEGER DEFAULT 3145728,
+    last_sync_type VARCHAR(50),
+    owner_id VARCHAR(255),
+    sync_mode VARCHAR(50) NOT NULL DEFAULT 'manual'
+        CHECK (sync_mode IN ('manual', 'polling')),
+    polling_interval_minutes INTEGER DEFAULT 60
+        CHECK (polling_interval_minutes >= 5 AND polling_interval_minutes <= 1440),
+    last_incremental_sync_at TIMESTAMPTZ,
+    next_sync_at TIMESTAMPTZ,
+    sync_enabled BOOLEAN DEFAULT TRUE,
+    root_page_ids TEXT[] DEFAULT '{}',
+    root_page_titles TEXT[] DEFAULT '{}',
+    UNIQUE (connection_id, space_key, dataset_id)
+);
+
+COMMENT ON TABLE confluence_space_bindings IS 'Confluence Space 绑定：Space 与 Dataset 的映射关系';
+
+-- Confluence 页面跟踪表
+CREATE TABLE IF NOT EXISTS confluence_pages (
+    id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    binding_id VARCHAR(255) NOT NULL REFERENCES confluence_space_bindings(binding_id) ON DELETE CASCADE,
+    document_id VARCHAR(255) REFERENCES documents(document_id) ON DELETE SET NULL,
+    page_id VARCHAR(255) NOT NULL,
+    space_key VARCHAR(255) NOT NULL,
+    title VARCHAR(512) NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    content_hash VARCHAR(64),
+    parent_page_id VARCHAR(255),
+    depth INTEGER DEFAULT 0,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    last_synced_at TIMESTAMPTZ,
+    confluence_updated_at TIMESTAMPTZ,
+    error TEXT,
+    labels JSONB DEFAULT '[]',
+    web_url TEXT,
+    author VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Image sync fields (010_image_segments)
+    image_count INTEGER DEFAULT 0,
+    images_synced_at TIMESTAMPTZ,
+    -- Page-level sync fields (013_page_level_sync)
+    sync_mode VARCHAR(50),
+    polling_interval_minutes INTEGER,
+    sync_enabled BOOLEAN DEFAULT TRUE,
+    next_sync_at TIMESTAMPTZ,
+    sync_priority INTEGER DEFAULT 0,
+    UNIQUE (binding_id, page_id)
+);
+
+COMMENT ON TABLE confluence_pages IS 'Confluence 页面跟踪：同步状态与版本管理';
+
+-- Confluence 同步任务表
+CREATE TABLE IF NOT EXISTS confluence_sync_tasks (
+    task_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    binding_id VARCHAR(255) REFERENCES confluence_space_bindings(binding_id) ON DELETE CASCADE,
+    page_id VARCHAR(255),
+    task_type VARCHAR(50) NOT NULL,
+    priority INTEGER DEFAULT 0,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    retry_count INTEGER DEFAULT 0,
+    max_retries INTEGER DEFAULT 3,
+    progress NUMERIC(5,2) DEFAULT 0,
+    total_items INTEGER DEFAULT 0,
+    processed_items INTEGER DEFAULT 0,
+    error TEXT,
+    result JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    owner_id VARCHAR(255)
+);
+
+COMMENT ON TABLE confluence_sync_tasks IS 'Confluence 同步任务：批量/增量同步任务追踪';
+
+-- Confluence Webhook 表
+CREATE TABLE IF NOT EXISTS confluence_webhooks (
+    webhook_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    connection_id VARCHAR(255) NOT NULL REFERENCES confluence_connections(connection_id) ON DELETE CASCADE,
+    confluence_webhook_id VARCHAR(255),
+    webhook_secret VARCHAR(255) NOT NULL,
+    callback_url TEXT NOT NULL,
+    events JSONB NOT NULL DEFAULT '["page_created", "page_updated", "page_removed"]',
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    last_event_at TIMESTAMPTZ,
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE confluence_webhooks IS 'Confluence Webhook：实时页面变更事件监听';
+
+-- Confluence 图片同步表 (010_image_segments)
+CREATE TABLE IF NOT EXISTS confluence_image_sync (
+    id BIGSERIAL PRIMARY KEY,
+    page_record_id VARCHAR(255) REFERENCES confluence_pages(id) ON DELETE CASCADE,
+    attachment_id VARCHAR(100) NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    media_type VARCHAR(100),
+    file_size INTEGER,
+    storage_url TEXT,
+    segment_id VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'pending',
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    synced_at TIMESTAMPTZ,
+    UNIQUE (page_record_id, attachment_id)
+);
+
+COMMENT ON TABLE confluence_image_sync IS 'Confluence 图片同步：页面内嵌图片的提取与存储';
+
+-- ============================================================
+-- 27. 账号权限系统
+-- Source: 005_account_permission_system + 006_user_extra_permissions
+-- ============================================================
+
+-- 权限定义表
+CREATE TABLE IF NOT EXISTS permissions (
+    id SERIAL PRIMARY KEY,
+    permission_code VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    category VARCHAR(50) NOT NULL,
+    resource VARCHAR(100) NOT NULL,
+    action VARCHAR(50) NOT NULL,
+    is_system BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE permissions IS '权限定义表：细粒度权限编码与分类';
+
+-- 角色-权限关联表
+CREATE TABLE IF NOT EXISTS role_permissions (
+    id SERIAL PRIMARY KEY,
+    role_name VARCHAR(100) NOT NULL,
+    permission_code VARCHAR(100) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (role_name, permission_code)
+);
+
+COMMENT ON TABLE role_permissions IS '角色-权限关联表：角色与权限的多对多映射';
+
+-- 用户-角色关联表
+CREATE TABLE IF NOT EXISTS user_roles (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    role_name VARCHAR(100) NOT NULL,
+    granted_by VARCHAR(255),
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    UNIQUE (user_id, role_name)
+);
+
+COMMENT ON TABLE user_roles IS '用户-角色关联表：用户与角色的多对多映射';
+
+-- 用户-权限直接授权表
+CREATE TABLE IF NOT EXISTS user_permissions (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    permission_code VARCHAR(100) NOT NULL,
+    granted_by VARCHAR(255),
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    note TEXT,
+    UNIQUE (user_id, permission_code)
+);
+
+COMMENT ON TABLE user_permissions IS '用户直接权限表：绕过角色的权限直授';
+
+-- 邮箱域名配置表
+CREATE TABLE IF NOT EXISTS email_domain_config (
+    id SERIAL PRIMARY KEY,
+    domain VARCHAR(255) NOT NULL UNIQUE,
+    is_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+    description TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE email_domain_config IS '邮箱域名配置：允许/拒绝的注册域名白名单';
+
+-- 登录审计表
+CREATE TABLE IF NOT EXISTS login_audit (
+    id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(255),
+    email VARCHAR(255),
+    action VARCHAR(50) NOT NULL,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    details JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE login_audit IS '登录审计表：登录/登出/密码修改等安全事件';
+
+-- 密码历史表
+CREATE TABLE IF NOT EXISTS password_history (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE password_history IS '密码历史表：防止密码重复使用';
+
+-- ============================================================
+-- 28. Artifacts（会话制品存储）
+-- Source: 021_artifacts
+-- ============================================================
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id VARCHAR(64) PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL,
+    message_id VARCHAR(64),
+    tenant_id VARCHAR(255) NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    type VARCHAR(32) NOT NULL,
+    format VARCHAR(32) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    storage_key VARCHAR(512) NOT NULL,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    mime_type VARCHAR(128),
+    source VARCHAR(32) NOT NULL DEFAULT 'ai',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE artifacts IS 'Artifacts 表：AI 生成的代码、文档等制品存储引用';
+
+-- ============================================================
+-- 29. LLM 服务商与模型配置
+-- Source: 022_llm_providers_models
+-- ============================================================
+
+-- LLM 服务商表
+CREATE TABLE IF NOT EXISTS llm_providers (
+    tenant_id VARCHAR(100) NOT NULL,
+    provider_id VARCHAR(50) NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    api_type VARCHAR(20) DEFAULT 'openai',
+    base_url VARCHAR(500),
+    api_key_encrypted TEXT,
+    is_enabled BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, provider_id)
+);
+
+COMMENT ON TABLE llm_providers IS 'LLM 服务商表：多租户 LLM 提供商配置';
+
+-- LLM 模型表
+CREATE TABLE IF NOT EXISTS llm_models (
+    tenant_id VARCHAR(100) NOT NULL,
+    model_id VARCHAR(100) NOT NULL,
+    provider_id VARCHAR(50) NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    context_window INTEGER DEFAULT 128000,
+    max_output_tokens INTEGER DEFAULT 4096,
+    supports_vision BOOLEAN DEFAULT FALSE,
+    supports_tools BOOLEAN DEFAULT TRUE,
+    input_price_per_1k DECIMAL(10,6) DEFAULT 0,
+    output_price_per_1k DECIMAL(10,6) DEFAULT 0,
+    access_level VARCHAR(20) DEFAULT 'public',
+    is_enabled BOOLEAN DEFAULT TRUE,
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, model_id)
+);
+
+COMMENT ON TABLE llm_models IS 'LLM 模型表：多租户模型配置与定价';
+
+-- ============================================================
+-- 30. 文档版本控制
+-- Source: 025_document_version_control
+-- ============================================================
+
+-- 文档版本表
+CREATE TABLE IF NOT EXISTS document_versions (
+    version_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    document_id VARCHAR(255) NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    confluence_version INTEGER,
+    confluence_updated_at TIMESTAMPTZ,
+    title VARCHAR(512),
+    metadata JSONB DEFAULT '{}',
+    word_count INTEGER DEFAULT 0,
+    change_type VARCHAR(50) NOT NULL,
+    change_reason TEXT,
+    changed_by VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (document_id, version_number)
+);
+
+COMMENT ON TABLE document_versions IS '文档版本表：文档内容变更历史';
+
+-- 版本保留策略表
+CREATE TABLE IF NOT EXISTS version_retention_policies (
+    policy_id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    tenant_id VARCHAR(255) NOT NULL,
+    dataset_id VARCHAR(255) REFERENCES datasets(dataset_id) ON DELETE CASCADE,
+    max_versions_per_document INTEGER DEFAULT 50,
+    retention_days INTEGER DEFAULT 90,
+    keep_first_version BOOLEAN DEFAULT TRUE,
+    keep_deleted_versions BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, dataset_id)
+);
+
+COMMENT ON TABLE version_retention_policies IS '版本保留策略：自动清理旧版本的配置';
+
+-- ============================================================
+-- 旧数据清理函数
+-- Source: 017_usage_metrics
+-- ============================================================
+CREATE OR REPLACE FUNCTION cleanup_old_usage_records(retention_days INTEGER DEFAULT 30)
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM usage_records
+    WHERE created_at < CURRENT_TIMESTAMP - (retention_days || ' days')::INTERVAL;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================
 -- 索引
 -- ============================================================
 CREATE INDEX IF NOT EXISTS idx_services_service_type ON services(service_type);
@@ -687,6 +1504,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at DESC
 CREATE INDEX IF NOT EXISTS idx_segments_dataset_id ON segments(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_segments_document_id ON segments(document_id);
 CREATE INDEX IF NOT EXISTS idx_segments_vector_id ON segments(vector_id);
+CREATE INDEX IF NOT EXISTS idx_segments_content_hash ON segments(document_id, content_hash);
 
 CREATE INDEX IF NOT EXISTS idx_dataset_permissions_dataset_id ON dataset_permissions(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_dataset_permissions_subject ON dataset_permissions(subject_type, subject_id);
@@ -707,6 +1525,197 @@ CREATE INDEX IF NOT EXISTS idx_usage_statistics_period_start ON usage_statistics
 CREATE INDEX IF NOT EXISTS idx_langgraph_threads_user_id ON langgraph_threads(user_id);
 CREATE INDEX IF NOT EXISTS idx_langgraph_threads_tenant_id ON langgraph_threads(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_langgraph_threads_status ON langgraph_threads(status);
+
+-- api_keys additional indexes (from 003_proxy_enhancements)
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
+
+-- users additional indexes (from 005_account_permission_system)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users(LOWER(email)) WHERE email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_status_tenant ON users(status, tenant_id);
+
+-- datasets additional indexes (from 002_kbms_enhancements)
+CREATE INDEX IF NOT EXISTS idx_datasets_kb_type ON datasets(kb_type);
+CREATE INDEX IF NOT EXISTS idx_datasets_tenant_kb_type ON datasets(tenant_id, kb_type);
+
+-- documents additional indexes (from 002/004 migrations)
+CREATE INDEX IF NOT EXISTS idx_documents_enabled ON documents(enabled);
+CREATE INDEX IF NOT EXISTS idx_documents_archived ON documents(archived);
+CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents(batch);
+CREATE INDEX IF NOT EXISTS idx_documents_confluence_page ON documents(confluence_page_id) WHERE confluence_page_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_documents_confluence_binding ON documents(confluence_binding_id) WHERE confluence_binding_id IS NOT NULL;
+
+-- segments additional indexes (from 002 migrations)
+CREATE INDEX IF NOT EXISTS idx_segments_enabled ON segments(enabled);
+CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
+CREATE INDEX IF NOT EXISTS idx_segments_index_node_id ON segments(index_node_id);
+CREATE INDEX IF NOT EXISTS idx_segments_image_attachment ON segments(image_attachment_id) WHERE image_attachment_id IS NOT NULL;
+
+-- segment_images additional indexes
+CREATE INDEX IF NOT EXISTS idx_segment_images_proximity ON segment_images(segment_id, proximity_score DESC);
+
+-- usage_records indexes
+CREATE INDEX IF NOT EXISTS idx_usage_tenant_date ON usage_records (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_records (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records (model, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_assistant ON usage_records (assistant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_service ON usage_records (service_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_records (created_at);
+
+-- usage_daily_aggregates indexes
+CREATE INDEX IF NOT EXISTS idx_usage_daily_tenant_date ON usage_daily_aggregates (tenant_id, date);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_user_date ON usage_daily_aggregates (user_id, date);
+CREATE INDEX IF NOT EXISTS idx_usage_daily_model_date ON usage_daily_aggregates (model, date);
+
+-- usage_hourly_aggregates indexes
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_tenant_date ON usage_hourly_aggregates (tenant_id, date);
+CREATE INDEX IF NOT EXISTS idx_usage_hourly_bucket ON usage_hourly_aggregates (bucket_start);
+
+-- user_quotas indexes
+CREATE INDEX IF NOT EXISTS idx_quota_tenant ON user_quotas (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_quota_blocked ON user_quotas (is_blocked) WHERE is_blocked = TRUE;
+
+-- model_pricing indexes
+CREATE INDEX IF NOT EXISTS idx_pricing_provider ON model_pricing (provider);
+CREATE INDEX IF NOT EXISTS idx_pricing_active ON model_pricing (is_active) WHERE is_active = TRUE;
+
+-- quota_alerts indexes
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_user ON quota_alerts (tenant_id, user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_unacked ON quota_alerts (is_acknowledged, created_at) WHERE is_acknowledged = FALSE;
+
+-- security_event_daily_aggregates indexes
+CREATE INDEX IF NOT EXISTS idx_security_event_daily_tenant_date ON security_event_daily_aggregates (tenant_id, date);
+CREATE INDEX IF NOT EXISTS idx_security_event_daily_user_date ON security_event_daily_aggregates (user_id, date);
+CREATE INDEX IF NOT EXISTS idx_security_event_daily_service_date ON security_event_daily_aggregates (service_id, date);
+
+-- session_memory indexes
+CREATE INDEX IF NOT EXISTS idx_session_memory_tenant_session_key ON session_memory(tenant_id, session_id, key);
+CREATE INDEX IF NOT EXISTS idx_session_memory_tenant_session ON session_memory(tenant_id, session_id);
+
+-- user_memory indexes
+CREATE INDEX IF NOT EXISTS idx_user_memory_tenant_user_key ON user_memory(tenant_id, user_id, key);
+CREATE INDEX IF NOT EXISTS idx_user_memory_tenant_user ON user_memory(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_user_memory_access_count ON user_memory(access_count DESC) WHERE access_count > 0;
+
+-- child_chunks indexes
+CREATE INDEX IF NOT EXISTS idx_child_chunks_dataset_id ON child_chunks(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_child_chunks_document_id ON child_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_child_chunks_segment_id ON child_chunks(segment_id);
+CREATE INDEX IF NOT EXISTS idx_child_chunks_index_node_id ON child_chunks(index_node_id);
+
+-- dataset_process_rules indexes
+CREATE INDEX IF NOT EXISTS idx_process_rules_dataset_id ON dataset_process_rules(dataset_id);
+
+-- dataset_queries indexes
+CREATE INDEX IF NOT EXISTS idx_dataset_queries_dataset_id ON dataset_queries(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_dataset_queries_created_at ON dataset_queries(created_at DESC);
+
+-- proxy_routes indexes
+CREATE INDEX IF NOT EXISTS idx_proxy_routes_service_id ON proxy_routes(service_id);
+CREATE INDEX IF NOT EXISTS idx_proxy_routes_priority ON proxy_routes(priority DESC);
+CREATE INDEX IF NOT EXISTS idx_proxy_routes_enabled ON proxy_routes(enabled);
+
+-- billing_events indexes
+CREATE INDEX IF NOT EXISTS idx_billing_events_request_id ON billing_events(request_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_service_id ON billing_events(service_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_user_id ON billing_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_tenant_id ON billing_events(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_event_time ON billing_events(event_time DESC);
+CREATE INDEX IF NOT EXISTS idx_billing_events_created_at ON billing_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_billing_events_time_tenant ON billing_events(event_time DESC, tenant_id);
+CREATE INDEX IF NOT EXISTS idx_billing_events_time_user ON billing_events(event_time DESC, user_id);
+
+-- confluence_connections indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_connections_tenant ON confluence_connections(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_connections_domain ON confluence_connections(domain);
+CREATE INDEX IF NOT EXISTS idx_confluence_connections_status ON confluence_connections(status);
+CREATE INDEX IF NOT EXISTS idx_confluence_connections_owner ON confluence_connections(owner_id);
+
+-- confluence_space_bindings indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_connection ON confluence_space_bindings(connection_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_dataset ON confluence_space_bindings(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_space ON confluence_space_bindings(space_key);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_status ON confluence_space_bindings(status);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_tenant ON confluence_space_bindings(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_owner ON confluence_space_bindings(owner_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_bindings_next_sync ON confluence_space_bindings(next_sync_at)
+    WHERE sync_enabled = TRUE AND sync_mode = 'polling';
+
+-- confluence_pages indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_binding ON confluence_pages(binding_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_document ON confluence_pages(document_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_page_id ON confluence_pages(page_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_parent ON confluence_pages(parent_page_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_status ON confluence_pages(status);
+CREATE INDEX IF NOT EXISTS idx_confluence_pages_next_sync ON confluence_pages(next_sync_at)
+    WHERE sync_enabled = TRUE AND sync_mode IS NOT NULL;
+
+-- confluence_sync_tasks indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_sync_tasks_binding ON confluence_sync_tasks(binding_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_sync_tasks_status ON confluence_sync_tasks(status, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_confluence_sync_tasks_created ON confluence_sync_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_confluence_sync_tasks_owner ON confluence_sync_tasks(owner_id);
+
+-- confluence_webhooks indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_webhooks_connection ON confluence_webhooks(connection_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_webhooks_status ON confluence_webhooks(status);
+CREATE INDEX IF NOT EXISTS idx_confluence_webhooks_secret ON confluence_webhooks(webhook_secret);
+
+-- confluence_image_sync indexes
+CREATE INDEX IF NOT EXISTS idx_confluence_image_sync_page ON confluence_image_sync(page_record_id);
+CREATE INDEX IF NOT EXISTS idx_confluence_image_sync_status ON confluence_image_sync(status);
+
+-- permissions indexes
+CREATE INDEX IF NOT EXISTS idx_permissions_category ON permissions(category);
+CREATE INDEX IF NOT EXISTS idx_permissions_resource ON permissions(resource);
+
+-- role_permissions indexes
+CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_name);
+CREATE INDEX IF NOT EXISTS idx_role_permissions_perm ON role_permissions(permission_code);
+
+-- user_roles indexes
+CREATE INDEX IF NOT EXISTS idx_user_roles_user_id ON user_roles(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role_name ON user_roles(role_name);
+
+-- user_permissions indexes
+CREATE INDEX IF NOT EXISTS idx_user_permissions_user_id ON user_permissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_permissions_permission ON user_permissions(permission_code);
+
+-- login_audit indexes
+CREATE INDEX IF NOT EXISTS idx_login_audit_user_id ON login_audit(user_id);
+CREATE INDEX IF NOT EXISTS idx_login_audit_email ON login_audit(email);
+CREATE INDEX IF NOT EXISTS idx_login_audit_action ON login_audit(action);
+CREATE INDEX IF NOT EXISTS idx_login_audit_created_at ON login_audit(created_at DESC);
+
+-- password_history indexes
+CREATE INDEX IF NOT EXISTS idx_password_history_user_id ON password_history(user_id);
+
+-- artifacts indexes
+CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_tenant_user ON artifacts(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at DESC);
+
+-- llm_providers indexes
+CREATE INDEX IF NOT EXISTS idx_llm_providers_tenant ON llm_providers(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_llm_providers_enabled ON llm_providers(tenant_id, is_enabled);
+
+-- llm_models indexes
+CREATE INDEX IF NOT EXISTS idx_llm_models_tenant ON llm_models(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_llm_models_provider ON llm_models(tenant_id, provider_id);
+CREATE INDEX IF NOT EXISTS idx_llm_models_enabled ON llm_models(tenant_id, is_enabled);
+
+-- document_versions indexes
+CREATE INDEX IF NOT EXISTS idx_doc_versions_document ON document_versions(document_id);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_number ON document_versions(document_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_hash ON document_versions(content_hash);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_type ON document_versions(change_type);
+CREATE INDEX IF NOT EXISTS idx_doc_versions_created ON document_versions(document_id, created_at DESC);
+
+-- version_retention_policies indexes
+CREATE INDEX IF NOT EXISTS idx_retention_policies_tenant ON version_retention_policies(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_retention_policies_dataset ON version_retention_policies(dataset_id);
 
 -- ============================================================
 -- 触发器：自动更新 updated_at
@@ -778,3 +1787,103 @@ CREATE TRIGGER update_usage_statistics_updated_at BEFORE UPDATE ON usage_statist
 DROP TRIGGER IF EXISTS update_langgraph_threads_updated_at ON langgraph_threads;
 CREATE TRIGGER update_langgraph_threads_updated_at BEFORE UPDATE ON langgraph_threads
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_usage_daily_aggregates_updated_at ON usage_daily_aggregates;
+CREATE TRIGGER update_usage_daily_aggregates_updated_at BEFORE UPDATE ON usage_daily_aggregates
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_user_quotas_updated_at ON user_quotas;
+CREATE TRIGGER update_user_quotas_updated_at BEFORE UPDATE ON user_quotas
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_model_pricing_updated_at ON model_pricing;
+CREATE TRIGGER update_model_pricing_updated_at BEFORE UPDATE ON model_pricing
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_security_event_daily_aggregates_updated_at ON security_event_daily_aggregates;
+CREATE TRIGGER update_security_event_daily_aggregates_updated_at BEFORE UPDATE ON security_event_daily_aggregates
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_session_memory_timestamp ON session_memory;
+CREATE TRIGGER update_session_memory_timestamp BEFORE UPDATE ON session_memory
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_user_memory_timestamp ON user_memory;
+CREATE TRIGGER update_user_memory_timestamp BEFORE UPDATE ON user_memory
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_child_chunks_updated_at ON child_chunks;
+CREATE TRIGGER update_child_chunks_updated_at BEFORE UPDATE ON child_chunks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_dataset_keyword_tables_updated_at ON dataset_keyword_tables;
+CREATE TRIGGER update_dataset_keyword_tables_updated_at BEFORE UPDATE ON dataset_keyword_tables
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_dataset_process_rules_updated_at ON dataset_process_rules;
+CREATE TRIGGER update_dataset_process_rules_updated_at BEFORE UPDATE ON dataset_process_rules
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_proxy_routes_updated_at ON proxy_routes;
+CREATE TRIGGER update_proxy_routes_updated_at BEFORE UPDATE ON proxy_routes
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_confluence_connections_updated_at ON confluence_connections;
+CREATE TRIGGER update_confluence_connections_updated_at BEFORE UPDATE ON confluence_connections
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_confluence_space_bindings_updated_at ON confluence_space_bindings;
+CREATE TRIGGER update_confluence_space_bindings_updated_at BEFORE UPDATE ON confluence_space_bindings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_confluence_pages_updated_at ON confluence_pages;
+CREATE TRIGGER update_confluence_pages_updated_at BEFORE UPDATE ON confluence_pages
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_confluence_sync_tasks_updated_at ON confluence_sync_tasks;
+CREATE TRIGGER update_confluence_sync_tasks_updated_at BEFORE UPDATE ON confluence_sync_tasks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_confluence_webhooks_updated_at ON confluence_webhooks;
+CREATE TRIGGER update_confluence_webhooks_updated_at BEFORE UPDATE ON confluence_webhooks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_permissions_updated_at ON permissions;
+CREATE TRIGGER update_permissions_updated_at BEFORE UPDATE ON permissions
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_email_domain_config_updated_at ON email_domain_config;
+CREATE TRIGGER update_email_domain_config_updated_at BEFORE UPDATE ON email_domain_config
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_version_retention_policies_updated_at ON version_retention_policies;
+CREATE TRIGGER update_version_retention_policies_updated_at BEFORE UPDATE ON version_retention_policies
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================
+-- Image count maintenance trigger (from 014_multimodal_chunks)
+-- Auto-updates has_images and image_count on segments
+-- ============================================================
+CREATE OR REPLACE FUNCTION update_segment_image_counts()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        UPDATE segments
+        SET has_images = TRUE,
+            image_count = (SELECT COUNT(*) FROM segment_images WHERE segment_id = NEW.segment_id)
+        WHERE segment_id = NEW.segment_id;
+    ELSIF TG_OP = 'DELETE' THEN
+        UPDATE segments
+        SET image_count = (SELECT COUNT(*) FROM segment_images WHERE segment_id = OLD.segment_id),
+            has_images = (SELECT COUNT(*) > 0 FROM segment_images WHERE segment_id = OLD.segment_id)
+        WHERE segment_id = OLD.segment_id;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_update_segment_image_counts ON segment_images;
+CREATE TRIGGER trg_update_segment_image_counts
+AFTER INSERT OR DELETE ON segment_images
+FOR EACH ROW
+EXECUTE FUNCTION update_segment_image_counts();

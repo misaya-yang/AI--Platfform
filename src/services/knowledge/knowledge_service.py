@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import asyncio
@@ -19,13 +20,20 @@ from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 from ...persistence.database import DatabaseStorage
-from .chunking import ChunkingConfig, process_document, flatten_chunks, ContentType, AssociatedImage
+from .chunking import ChunkingConfig, process_document, flatten_chunks, merge_small_chunks, ContentType, AssociatedImage
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, get_cached_embedder, DashScopeMultimodalEmbedding
 from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
 from .ingestion import DocumentImageExtractor, ExtractedImage as IngestionExtractedImage
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
 from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
+from .structured_document_parser import (
+    StructuredDocumentParser, 
+    ChunkType, 
+    StructuredChunk,
+    ParseResult
+)
+from .retrieval_service import RetrieveResult
 
 # Type hint imports
 from typing import TYPE_CHECKING
@@ -33,6 +41,11 @@ if TYPE_CHECKING:
     from ..storage.image_storage import ImageStorageService
     from .worker import KnowledgeWorker
     from .vlm_service import DashScopeVLMService
+
+# Global VLM semaphore for rate limiting across all concurrent document processing
+# This prevents overwhelming the VLM API when multiple documents are processed simultaneously
+_global_vlm_semaphore: Optional[asyncio.Semaphore] = None
+_global_vlm_max_concurrent: int = 10  # Default, updated from settings on first use
 
 
 def _ensure_dict(value: Any) -> Dict[str, Any]:
@@ -49,6 +62,24 @@ def _ensure_dict(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _resolve_mime_type(filename: str, mime_type: Optional[str], document_type: Optional[str]) -> str:
+    """Resolve a safe MIME type without overwriting with non-MIME document type labels."""
+    if mime_type:
+        return mime_type
+
+    doc_type = (document_type or "").lower()
+    mapping = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "html": "text/html",
+    }
+    if doc_type in mapping:
+        return mapping[doc_type]
+
+    guessed, _ = mimetypes.guess_type(filename or "")
+    return guessed or "application/octet-stream"
+
+
 def _permission_rank(p: Optional[str]) -> int:
     if not p:
         return 0
@@ -61,21 +92,18 @@ def _require_not_guest(user: UserContext) -> None:
         raise PermissionDeniedError("Authentication required")
 
 
-@dataclass(frozen=True)
-class RetrieveResult:
-    segment_id: str
-    document_id: str
-    score: float
-    text: str
-    metadata: Dict[str, Any]
-    # P3: Multimodal fields
-    content_type: str = "text"  # "text" | "image"
-    image_url: Optional[str] = None
-    vlm_description: Optional[str] = None
-    associated_images: tuple = ()  # Using tuple for frozen dataclass compatibility
-
-
 class KnowledgeService:
+    """Main knowledge base service - coordinates specialized sub-services.
+    
+    This service acts as a facade for:
+    - DatasetService: Dataset management
+    - DocumentService: Document CRUD operations
+    - IngestionService: Document processing and embedding
+    - RetrievalService: Search and retrieval
+    
+    Note: This class is being refactored. New code should use the sub-services directly.
+    """
+    
     def __init__(
         self,
         settings: Settings,
@@ -83,6 +111,11 @@ class KnowledgeService:
         multimodal_embedding: Optional[DashScopeMultimodalEmbedding] = None,
         image_storage_service: Optional["ImageStorageService"] = None,
         vlm_service: Optional[Any] = None,
+        # New: allow injecting sub-services (for testing and gradual migration)
+        dataset_service: Optional[Any] = None,
+        document_service: Optional[Any] = None,
+        ingestion_service: Optional[Any] = None,
+        retrieval_service: Optional[Any] = None,
     ):
         self.settings = settings
         self.db = database
@@ -91,6 +124,29 @@ class KnowledgeService:
         self.vlm_service = vlm_service
         self.pdf_image_processor = PDFImageProcessor()
         self.document_image_extractor = DocumentImageExtractor()
+
+        # Initialize sub-services (composition over inheritance)
+        # These can be injected for testing or created internally
+        from .dataset_service import DatasetService
+        from .document_service import DocumentService as DocService
+        from .ingestion_service import IngestionService
+        from .retrieval_service import RetrievalService
+        
+        self.dataset_service = dataset_service or DatasetService(settings, database)
+        self.document_service = document_service or DocService(settings, database, self.dataset_service)
+        self.retrieval_service = retrieval_service or RetrievalService(settings, database)
+        
+        # Initialize structured document parser for enhanced multimodal parsing
+        self.structured_parser = None
+        try:
+            self.structured_parser = StructuredDocumentParser(
+                vlm_service=vlm_service,
+                enable_vlm_description=False,  # Disabled by default, enable per-dataset config
+                max_vlm_images=10,
+            )
+            logger.info("Structured document parser initialized")
+        except Exception as e:
+            logger.warning(f"Structured parser initialization failed: {e}")
 
         if not getattr(settings, "knowledge", None) or not settings.knowledge.enabled:
             raise RuntimeError("Knowledge service is disabled (GATEWAY_KNOWLEDGE__ENABLED=false)")
@@ -104,9 +160,165 @@ class KnowledgeService:
             timeout_seconds=settings.knowledge.qdrant.timeout_seconds,
             prefer_grpc=settings.knowledge.qdrant.prefer_grpc,
         )
+        
+        # Update retrieval service with vector store
+        self.retrieval_service.vector_store = self.vector_store
+        
+        # Initialize ingestion service with vector store
+        self.ingestion_service = ingestion_service or IngestionService(
+            settings, database, self.vector_store
+        )
 
     async def close(self) -> None:
         await self.vector_store.close()
+
+    # ========================================================================
+    # Delegated Methods (will be removed after full migration to sub-services)
+    # ========================================================================
+    
+    # Dataset operations - delegated to DatasetService
+    async def list_datasets(self, user: UserContext) -> List[Dict[str, Any]]:
+        """List datasets (delegated to DatasetService)."""
+        return await self.dataset_service.list_datasets(user)
+    
+    async def create_dataset(self, user: UserContext, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create dataset (delegated to DatasetService)."""
+        return await self.dataset_service.create_dataset(user, data)
+    
+    async def update_dataset(self, user: UserContext, dataset_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Update dataset (delegated to DatasetService)."""
+        return await self.dataset_service.update_dataset(user, dataset_id, patch)
+    
+    async def delete_dataset(self, user: UserContext, dataset_id: str) -> bool:
+        """Delete dataset (delegated to DatasetService)."""
+        return await self.dataset_service.delete_dataset(user, dataset_id)
+    
+    async def list_dataset_permissions(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+        """List dataset permissions (delegated to DatasetService)."""
+        return await self.dataset_service.list_dataset_permissions(user, dataset_id)
+    
+    async def grant_dataset_permission(
+        self, user: UserContext, dataset_id: str, target_user_id: str, permission: str
+    ) -> Dict[str, Any]:
+        """Grant dataset permission (delegated to DatasetService)."""
+        return await self.dataset_service.grant_dataset_permission(user, dataset_id, target_user_id, permission)
+    
+    async def revoke_dataset_permission(
+        self, user: UserContext, dataset_id: str, target_user_id: str
+    ) -> Dict[str, Any]:
+        """Revoke dataset permission (delegated to DatasetService)."""
+        return await self.dataset_service.revoke_dataset_permission(user, dataset_id, target_user_id)
+    
+    # Document operations - delegated to DocumentService
+    async def create_document_from_text(
+        self, user: UserContext, dataset_id: str, title: str, content: str, metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Create document from text (delegated to DocumentService)."""
+        return await self.document_service.create_document_from_text(user, dataset_id, title, content, metadata)
+    
+    async def create_document_from_upload(
+        self, user: UserContext, dataset_id: str, filename: str, content: bytes, metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Create document from upload (delegated to DocumentService)."""
+        return await self.document_service.create_document_from_upload(user, dataset_id, filename, content, metadata)
+    
+    async def create_document_from_url(
+        self, user: UserContext, dataset_id: str, url: str, title: Optional[str] = None, metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Create document from URL (delegated to DocumentService)."""
+        return await self.document_service.create_document_from_url(user, dataset_id, url, title, metadata)
+    
+    async def list_documents(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+        """List documents (delegated to DocumentService)."""
+        return await self.document_service.list_documents(user, dataset_id)
+    
+    async def get_document(self, user: UserContext, dataset_id: str, document_id: str) -> Dict[str, Any]:
+        """Get document (delegated to DocumentService)."""
+        return await self.document_service.get_document(user, dataset_id, document_id)
+    
+    async def delete_document(self, user: UserContext, dataset_id: str, document_id: str) -> bool:
+        """Delete document (delegated to DocumentService)."""
+        return await self.document_service.delete_document(user, dataset_id, document_id)
+    
+    async def batch_create_documents(
+        self, user: UserContext, dataset_id: str, documents: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Batch create documents (delegated to DocumentService)."""
+        return await self.document_service.batch_create_documents(user, dataset_id, documents)
+    
+    async def batch_delete_documents(
+        self, user: UserContext, dataset_id: str, document_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Batch delete documents (delegated to DocumentService)."""
+        return await self.document_service.batch_delete_documents(user, dataset_id, document_ids)
+    
+    async def set_document_enabled(
+        self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
+    ) -> Dict[str, Any]:
+        """Set document enabled (delegated to DocumentService)."""
+        return await self.document_service.set_document_enabled(user, dataset_id, document_id, enabled)
+    
+    async def set_document_archived(
+        self, user: UserContext, dataset_id: str, document_id: str, archived: bool
+    ) -> Dict[str, Any]:
+        """Set document archived (delegated to DocumentService)."""
+        return await self.document_service.set_document_archived(user, dataset_id, document_id, archived)
+    
+    async def update_document(
+        self, user: UserContext, dataset_id: str, document_id: str, updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update document (delegated to DocumentService)."""
+        return await self.document_service.update_document(user, dataset_id, document_id, updates)
+
+    def _create_vlm_callback(self):
+        """Create a VLM callback for document processing.
+        
+        Uses a global semaphore to limit concurrent VLM API calls across all
+        document processing tasks. This prevents overwhelming the API when
+        multiple documents are processed simultaneously.
+        """
+        global _global_vlm_semaphore, _global_vlm_max_concurrent
+        
+        vlm = self.vlm_service
+        if vlm is None:
+            return None
+
+        # Initialize global semaphore if not done yet
+        vlm_max_concurrent = self.settings.knowledge.vlm_max_concurrent
+        if _global_vlm_semaphore is None or _global_vlm_max_concurrent != vlm_max_concurrent:
+            _global_vlm_max_concurrent = vlm_max_concurrent
+            _global_vlm_semaphore = asyncio.Semaphore(vlm_max_concurrent)
+            logger.info(f"Initialized global VLM semaphore with max_concurrent={vlm_max_concurrent}")
+
+        semaphore = _global_vlm_semaphore
+
+        async def _vlm_extract_text(image_bytes: bytes, lang: str) -> str:
+            prompt = (
+                "Extract ALL text from this document page exactly as written. "
+                "Preserve the original structure, paragraphs, and formatting. "
+                "Do not summarize or interpret — output only the raw text content."
+            )
+            if lang == "ar":
+                prompt = (
+                    "استخرج جميع النصوص من هذه الصفحة كما هي مكتوبة بالضبط. "
+                    "حافظ على الهيكل الأصلي والفقرات والتنسيق. "
+                    "لا تلخص أو تفسر — أخرج فقط المحتوى النصي الخام."
+                )
+            try:
+                # Use global semaphore to limit concurrent VLM calls
+                async with semaphore:
+                    result = await vlm.describe_image(
+                        image_bytes=image_bytes,
+                        prompt=prompt,
+                        image_type="document",
+                        max_tokens=2000,
+                    )
+                    return result.description
+            except Exception as e:
+                logger.warning(f"VLM text extraction failed: {e}")
+                return ""
+
+        return _vlm_extract_text
 
     def _is_multimodal_dataset(self, dataset: Dict[str, Any]) -> bool:
         """Check if dataset is configured for multimodal (unified embedding space).
@@ -148,6 +360,8 @@ class KnowledgeService:
 
         This ensures text and images are embedded in the same vector space,
         enabling true cross-modal retrieval.
+        
+        Uses settings.knowledge.multimodal_embedding_* configuration.
         """
         from .embedding import UnifiedMultimodalEmbedding
 
@@ -155,24 +369,238 @@ class KnowledgeService:
         ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
         api_key = ec.get("api_key") or ""
 
-        if not api_key and hasattr(settings, "knowledge") and settings.knowledge.embedding:
-            api_key = settings.knowledge.embedding.api_key or ""
-
-        if not api_key and hasattr(settings, "dashscope"):
-            api_key = getattr(settings.dashscope, "api_key", "") or ""
+        # Try DashScope API key from various sources
+        if not api_key:
+            api_key = getattr(self.settings.knowledge.dashscope, "api_key", "") or ""
+        if not api_key:
+            api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("ALIYUN_KEY") or ""
 
         if not api_key:
             raise ValidationFailedError("API key required for multimodal embedding")
 
-        # Use the recommended unified model
-        model = dataset.get("embedding_model") or "tongyi-embedding-vision-plus"
+        # Use model from dataset or fall back to settings
+        model = dataset.get("embedding_model") or self.settings.knowledge.multimodal_embedding_model
+        max_concurrent = ec.get("max_concurrent") or self.settings.knowledge.multimodal_embedding_max_concurrent
 
         return UnifiedMultimodalEmbedding(
             api_key=api_key,
             model=model,
             base_url=ec.get("base_url"),
-            max_concurrent=ec.get("max_concurrent", 5),
+            max_concurrent=max_concurrent,
         )
+
+    def _get_text_embedder(
+        self,
+        dataset: Dict[str, Any],
+        embedding_config: Optional[Dict[str, Any]] = None,
+    ) -> "BaseEmbedding":
+        """Create embedder for text-only datasets using high-speed provider.
+
+        Uses settings.knowledge.text_embedding_* configuration.
+        Defaults to Gemini for faster embedding (100 items/batch, 5M TPM).
+        """
+        from .embedding import GeminiEmbedding, DashScopeEmbedding, create_embedding, EmbeddingConfig
+
+        ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
+        
+        # Check if dataset has explicit provider override
+        dataset_provider = str(dataset.get("embedding_provider") or "").lower()
+        dataset_model = str(dataset.get("embedding_model") or "")
+        
+        # Use dataset-specific config if explicitly set, otherwise use settings defaults
+        if dataset_provider and dataset_provider not in {"", "auto", "default"}:
+            # Dataset has explicit provider - use it
+            provider = dataset_provider
+            model = dataset_model
+        else:
+            # Use settings defaults for text embedding (Gemini for speed)
+            provider = self.settings.knowledge.text_embedding_provider
+            model = self.settings.knowledge.text_embedding_model
+        
+        # Resolve configuration based on provider
+        if provider in {"gemini", "google"}:
+            api_key = ec.get("api_key") or ""
+            if not api_key:
+                api_key = (
+                    self.settings.knowledge.gemini.api_key
+                    or os.getenv("GEMINI_API_KEY")
+                    or os.getenv("GOOGLE_API_KEY")
+                    or ""
+                )
+            if not api_key:
+                raise ValidationFailedError("Gemini api_key is required for text embedding")
+            
+            return GeminiEmbedding(
+                api_key=api_key,
+                model=model or "gemini-embedding-001",
+                dimension=self.settings.knowledge.text_embedding_dimension,
+                base_url=ec.get("base_url") or self.settings.knowledge.gemini.base_url,
+                timeout_seconds=30.0,
+            )
+        elif provider in {"dashscope", "aliyun"}:
+            api_key = ec.get("api_key") or ""
+            if not api_key:
+                api_key = (
+                    getattr(self.settings.knowledge.dashscope, "api_key", None)
+                    or os.getenv("DASHSCOPE_API_KEY")
+                    or os.getenv("ALIYUN_KEY")
+                    or ""
+                )
+            if not api_key:
+                raise ValidationFailedError("DashScope api_key is required for text embedding")
+            
+            return DashScopeEmbedding(
+                model=model or "text-embedding-v3",
+                api_key=api_key,
+                dimension=self.settings.knowledge.text_embedding_dimension,
+                base_url=ec.get("base_url"),
+            )
+        else:
+            # Fall back to local hash embedding
+            econf = EmbeddingConfig(
+                provider="local",
+                model=model or "hash-384",
+                api_key=None,
+                base_url=None,
+                timeout_seconds=5.0,
+            )
+            return create_embedding(econf)
+
+    def _convert_structured_chunks(
+        self,
+        structured_chunks: List[Dict[str, Any]],
+        document_id: str,
+        doc_name: str,
+        dataset_id: str,
+    ) -> List[Any]:
+        """
+        Convert structured parsing chunks to Chunk objects for embedding.
+        
+        This preserves the document structure (headings, images, tables)
+        for better multimodal retrieval.
+        """
+        from .chunking import Chunk, ContentType
+        
+        flat_chunks = []
+        
+        for i, sc in enumerate(structured_chunks):
+            chunk_type = sc.get("type", "text")
+            content = sc.get("content", "")
+            text = sc.get("text", content)  # Use text if available, else content
+            
+            # Determine content type based on chunk type
+            content_type = ContentType.TEXT
+            if chunk_type in ("image", "mixed"):
+                content_type = ContentType.MIXED
+            
+            # Create Chunk object
+            chunk = Chunk(
+                text=text,
+                index=i,  # Position in sequence
+                metadata={
+                    **sc.get("metadata", {}),
+                    "source_document": doc_name,
+                    "source_document_id": document_id,
+                    "source_dataset_id": dataset_id,
+                    "structured_chunk_type": chunk_type,
+                    "page_number": sc.get("page_number", 0),
+                    "section_title": sc.get("section_title"),
+                    "section_level": sc.get("section_level", 0),
+                },
+                content_type=content_type,
+            )
+            
+            # Mark if this chunk has associated images
+            if sc.get("has_images") or sc.get("images"):
+                chunk.metadata["has_images"] = True
+                chunk.metadata["image_count"] = len(sc.get("images", []))
+                # Store image metadata for later retrieval
+                chunk.metadata["associated_images"] = sc.get("images", [])
+            
+            flat_chunks.append(chunk)
+        
+        return flat_chunks
+
+    def _resolve_fusion_config(
+        self,
+        *,
+        retrieval_defaults: Dict[str, Any],
+        fusion_method: Optional[str],
+        fusion: Optional[str],
+        alpha: Optional[float],
+        dense_weight: Optional[float],
+        bm25_weight: Optional[float],
+        rrf_k: Optional[int],
+        rrf_weights: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
+        fusion_cfg = retrieval_defaults.get("fusion") if isinstance(retrieval_defaults, dict) else None
+        fusion_strategy = None
+        fusion_alpha = None
+        fusion_rrf_k = None
+        if isinstance(fusion_cfg, dict):
+            fusion_strategy = fusion_cfg.get("strategy")
+            fusion_alpha = fusion_cfg.get("alpha")
+            fusion_rrf_k = fusion_cfg.get("rrf_k")
+
+        effective_fusion_method = str(
+            (fusion_method if fusion_method is not None else
+             fusion if fusion is not None else
+             fusion_strategy or retrieval_defaults.get("fusion_method") or retrieval_defaults.get("fusion"))
+            or "rrf"
+        ).lower()
+        if effective_fusion_method == "alpha":
+            effective_fusion_method = "weighted"
+        if effective_fusion_method not in {"weighted", "rrf"}:
+            effective_fusion_method = "rrf"
+
+        if alpha is not None:
+            effective_dense_weight = float(alpha)
+            effective_bm25_weight = 1.0 - float(alpha)
+        elif fusion_alpha is not None:
+            effective_dense_weight = float(fusion_alpha)
+            effective_bm25_weight = 1.0 - float(fusion_alpha)
+        else:
+            effective_dense_weight = float(
+                dense_weight if dense_weight is not None else retrieval_defaults.get("dense_weight", 0.5)
+            )
+            effective_bm25_weight = float(
+                bm25_weight if bm25_weight is not None else retrieval_defaults.get("bm25_weight", 0.5)
+            )
+
+        # Legacy rrf_weights support
+        if rrf_weights and isinstance(rrf_weights, dict):
+            effective_dense_weight = float(rrf_weights.get("vector", effective_dense_weight))
+            effective_bm25_weight = float(rrf_weights.get("keyword", effective_bm25_weight))
+
+        rrf_k_value = int(rrf_k if rrf_k is not None else fusion_rrf_k or retrieval_defaults.get("rrf_k") or 60)
+
+        return {
+            "method": effective_fusion_method,
+            "dense_weight": effective_dense_weight,
+            "bm25_weight": effective_bm25_weight,
+            "rrf_k": rrf_k_value,
+        }
+
+    def _filter_candidates_by_metadata(
+        self,
+        candidates: List[Dict[str, Any]],
+        source_type: Optional[str],
+        language: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        if not source_type and not language:
+            return candidates
+        filtered: List[Dict[str, Any]] = []
+        for c in candidates:
+            meta = _ensure_dict(c.get("metadata"))
+            if source_type and str(meta.get("source_type")) != str(source_type):
+                continue
+            if language and str(meta.get("language")) != str(language):
+                continue
+            filtered.append(c)
+        return filtered
+
+    def _should_apply_score_threshold(self, mode: Optional[str]) -> bool:
+        return str(mode or "").lower() == "dense"
 
     async def _get_dataset_or_404(self, dataset_id: str) -> Dict[str, Any]:
         dataset = await self.db.get_dataset(dataset_id)
@@ -522,14 +950,28 @@ class KnowledgeService:
         mime_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        import logging
-        logger = logging.getLogger(__name__)
+
 
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc_id = str(uuid.uuid4())
 
         name = (filename or "").strip().lower()
         mime = (mime_type or "").strip().lower()
+
+        # Save document record immediately so frontend can show it while processing
+        initial_doc = {
+            "document_id": doc_id,
+            "dataset_id": dataset_id,
+            "title": filename or doc_id,
+            "source_type": "upload",
+            "mime_type": mime_type or "application/octet-stream",
+            "size_bytes": len(content_bytes),
+            "status": "parsing",
+            "progress": 0,
+            "content": "",
+            "metadata": metadata or {},
+        }
+        await self.db.save_document(initial_doc)
 
         extracted_images: List[IngestionExtractedImage] = []
         text: str = ""
@@ -546,11 +988,28 @@ class KnowledgeService:
                 )
                 text = extraction_result.text
                 extracted_images = extraction_result.embeddable_images
-                detected_mime = extraction_result.document_type
+                detected_mime = _resolve_mime_type(
+                    filename,
+                    mime_type,
+                    extraction_result.document_type,
+                )
                 logger.info(
                     f"Extraction complete: {len(text)} chars, "
                     f"{extraction_result.total_images} images ({len(extracted_images)} embeddable)"
                 )
+
+                # Scanned PDF: use image-only (no OCR). Log when we have enough page images.
+                if name.endswith(".pdf") or "application/pdf" in mime:
+                    min_images = getattr(
+                        self.settings.knowledge, "scanned_min_images_for_image_only", 5
+                    )
+                    embeddable_count = len(extracted_images) if extracted_images else 0
+                    if embeddable_count >= min_images:
+                        logger.info(
+                            f"Scanned PDF with {embeddable_count} embeddable images, "
+                            f"using multimodal image embeddings only"
+                        )
+
             except Exception as extract_err:
                 logger.warning(f"Image extraction failed, falling back to text-only: {extract_err}")
                 # Fallback to text-only extraction
@@ -566,25 +1025,79 @@ class KnowledgeService:
         # Prepare document metadata
         doc_metadata = metadata or {}
         stored_image_metadata = []
+        images_embedded = False  # Track if images were embedded in-memory
 
-        # Persist images to storage immediately if available
-        if extracted_images and self.image_storage_service:
+        # Resolve tenant for storage operations
+        dataset = None
+        tenant_id = None
+        if self.image_storage_service:
             dataset = await self._get_dataset_or_404(dataset_id)
             tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
+
+        # ============================================================
+        # IN-MEMORY DIRECT EMBEDDING: Embed images before S3 upload
+        # This avoids the slow S3 download during ingestion
+        # ============================================================
+        if extracted_images and self.multimodal_embedding:
+            try:
+                # Get collection name for vector storage
+                dataset_config = dataset or await self._get_dataset_or_404(dataset_id)
+                index_config = _ensure_dict(dataset_config.get("index_config"))
+                embedding_model = index_config.get("embedding_model") or self.settings.knowledge.default_embedding_model
+                
+                # Determine vector dimension
+                vector_dim = 1024  # Default for multimodal
+                if hasattr(self.multimodal_embedding, 'dimension'):
+                    vector_dim = self.multimodal_embedding.dimension
+                
+                collection = f"kb_{dataset_id}_{vector_dim}"
+                
+                # Ensure collection exists
+                await self.vector_store.ensure_collection(
+                    collection_name=collection,
+                    vector_size=vector_dim,
+                )
+                
+                logger.info(f"[Upload] Starting in-memory embedding for {len(extracted_images)} images...")
+                await self.db.update_document_status(doc_id, status="embedding_images", progress=10)
+                
+                # Embed images directly from memory
+                embed_count, embedded_meta = await self._embed_images_in_memory(
+                    embedder=self.multimodal_embedding,
+                    dataset_id=dataset_id,
+                    document_id=doc_id,
+                    images=extracted_images,
+                    collection=collection,
+                    base_position=0,
+                )
+                
+                if embed_count > 0:
+                    images_embedded = True
+                    doc_metadata["images_embedded"] = True
+                    doc_metadata["embedded_image_count"] = embed_count
+                    logger.info(f"[Upload] In-memory embedding complete: {embed_count} images embedded")
+                
+            except Exception as embed_err:
+                logger.warning(f"[Upload] In-memory embedding failed, will retry during ingestion: {embed_err}")
+                # Continue with upload, images will be embedded during ingestion
+
+        # ============================================================
+        # S3 UPLOAD: Now upload images to storage (after embedding)
+        # ============================================================
+        if extracted_images and self.image_storage_service:
+            logger.info(f"[Upload] Uploading {len(extracted_images)} images to S3...")
+            await self.db.update_document_status(doc_id, status="uploading_images", progress=65)
             
-            for idx, img in enumerate(extracted_images):
+            async def upload_single_image(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                """Upload a single image and return metadata."""
                 try:
-                    # Extract page_number from metadata or attributes
                     page_number = (
                         getattr(img, "page_number", None) or
                         img.metadata.get("page_number") if hasattr(img, "metadata") else None
                     )
-                    
-                    # Generate storage key
                     attachment_id = f"upload_{img.image_id}"
                     storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
                     
-                    # Upload to persistent storage
                     storage_url = await self.image_storage_service.upload_image(
                         tenant_id=tenant_id,
                         document_id=doc_id,
@@ -600,11 +1113,13 @@ class KnowledgeService:
                         },
                     )
                     
-                    # Store metadata with storage URL
-                    stored_image_metadata.append({
+                    actual_storage_key = self.image_storage_service._generate_key(
+                        tenant_id, doc_id, attachment_id, storage_filename
+                    )
+                    return {
                         "image_id": img.image_id,
                         "storage_url": storage_url,
-                        "storage_key": f"{tenant_id}/{doc_id}/images/{attachment_id}_{storage_filename}",
+                        "storage_key": actual_storage_key,
                         "mime_type": img.mime_type,
                         "width": img.width,
                         "height": img.height,
@@ -612,12 +1127,10 @@ class KnowledgeService:
                         "size_bytes": img.size_bytes,
                         "context_text": img.context_text[:200] if img.context_text else "",
                         "source_location": img.source_location,
-                    })
-                    logger.debug(f"Persisted image {img.image_id} to storage: {storage_url}")
+                    }
                 except Exception as store_err:
                     logger.warning(f"Failed to persist image {img.image_id}: {store_err}")
-                    # Still include in metadata but without storage URL
-                    stored_image_metadata.append({
+                    return {
                         "image_id": img.image_id,
                         "storage_url": None,
                         "mime_type": img.mime_type,
@@ -627,12 +1140,113 @@ class KnowledgeService:
                         "size_bytes": img.size_bytes,
                         "context_text": img.context_text[:200] if img.context_text else "",
                         "error": str(store_err),
-                    })
+                    }
+            
+            # Parallel upload with concurrency limit (reduced for stability)
+            upload_semaphore = asyncio.Semaphore(10)
+            
+            async def upload_with_semaphore(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                async with upload_semaphore:
+                    return await upload_single_image(idx, img)
+            
+            upload_tasks = [upload_with_semaphore(i, img) for i, img in enumerate(extracted_images)]
+            upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+            
+            for result in upload_results:
+                if isinstance(result, Exception):
+                    logger.warning(f"Image upload failed: {result}")
+                    continue
+                stored_image_metadata.append(result)
+            
+            logger.info(f"[Upload] S3 upload complete: {len(stored_image_metadata)}/{len(extracted_images)} images")
 
         if stored_image_metadata:
             doc_metadata["extracted_images"] = stored_image_metadata
             doc_metadata["image_count"] = len(stored_image_metadata)
             logger.info(f"Document {doc_id} has {len(stored_image_metadata)} images persisted to storage")
+
+        # Persist original file to storage for future re-extraction (reindex)
+        if self.image_storage_service and tenant_id:
+            try:
+                original_key = await self.image_storage_service.upload_original_file(
+                    tenant_id=tenant_id,
+                    document_id=doc_id,
+                    filename=filename,
+                    content=content_bytes,
+                    content_type=mime_type or "application/octet-stream",
+                )
+                doc_metadata["original_file_key"] = original_key
+                doc_metadata["original_filename"] = filename
+                doc_metadata["original_mime_type"] = mime_type or "application/octet-stream"
+                logger.info(f"Original file persisted to storage: {original_key}")
+            except Exception as e:
+                logger.warning(f"Failed to persist original file to storage: {e}")
+        
+        # Structured document parsing for PDFs (enhanced multimodal support)
+        # Check if enabled via dataset config or global settings
+        dataset_config = await self.db.get_dataset(dataset_id) if self.db else None
+        dataset_index_config = _ensure_dict(dataset_config.get("index_config")) if dataset_config else {}
+        parsing_config = dataset_index_config.get("parsing", {})
+        
+        # Enable structured parsing by default for PDFs, can be disabled per-dataset
+        use_structured_parsing = parsing_config.get("structured", True)
+        
+        structured_chunks = None
+        if name.endswith(".pdf") and self.structured_parser and use_structured_parsing:
+            try:
+                logger.info(f"Running structured document parsing for {filename}")
+                parse_result = await self.structured_parser.parse_pdf(
+                    content_bytes, 
+                    filename=filename
+                )
+                
+                # Convert structured chunks to serializable format
+                structured_chunks = []
+                for chunk in parse_result.chunks:
+                    chunk_data = {
+                        "type": chunk.type.value,
+                        "content": chunk.content,
+                        "page_number": chunk.page_number,
+                        "text": chunk.text,
+                        "has_images": chunk.has_images,
+                        "metadata": chunk.metadata,
+                        "section_title": chunk.section_title,
+                        "section_level": chunk.section_level,
+                    }
+                    # Include image metadata (but not bytes for storage)
+                    if chunk.images:
+                        chunk_data["images"] = [
+                            {
+                                "image_id": img.get("image_id"),
+                                "mime_type": img.get("mime_type"),
+                                "width": img.get("width"),
+                                "height": img.get("height"),
+                            }
+                            for img in chunk.images
+                        ]
+                    structured_chunks.append(chunk_data)
+                
+                doc_metadata["structured_parsing"] = {
+                    "enabled": True,
+                    "total_chunks": len(parse_result.chunks),
+                    "text_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.TEXT]),
+                    "heading_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.HEADING]),
+                    "image_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.IMAGE]),
+                    "table_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.TABLE]),
+                    "chunks": structured_chunks,
+                }
+                logger.info(
+                    f"Structured parsing complete: {len(parse_result.chunks)} chunks "
+                    f"({len([c for c in parse_result.chunks if c.type == ChunkType.IMAGE])} images, "
+                    f"{len([c for c in parse_result.chunks if c.type == ChunkType.TABLE])} tables)"
+                )
+            except Exception as e:
+                logger.warning(f"Structured parsing failed, falling back to standard extraction: {e}")
+                doc_metadata["structured_parsing"] = {"enabled": False, "error": str(e)}
+
+        # Mark that full extraction ran at upload — ingest_document will skip re-extraction
+        # to avoid duplicate processing.
+        doc_metadata["ocr_processed"] = True
 
         doc = {
             "document_id": doc_id,
@@ -862,6 +1476,7 @@ class KnowledgeService:
 
     async def ingest_document(self, dataset_id: str, document_id: str) -> None:
         try:
+            logger.info(f"Ingest started for document {document_id} (dataset={dataset_id})")
             dataset = await self._get_dataset_or_404(dataset_id)
             doc = await self.db.get_document(document_id)
             if not doc or str(doc.get("dataset_id")) != dataset_id:
@@ -870,6 +1485,61 @@ class KnowledgeService:
             await self.db.update_document_status(document_id, status="parsing", progress=10)
 
             raw_text = str(doc.get("content") or "")
+
+            # Re-extract from original file only when content is empty and we did not already
+            # run the full extraction pipeline at upload (ocr_processed). Skip re-extraction
+            # when upload already ran full extraction to avoid duplicate processing.
+            doc_meta = doc.get("metadata") or {}
+            original_key = doc_meta.get("original_file_key")
+            doc_already_processed = doc_meta.get("ocr_processed", False)
+            if original_key and self.image_storage_service and not raw_text.strip() and not doc_already_processed:
+                try:
+                    logger.info(f"Downloading original file for re-extraction: {original_key}")
+                    original_bytes = await self.image_storage_service.download_original_file(
+                        original_key
+                    )
+                    original_filename = doc_meta.get("original_filename", "")
+                    original_mime = doc_meta.get("original_mime_type", "")
+
+                    # Re-run full extraction pipeline (multimodal, no OCR)
+                    if self.multimodal_embedding and self.image_storage_service:
+                        extraction_result = await self.document_image_extractor.extract(
+                            filename=original_filename,
+                            content=original_bytes,
+                        )
+                        re_text = extraction_result.text
+                        re_extracted_images = extraction_result.embeddable_images
+                        name_lower = original_filename.lower()
+                        if name_lower.endswith(".pdf") or "pdf" in (original_mime or "").lower():
+                            min_images = getattr(
+                                self.settings.knowledge, "scanned_min_images_for_image_only", 5
+                            )
+                            embeddable_count = len(re_extracted_images) if re_extracted_images else 0
+                            if embeddable_count >= min_images:
+                                logger.info(
+                                    f"Re-extraction: Scanned PDF with {embeddable_count} images, "
+                                    f"using multimodal embeddings only"
+                                )
+                    else:
+                        re_text, _ = await asyncio.to_thread(
+                            self._extract_text_from_bytes,
+                            original_bytes,
+                            original_filename,
+                            original_mime,
+                        )
+
+                    if re_text and len(re_text.strip()) > len(raw_text.strip()):
+                        raw_text = re_text
+                        await self.db.update_document_content(document_id, raw_text)
+                        logger.info(
+                            f"Re-extracted {len(raw_text)} chars from original file "
+                            f"(was {len(str(doc.get('content') or ''))} chars)"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to re-extract from original file: {e}, using stored content"
+                    )
+
             text = raw_text.strip()
             if not text:
                 await self.db.update_document_status(
@@ -879,29 +1549,115 @@ class KnowledgeService:
 
             await self.db.update_document_status(document_id, status="segmenting", progress=25)
             
-            # Get chunking configuration from dataset's index_config
-            index_config = _ensure_dict(dataset.get("index_config"))
-            chunking_config_dict = _ensure_dict(index_config.get("chunking"))
+            # Check if structured parsing results are available (for enhanced multimodal docs)
+            structured_parsing = doc_meta.get("structured_parsing", {})
+            use_structured_chunks = (
+                structured_parsing.get("enabled") and 
+                structured_parsing.get("chunks") and
+                len(structured_parsing.get("chunks", [])) > 0
+            )
             
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"Chunking config for document {document_id}: {chunking_config_dict}")
+            doc_name = str(doc.get("name") or doc.get("title") or document_id)
             
-            chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
-            logger.info(f"Parsed chunking config: mode={chunking_config.mode.value}, chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}")
-            
-            # Use the new configurable chunking module
-            chunk_objects = process_document(text, chunking_config, document_id)
-            logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
-            
-            # Flatten hierarchical chunks if needed
-            flat_chunks = flatten_chunks(chunk_objects)
-            
+            if use_structured_chunks:
+                # Use structured parsing results for intelligent chunking
+                logger.info(f"Using structured parsing results for document {document_id}")
+                flat_chunks = self._convert_structured_chunks(
+                    structured_parsing["chunks"], 
+                    document_id, 
+                    doc_name,
+                    dataset_id
+                )
+                logger.info(f"Created {len(flat_chunks)} chunks from structured parsing")
+            else:
+                # Standard chunking flow
+                index_config = _ensure_dict(dataset.get("index_config"))
+                chunking_config_dict = _ensure_dict(index_config.get("chunking"))
+                
+                logger.info(f"Chunking config for document {document_id}: {chunking_config_dict}")
+                
+                chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
+                logger.info(f"Parsed chunking config: mode={chunking_config.mode.value}, chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}")
+                
+                # Use the new configurable chunking module
+                chunk_objects = process_document(text, chunking_config, document_id)
+                logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
+
+                # Flatten hierarchical chunks if needed
+                flat_chunks = flatten_chunks(chunk_objects)
+
+                # Merge undersized chunks AFTER flattening (must operate on leaf chunks)
+                flat_chunks = merge_small_chunks(
+                    flat_chunks,
+                    min_size=chunking_config.min_chunk_size,
+                    max_size=chunking_config.max_chunk_size,
+                )
+
+                # Inject source traceability metadata into every chunk
+                for c in flat_chunks:
+                    c.metadata["source_document"] = doc_name
+                    c.metadata["source_document_id"] = document_id
+                    c.metadata["source_dataset_id"] = dataset_id
+
+            # === Islamic metadata extraction (opt-in via dataset config) ===
+            islamic_cfg = (
+                dataset.get("index_config", {}).get("retrieval", {}).get("islamic", {})
+                if isinstance(dataset.get("index_config"), dict) else {}
+            )
+            islamic_enabled = any(islamic_cfg.get(k) for k in (
+                "multi_query", "citation_format", "authority_sort", "contextual_prefix",
+            ))
+            if islamic_enabled:
+                try:
+                    from .islamic_metadata import IslamicMetadataExtractor
+                    metadata_extractor = IslamicMetadataExtractor()
+                    doc_meta_for_islamic = {
+                        "title": doc_name,
+                        "name": doc_name,
+                        **(doc.get("metadata") or {}),
+                    }
+                    for c in flat_chunks:
+                        islamic_meta = metadata_extractor.extract(c.text, doc_meta_for_islamic)
+                        c.metadata.update(islamic_meta)
+                    logger.info(f"Islamic metadata extracted for {len(flat_chunks)} chunks")
+                except Exception as meta_err:
+                    logger.warning(f"Islamic metadata extraction failed (non-fatal): {meta_err}")
+
+            # === Contextual retrieval prefix (opt-in via dataset config) ===
+            if islamic_cfg.get("contextual_prefix"):
+                try:
+                    from .contextual_retrieval import ContextualRetrieval
+                    ctx_retrieval = ContextualRetrieval()
+                    doc_meta_ctx = {"title": doc_name, "name": doc_name}
+                    for c in flat_chunks:
+                        prefix = await ctx_retrieval.generate_context_prefix(
+                            chunk_text=c.text,
+                            document_text=text[:5000],
+                            document_metadata=doc_meta_ctx,
+                            chunk_metadata=c.metadata,
+                        )
+                        if prefix:
+                            c.metadata["contextual_prefix"] = prefix
+                            c.metadata["original_text"] = c.text
+                            c.text = f"{prefix}{c.text}"
+                    logger.info(f"Contextual prefixes generated for {len(flat_chunks)} chunks")
+                except Exception as ctx_err:
+                    logger.warning(f"Contextual retrieval prefix generation failed (non-fatal): {ctx_err}")
+
             # Convert to the format expected by the rest of the pipeline
             # Include content_hash for incremental update detection
+            # Hash the ORIGINAL text (before contextual prefix) so prefix format
+            # changes don't invalidate hashes and force unnecessary re-embedding.
             import hashlib
             chunks = [
-                (c.text, c.token_count, hashlib.md5(c.text.encode()).hexdigest())
+                (
+                    c.text,
+                    c.token_count,
+                    hashlib.sha256(
+                        (c.metadata.get("original_text") or c.text).encode()
+                    ).hexdigest(),
+                    c.metadata,
+                )
                 for c in flat_chunks
             ]
 
@@ -920,7 +1676,7 @@ class KnowledgeService:
             unchanged_segments = []  # segment_ids to keep as-is
             vectors_to_delete = []  # old vector_ids that need replacement
 
-            for pos, (text, token_count, content_hash) in enumerate(chunks):
+            for pos, (text, token_count, content_hash, chunk_meta) in enumerate(chunks):
                 old_seg = existing_hashes.get(pos)
                 if old_seg and old_seg.get("content_hash") == content_hash:
                     # Content unchanged - keep existing segment and vector
@@ -928,7 +1684,7 @@ class KnowledgeService:
                     logger.info(f"Segment at position {pos} unchanged, skipping embed")
                 else:
                     # Content changed or new - needs embedding
-                    chunks_to_embed.append((pos, text, token_count, content_hash))
+                    chunks_to_embed.append((pos, text, token_count, content_hash, chunk_meta))
                     if old_seg and old_seg.get("vector_id"):
                         # Old vector needs to be replaced
                         vectors_to_delete.append(old_seg["vector_id"])
@@ -948,8 +1704,6 @@ class KnowledgeService:
                 f"{len(excess_segments)} to delete"
             )
 
-            embedding_provider = str(dataset.get("embedding_provider") or "local")
-            embedding_model = str(dataset.get("embedding_model") or "hash-384")
             embedding_config = _ensure_dict(dataset.get("embedding_config"))
 
             # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
@@ -957,32 +1711,29 @@ class KnowledgeService:
 
             embedder: Optional[BaseEmbedding] = None
             embed_timeout = 60.0  # Default timeout for embedding operations
+            embedding_provider_used = ""
             try:
                 if is_multimodal:
                     # Use UnifiedMultimodalEmbedding for consistent text-image vector space
                     logger.info(f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}")
                     embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
                     embed_timeout = 90.0  # Longer timeout for multimodal
+                    embedding_provider_used = "dashscope_multimodal"
                 else:
-                    econf = self._resolve_embedding_config(
-                        provider=embedding_provider,
-                        model=embedding_model,
-                        embedding_config=embedding_config,
+                    # Use high-speed text embedder (Gemini by default)
+                    embedder = self._get_text_embedder(dataset, embedding_config)
+                    embed_timeout = 60.0
+                    embedding_provider_used = self.settings.knowledge.text_embedding_provider
+                    logger.info(
+                        f"Using {embedding_provider_used} text embedding for dataset {dataset_id} "
+                        f"(batch_size={self.settings.knowledge.text_embedding_batch_size})"
                     )
-                    embedder = create_embedding(
-                        econf, dimension=int(dataset.get("embedding_dimension") or 0) or None
-                    )
-                    embed_timeout = float(econf.timeout_seconds) + 30.0
 
                 # If dimension is unknown, dry-run to fetch it.
                 if embedder._dimension is None:
-                    # Default timeout for multimodal (no econf available)
-                    timeout_val = 35.0
-                    if not is_multimodal and 'econf' in dir():
-                        timeout_val = float(econf.timeout_seconds) + 5.0
                     await asyncio.wait_for(
                         embedder.embed_query("test"),
-                        timeout=timeout_val,
+                        timeout=35.0,
                     )
 
                 dim = embedder._dimension or 1024  # fallback
@@ -1013,31 +1764,68 @@ class KnowledgeService:
 
                 # If no chunks need embedding, skip to cleanup
                 if chunks_to_embed:
-                    # Use smaller batch size for DashScope compatibility (max 10 per API call)
-                    batch_size = 8
+                    # Use provider-specific batch sizes from settings
+                    # Gemini: 50 (supports 100), DashScope: 10
+                    if is_multimodal:
+                        batch_size = 10  # DashScope multimodal
+                        max_concurrent = self.settings.knowledge.multimodal_embedding_max_concurrent
+                    else:
+                        batch_size = self.settings.knowledge.text_embedding_batch_size
+                        max_concurrent = self.settings.knowledge.text_embedding_max_concurrent
+                    
                     total = len(chunks_to_embed)
                     embedded = 0
 
+                    # OPTIMIZATION: Concurrent embedding for massive performance boost
+                    # Split chunks into batches
+                    batches = []
                     for i in range(0, total, batch_size):
                         batch = chunks_to_embed[i : i + batch_size]
-                        texts = [text for _, text, _, _ in batch]
-
-                        try:
-                            vectors = await asyncio.wait_for(
-                                embedder.embed_documents(texts),
-                                timeout=embed_timeout,
-                            )
-                        except Exception as embed_err:
-                            # Log detailed error for debugging
-                            text_lengths = [len(t) for t in texts]
-                            logger.error(
-                                f"Embedding failed for batch {i // batch_size + 1}: {embed_err}. "
-                                f"Text lengths: {text_lengths}, Provider: {embedding_provider}, Model: {embedding_model}"
-                            )
-                            raise
-
-                        for j, (pos, chunk_text, token_count, content_hash) in enumerate(batch):
+                        batches.append((i // batch_size, batch))
+                    
+                    # Process batches concurrently with configurable parallelism
+                    effective_concurrent = min(max_concurrent, len(batches))
+                    semaphore = asyncio.Semaphore(effective_concurrent)
+                    
+                    logger.info(
+                        f"Embedding {total} chunks in {len(batches)} batches "
+                        f"(batch_size={batch_size}, max_concurrent={effective_concurrent})"
+                    )
+                    
+                    async def embed_single_batch(batch_idx: int, batch: list) -> tuple[int, list, list]:
+                        """Embed one batch and return (index, vectors, batch_data)"""
+                        texts = [text for _, text, _, _, _ in batch]
+                        
+                        async with semaphore:
+                            try:
+                                vectors = await asyncio.wait_for(
+                                    embedder.embed_documents(texts),
+                                    timeout=embed_timeout,
+                                )
+                                return (batch_idx, vectors, batch)
+                            except Exception as embed_err:
+                                text_lengths = [len(t) for t in texts]
+                                logger.error(
+                                    f"Embedding failed for batch {batch_idx + 1}: {embed_err}. "
+                                    f"Text lengths: {text_lengths}, Provider: {embedding_provider_used}"
+                                )
+                                raise
+                    
+                    # Launch all embedding tasks concurrently
+                    tasks = [embed_single_batch(idx, batch) for idx, batch in batches]
+                    
+                    # Process results as they complete (for progressive updates)
+                    for coro in asyncio.as_completed(tasks):
+                        batch_idx, vectors, batch = await coro
+                        
+                        # Build segments for this batch
+                        for j, (pos, chunk_text, token_count, content_hash, chunk_meta) in enumerate(batch):
                             seg_id = str(uuid.uuid4())
+                            seg_metadata = dict(chunk_meta) if chunk_meta else {}
+                            seg_metadata["position"] = pos
+                            
+                            display_text = seg_metadata.pop("original_text", chunk_text)
+
                             payload = {
                                 "dataset_id": dataset_id,
                                 "document_id": document_id,
@@ -1045,6 +1833,8 @@ class KnowledgeService:
                                 "position": pos,
                                 "text": chunk_text,
                                 "token_count": token_count,
+                                "source_type": seg_metadata.get("source_type", "unknown"),
+                                "language": seg_metadata.get("language", "en"),
                             }
                             points.append(
                                 qmodels.PointStruct(
@@ -1059,11 +1849,11 @@ class KnowledgeService:
                                     "dataset_id": dataset_id,
                                     "document_id": document_id,
                                     "position": pos,
-                                    "text": chunk_text,
+                                    "text": display_text,
                                     "token_count": token_count,
                                     "vector_id": seg_id,
                                     "content_hash": content_hash,
-                                    "metadata": {},
+                                    "metadata": seg_metadata,
                                 }
                             )
 
@@ -1072,6 +1862,7 @@ class KnowledgeService:
                         await self.db.update_document_status(
                             document_id, status="embedding", progress=min(progress, 95)
                         )
+                        logger.debug(f"Batch {batch_idx+1}/{len(batches)} embedded ({embedded}/{total} chunks)")
 
                     # Upsert new/changed vectors and segments
                     await self.vector_store.upsert(collection_name=collection, points=points)
@@ -1110,16 +1901,43 @@ class KnowledgeService:
                     await self.db.save_dataset(updated)
 
                 # Process images if multimodal embedding is available
+                # FALLBACK MODE: Use system-level multimodal embedding even if dataset uses text-only model
+                # This ensures we don't lose image processing capability due to dataset config mismatch
                 image_count = 0
-                if self.multimodal_embedding and self.image_storage_service:
-                    # Load image metadata from document (for file uploads)
-                    image_metadata_list = doc.get("metadata", {}).get("extracted_images", [])
-                    if image_metadata_list:
+                doc_metadata = doc.get("metadata", {})
+                image_metadata_list = doc_metadata.get("extracted_images", [])
+                
+                # Check if images were already embedded during upload (in-memory direct embedding)
+                images_already_embedded = doc_metadata.get("images_embedded", False)
+                if images_already_embedded:
+                    embedded_count = doc_metadata.get("embedded_image_count", 0)
+                    logger.info(
+                        f"[Ingest] Images already embedded during upload: {embedded_count} images, skipping re-embedding"
+                    )
+                    image_count = embedded_count
+                else:
+                    # Determine which multimodal embedder to use
+                    multimodal_embedder = None
+                    if is_multimodal and embedder and getattr(embedder, 'supports_multimodal', False):
+                        # Dataset is configured for multimodal - use the unified embedder
+                        multimodal_embedder = embedder
+                        logger.info(f"Using dataset's multimodal embedder for {len(image_metadata_list)} images")
+                    elif self.multimodal_embedding and self.image_storage_service and image_metadata_list:
+                        # FALLBACK: Dataset uses text-only, but system has multimodal capability
+                        # Process images with system-level multimodal embedding (separate vector space)
+                        multimodal_embedder = self.multimodal_embedding
+                        logger.info(
+                            f"FALLBACK: Using system-level multimodal embedding for {len(image_metadata_list)} images "
+                            f"(dataset configured with text-only provider '{embedding_provider_used}')"
+                        )
+                    
+                    if multimodal_embedder and self.image_storage_service and image_metadata_list:
                         await self.db.update_document_status(
                             document_id, status="embedding_images", progress=85
                         )
                         try:
-                            image_count = await self._process_document_images_from_storage(
+                            image_count = await self._process_document_images_with_embedder(
+                                embedder=multimodal_embedder,
                                 dataset_id=dataset_id,
                                 document_id=document_id,
                                 image_metadata_list=image_metadata_list,
@@ -1166,6 +1984,12 @@ class KnowledgeService:
                 # Update document segment_count after successful ingestion
                 await self.db.refresh_document_segment_count(document_id)
 
+                # Clear needs_reindex flag if this was a reindex operation
+                try:
+                    await self.db.clear_dataset_needs_reindex(dataset_id)
+                except Exception as clear_err:
+                    logger.warning(f"Failed to clear needs_reindex flag for {dataset_id}: {clear_err}")
+
                 await self.db.update_document_status(document_id, status="completed", progress=100)
             except Exception as exc:
                 logger.error(
@@ -1192,8 +2016,9 @@ class KnowledgeService:
                 pass
             return
 
-    async def _process_document_images_from_storage(
+    async def _process_document_images_with_embedder(
         self,
+        embedder: Any,  # Multimodal embedder
         dataset_id: str,
         document_id: str,
         image_metadata_list: List[Dict[str, Any]],
@@ -1202,7 +2027,12 @@ class KnowledgeService:
         tenant_id: str = "default",
     ) -> int:
         """
-        Process and embed images loaded from persistent storage with VLM enrichment.
+        Process and embed images loaded from persistent storage.
+        
+        Optimized for parallel processing:
+        1. Parallel image loading (concurrent downloads)
+        2. Batch embedding (single API call for multiple images)
+        3. Batch database/vector store operations
 
         Args:
             dataset_id: Dataset ID
@@ -1215,79 +2045,120 @@ class KnowledgeService:
         Returns:
             Number of successfully processed images
         """
-        import logging
-        logger = logging.getLogger(__name__)
-
-        if not self.multimodal_embedding or not self.image_storage_service or not image_metadata_list:
+        if not embedder or not self.image_storage_service or not image_metadata_list:
             return 0
 
         from qdrant_client.http import models as qmodels
+        
+        total_images = len(image_metadata_list)
+        logger.info(f"Processing {total_images} images in parallel batches...")
 
-        processed = 0
-        image_points = []
-        image_segments = []
-
-        for idx, img_meta in enumerate(image_metadata_list):
-            try:
-                storage_url = img_meta.get("storage_url")
-                if not storage_url:
-                    logger.debug(f"Skipping image {img_meta.get('image_id')} - no storage URL")
-                    continue
-
-                # Load image from storage
+        # Step 1: Load images from storage (parallel download with retry)
+        MAX_DOWNLOAD_RETRIES = 3
+        
+        async def load_image(idx: int, img_meta: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[bytes]]:
+            """Load a single image from storage with retry, return (idx, metadata, bytes or None)."""
+            storage_url = img_meta.get("storage_url")
+            if not storage_url:
+                return (idx, img_meta, None)
+            
+            storage_key = img_meta.get("storage_key")
+            for retry in range(MAX_DOWNLOAD_RETRIES):
                 try:
-                    # Extract storage key from metadata or reconstruct from URL
-                    storage_key = img_meta.get("storage_key")
                     if storage_key:
                         image_bytes = await self.image_storage_service._backend.download(storage_key)
                     else:
-                        # Fallback: try to download from URL
                         import httpx
-                        async with httpx.AsyncClient(timeout=30.0) as client:
+                        async with httpx.AsyncClient(timeout=60.0) as client:
                             response = await client.get(storage_url)
                             response.raise_for_status()
                             image_bytes = response.content
-                    logger.debug(f"Loaded image {img_meta.get('image_id')} from storage ({len(image_bytes)} bytes)")
-                except Exception as load_err:
-                    logger.warning(f"Failed to load image {img_meta.get('image_id')} from storage: {load_err}")
+                    return (idx, img_meta, image_bytes)
+                except Exception as e:
+                    if retry < MAX_DOWNLOAD_RETRIES - 1:
+                        wait_time = 2 ** retry  # 1s, 2s
+                        logger.debug(f"Download retry {retry + 1} for image {idx} in {wait_time}s: {e}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.warning(f"Failed to load image {img_meta.get('image_id')} after {MAX_DOWNLOAD_RETRIES} retries: {e}")
+            return (idx, img_meta, None)
+
+        # Load all images in parallel (limit concurrency to avoid S3 socket timeouts)
+        load_semaphore = asyncio.Semaphore(5)  # Reduced from 20 to 5
+        
+        async def load_with_semaphore(idx: int, meta: Dict) -> Tuple[int, Dict, Optional[bytes]]:
+            async with load_semaphore:
+                return await load_image(idx, meta)
+
+        load_tasks = [load_with_semaphore(i, m) for i, m in enumerate(image_metadata_list)]
+        load_results = await asyncio.gather(*load_tasks, return_exceptions=True)
+        
+        # Filter successful loads
+        loaded_images: List[Tuple[int, Dict[str, Any], bytes]] = []
+        for result in load_results:
+            if isinstance(result, Exception):
+                continue
+            idx, meta, img_bytes = result
+            if img_bytes:
+                loaded_images.append((idx, meta, img_bytes))
+        
+        logger.info(f"Loaded {len(loaded_images)}/{total_images} images from storage")
+        
+        if not loaded_images:
+            return 0
+
+        # Step 2: Batch embed images (DashScope supports batch)
+        # Process in batches to avoid API limits
+        EMBED_BATCH_SIZE = 8  # Reduced batch size for stability
+        MAX_RETRIES = 3
+        
+        image_points = []
+        image_segments = []
+        processed = 0
+        
+        for batch_start in range(0, len(loaded_images), EMBED_BATCH_SIZE):
+            batch = loaded_images[batch_start:batch_start + EMBED_BATCH_SIZE]
+            batch_bytes = [img_bytes for _, _, img_bytes in batch]
+            
+            # Retry with exponential backoff
+            vectors = None
+            for retry in range(MAX_RETRIES):
+                try:
+                    # Single API call for batch embedding
+                    batch_num = batch_start // EMBED_BATCH_SIZE + 1
+                    logger.info(f"Embedding batch {batch_num}: {len(batch)} images... (attempt {retry + 1}/{MAX_RETRIES})")
+                    vectors = await embedder.embed_images(batch_bytes)
+                    
+                    if vectors and len(vectors) == len(batch):
+                        break  # Success
+                    else:
+                        logger.warning(f"Embedding returned {len(vectors) if vectors else 0} vectors for {len(batch)} images")
+                        vectors = None
+                except Exception as e:
+                    logger.warning(f"Batch {batch_num} embedding attempt {retry + 1} failed: {e}")
+                    if retry < MAX_RETRIES - 1:
+                        wait_time = 2 ** retry  # 1s, 2s, 4s
+                        logger.info(f"Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"Batch {batch_num} failed after {MAX_RETRIES} attempts, skipping")
+            
+            if not vectors:
+                continue  # Skip this batch if all retries failed
+            
+            # Create points and segments for this batch
+            for i, (idx, img_meta, img_bytes) in enumerate(batch):
+                vector = vectors[i]
+                if not vector:
                     continue
-
-                # Generate VLM description if VLM service is available
-                vlm_description = None
-                if self.vlm_service:
-                    try:
-                        # Determine image type for better prompts
-                        context_text = img_meta.get("context_text", "")
-                        image_type = "table" if "table" in context_text.lower() or "chart" in context_text.lower() else "general"
-                        
-                        vlm_result = await self.vlm_service.describe_image(
-                            image_bytes=image_bytes,
-                            image_type=image_type,
-                            context=context_text[:200] if context_text else None,
-                            max_tokens=1500,
-                        )
-                        vlm_description = vlm_result.description
-                        logger.debug(f"Generated VLM description for image {img_meta.get('image_id')}: {len(vlm_description)} chars")
-                    except Exception as vlm_err:
-                        logger.warning(f"VLM description failed for image {img_meta.get('image_id')}: {vlm_err}")
-                        # Continue without VLM description
-
-                # Embed the image (with context if available)
-                logger.debug(f"Embedding image {img_meta.get('image_id')} ({img_meta.get('width')}x{img_meta.get('height')})")
-                embeddings = await self.multimodal_embedding.embed_images([image_bytes])
-
-                if not embeddings or not embeddings[0]:
-                    logger.warning(f"No embedding returned for image {img_meta.get('image_id')}")
-                    continue
-
-                vector = embeddings[0]
+                
                 seg_id = str(uuid.uuid4())
                 position = base_position + idx
+                storage_url = img_meta.get("storage_url", "")
+                
+                # Use context text as image description (skip slow VLM calls)
+                image_text = img_meta.get("context_text", "") or f"[Image: page {img_meta.get('page_number', 'unknown')}]"
 
-                # Prepare text for embedding context (use VLM description if available, otherwise context text)
-                image_text = vlm_description or img_meta.get("context_text", "") or f"[Image: {img_meta.get('source_location', 'unknown')}]"
-
-                # Prepare payload for Qdrant
                 payload = {
                     "dataset_id": dataset_id,
                     "document_id": document_id,
@@ -1300,18 +2171,12 @@ class KnowledgeService:
                     "image_width": img_meta.get("width"),
                     "image_height": img_meta.get("height"),
                     "image_page": img_meta.get("page_number"),
-                    "vlm_description": vlm_description,  # Store VLM description in payload
                 }
 
                 image_points.append(
-                    qmodels.PointStruct(
-                        id=seg_id,
-                        vector=vector,
-                        payload=payload,
-                    )
+                    qmodels.PointStruct(id=seg_id, vector=vector, payload=payload)
                 )
 
-                # Prepare segment for database
                 image_segments.append({
                     "segment_id": seg_id,
                     "dataset_id": dataset_id,
@@ -1326,7 +2191,6 @@ class KnowledgeService:
                     "image_filename": img_meta.get("storage_key", "").split("/")[-1] if img_meta.get("storage_key") else f"image_{idx}",
                     "image_media_type": img_meta.get("mime_type"),
                     "image_file_size": img_meta.get("size_bytes", 0),
-                    "vlm_description": vlm_description,  # Store in DB
                     "metadata": {
                         "width": img_meta.get("width"),
                         "height": img_meta.get("height"),
@@ -1334,30 +2198,243 @@ class KnowledgeService:
                         "source_location": img_meta.get("source_location"),
                     },
                 })
-
                 processed += 1
+            
+            # Update progress after each batch
+            progress = 85 + (batch_start + len(batch)) / len(loaded_images) * 10  # 85% -> 95%
+            await self.db.update_document_status(document_id, status="embedding_images", progress=progress)
+            logger.info(f"Batch complete: {processed}/{len(loaded_images)} images embedded, progress={progress:.1f}%")
 
-            except Exception as e:
-                logger.warning(f"Failed to process image {img_meta.get('image_id', idx)}: {e}")
-                continue
-
-        # Upsert image vectors to Qdrant
+        # Step 3: Batch upsert to Qdrant
         if image_points:
             try:
+                # Debug: validate vectors before upserting
+                sample_point = image_points[0]
+                sample_vector = sample_point.vector if sample_point else []
+                
+                # Check for NaN/Infinity in vectors
+                import math
+                has_invalid = False
+                for i, pt in enumerate(image_points):
+                    vec = pt.vector
+                    if any(math.isnan(v) or math.isinf(v) for v in vec):
+                        logger.error(f"Point {i} has invalid vector values (NaN/Inf)")
+                        has_invalid = True
+                        break
+                
+                logger.info(
+                    f"Upserting {len(image_points)} image vectors to collection={collection}, "
+                    f"vector_dim={len(sample_vector)}, sample_id={sample_point.id}, "
+                    f"has_invalid={has_invalid}"
+                )
+                
+                if has_invalid:
+                    raise ValueError("Vectors contain NaN or Infinity values")
+                
                 await self.vector_store.upsert(collection_name=collection, points=image_points)
-                logger.info(f"Upserted {len(image_points)} image vectors to collection {collection}")
+                logger.info(f"Successfully upserted {len(image_points)} image vectors to collection {collection}")
             except Exception as e:
-                logger.error(f"Failed to upsert image vectors: {e}")
+                logger.error(f"Failed to upsert image vectors to collection={collection}: {e}")
+                # Log more details for debugging
+                if image_points:
+                    pt = image_points[0]
+                    logger.error(f"Sample point: id={pt.id}, vector_len={len(pt.vector) if pt.vector else 0}, payload_keys={list(pt.payload.keys()) if pt.payload else []}")
                 raise
 
-        # Save image segments to database
+        # Step 4: Batch save to database
         for seg in image_segments:
             try:
                 await self.db.save_image_segment(seg)
             except Exception as e:
                 logger.warning(f"Failed to save image segment {seg['segment_id']}: {e}")
 
+        logger.info(f"Image processing complete: {processed}/{total_images} images processed")
         return processed
+
+    async def _embed_images_in_memory(
+        self,
+        embedder: Any,  # Multimodal embedder
+        dataset_id: str,
+        document_id: str,
+        images: List["IngestionExtractedImage"],
+        collection: str,
+        base_position: int = 0,
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        """
+        Embed images directly from memory (no S3 download needed).
+        
+        This is the "in-memory direct embedding" mode for maximum efficiency.
+        Images are embedded while still in memory after extraction, before S3 upload.
+
+        Args:
+            embedder: Multimodal embedder instance
+            dataset_id: Dataset ID
+            document_id: Document ID
+            images: List of IngestionExtractedImage objects (with content bytes)
+            collection: Qdrant collection name
+            base_position: Starting position for image segments
+
+        Returns:
+            Tuple of (processed_count, list of image metadata with embedding info)
+        """
+        if not embedder or not images:
+            return 0, []
+
+        from qdrant_client.http import models as qmodels
+        import math
+        
+        total_images = len(images)
+        logger.info(f"[MemoryEmbed] Embedding {total_images} images directly from memory...")
+
+        # Prepare image data
+        image_data: List[Tuple[int, "IngestionExtractedImage", bytes]] = []
+        for idx, img in enumerate(images):
+            if img.content and len(img.content) > 0:
+                image_data.append((idx, img, img.content))
+            else:
+                logger.debug(f"Skipping image {idx} with no content")
+        
+        if not image_data:
+            logger.warning("[MemoryEmbed] No valid images with content to embed")
+            return 0, []
+        
+        logger.info(f"[MemoryEmbed] {len(image_data)}/{total_images} images have valid content")
+
+        # Batch embed images
+        EMBED_BATCH_SIZE = 8
+        MAX_RETRIES = 3
+        
+        image_points = []
+        image_segments = []
+        embedded_metadata = []  # Track which images were embedded
+        processed = 0
+        
+        for batch_start in range(0, len(image_data), EMBED_BATCH_SIZE):
+            batch = image_data[batch_start:batch_start + EMBED_BATCH_SIZE]
+            batch_bytes = [img_bytes for _, _, img_bytes in batch]
+            
+            # Retry with exponential backoff
+            vectors = None
+            for retry in range(MAX_RETRIES):
+                try:
+                    batch_num = batch_start // EMBED_BATCH_SIZE + 1
+                    total_batches = (len(image_data) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
+                    logger.info(f"[MemoryEmbed] Batch {batch_num}/{total_batches}: {len(batch)} images (attempt {retry + 1})")
+                    
+                    vectors = await embedder.embed_images(batch_bytes)
+                    
+                    if vectors and len(vectors) == len(batch):
+                        break
+                    else:
+                        logger.warning(f"[MemoryEmbed] Got {len(vectors) if vectors else 0} vectors for {len(batch)} images")
+                        vectors = None
+                except Exception as e:
+                    logger.warning(f"[MemoryEmbed] Batch {batch_num} attempt {retry + 1} failed: {e}")
+                    if retry < MAX_RETRIES - 1:
+                        wait_time = 2 ** retry
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"[MemoryEmbed] Batch {batch_num} failed after {MAX_RETRIES} attempts")
+            
+            if not vectors:
+                continue
+            
+            # Create points and segments for this batch
+            for i, (idx, img, img_bytes) in enumerate(batch):
+                vector = vectors[i]
+                if not vector:
+                    continue
+                
+                seg_id = str(uuid.uuid4())
+                position = base_position + idx
+                
+                # Use context text as image description
+                image_text = img.context_text[:200] if img.context_text else f"[Image: page {getattr(img, 'page_number', idx)}]"
+                page_number = getattr(img, 'page_number', None) or (img.metadata.get('page_number') if hasattr(img, 'metadata') else None)
+
+                payload = {
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "segment_id": seg_id,
+                    "position": position,
+                    "text": image_text,
+                    "content_type": "image",
+                    "image_id": img.image_id,
+                    "image_mime_type": img.mime_type,
+                    "image_width": img.width,
+                    "image_height": img.height,
+                    "image_page": page_number,
+                }
+
+                image_points.append(
+                    qmodels.PointStruct(id=seg_id, vector=vector, payload=payload)
+                )
+
+                image_segments.append({
+                    "segment_id": seg_id,
+                    "dataset_id": dataset_id,
+                    "document_id": document_id,
+                    "position": position,
+                    "text": image_text,
+                    "token_count": 0,
+                    "vector_id": seg_id,
+                    "content_type": "image",
+                    "image_attachment_id": img.image_id,
+                    "image_filename": img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}",
+                    "image_media_type": img.mime_type,
+                    "image_file_size": img.size_bytes,
+                    "metadata": {
+                        "width": img.width,
+                        "height": img.height,
+                        "page_number": page_number,
+                        "source_location": img.source_location,
+                    },
+                })
+                
+                # Track this image as embedded
+                embedded_metadata.append({
+                    "idx": idx,
+                    "image_id": img.image_id,
+                    "segment_id": seg_id,
+                    "vector_id": seg_id,
+                })
+                processed += 1
+            
+            # Update progress
+            progress = 10 + (batch_start + len(batch)) / len(image_data) * 50  # 10% -> 60%
+            await self.db.update_document_status(document_id, status="embedding_images", progress=progress)
+            logger.info(f"[MemoryEmbed] Progress: {processed}/{len(image_data)} images, {progress:.1f}%")
+
+        # Batch upsert to Qdrant
+        if image_points:
+            try:
+                # Validate vectors
+                has_invalid = False
+                for i, pt in enumerate(image_points):
+                    if any(math.isnan(v) or math.isinf(v) for v in pt.vector):
+                        logger.error(f"Point {i} has invalid vector values")
+                        has_invalid = True
+                        break
+                
+                if has_invalid:
+                    raise ValueError("Vectors contain NaN or Infinity values")
+                
+                logger.info(f"[MemoryEmbed] Upserting {len(image_points)} vectors to collection={collection}")
+                await self.vector_store.upsert(collection_name=collection, points=image_points)
+                logger.info(f"[MemoryEmbed] Successfully upserted {len(image_points)} image vectors")
+            except Exception as e:
+                logger.error(f"[MemoryEmbed] Failed to upsert vectors: {e}")
+                raise
+
+        # Save segments to database
+        for seg in image_segments:
+            try:
+                await self.db.save_image_segment(seg)
+            except Exception as e:
+                logger.warning(f"[MemoryEmbed] Failed to save segment {seg['segment_id']}: {e}")
+
+        logger.info(f"[MemoryEmbed] Complete: {processed}/{total_images} images embedded")
+        return processed, embedded_metadata
 
     async def _process_document_images(
         self,
@@ -1382,8 +2459,7 @@ class KnowledgeService:
         Returns:
             Number of successfully processed images
         """
-        import logging
-        logger = logging.getLogger(__name__)
+
 
         if not self.multimodal_embedding or not images:
             return 0
@@ -1552,37 +2628,26 @@ class KnowledgeService:
         else:
             raise ValidationFailedError("mode must be dense|bm25|hybrid")
 
-        # Fusion method and weights
-        # Default to RRF (Reciprocal Rank Fusion) - industry best practice for hybrid search
-        effective_fusion_method = str(
-            (fusion_method if fusion_method is not None else
-             fusion if fusion is not None else
-             retrieval_defaults.get("fusion_method") or retrieval_defaults.get("fusion"))
-            or "rrf"  # Changed from "weighted" to "rrf" for better accuracy
-        ).lower()
-        if effective_fusion_method == "alpha":
-            effective_fusion_method = "weighted"  # Normalize legacy param
-        if effective_fusion_method not in {"weighted", "rrf"}:
-            effective_fusion_method = "rrf"  # Default to RRF
-        
-        # Weights (default 0.5/0.5 for balanced hybrid)
-        # Support legacy 'alpha' parameter (alpha = dense_weight)
-        if alpha is not None:
-            effective_dense_weight = float(alpha)
-            effective_bm25_weight = 1.0 - float(alpha)
-        else:
-            effective_dense_weight = float(
-                dense_weight if dense_weight is not None
-                else retrieval_defaults.get("dense_weight", 0.5)
+        if dataset.get("needs_reindex") and effective_mode in {"dense", "hybrid"}:
+            raise ValidationFailedError(
+                "Dataset embeddings were migrated and require re-indexing before vector retrieval. "
+                "Please re-index this dataset (or use mode='bm25' temporarily)."
             )
-            effective_bm25_weight = float(
-                bm25_weight if bm25_weight is not None
-                else retrieval_defaults.get("bm25_weight", 0.5)
-            )
-        # Legacy rrf_weights support
-        if rrf_weights and isinstance(rrf_weights, dict):
-            effective_dense_weight = float(rrf_weights.get("vector", effective_dense_weight))
-            effective_bm25_weight = float(rrf_weights.get("keyword", effective_bm25_weight))
+
+        # Fusion method and weights (supports nested retrieval.fusion config)
+        fusion_config = self._resolve_fusion_config(
+            retrieval_defaults=retrieval_defaults,
+            fusion_method=fusion_method,
+            fusion=fusion,
+            alpha=alpha,
+            dense_weight=dense_weight,
+            bm25_weight=bm25_weight,
+            rrf_k=rrf_k,
+            rrf_weights=rrf_weights,
+        )
+        effective_fusion_method = fusion_config["method"]
+        effective_dense_weight = fusion_config["dense_weight"]
+        effective_bm25_weight = fusion_config["bm25_weight"]
 
         top_k = max(int(top_k), 1)
         vector_k = int(
@@ -1613,9 +2678,7 @@ class KnowledgeService:
         keyword_pool_k = min(keyword_pool_k, 5000)
 
         # RRF params
-        rrf_k_value = int(
-            rrf_k if rrf_k is not None else retrieval_defaults.get("rrf_k") or 60
-        )
+        rrf_k_value = int(fusion_config["rrf_k"])
 
         # Rerank params (bool or dict in index_config)
         rerank_cfg = retrieval_defaults.get("rerank")
@@ -1628,6 +2691,7 @@ class KnowledgeService:
                 else (int(rerank_cfg["top_n"]) if rerank_cfg.get("top_n") is not None else None)
             )
         else:
+            # Rerank defaults to OFF unless explicitly configured
             rerank_enabled = bool(rerank_cfg) if rerank is None else bool(rerank)
             effective_rerank_model = str(rerank_model or "gte-rerank")
             effective_rerank_top_n = int(rerank_top_n) if rerank_top_n is not None else None
@@ -1650,13 +2714,15 @@ class KnowledgeService:
             effective_mmr_threshold = float(mmr_threshold) if mmr_threshold is not None else None
 
         # Score threshold - filter out low-relevance results
-        # NOTE: This threshold only applies to vector retrieval, not BM25
+        # NOTE: This threshold only applies to dense retrieval
         effective_score_threshold = float(
             score_threshold if score_threshold is not None 
             else retrieval_defaults.get("score_threshold") or 0.0
         )
         # Ensure threshold is within valid range (0 = no filtering)
         effective_score_threshold = max(0.0, min(1.0, effective_score_threshold))
+        if not self._should_apply_score_threshold(effective_mode):
+            effective_score_threshold = 0.0
 
         embedding_provider = str(dataset.get("embedding_provider") or "local")
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
@@ -1676,8 +2742,7 @@ class KnowledgeService:
             # Use cached embedder to reduce first-call latency (connection reuse)
             if is_multimodal:
                 # Use UnifiedMultimodalEmbedding for cross-modal retrieval
-                import logging
-                logging.getLogger(__name__).debug(
+                logger.debug(
                     f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
                 )
                 embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
@@ -1697,6 +2762,26 @@ class KnowledgeService:
             )
             # Note: Don't close cached embedder - it's reused across requests
 
+        # --- PRE_RETRIEVAL Hook: Islamic multi-query expansion ---
+        # Resolve Islamic enhancement config from dataset index_config
+        islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
+        islamic_multi_query = bool(islamic_cfg.get("multi_query", False)) or bool(multi_query)
+        islamic_citation = bool(islamic_cfg.get("citation_format", False))
+        islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(authority_sort)
+        islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
+
+        queries_to_run: List[str] = [q]
+        meta_islamic_queries: Optional[List[str]] = None
+        if islamic_multi_query:
+            try:
+                from .multi_query import expand_query_islamic
+                queries_to_run = expand_query_islamic(q, max_queries=islamic_max_queries)
+                if len(queries_to_run) > 1:
+                    meta_islamic_queries = queries_to_run[:]
+                    logger.info(f"Islamic multi-query expanded: {queries_to_run}")
+            except Exception as mq_err:
+                logger.warning(f"Islamic multi-query expansion failed: {mq_err}")
+
         # --- Parallel Dense + BM25 retrieval for better latency ---
         import asyncio
 
@@ -1714,6 +2799,8 @@ class KnowledgeService:
                     query_vector=qvec,
                     top_k=vector_k,
                     document_id=document_id,
+                    source_type=source_type_filter,
+                    language=language_filter,
                     with_payload=True,
                 )
                 raw_count = len(raw_hits)
@@ -1728,8 +2815,7 @@ class KnowledgeService:
                     filtered.append(h)
                 return filtered, raw_count
             except Exception as vec_err:
-                import logging
-                logging.getLogger(__name__).warning(f"Dense search failed: {vec_err}")
+                logger.warning(f"Dense search failed: {vec_err}")
                 if effective_mode == "dense":
                     raise ValidationFailedError(f"Dense search failed: {vec_err}")
                 return [], 0
@@ -1749,6 +2835,8 @@ class KnowledgeService:
                 dataset_id=dataset_id,
                 terms=terms,
                 document_id=document_id,
+                source_type=source_type_filter,
+                language=language_filter,
                 limit=keyword_pool_k,
             )
             raw_count = len(rows)
@@ -1788,6 +2876,63 @@ class KnowledgeService:
             _dense_search(),
             _bm25_search(),
         )
+
+        # --- PRE_RETRIEVAL Hook: run BM25 for expanded queries and merge ---
+        if islamic_multi_query and len(queries_to_run) > 1 and effective_mode in {"bm25", "hybrid"}:
+            expanded_queries = queries_to_run[1:]  # Skip original (already searched)
+
+            async def _bm25_expanded(eq: str) -> list:
+                """BM25 search for a single expanded query."""
+                eq_tokens = tokenize(eq)
+                terms = list(dict.fromkeys(eq_tokens))[:12]
+                if not terms:
+                    terms = [eq.strip()]
+                if eq.strip().lower() not in [t.lower() for t in terms]:
+                    terms.append(eq.strip().lower())
+                rows = await self.db.search_segments_like_any(
+                    dataset_id=dataset_id, terms=terms,
+                    document_id=document_id,
+                    source_type=source_type_filter,
+                    language=language_filter,
+                    limit=keyword_pool_k,
+                )
+                valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
+                doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
+                scores = bm25_scores(eq_tokens, doc_tokens)
+                hits = []
+                for row, score in zip(valid_rows, scores):
+                    seg_id = str(row.get("segment_id") or "")
+                    text = str(row.get("text") or "").strip()
+                    if not seg_id or not text or score <= 0.0:
+                        continue
+                    seg_metadata = _ensure_dict(row.get("metadata"))
+                    hits.append({
+                        "segment_id": seg_id,
+                        "document_id": str(row.get("document_id") or ""),
+                        "text": text,
+                        "metadata": seg_metadata,
+                        "bm25_score": float(score),
+                    })
+                hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+                return hits[:keyword_k]
+
+            expanded_results = await asyncio.gather(
+                *[_bm25_expanded(eq) for eq in expanded_queries]
+            )
+            # Merge expanded BM25 hits — keep highest score per segment
+            seen_ids = {str(h.get("segment_id") or "") for h in bm25_hits}
+            expanded_added = 0
+            for exp_hits in expanded_results:
+                for h in exp_hits:
+                    sid = str(h.get("segment_id") or "")
+                    if sid not in seen_ids:
+                        bm25_hits.append(h)
+                        seen_ids.add(sid)
+                        expanded_added += 1
+            if expanded_added > 0:
+                bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+                bm25_hits_raw_count += expanded_added
+                logger.info(f"Islamic multi-query added {expanded_added} BM25 hits from {len(expanded_queries)} expanded queries")
 
         # --- Merge candidates with clear score tracking ---
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -2132,6 +3277,55 @@ class KnowledgeService:
             if len(final_sorted) < original_count:
                 meta["pipeline_stages"].append(f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results")
         
+        if source_type_filter or language_filter:
+            original_count = len(final_sorted)
+            final_sorted = self._filter_candidates_by_metadata(
+                final_sorted, source_type_filter, language_filter
+            )
+            if len(final_sorted) < original_count:
+                meta["pipeline_stages"].append(
+                    f"Metadata filter: filtered {original_count - len(final_sorted)} results"
+                )
+            if source_type_filter:
+                meta["source_type_filter"] = source_type_filter
+            if language_filter:
+                meta["language_filter"] = language_filter
+        
+        # --- POST_RANKING Hook: Islamic citation formatting & authority sort ---
+        if (islamic_citation or islamic_authority_sort) and final_sorted:
+            try:
+                from .citation_formatter import CitationFormatter
+                formatter = CitationFormatter()
+
+                if islamic_citation:
+                    # Enrich results with citation_text (does NOT re-sort)
+                    for c in final_sorted:
+                        if not c.get("citation_text"):
+                            c["citation_text"] = formatter.format_citation(c)
+                    meta["pipeline_stages"].append(f"Islamic citation formatting: {len(final_sorted)} results enriched")
+
+                if islamic_authority_sort:
+                    # Re-sort by Islamic authority (Quran > Hadith > Tafseer > Fiqh > Others)
+                    # Within same authority level, preserve score ordering
+                    final_sorted = formatter.sort_by_authority(final_sorted)
+                    meta["pipeline_stages"].append("Islamic authority sort applied")
+
+            except Exception as islamic_err:
+                logger.warning(f"Islamic POST_RANKING hook failed: {islamic_err}")
+                meta["islamic_enhancement_error"] = str(islamic_err)
+
+        # Add Islamic multi-query metadata if applicable
+        if meta_islamic_queries:
+            meta["islamic_multi_query"] = True
+            meta["islamic_expanded_queries"] = meta_islamic_queries
+            meta["pipeline_stages"].insert(0, f"Islamic multi-query: {len(meta_islamic_queries)} queries ({', '.join(meta_islamic_queries[:3])}{'...' if len(meta_islamic_queries) > 3 else ''})")
+        if islamic_citation or islamic_authority_sort:
+            meta["islamic_enhancements"] = {
+                "multi_query": islamic_multi_query,
+                "citation_format": islamic_citation,
+                "authority_sort": islamic_authority_sort,
+            }
+
         # Build result candidates first (to collect image URLs for presigned generation)
         result_candidates: List[Dict[str, Any]] = []
         for rank, c in enumerate(final_sorted, 1):
@@ -2195,6 +3389,10 @@ class KnowledgeService:
             payload["_exact_match"] = c.get("_exact_match")
             payload["_term_matches"] = c.get("_term_matches")
             payload["_term_ratio"] = c.get("_term_ratio")
+
+            # Islamic citation (added by POST_RANKING hook if enabled)
+            if c.get("citation_text"):
+                payload["citation_text"] = c["citation_text"]
 
             # Rank
             payload["_rank"] = rank
@@ -2878,6 +4076,10 @@ class KnowledgeService:
         fusion_method: Optional[str] = None,
         alpha: Optional[float] = None,
         score_threshold: Optional[float] = None,
+        source_type_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
+        multi_query: bool = False,
+        authority_sort: bool = False,
         vector_top_k: Optional[int] = None,
         keyword_top_k: Optional[int] = None,
         candidate_top_k: Optional[int] = None,
@@ -3108,64 +4310,61 @@ class KnowledgeService:
         # If a large portion of content was TOC-like, we may have a TOC-heavy doc
         # Log this for debugging
         if toc_indicators > 10:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info(f"Cleaned {toc_indicators} TOC-like lines from PDF")
         
         return result
 
     def _extract_text_from_pdf_bytes(self, content: bytes) -> str:
         """Extract text from PDF with table-to-markdown conversion.
-        
-        Uses pdfplumber if available for better table extraction, 
+
+        Uses pdfplumber if available for better table extraction,
         falls back to pypdf for basic text extraction.
+        Scanned PDFs are handled via multimodal image embedding (no OCR).
         """
         from io import BytesIO
         import traceback
-        import logging
-        logger = logging.getLogger(__name__)
-        
+
+        text = ""
+
         # Try pdfplumber first (better table extraction)
         try:
             # Explicit import check
             import pdfplumber
             text = self._extract_pdf_with_pdfplumber(BytesIO(content))
-            return self._clean_pdf_content(self._sanitize_text_for_db(normalize_text(text)))
         except ImportError as e:
             logger.warning(f"pdfplumber import failed: {e}")
         except Exception as e:
             logger.warning(f"pdfplumber extraction failed: {e}")
             traceback.print_exc()
             # Fall back to pypdf if pdfplumber fails
-        
-        # Fallback to pypdf
-        try:
-            from pypdf import PdfReader  # type: ignore
-        except ImportError as exc:
-            logger.error(f"pypdf import failed: {exc}")
-            raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf) or pdfplumber") from exc
-        except Exception as exc:
-             logger.error(f"pypdf import/init failed: {exc}")
-             raise ValidationFailedError(f"PDF parsing error: {exc}") from exc
 
-        try:
-            reader = PdfReader(BytesIO(content))
-            parts: List[str] = []
-            for i, page in enumerate(reader.pages):
-                try:
-                    t = page.extract_text() or ""
-                except Exception as e:
-                    logger.warning(f"Failed to extract text from page {i}: {e}")
-                    t = ""
-                if t:
-                    parts.append(t)
-            text = "\n".join(parts)
-            text = self._sanitize_text_for_db(normalize_text(text))
-            return self._clean_pdf_content(text)
-        except Exception as exc:
-            logger.error(f"pypdf parsing failed: {exc}")
-            traceback.print_exc()
-            raise ValidationFailedError(f"Failed to parse PDF: {exc}") from exc
+        # Fallback to pypdf if pdfplumber didn't work
+        if not text:
+            try:
+                from pypdf import PdfReader  # type: ignore
+                reader = PdfReader(BytesIO(content))
+                parts: List[str] = []
+                for i, page in enumerate(reader.pages):
+                    try:
+                        t = page.extract_text() or ""
+                    except Exception as e:
+                        logger.warning(f"Failed to extract text from page {i}: {e}")
+                        t = ""
+                    if t:
+                        parts.append(t)
+                text = "\n".join(parts)
+            except ImportError as exc:
+                logger.error(f"pypdf import failed: {exc}")
+                raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf) or pdfplumber") from exc
+            except Exception as exc:
+                logger.error(f"pypdf parsing failed: {exc}")
+                traceback.print_exc()
+
+        if not text:
+            raise ValidationFailedError("Failed to extract any text from PDF")
+
+        text = self._sanitize_text_for_db(normalize_text(text))
+        return self._clean_pdf_content(text)
     
     def _extract_pdf_with_pdfplumber(self, pdf_stream) -> str:
         """Extract PDF content using pdfplumber with table detection."""
@@ -3499,16 +4698,22 @@ class KnowledgeService:
                 timeout_seconds=5.0,
                 extra=embedding_config or {},
             )
-        if provider_key == "openai":
+        if provider_key in {"gemini", "google"}:
             if not api_key:
                 api_key = (
-                    self.settings.knowledge.openai.api_key
-                    or os.getenv("OPENAI_API_KEY")
-                    or os.getenv("OPENAI_KEY")
+                    self.settings.knowledge.gemini.api_key
+                    or os.getenv("GEMINI_API_KEY")
+                    or os.getenv("GOOGLE_API_KEY")
                     or ""
                 )
+            if not api_key:
+                raise ValidationFailedError("Gemini api_key is required")
             if not base_url:
-                base_url = self.settings.knowledge.openai.base_url or "https://api.openai.com/v1"
+                base_url = (
+                    self.settings.knowledge.gemini.base_url
+                    or os.getenv("GEMINI_BASE_URL")
+                    or None
+                )
         elif provider_key in {"dashscope", "aliyun"}:
             if not api_key:
                 api_key = (
@@ -3521,8 +4726,6 @@ class KnowledgeService:
                 raise ValidationFailedError("DashScope api_key is required")
 
             # DashScopeEmbedding uses the official DashScope SDK.
-            # If you want to use OpenAI-compatible endpoints (compatible-mode),
-            # choose embedding_provider=openai and set openai.base_url accordingly.
             if not base_url:
                 base_url = (
                     getattr(self.settings.knowledge.dashscope, "base_url", None)
@@ -3907,8 +5110,7 @@ class KnowledgeService:
                 if presigned:
                     return presigned
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Failed to generate presigned URL: {e}")
+                logger.warning(f"Failed to generate presigned URL: {e}")
 
         # Fall back to original URL
         return image_url
@@ -3944,8 +5146,7 @@ class KnowledgeService:
         Returns:
             Statistics about associations created
         """
-        import logging
-        logger = logging.getLogger(__name__)
+
 
         # Get all segments for the document
         doc = await self.db.get_document(document_id)

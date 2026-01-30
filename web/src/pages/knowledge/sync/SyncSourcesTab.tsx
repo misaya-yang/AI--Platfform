@@ -14,6 +14,7 @@ import {
   RefreshCcw,
   Loader2,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -30,6 +31,7 @@ interface SyncSourcesTabProps {
 }
 
 export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
+  const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedBindingId = searchParams.get("binding");
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -113,9 +115,9 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
               <Cloud className="h-5 w-5 text-blue-500" />
             </div>
             <div>
-              <h3 className="font-semibold">Confluence 同步</h3>
+              <h3 className="font-semibold">{t("knowledge.sync.confluenceSync")}</h3>
               <p className="text-sm text-muted-foreground">
-                将 Confluence 空间中的页面同步到此知识库
+                {t("knowledge.sync.confluenceSyncDesc")}
               </p>
             </div>
           </div>
@@ -126,11 +128,11 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
               onClick={() => refetchBindings()}
             >
               <RefreshCcw className="h-4 w-4 mr-1.5" />
-              刷新
+              {t("knowledge.sync.refresh")}
             </Button>
             <Button onClick={() => setShowAddDialog(true)}>
               <Plus className="h-4 w-4 mr-1.5" />
-              添加绑定
+              {t("knowledge.sync.addBinding")}
             </Button>
           </div>
         </div>
@@ -180,18 +182,19 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
 
 // Empty state component
 function EmptySyncState({ onAdd }: { onAdd: () => void }) {
+  const { t } = useTranslation();
   return (
     <div className="text-center py-12">
       <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
         <Cloud className="h-8 w-8 text-blue-500" />
       </div>
-      <h3 className="font-semibold text-lg mb-2">还没有 Confluence 同步</h3>
+      <h3 className="font-semibold text-lg mb-2">{t("knowledge.sync.noConfluenceSync")}</h3>
       <p className="text-muted-foreground mb-6 max-w-md mx-auto">
-        将 Confluence 空间绑定到此知识库，自动同步页面内容并保持更新
+        {t("knowledge.sync.noConfluenceSyncDesc")}
       </p>
       <Button onClick={onAdd}>
         <Plus className="h-4 w-4 mr-1.5" />
-        添加 Confluence 绑定
+        {t("knowledge.sync.addConfluenceBinding")}
       </Button>
     </div>
   );

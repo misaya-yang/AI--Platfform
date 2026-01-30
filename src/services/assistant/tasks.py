@@ -37,7 +37,7 @@ async def process_file_task(
     )
     
     try:
-        # Preprocess file (OCR, PDF conversion, etc.) and cache result
+        # Preprocess file (PDF conversion, etc.) and cache result
         # By default we enable vision support to pre-generate images
         await file_processor.preprocess_file(
             file_path=file_path,

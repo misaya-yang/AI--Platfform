@@ -174,14 +174,15 @@ class TestAssistantServiceChatStream:
 
     @pytest.mark.asyncio
     async def test_chat_stream_yields_status_first(self, service, mock_model_registry):
-        """chat_stream should yield status event first."""
+        """chat_stream should yield status or run_started event first."""
         from src.services.assistant.assistant_service import (
             AssistantConfig,
             StreamEventType,
         )
 
         user = MockUserContext(user_id="user1", tenant_id="tenant1")
-        config = AssistantConfig(model_id="gpt-4")
+        # Disable agent loop to test traditional path
+        config = AssistantConfig(model_id="gpt-4", use_agent_loop=False)
 
         # Mock the model provider
         mock_provider = AsyncMock()
@@ -209,9 +210,9 @@ class TestAssistantServiceChatStream:
         except Exception:
             pass  # May fail due to incomplete mocking
 
-        # First event should be status
+        # First event should be status (traditional path) or run_started (agent loop path)
         if events:
-            assert events[0].event_type == StreamEventType.STATUS
+            assert events[0].event_type in (StreamEventType.STATUS, StreamEventType.RUN_STARTED)
 
     def test_service_has_session_manager(self, service, mock_session_manager):
         """Service should have session manager configured."""

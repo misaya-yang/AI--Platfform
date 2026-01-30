@@ -12,7 +12,7 @@
 // ============================================================
 
 export type RetrieveMode = "keyword" | "hybrid" | "vector" | "dense" | "bm25";
-export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa";
+export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa" | "islamic";
 export type FusionStrategy = "rrf" | "weighted";
 export type Visibility = "private" | "tenant" | "public";
 export type DocumentStatus = "pending" | "parsing" | "segmenting" | "embedding" | "completed" | "failed";
@@ -227,20 +227,25 @@ export interface MMRConfig {
   similarity_threshold?: number;
 }
 
+export interface IslamicEnhancementConfig {
+  multi_query?: boolean;        // PRE_RETRIEVAL: expand query with Islamic synonyms
+  citation_format?: boolean;    // POST_RANKING: attach formatted citations
+  authority_sort?: boolean;     // POST_RANKING: sort by Quran > Hadith > Tafseer > Fiqh
+  contextual_prefix?: boolean;  // INDEX-TIME: prepend context prefix (requires re-index)
+  max_expanded_queries?: number; // Max queries for multi_query (default 3)
+}
+
 export interface RetrievalConfig {
   mode: RetrieveMode;
   top_k: number;
   score_threshold?: number;
-  
+
   vector?: VectorRetrievalConfig;
   keyword?: KeywordRetrievalConfig;
   fusion?: FusionConfig;
   rerank?: RerankConfig;
   mmr?: MMRConfig;
-  
-  // Query enhancement
-  query_rewrite?: boolean;
-  hyde?: boolean;
+  islamic?: IslamicEnhancementConfig;
 }
 
 // Flat retrieval config for API requests
@@ -560,45 +565,23 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
 // Helper Functions
 // ============================================================
 
-export function getChunkingModeLabel(mode: ChunkingMode): string {
-  const labels: Record<ChunkingMode, string> = {
-    automatic: "智能切分",
-    fixed_size: "按长度切分",
-    paragraph: "按段落切分",
-    page: "按页切分",
-    heading: "按标题切分",
-    regex: "按正则切分",
-    separator: "按符号切分",
-    recursive: "递归切分",
-    hierarchical: "父子切分",
-    qa: "Q&A切分",
-  };
-  return labels[mode] || mode;
+// NOTE: Use i18n keys (knowledge.chunkModeLabels.*, knowledge.retrieveModeLabels.*)
+// instead of these deprecated helpers. They will be removed in a future release.
+
+/** @deprecated Use i18n key knowledge.chunkModeLabels instead */
+export function getChunkingModeLabel(_mode: ChunkingMode): string {
+  // Deprecated: use t("knowledge.chunkModeLabels.<mode>") from i18n
+  return _mode;
 }
 
-export function getChunkingModeDescription(mode: ChunkingMode): string {
-  const descriptions: Record<ChunkingMode, string> = {
-    automatic: "自动检测最优切分方式，适用于通用文档",
-    fixed_size: "按固定字符数切分，适合对Token数量有严格要求的场景",
-    paragraph: "按段落边界切分，适合结构清晰的文档",
-    page: "按页面标记切分，适合PDF等分页文档",
-    heading: "按标题层级切分，适合有明确章节的文档",
-    regex: "按自定义正则表达式切分",
-    separator: "按指定分隔符切分",
-    recursive: "递归多层级切分，确保每个片段不超过限制",
-    hierarchical: "父子双层切分，支持上下文关联检索",
-    qa: "按问答对格式切分",
-  };
-  return descriptions[mode] || "";
+/** @deprecated Use i18n key knowledge.chunkModeDescriptions instead */
+export function getChunkingModeDescription(_mode: ChunkingMode): string {
+  // Deprecated: use t("knowledge.chunkModeDescriptions.<mode>") from i18n
+  return "";
 }
 
-export function getRetrievalModeLabel(mode: RetrieveMode): string {
-  const labels: Record<RetrieveMode, string> = {
-    keyword: "关键词检索",
-    hybrid: "混合检索",
-    vector: "向量检索",
-    dense: "稠密检索",
-    bm25: "BM25检索",
-  };
-  return labels[mode] || mode;
+/** @deprecated Use i18n key knowledge.retrieveModeLabels instead */
+export function getRetrievalModeLabel(_mode: RetrieveMode): string {
+  // Deprecated: use t("knowledge.retrieveModeLabels.<mode>") from i18n
+  return _mode;
 }

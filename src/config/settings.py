@@ -185,9 +185,44 @@ class KnowledgeSettings(BaseModel):
     enabled: bool = True
     worker_concurrency: int = 2
     qdrant: KnowledgeQdrantSettings = Field(default_factory=KnowledgeQdrantSettings)
-    openai: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     gemini: KnowledgeGeminiSettings = Field(default_factory=KnowledgeGeminiSettings)
+    
+    # =============================================
+    # Text Embedding Configuration (for text-only datasets)
+    # Uses Gemini by default for high-speed embedding
+    # =============================================
+    text_embedding_provider: str = "gemini"  # gemini | dashscope
+    text_embedding_model: str = "gemini-embedding-001"
+    text_embedding_dimension: int = 1024
+    text_embedding_batch_size: int = 50  # Gemini supports 100, use 50 for safety
+    text_embedding_max_concurrent: int = 10
+    
+    # =============================================
+    # Multimodal Embedding Configuration (for image+text datasets)
+    # Uses DashScope for unified vector space (cross-modal search)
+    # =============================================
+    multimodal_embedding_provider: str = "dashscope"
+    multimodal_embedding_model: str = "tongyi-embedding-vision-plus"
+    multimodal_embedding_dimension: int = 1024
+    multimodal_embedding_max_concurrent: int = 5
+    
+    # =============================================
+    # VLM (Vision Language Model) Configuration
+    # For image description (e.g. Confluence)
+    # =============================================
+    vlm_batch_size: int = 5
+    vlm_max_concurrent: int = 8
+    vlm_timeout_seconds: float = 90.0
+    vlm_quality_threshold: float = 0.5
+    
+    # =============================================
+    # Document Processing Configuration
+    # =============================================
+    document_worker_concurrency: int = 3  # Max concurrent document processing
+    
+    # Scanned PDF: min embeddable images to use image-only (no text extraction)
+    scanned_min_images_for_image_only: int = 5
 
 
 class ConfluenceSettings(BaseModel):
@@ -275,6 +310,7 @@ class StorageSettings(BaseModel):
     backend: str = "local"  # local | s3 | oss
     local_base_path: str = "./data/images"
     url_expiry_seconds: int = 3600
+    key_prefix: str = "dev"  # 环境前缀，如 "dev", "staging", "prod"（与 .env.example 和 docker-compose.yml 一致）
 
     s3: StorageS3Settings = Field(default_factory=StorageS3Settings)
     oss: StorageOSSSettings = Field(default_factory=StorageOSSSettings)

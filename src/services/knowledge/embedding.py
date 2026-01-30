@@ -111,59 +111,6 @@ class BaseEmbedding(ABC):
         raise EmbeddingError(f"{self.provider}:{self.model} does not support image embedding")
 
 
-class OpenAIEmbedding(BaseEmbedding):
-    """OpenAI embeddings adapter (HTTP via httpx)."""
-
-    MODEL_DIMENSIONS: Dict[str, int] = {
-        "text-embedding-3-small": 1536,
-        "text-embedding-3-large": 3072,
-        "text-embedding-ada-002": 1536,
-    }
-
-    def __init__(
-        self,
-        model: str,
-        api_key: str,
-        base_url: str = "https://api.openai.com/v1",
-        timeout_seconds: float = 30.0,
-        dimension: Optional[int] = None,
-        organization: Optional[str] = None,
-    ):
-        dim = dimension or self.MODEL_DIMENSIONS.get(model)
-        super().__init__(provider="openai", model=model, dimension=dim)
-        if not api_key:
-            raise EmbeddingError("OpenAI api_key is required")
-        headers = {"Authorization": f"Bearer {api_key}"}
-        if organization:
-            headers["OpenAI-Organization"] = organization
-        self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
-            headers=headers,
-        )
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-    async def embed_texts(
-        self, texts: List[str], text_type: Optional[str] = None
-    ) -> List[List[float]]:
-        if not texts:
-            return []
-        payload: Dict[str, Any] = {"model": self.model, "input": texts}
-        resp = await self._client.post("/embeddings", json=payload)
-        if resp.status_code >= 400:
-            raise EmbeddingError(f"OpenAI embeddings failed: {resp.status_code} {resp.text}")
-        data = resp.json().get("data") or []
-        data = sorted(data, key=lambda x: x.get("index", 0))
-        vectors = [item.get("embedding") for item in data]
-        if not vectors or any(v is None for v in vectors):
-            raise EmbeddingError("OpenAI embeddings response missing embeddings")
-        if self._dimension is None:
-            self._dimension = len(vectors[0])
-        return vectors  # type: ignore[return-value]
-
-
 class GeminiEmbedding(BaseEmbedding):
     """
     Google Gemini Embedding API adapter.
@@ -422,14 +369,14 @@ class DashScopeEmbedding(BaseEmbedding):
         "text-embedding-v4": 8000,
     }
 
-    # DashScope API limit: max 10 texts per batch for v3, 25 for v1/v2
-    # Use 6 to be safe across all models
+    # DashScope API limit: max 10 texts per batch for v3/v4 (observed 400 when >10)
+    # Use 10 for safety across models to avoid InvalidParameter errors.
 
     # Retry configuration
     MAX_RETRIES = 3
-    RETRY_BASE_DELAY = 1.0  # seconds
-    REQUEST_TIMEOUT = 60  # seconds for HTTP request
-    MAX_BATCH_SIZE = 6
+    RETRY_BASE_DELAY = 0.5  # seconds (reduced from 1.0)
+    REQUEST_TIMEOUT = 45  # seconds for HTTP request (reduced from 60)
+    MAX_BATCH_SIZE = 10  # DashScope safe batch limit
 
     def __init__(
         self,
@@ -590,8 +537,18 @@ class DashScopeEmbedding(BaseEmbedding):
             batch = processed_texts[i:i + self.MAX_BATCH_SIZE]
             batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}, texts {i}-{i + len(batch) - 1}"
 
-            vectors = await self._call_with_retry(batch, batch_info, **kwargs)
-            all_vectors.extend(vectors)
+            try:
+                vectors = await self._call_with_retry(batch, batch_info, **kwargs)
+                all_vectors.extend(vectors)
+            except EmbeddingError as e:
+                # On timeout, fall back to smaller batches to reduce request cost.
+                if "timeout" in str(e).lower() and len(batch) > 1:
+                    for j, text in enumerate(batch):
+                        single_info = f"{batch_info} (fallback {j + 1}/{len(batch)})"
+                        vectors = await self._call_with_retry([text], single_info, **kwargs)
+                        all_vectors.extend(vectors)
+                else:
+                    raise
 
         if self._dimension is None and all_vectors:
             self._dimension = len(all_vectors[0])
@@ -1067,15 +1024,6 @@ async def get_cached_embedder(config: EmbeddingConfig, dimension: Optional[int] 
 
 def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -> BaseEmbedding:
     provider = (config.provider or "").lower()
-    if provider == "openai":
-        return OpenAIEmbedding(
-            model=config.model,
-            api_key=config.api_key or "",
-            base_url=config.base_url or "https://api.openai.com/v1",
-            timeout_seconds=config.timeout_seconds,
-            dimension=dimension,
-            organization=config.extra.get("organization") if config.extra else None,
-        )
     if provider in {"local", "builtin", "hash"}:
         return LocalHashEmbedding(
             model=config.model or "hash-384",
@@ -1110,6 +1058,11 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             dimension=dimension or 1024,
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
+        )
+    if provider in {"openai"}:
+        raise EmbeddingError(
+            "OpenAI embedding provider has been removed. "
+            "Please update your dataset to use 'gemini' or 'dashscope'."
         )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
 

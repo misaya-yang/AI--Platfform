@@ -139,7 +139,7 @@ class FusionConfig:
 @dataclass
 class RerankConfig:
     """Reranking configuration"""
-    enabled: bool = False
+    enabled: bool = False  # Off by default; preset configs (balanced/accurate/sota) enable it explicitly
     provider: RerankProvider = RerankProvider.DASHSCOPE
     model: str = "gte-rerank"
     top_n: Optional[int] = None  # Number of results to keep after reranking
@@ -271,6 +271,46 @@ class MultimodalConfig:
 
 
 @dataclass
+class IslamicEnhancementConfig:
+    """Islamic-specific retrieval enhancements (opt-in per dataset).
+
+    All features default to OFF. Enable per-dataset via index_config.retrieval.islamic.
+    When disabled, these hooks are never executed — zero overhead for non-Islamic datasets.
+    """
+    multi_query: bool = False       # PRE_RETRIEVAL: expand query with Islamic synonyms/transliterations
+    citation_format: bool = False   # POST_RANKING: attach formatted citations to results
+    authority_sort: bool = False    # POST_RANKING: sort results by Quran > Hadith > Tafseer > Fiqh
+    contextual_prefix: bool = False # INDEX-TIME: prepend context prefix before embedding (requires re-index)
+
+    # multi_query parameters
+    max_expanded_queries: int = 3   # Maximum number of expanded queries (including original)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "multi_query": self.multi_query,
+            "citation_format": self.citation_format,
+            "authority_sort": self.authority_sort,
+            "contextual_prefix": self.contextual_prefix,
+            "max_expanded_queries": self.max_expanded_queries,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "IslamicEnhancementConfig":
+        if not data:
+            return cls()
+        if isinstance(data, bool):
+            # Shorthand: islamic: true enables multi_query + citation + authority_sort
+            return cls(multi_query=data, citation_format=data, authority_sort=data)
+        return cls(
+            multi_query=bool(data.get("multi_query", False)),
+            citation_format=bool(data.get("citation_format", False)),
+            authority_sort=bool(data.get("authority_sort", False)),
+            contextual_prefix=bool(data.get("contextual_prefix", False)),
+            max_expanded_queries=int(data.get("max_expanded_queries", 3)),
+        )
+
+
+@dataclass
 class RetrievalConfig:
     """Complete retrieval pipeline configuration"""
     mode: RetrievalMode = RetrievalMode.HYBRID
@@ -284,13 +324,10 @@ class RetrievalConfig:
     rerank: RerankConfig = field(default_factory=RerankConfig)
     mmr: MMRConfig = field(default_factory=MMRConfig)
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)  # Multimodal retrieval
-
-    # Query enhancement
-    query_rewrite: bool = False  # Multi-turn query rewriting
-    hyde: bool = False  # Hypothetical Document Embedding
+    islamic: IslamicEnhancementConfig = field(default_factory=IslamicEnhancementConfig)  # Islamic enhancements
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "mode": self.mode.value,
             "top_k": self.top_k,
             "score_threshold": self.score_threshold,
@@ -300,9 +337,12 @@ class RetrievalConfig:
             "rerank": self.rerank.to_dict(),
             "mmr": self.mmr.to_dict(),
             "multimodal": self.multimodal.to_dict(),
-            "query_rewrite": self.query_rewrite,
-            "hyde": self.hyde,
         }
+        # Only include islamic config if any feature is enabled (keep output clean for non-Islamic datasets)
+        islamic_dict = self.islamic.to_dict()
+        if any(islamic_dict.get(k) for k in ("multi_query", "citation_format", "authority_sort", "contextual_prefix")):
+            result["islamic"] = islamic_dict
+        return result
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RetrievalConfig":
@@ -329,8 +369,7 @@ class RetrievalConfig:
             rerank=RerankConfig.from_dict(data.get("rerank") or {}),
             mmr=MMRConfig.from_dict(data.get("mmr") or {}),
             multimodal=MultimodalConfig.from_dict(data.get("multimodal") or {}),
-            query_rewrite=bool(data.get("query_rewrite", False)),
-            hyde=bool(data.get("hyde", False)),
+            islamic=IslamicEnhancementConfig.from_dict(data.get("islamic") or {}),
         )
 
     @classmethod
@@ -446,6 +485,20 @@ DEFAULT_CONFIGS = {
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
         rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=10),
         mmr=MMRConfig(enabled=True, lambda_mult=0.7),  # Slight diversity
+    ),
+    # Islamic strict: Optimized for Islamic knowledge base with multi-madhab coverage
+    "islamic_strict": RetrievalConfig(
+        mode=RetrievalMode.HYBRID,
+        top_k=10,  # More results for multi-madhab coverage
+        score_threshold=0.25,  # Lower threshold for bilingual Arabic/English content
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
+        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        mmr=MMRConfig(enabled=True, lambda_mult=0.6),  # Ensure madhab diversity
+        islamic=IslamicEnhancementConfig(
+            multi_query=True,
+            citation_format=True,
+            authority_sort=True,
+        ),
     ),
 }
 

@@ -31,6 +31,7 @@ import {
   ArrowLeft,
   ArrowRight,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -271,13 +272,15 @@ function DepthSelector({
   value: number;
   onChange: (depth: number) => void;
 }) {
+  const { t } = useTranslation();
+
   const depths = [
-    { value: 1, label: "1", desc: "仅当前页" },
-    { value: 2, label: "2", desc: "2 层" },
-    { value: 3, label: "3", desc: "3 层" },
-    { value: 5, label: "5", desc: "5 层" },
-    { value: 10, label: "10", desc: "10 层" },
-    { value: 100, label: "All", desc: "全部" },
+    { value: 1, label: "1", desc: t("knowledge.sync.depthCurrentPageOnly") },
+    { value: 2, label: "2", desc: t("knowledge.sync.depthLayers", { count: 2 }) },
+    { value: 3, label: "3", desc: t("knowledge.sync.depthLayers", { count: 3 }) },
+    { value: 5, label: "5", desc: t("knowledge.sync.depthLayers", { count: 5 }) },
+    { value: 10, label: "10", desc: t("knowledge.sync.depthLayers", { count: 10 }) },
+    { value: 100, label: "All", desc: t("knowledge.sync.depthAll") },
   ];
 
   return (
@@ -314,6 +317,7 @@ export function AddConfluenceBindingDialog({
   onCreated,
 }: AddConfluenceBindingDialogProps) {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
 
   // Current step (0: connection, 1: space, 2: options)
   const [currentStep, setCurrentStep] = useState(0);
@@ -385,7 +389,7 @@ export function AddConfluenceBindingDialog({
     mutationFn: (data: ConfluenceBindingCreateRequest) =>
       createBinding(selectedConnectionId, data),
     onSuccess: () => {
-      toast.success("绑定创建成功", "Confluence 空间已绑定到知识库");
+      toast.success(t("knowledge.sync.bindingCreated"), t("knowledge.sync.bindingCreatedDesc"));
       queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });
       handleOpenChange(false);
       onCreated?.();
@@ -393,9 +397,9 @@ export function AddConfluenceBindingDialog({
     onError: (error) => {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("already exists")) {
-        toast.error("绑定已存在", "该空间已绑定到此知识库");
+        toast.error(t("knowledge.sync.bindingExists"), t("knowledge.sync.bindingExistsDesc"));
       } else {
-        toast.error("创建失败", message);
+        toast.error(t("knowledge.sync.createFailed"), message);
       }
     },
   });
@@ -481,9 +485,9 @@ export function AddConfluenceBindingDialog({
   };
 
   const steps = [
-    { label: "连接", icon: <Cloud className="h-3.5 w-3.5" /> },
-    { label: "空间", icon: <Folder className="h-3.5 w-3.5" /> },
-    { label: "选项", icon: <Settings2 className="h-3.5 w-3.5" /> },
+    { label: t("knowledge.sync.stepConnection"), icon: <Cloud className="h-3.5 w-3.5" /> },
+    { label: t("knowledge.sync.stepSpace"), icon: <Folder className="h-3.5 w-3.5" /> },
+    { label: t("knowledge.sync.stepOptions"), icon: <Settings2 className="h-3.5 w-3.5" /> },
   ];
 
   return (
@@ -492,7 +496,7 @@ export function AddConfluenceBindingDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Cloud className="h-5 w-5 text-blue-500" />
-            添加 Confluence 绑定
+            {t("knowledge.sync.addConfluenceTitle")}
           </DialogTitle>
         </DialogHeader>
 
@@ -505,12 +509,12 @@ export function AddConfluenceBindingDialog({
               <div className="flex items-start gap-3 p-3 bg-muted/30 rounded-lg border border-border/50">
                 <Info className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-muted-foreground">
-                  选择一个已配置的 Confluence 连接来同步页面
+                  {t("knowledge.sync.selectConnectionHint")}
                 </p>
               </div>
 
               <div className="space-y-2">
-                <Label>Confluence 连接</Label>
+                <Label>{t("knowledge.sync.confluenceConnection")}</Label>
                 {loadingConnections ? (
                   <div className="flex items-center justify-center h-10 border rounded-lg">
                     <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
@@ -518,7 +522,7 @@ export function AddConfluenceBindingDialog({
                 ) : activeConnections.length > 0 ? (
                   <Select value={selectedConnectionId} onValueChange={handleConnectionSelect}>
                     <SelectTrigger>
-                      <SelectValue placeholder="选择连接...">
+                      <SelectValue placeholder={t("knowledge.sync.selectConnection")}>
                         {selectedConnectionId && (() => {
                           const conn = activeConnections.find(c => c.connection_id === selectedConnectionId);
                           return conn ? (
@@ -527,7 +531,7 @@ export function AddConfluenceBindingDialog({
                               <span>{conn.name}</span>
                               <span className="text-xs text-muted-foreground">({conn.domain})</span>
                             </div>
-                          ) : "选择连接...";
+                          ) : t("knowledge.sync.selectConnection");
                         })()}
                       </SelectValue>
                     </SelectTrigger>
@@ -542,12 +546,12 @@ export function AddConfluenceBindingDialog({
                 ) : (
                   <div className="p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 rounded-lg">
                     <p className="text-sm text-amber-700 dark:text-amber-400 mb-3">
-                      还没有可用的 Confluence 连接
+                      {t("knowledge.sync.noAvailableConnections")}
                     </p>
                     <Button variant="outline" size="sm" asChild>
                       <Link to="/confluence/connections/new" target="_blank">
                         <Cloud className="h-4 w-4 mr-1.5" />
-                        创建连接
+                        {t("knowledge.sync.createConnection")}
                       </Link>
                     </Button>
                   </div>
@@ -562,7 +566,7 @@ export function AddConfluenceBindingDialog({
                     className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors"
                   >
                     <Cloud className="h-3.5 w-3.5 mr-1" />
-                    新建连接
+                    {t("knowledge.sync.newConnection")}
                   </Link>
                 </div>
               )}
@@ -576,14 +580,14 @@ export function AddConfluenceBindingDialog({
                 <div className="p-4 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 rounded-lg">
                   <div className="flex items-center gap-2 text-rose-700 dark:text-rose-400">
                     <AlertCircle className="h-5 w-5" />
-                    <span className="font-medium">无法加载空间</span>
+                    <span className="font-medium">{t("knowledge.sync.cannotLoadSpaces")}</span>
                   </div>
                 </div>
               ) : (
                 <>
                   {/* Space Selector */}
                   <div className="space-y-2">
-                    <Label>选择空间</Label>
+                    <Label>{t("knowledge.sync.selectSpace")}</Label>
                     {loadingSpaces ? (
                       <div className="flex items-center justify-center h-10 border rounded-lg">
                         <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
@@ -591,7 +595,7 @@ export function AddConfluenceBindingDialog({
                     ) : spaces.length > 0 ? (
                       <Select value={selectedSpaceKey} onValueChange={handleSpaceSelect}>
                         <SelectTrigger>
-                          <SelectValue placeholder="选择空间...">
+                          <SelectValue placeholder={t("knowledge.sync.selectSpacePlaceholder")}>
                             {selectedSpaceKey && (() => {
                               const space = spaces.find(s => s.space_key === selectedSpaceKey);
                               return space ? (
@@ -600,7 +604,7 @@ export function AddConfluenceBindingDialog({
                                   <span>{space.name}</span>
                                   <span className="text-xs text-muted-foreground">({space.space_key})</span>
                                 </div>
-                              ) : "选择空间...";
+                              ) : t("knowledge.sync.selectSpacePlaceholder");
                             })()}
                           </SelectValue>
                         </SelectTrigger>
@@ -614,7 +618,7 @@ export function AddConfluenceBindingDialog({
                       </Select>
                     ) : (
                       <div className="p-4 text-center text-muted-foreground text-sm border rounded-lg">
-                        该连接下没有可用的空间
+                        {t("knowledge.sync.noSpacesAvailable")}
                       </div>
                     )}
                   </div>
@@ -623,7 +627,7 @@ export function AddConfluenceBindingDialog({
                   {selectedSpaceKey && (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <Label>选择要同步的页面</Label>
+                        <Label>{t("knowledge.sync.selectPagesToSync")}</Label>
                         {selectedPages.size > 0 && (
                           <Button
                             variant="ghost"
@@ -633,7 +637,7 @@ export function AddConfluenceBindingDialog({
                               setSyncEntireSpace(true);
                             }}
                           >
-                            清除选择
+                            {t("knowledge.sync.clearSelection")}
                           </Button>
                         )}
                       </div>
@@ -641,8 +645,8 @@ export function AddConfluenceBindingDialog({
                       <div className="flex items-center gap-2 mb-2">
                         <Badge variant={syncEntireSpace ? "default" : "outline"}>
                           {syncEntireSpace
-                            ? "同步整个空间"
-                            : `已选 ${selectedPages.size} 个根页面`}
+                            ? t("knowledge.sync.syncEntireSpace")
+                            : t("knowledge.sync.selectedRootPages", { count: selectedPages.size })}
                         </Badge>
                       </div>
 
@@ -664,7 +668,7 @@ export function AddConfluenceBindingDialog({
                           </div>
                         ) : (
                           <div className="p-8 text-center text-muted-foreground text-sm">
-                            该空间没有页面
+                            {t("knowledge.sync.noPages")}
                           </div>
                         )}
                       </div>
@@ -680,14 +684,14 @@ export function AddConfluenceBindingDialog({
             <div className="space-y-6">
               {/* Summary */}
               <div className="p-4 bg-muted/30 rounded-lg border border-border/50">
-                <div className="text-sm text-muted-foreground mb-2">即将绑定:</div>
+                <div className="text-sm text-muted-foreground mb-2">{t("knowledge.sync.aboutToBind")}</div>
                 <div className="flex items-center gap-2">
                   <Folder className="h-4 w-4 text-amber-500" />
                   <span className="font-medium">{selectedSpaceName}</span>
                   <Badge variant="outline" className="text-xs">
                     {syncEntireSpace
-                      ? "整个空间"
-                      : `${selectedPages.size} 个根页面`}
+                      ? t("knowledge.sync.entireSpace")
+                      : t("knowledge.sync.rootPages", { count: selectedPages.size })}
                   </Badge>
                 </div>
               </div>
@@ -695,9 +699,9 @@ export function AddConfluenceBindingDialog({
               {/* Depth */}
               <div className="space-y-3">
                 <Label className="flex items-center gap-2">
-                  同步深度
+                  {t("knowledge.sync.syncDepth")}
                   <Badge variant="secondary" className="text-xs font-normal">
-                    当前: {maxDepth === 100 ? "全部" : maxDepth + " 层"}
+                    {t("knowledge.sync.depthCurrent", { depth: maxDepth === 100 ? t("knowledge.sync.depthAll") : t("knowledge.sync.depthLayers", { count: maxDepth }) })}
                   </Badge>
                 </Label>
                 <DepthSelector value={maxDepth} onChange={setMaxDepth} />
@@ -708,9 +712,9 @@ export function AddConfluenceBindingDialog({
                 <div className="flex items-center gap-3">
                   <ImageIcon className="h-5 w-5 text-muted-foreground" />
                   <div>
-                    <Label className="text-sm font-medium">同步图片</Label>
+                    <Label className="text-sm font-medium">{t("knowledge.sync.syncImages")}</Label>
                     <p className="text-xs text-muted-foreground">
-                      同步页面中的图片并进行 VLM 描述
+                      {t("knowledge.sync.syncImagesDesc")}
                     </p>
                   </div>
                 </div>
@@ -722,9 +726,9 @@ export function AddConfluenceBindingDialog({
                 <div className="flex items-center gap-3">
                   <FileText className="h-5 w-5 text-muted-foreground" />
                   <div>
-                    <Label className="text-sm font-medium">同步附件</Label>
+                    <Label className="text-sm font-medium">{t("knowledge.sync.syncAttachments")}</Label>
                     <p className="text-xs text-muted-foreground">
-                      同步页面的附件文件
+                      {t("knowledge.sync.syncAttachmentsDesc")}
                     </p>
                   </div>
                 </div>
@@ -745,12 +749,12 @@ export function AddConfluenceBindingDialog({
               disabled={createBindingMutation.isPending}
             >
               <ArrowLeft className="h-4 w-4 mr-1.5" />
-              上一步
+              {t("knowledge.sync.previousStep")}
             </Button>
           )}
           {currentStep < 2 ? (
             <Button onClick={() => setCurrentStep((s) => s + 1)} disabled={!canProceed()}>
-              下一步
+              {t("knowledge.sync.nextStep")}
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Button>
           ) : (
@@ -763,7 +767,7 @@ export function AddConfluenceBindingDialog({
               ) : (
                 <CheckCircle className="h-4 w-4 mr-1.5" />
               )}
-              创建绑定
+              {t("knowledge.sync.createBinding")}
             </Button>
           )}
         </DialogFooter>

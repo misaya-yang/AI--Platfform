@@ -163,19 +163,34 @@ class VectorStore:
         query_vector: List[float],
         top_k: int = 5,
         document_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        language: Optional[str] = None,
         with_payload: bool = True,
         with_vectors: bool = False,
     ) -> List[VectorSearchHit]:
-        flt = None
+        conditions = []
         if document_id:
-            flt = qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="document_id",
-                        match=qmodels.MatchValue(value=document_id),
-                    )
-                ]
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="document_id",
+                    match=qmodels.MatchValue(value=document_id),
+                )
             )
+        if source_type:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="source_type",
+                    match=qmodels.MatchValue(value=source_type),
+                )
+            )
+        if language:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="language",
+                    match=qmodels.MatchValue(value=language),
+                )
+            )
+        flt = qmodels.Filter(must=conditions) if conditions else None
 
         # qdrant-client >= 1.11 uses `query_points` as the unified entry point.
         resp = await self._call(

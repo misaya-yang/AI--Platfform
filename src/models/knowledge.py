@@ -118,9 +118,9 @@ class Dataset:
     visibility: DatasetVisibility = DatasetVisibility.PRIVATE
 
     # Embedding configuration
-    embedding_provider: str = "openai"
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dimension: int = 1536
+    embedding_provider: str = "gemini"
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimension: int = 1024
     embedding_config: Dict[str, Any] = field(default_factory=dict)
 
     # Indexing configuration

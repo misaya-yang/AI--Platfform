@@ -24,6 +24,7 @@ import {
   Cloud,
   Trash2,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -86,6 +87,8 @@ function StatusBadge({
   documentStatus?: string | null;
   documentProgress?: number | null;
 }) {
+  const { t } = useTranslation();
+
   const getEffectiveStatus = () => {
     // If backend provides effective_status, use it directly for needs_resync detection
     if (effectiveStatusProp === "needs_resync") {
@@ -119,37 +122,37 @@ function StatusBadge({
     synced: {
       color: "bg-emerald-500/10 text-emerald-600 border-emerald-200 dark:border-emerald-800",
       icon: <CheckCircle className="h-3 w-3" />,
-      label: "已同步",
+      label: t("knowledge.sync.statusSynced"),
     },
     processing: {
       color: "bg-blue-500/10 text-blue-600 border-blue-200 dark:border-blue-800",
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: documentProgress ? `处理中 ${Math.round(documentProgress)}%` : "处理中",
+      label: documentProgress ? t("knowledge.sync.statusProcessingProgress", { progress: Math.round(documentProgress) }) : t("knowledge.sync.statusProcessing"),
     },
     uploaded: {
       color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
       icon: <Clock className="h-3 w-3" />,
-      label: "已上传",
+      label: t("knowledge.sync.statusUploaded"),
     },
     pending: {
       color: "bg-amber-500/10 text-amber-600 border-amber-200 dark:border-amber-800",
       icon: <Clock className="h-3 w-3" />,
-      label: "待处理",
+      label: t("knowledge.sync.statusPending"),
     },
     needs_resync: {
       color: "bg-orange-500/10 text-orange-600 border-orange-200 dark:border-orange-800",
       icon: <RefreshCw className="h-3 w-3" />,
-      label: "需要重新同步",
+      label: t("knowledge.sync.statusNeedsResync"),
     },
     error: {
       color: "bg-rose-500/10 text-rose-600 border-rose-200 dark:border-rose-800",
       icon: <AlertCircle className="h-3 w-3" />,
-      label: "错误",
+      label: t("knowledge.sync.statusError"),
     },
     deleted: {
       color: "bg-slate-500/10 text-slate-600 border-slate-200 dark:border-slate-800",
       icon: <AlertCircle className="h-3 w-3" />,
-      label: "已删除",
+      label: t("knowledge.sync.statusDeleted"),
     },
   };
 
@@ -190,6 +193,8 @@ function PageListRow({
   onSelect: (checked: boolean) => void;
   onSync: () => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <div className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/40 border-b border-border/40 last:border-b-0 transition-colors">
       <Checkbox checked={isSelected} onCheckedChange={onSelect} className="flex-shrink-0" />
@@ -234,7 +239,7 @@ function PageListRow({
         {isSyncing ? (
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>同步中</span>
+            <span>{t("knowledge.sync.syncing")}</span>
           </div>
         ) : (
           <>
@@ -245,7 +250,7 @@ function PageListRow({
                 onSync();
               }}
             >
-              更新
+              {t("knowledge.sync.update")}
             </button>
             {page.web_url && (
               <button
@@ -255,7 +260,7 @@ function PageListRow({
                   if (page.web_url) window.open(page.web_url, "_blank");
                 }}
               >
-                查看
+                {t("knowledge.sync.view")}
               </button>
             )}
           </>
@@ -277,6 +282,7 @@ export function BindingPagesPanel({
   onBack,
 }: BindingPagesPanelProps) {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
 
   // State
   const [searchQuery, setSearchQuery] = useState("");
@@ -337,7 +343,7 @@ export function BindingPagesPanel({
     },
     onSuccess: (_, pageRecordId) => {
       const page = pages.find((p) => p.id === pageRecordId);
-      toast.success("更新成功", page?.title || "文档已更新");
+      toast.success(t("knowledge.sync.updateSuccess"), page?.title || t("knowledge.sync.documentUpdated"));
     },
     onSettled: (_, __, pageRecordId) => {
       setSyncingIds((prev) => {
@@ -348,7 +354,7 @@ export function BindingPagesPanel({
       refetchPages();
     },
     onError: (error) => {
-      toast.error("更新失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.updateFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -358,7 +364,7 @@ export function BindingPagesPanel({
       setSyncingIds((prev) => new Set([...prev, ...ids]));
     },
     onSuccess: () => {
-      toast.success("批量更新已启动", `正在更新 ${selectedIds.size} 个文档`);
+      toast.success(t("knowledge.sync.batchUpdateStarted"), t("knowledge.sync.batchUpdateStartedDesc", { count: selectedIds.size }));
       setSelectedIds(new Set());
     },
     onSettled: (_, __, ids) => {
@@ -370,31 +376,31 @@ export function BindingPagesPanel({
       refetchPages();
     },
     onError: (error) => {
-      toast.error("批量更新失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.batchUpdateFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
   const fullSyncMutation = useMutation({
     mutationFn: () => triggerSync(bindingId, { force: false }),
     onSuccess: () => {
-      toast.success("更新全部已触发", "正在后台更新所有文档");
+      toast.success(t("knowledge.sync.updateAllTriggered"), t("knowledge.sync.updateAllTriggeredDesc"));
       refetchPages();
     },
     onError: (error) => {
-      toast.error("更新失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.updateFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
   const removeMutation = useMutation({
     mutationFn: (ids: string[]) => removePages(ids, true),
     onSuccess: (result) => {
-      toast.success("移除成功", `已从知识库移除 ${result.removed} 个文档`);
+      toast.success(t("knowledge.sync.removeSuccess"), t("knowledge.sync.removeSuccessDesc", { count: result.removed }));
       setSelectedIds(new Set());
       refetchPages();
       queryClient.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
     },
     onError: (error) => {
-      toast.error("移除失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.removeFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -427,7 +433,7 @@ export function BindingPagesPanel({
   // Title display
   const displayTitle = binding?.root_page_titles?.length
     ? binding.root_page_titles.join(", ")
-    : binding?.space_name || binding?.space_key || "空间";
+    : binding?.space_name || binding?.space_key || t("knowledge.sync.space");
 
   return (
     <div className="space-y-4">
@@ -451,10 +457,10 @@ export function BindingPagesPanel({
               <TooltipTrigger asChild>
                 <Button variant="outline" size="sm" onClick={() => setShowAddModal(true)}>
                   <Plus className="h-4 w-4 mr-1.5" />
-                  添加文档
+                  {t("knowledge.sync.addDocuments")}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>从 Confluence 选择页面添加到知识库</TooltipContent>
+              <TooltipContent>{t("knowledge.sync.addDocumentsTooltip")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
           <TooltipProvider>
@@ -471,10 +477,10 @@ export function BindingPagesPanel({
                   ) : (
                     <RefreshCcw className="h-4 w-4 mr-1.5" />
                   )}
-                  更新全部
+                  {t("knowledge.sync.updateAll")}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>从 Confluence 拉取最新内容更新全部文档</TooltipContent>
+              <TooltipContent>{t("knowledge.sync.updateAllTooltip")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
@@ -485,7 +491,7 @@ export function BindingPagesPanel({
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="搜索文档..."
+            placeholder={t("knowledge.sync.searchDocuments")}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9"
@@ -508,10 +514,10 @@ export function BindingPagesPanel({
                     ) : (
                       <RefreshCcw className="h-4 w-4 mr-1.5" />
                     )}
-                    更新选中 ({selectedIds.size})
+                    {t("knowledge.sync.updateSelected", { count: selectedIds.size })}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>从 Confluence 拉取最新内容更新选中的文档</TooltipContent>
+                <TooltipContent>{t("knowledge.sync.updateSelectedTooltip")}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
             <TooltipProvider>
@@ -529,10 +535,10 @@ export function BindingPagesPanel({
                     ) : (
                       <Trash2 className="h-4 w-4 mr-1.5" />
                     )}
-                    移除选中 ({selectedIds.size})
+                    {t("knowledge.sync.removeSelected", { count: selectedIds.size })}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>从知识库移除选中的文档（不影响 Confluence 原页面）</TooltipContent>
+                <TooltipContent>{t("knowledge.sync.removeSelectedTooltip")}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
           </>
@@ -541,11 +547,11 @@ export function BindingPagesPanel({
 
       {/* Stats */}
       <div className="flex items-center gap-4 text-sm text-muted-foreground">
-        <span>共 {pages.length} 个文档</span>
+        <span>{t("knowledge.sync.totalDocuments", { count: pages.length })}</span>
         {searchQuery && (
           <>
             <span>•</span>
-            <span>搜索结果 {filteredPages.length}</span>
+            <span>{t("knowledge.sync.searchResults", { count: filteredPages.length })}</span>
           </>
         )}
       </div>
@@ -561,11 +567,11 @@ export function BindingPagesPanel({
             onCheckedChange={handleSelectAll}
             className="flex-shrink-0"
           />
-          <span className="flex-1">文档</span>
-          <span className="w-24">状态</span>
-          <span className="w-12 text-center">版本</span>
-          <span className="w-28 text-right">同步时间</span>
-          <span className="w-28 text-center">操作</span>
+          <span className="flex-1">{t("knowledge.sync.document")}</span>
+          <span className="w-24">{t("knowledge.sync.status")}</span>
+          <span className="w-12 text-center">{t("knowledge.sync.version")}</span>
+          <span className="w-28 text-right">{t("knowledge.sync.syncTime")}</span>
+          <span className="w-28 text-center">{t("knowledge.sync.actions")}</span>
         </div>
 
         {/* Content */}
@@ -576,13 +582,13 @@ export function BindingPagesPanel({
         ) : filteredPages.length === 0 ? (
           <div className="p-8 text-center">
             {searchQuery ? (
-              <p className="text-muted-foreground">没有找到匹配的文档</p>
+              <p className="text-muted-foreground">{t("knowledge.sync.noMatchingDocuments")}</p>
             ) : (
               <div className="space-y-2">
                 <FolderOpen className="h-10 w-10 mx-auto text-muted-foreground/50" />
-                <p className="text-muted-foreground">还没有同步任何文档</p>
+                <p className="text-muted-foreground">{t("knowledge.sync.noSyncedDocuments")}</p>
                 <p className="text-sm text-muted-foreground/70">
-                  点击上方「添加文档」从 Confluence 选择页面
+                  {t("knowledge.sync.noSyncedDocumentsHint")}
                 </p>
               </div>
             )}
@@ -620,13 +626,13 @@ export function BindingPagesPanel({
       <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认移除文档</AlertDialogTitle>
+            <AlertDialogTitle>{t("knowledge.sync.confirmRemoveDocuments")}</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要移除选中的 {selectedIds.size} 个文档吗？这将从知识库中删除这些文档。Confluence 原页面不会受到影响。此操作不可撤销。
+              {t("knowledge.sync.confirmRemoveDocumentsDesc", { count: selectedIds.size })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
                 removeMutation.mutate(Array.from(selectedIds));
@@ -634,7 +640,7 @@ export function BindingPagesPanel({
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              确认移除
+              {t("knowledge.sync.confirmRemove")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

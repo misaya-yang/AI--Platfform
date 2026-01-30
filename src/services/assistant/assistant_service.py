@@ -190,7 +190,7 @@ class AssistantConfig:
     # Knowledge base settings (TTFT-optimized defaults)
     kb_dataset_ids: List[str] = field(default_factory=list)
     kb_mode: RAGMode = RAGMode.AUTO
-    kb_top_k: int = 3  # Reduced from 5 for faster retrieval and fewer tokens
+    kb_top_k: int = 5  # Number of KB results to retrieve
     kb_score_threshold: float = 0.65  # Increased from 0.5 for higher quality results
     kb_include_images: bool = False
     kb_max_content_length: int = 400  # Max chars per chunk to reduce context size

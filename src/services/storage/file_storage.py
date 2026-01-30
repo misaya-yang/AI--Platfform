@@ -88,6 +88,7 @@ class FileStorageService:
 
     def _create_backend(self) -> BaseStorageBackend:
         """Create storage backend based on configuration."""
+        kp = self.config.key_prefix
         if self.config.backend == StorageBackend.S3:
             return S3StorageBackend(
                 bucket=self.config.s3_bucket,
@@ -95,6 +96,7 @@ class FileStorageService:
                 access_key=self.config.s3_access_key,
                 secret_key=self.config.s3_secret_key,
                 endpoint_url=self.config.s3_endpoint_url,
+                key_prefix=kp,
             )
         elif self.config.backend == StorageBackend.OSS:
             return OSSStorageBackend(
@@ -102,9 +104,10 @@ class FileStorageService:
                 endpoint=self.config.oss_endpoint,
                 access_key=self.config.oss_access_key,
                 secret_key=self.config.oss_secret_key,
+                key_prefix=kp,
             )
         else:
-            return LocalStorageBackend(self.config.local_base_path)
+            return LocalStorageBackend(self.config.local_base_path, key_prefix=kp)
 
     @staticmethod
     def generate_file_id() -> str:

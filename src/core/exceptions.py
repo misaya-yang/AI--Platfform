@@ -69,3 +69,9 @@ class TaskCancelledError(GatewayError):
     def __init__(self, task_id: str):
         super().__init__(f"Task cancelled: {task_id}")
         self.task_id = task_id
+
+
+class NotFoundError(GatewayError):
+    """资源不存在错误"""
+    def __init__(self, message: str = "Resource not found"):
+        super().__init__(message)

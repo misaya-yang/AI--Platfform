@@ -269,7 +269,7 @@ class DashScopeVLMService:
         prompts: Optional[List[str]] = None,
         image_types: Optional[List[str]] = None,
         contexts: Optional[List[str]] = None,
-        max_concurrent: int = 3,
+        max_concurrent: int = 8,  # Increased from 3 for better throughput
     ) -> List[ImageDescription]:
         """
         Generate descriptions for multiple images.
@@ -279,7 +279,7 @@ class DashScopeVLMService:
             prompts: Optional list of custom prompts
             image_types: Optional list of image type hints
             contexts: Optional list of context strings
-            max_concurrent: Maximum concurrent API calls
+            max_concurrent: Maximum concurrent API calls (default: 8)
 
         Returns:
             List of ImageDescription results

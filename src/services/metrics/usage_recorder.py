@@ -430,8 +430,7 @@ class UsageRecorder:
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
                     )
-                    ON CONFLICT (tenant_id, COALESCE(user_id, ''), COALESCE(model, ''),
-                                 COALESCE(assistant_id, ''), COALESCE(service_id, ''), date)
+                    ON CONFLICT (tenant_id, user_id, model, assistant_id, service_id, date)
                     DO UPDATE SET
                         request_count = usage_daily_aggregates.request_count + EXCLUDED.request_count,
                         success_count = usage_daily_aggregates.success_count + EXCLUDED.success_count,
@@ -452,10 +451,10 @@ class UsageRecorder:
                         updated_at = CURRENT_TIMESTAMP
                     """,
                     tenant_id,
-                    user_id or None,
-                    model or None,
-                    assistant_id or None,
-                    service_id or None,
+                    user_id or '',
+                    model or '',
+                    assistant_id or '',
+                    service_id or '',
                     agg_date,
                     agg["request_count"],
                     agg["success_count"],

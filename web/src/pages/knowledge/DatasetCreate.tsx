@@ -1,6 +1,6 @@
 /**
  * Knowledge Base Creation Wizard
- * 
+ *
  * 3-Step wizard following Alibaba Cloud design:
  * 1. Basic Info - Name, description, embedding model
  * 2. Select Data - Upload files / URL
@@ -9,6 +9,7 @@
 
 import { useState, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import { message } from "antd";
 import {
   ArrowLeft,
@@ -55,7 +56,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 import { createDataset, uploadDocument, createDocumentFromUrl, previewChunking, type ChunkPreviewItem } from "@/api/knowledge";
-import type { ChunkingMode, ChunkingConfig } from "@/types/knowledge";
+import type { ChunkingMode, ChunkingConfig, IslamicEnhancementConfig } from "@/types/knowledge";
 
 // ============================================================
 // Types & Constants
@@ -78,119 +79,118 @@ interface PendingUrl {
   error?: string;
 }
 
-const CHUNKING_MODES: Array<{ id: ChunkingMode; name: string; desc: string }> = [
-  { id: "automatic", name: "智能切分", desc: "在通用文档上的最优chunk切分方法，经过评测可在多数文档上获得最佳的检索效果" },
-  { id: "fixed_size", name: "按长度切分", desc: "适合对Token数量有严格要求的场景，比如使用上下文长度较小的模型时" },
-  { id: "paragraph", name: "按段落切分", desc: "以段落为基本单位切分，适合段落结构清晰的文档" },
-  { id: "heading", name: "按标题切分", desc: "适合于用标题划分并传达独立主题的文档，要求不同级标题下的内容不会混杂" },
-  { id: "recursive", name: "递归切分", desc: "层级递归分割，先按段落再按句子，逐级细分直到达到目标长度" },
-  { id: "hierarchical", name: "父子切分", desc: "创建大块（父块）和小块（子块）的层级结构，适合需要保留上下文的场景" },
+const CHUNKING_MODES: Array<{ id: ChunkingMode; nameKey: string; descKey: string }> = [
+  { id: "automatic", nameKey: "knowledge.create.chunkAutomatic", descKey: "knowledge.create.chunkAutomaticDesc" },
+  { id: "fixed_size", nameKey: "knowledge.create.chunkFixedSize", descKey: "knowledge.create.chunkFixedSizeDesc" },
+  { id: "paragraph", nameKey: "knowledge.create.chunkParagraph", descKey: "knowledge.create.chunkParagraphDesc" },
+  { id: "heading", nameKey: "knowledge.create.chunkHeading", descKey: "knowledge.create.chunkHeadingDesc" },
+  { id: "recursive", nameKey: "knowledge.create.chunkRecursive", descKey: "knowledge.create.chunkRecursiveDesc" },
+  { id: "hierarchical", nameKey: "knowledge.create.chunkHierarchical", descKey: "knowledge.create.chunkHierarchicalDesc" },
 ];
 
 const EMBEDDING_MODELS = [
-  { provider: "dashscope", model: "text-embedding-v4", name: "通义向量 v4 (推荐)", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v3", name: "通义向量 v3", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v2", name: "通义向量 v2", dimension: 1536 },
-  { provider: "openai", model: "text-embedding-3-small", name: "OpenAI Small", dimension: 1536 },
-  { provider: "openai", model: "text-embedding-3-large", name: "OpenAI Large", dimension: 3072 },
+  { provider: "gemini", model: "gemini-embedding-001", nameKey: "knowledge.create.embeddingGemini001", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v4", nameKey: "knowledge.create.embeddingDashscopeV4", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v3", nameKey: "knowledge.create.embeddingDashscopeV3", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v2", nameKey: "knowledge.create.embeddingDashscopeV2", dimension: 1536 },
 ];
 
 const RERANK_MODELS = [
-  { id: "default", name: "官方排序" },
+  { id: "default", nameKey: "knowledge.create.rerankDefault" },
   { id: "gte-rerank", name: "GTE-ReRank" },
   { id: "gte-rerank-v2", name: "GTE-ReRank v2" },
 ];
 
-// 可见性选项
+// Visibility options
 type VisibilityType = "private" | "tenant" | "public";
 const VISIBILITY_OPTIONS: Array<{
   id: VisibilityType;
-  name: string;
-  desc: string;
+  nameKey: string;
+  descKey: string;
   icon: typeof Lock;
 }> = [
   {
     id: "private",
-    name: "私有",
-    desc: "仅创建者可访问",
+    nameKey: "knowledge.create.visPrivate",
+    descKey: "knowledge.create.visPrivateDesc",
     icon: Lock,
   },
   {
     id: "tenant",
-    name: "团队",
-    desc: "同租户所有成员可查看",
+    nameKey: "knowledge.create.visTenant",
+    descKey: "knowledge.create.visTenantDesc",
     icon: Users,
   },
   {
     id: "public",
-    name: "公开",
-    desc: "所有人可查看",
+    nameKey: "knowledge.create.visPublic",
+    descKey: "knowledge.create.visPublicDesc",
     icon: Globe,
   },
 ];
 
-// 知识库类型选项
+// Knowledge base type options
 type KBType = "document" | "data" | "image" | "audio_video";
 const KB_TYPE_OPTIONS: Array<{
   id: KBType;
-  name: string;
-  desc: string;
+  nameKey: string;
+  descKey: string;
   icon: typeof FileText;
   color: string;
 }> = [
   {
     id: "document",
-    name: "文档搜索",
-    desc: "上传文档构建知识库，可根据文档内容进行提问并获取回答",
+    nameKey: "knowledge.create.kbTypeDocument",
+    descKey: "knowledge.create.kbTypeDocumentDesc",
     icon: FileText,
     color: "text-blue-500",
   },
   {
     id: "data",
-    name: "数据查询",
-    desc: "上传结构化数据，支持表格数据查询和统计分析",
+    nameKey: "knowledge.create.kbTypeData",
+    descKey: "knowledge.create.kbTypeDataDesc",
     icon: Database,
     color: "text-green-500",
   },
   {
     id: "image",
-    name: "图片问答",
-    desc: "上传图片素材，支持图像内容识别与问答",
+    nameKey: "knowledge.create.kbTypeImage",
+    descKey: "knowledge.create.kbTypeImageDesc",
     icon: Image,
     color: "text-purple-500",
   },
   {
     id: "audio_video",
-    name: "音视频搜索",
-    desc: "上传音频视频内容，支持多媒体内容检索",
+    nameKey: "knowledge.create.kbTypeAudioVideo",
+    descKey: "knowledge.create.kbTypeAudioVideoDesc",
     icon: PlayCircle,
     color: "text-orange-500",
   },
 ];
 
-// 使用场景选项
+// Use case options
 type UseCase = "basic_qa" | "rich_text_response";
 const USE_CASE_OPTIONS: Array<{
   id: UseCase;
-  name: string;
-  desc: string;
+  nameKey: string;
+  descKey: string;
   icon: typeof MessageSquare;
 }> = [
   {
     id: "basic_qa",
-    name: "基础文档问答",
-    desc: "标准问答场景，返回精准文本答案",
+    nameKey: "knowledge.create.useCaseBasicQA",
+    descKey: "knowledge.create.useCaseBasicQADesc",
     icon: MessageSquare,
   },
   {
     id: "rich_text_response",
-    name: "图文并茂回复",
-    desc: "支持富文本响应，包含图片和格式化内容",
+    nameKey: "knowledge.create.useCaseRichText",
+    descKey: "knowledge.create.useCaseRichTextDesc",
     icon: FileImage,
   },
 ];
 
-// 验证常量
+// Validation constants
 const MAX_NAME_LENGTH = 100;
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20MB
@@ -204,8 +204,9 @@ const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 type ChunkPreviewConfig = Pick<ChunkingConfig, "mode" | "chunk_size" | "chunk_overlap" | "remove_extra_spaces">;
 
 function ChunkPreviewSection({ datasetId, config }: { datasetId: string; config: ChunkPreviewConfig }) {
+  const { t } = useTranslation();
   const [text, setText] = useState(`# Sample Header
-  
+
 Here is some sample text content to demonstrate how the chunking works.
 It supports markdown structure detection and automatic splitting.
 
@@ -221,41 +222,10 @@ Try pasting your own content here to test.`);
     if (!text.trim()) return;
     setLoading(true);
     try {
-      // Use "preview_temp" or similar if dataset not created yet, 
-      // but backend logic handles it (uses dummy doc ID). 
-      // Actually backend expects dataset_id to exist to check permissions, 
-      // but if we are in creation wizard, the dataset might NOT exist yet.
-      // We might need to handle this. For now assume we pass a placeholder or handle in backend.
-      // Wait, endpoint is /knowledge/{dataset_id}/chunk/preview.
-      // If dataset doesn't exist, we can't call it easily unless we remove auth check or use "temp".
-      // Backend requires "viewer" permission on dataset_id.
-      // Workaround: If creating new, we don't have ID. 
-      // Maybe we can use a special "preview" dataset ID or empty?
-      // For now, let's assume we can't preview until dataset created? 
-      // OR, user requested "Preview capability" in Step 3. Dataset IS created at Step 1 handleSubmit?
-      // Ah, Step 1 just sets state. dataset is created at FINAL Submit (Step 3 completion).
-      // Wait, let's check code.
-      // handleSubmit is called at the end of Step 3.
-      // So dataset DOES NOT EXIST yet when in Step 3 UI.
-
-      // FIX Needed: We can't use /knowledge/{dataset_id}/... if dataset doesn't exist.
-      // However, usually "Create" wizards create the ID early or use a generic preview endpoint.
-      // I will implement a global preview endpoint later or mock it for now.
-      // Actually, let's check my Implementation Plan. "POST /knowledge/{dataset_id}/chunk/preview".
-      // If dataset doesn't exist, this fails.
-      // I should update backend to allow generic preview? Or use a separate endpoint `POST /knowledge/preview`?
-      // I'll try to use a "mock" ID, but backend checks DB. 
-      // User Requirements: "Implement backend chunk preview endpoint".
-
-      // Let's assume for this P0, I need to update backend to support `/knowledge/preview` (no dataset_id).
-      // But for now I'll just code the frontend logic.
-
       const res = await previewChunking(datasetId === "create" ? "temp" : datasetId, text, config);
       setChunks(res.chunks);
     } catch (e) {
       console.error(e);
-      // Fallback for demo when backend fails (e.g. invalid dataset_id)
-      // setChunks([{ content: "Preview unavailable (Dataset not created)", char_count: 0, token_count: 0 }]);
     } finally {
       setLoading(false);
     }
@@ -266,34 +236,34 @@ Try pasting your own content here to test.`);
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Eye className="h-4 w-4 text-primary" />
-          <Label className="text-sm font-medium">分段预览</Label>
+          <Label className="text-sm font-medium">{t("knowledge.create.chunkPreview")}</Label>
         </div>
         <Dialog open={showPreview} onOpenChange={setShowPreview}>
           <DialogTrigger asChild>
             <Button variant="outline" size="sm">
               <Eye className="mr-2 h-4 w-4" />
-              测试分段效果
+              {t("knowledge.create.testChunking")}
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-3xl h-[80vh] flex flex-col">
             <DialogHeader>
-              <DialogTitle>分段效果预览</DialogTitle>
+              <DialogTitle>{t("knowledge.create.chunkPreviewTitle")}</DialogTitle>
             </DialogHeader>
             <div className="flex-1 flex gap-4 min-h-0 pt-4">
               <div className="flex-1 flex flex-col gap-2">
-                <Label>测试文本</Label>
+                <Label>{t("knowledge.create.testText")}</Label>
                 <Textarea
                   value={text}
                   onChange={e => setText(e.target.value)}
                   className="flex-1 resize-none font-mono text-sm"
-                  placeholder="输入测试文本..."
+                  placeholder={t("knowledge.create.testTextPlaceholder")}
                 />
               </div>
               <div className="flex-1 flex flex-col gap-2">
                 <div className="flex items-center justify-between">
-                  <Label>分段结果 ({chunks.length})</Label>
+                  <Label>{t("knowledge.create.chunkResults")} ({chunks.length})</Label>
                   <Button size="sm" onClick={handlePreview} disabled={loading}>
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "执行分段"}
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : t("knowledge.create.executeChunking")}
                   </Button>
                 </div>
                 <div className="flex-1 border rounded-md bg-muted/40 p-4 overflow-y-auto">
@@ -314,7 +284,7 @@ Try pasting your own content here to test.`);
                     ))}
                     {chunks.length === 0 && !loading && (
                       <div className="text-center text-muted-foreground/70 py-10">
-                        点击执行分段查看结果
+                        {t("knowledge.create.clickToPreview")}
                       </div>
                     )}
                   </div>
@@ -325,7 +295,7 @@ Try pasting your own content here to test.`);
         </Dialog>
       </div>
       <div className="text-xs text-muted-foreground">
-        可以在此处测试不同分段设置下的实际效果
+        {t("knowledge.create.previewHint")}
       </div>
     </div>
   );
@@ -337,13 +307,14 @@ Try pasting your own content here to test.`);
 
 export default function DatasetCreatePage() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 表单验证错误
+  // Form validation errors
   const [nameError, setNameError] = useState<string | null>(null);
 
   // Step 1: Basic Info
@@ -370,6 +341,12 @@ export default function DatasetCreatePage() {
   const [scoreThreshold, setScoreThreshold] = useState(0.2);
   const [maxRecall, setMaxRecall] = useState(5);
 
+  // Islamic Enhancements (opt-in per dataset)
+  const [islamicMultiQuery, setIslamicMultiQuery] = useState(false);
+  const [islamicCitation, setIslamicCitation] = useState(false);
+  const [islamicAuthoritySort, setIslamicAuthoritySort] = useState(false);
+  const [islamicMaxQueries, setIslamicMaxQueries] = useState(3);
+
   // ============================================================
   // Handlers
   // ============================================================
@@ -385,13 +362,13 @@ export default function DatasetCreatePage() {
       const maxSizeLabel = isImage ? "20MB" : "100MB";
 
       if (file.size > maxSize) {
-        errors.push(`文件 "${file.name}" 超过大小限制 (${maxSizeLabel})`);
+        errors.push(t("knowledge.create.validation.fileTooLarge", { name: file.name, limit: maxSizeLabel }));
         return;
       }
 
-      // 检查重复文件
+      // Check duplicate files
       if (pendingFiles.some(pf => pf.name === file.name && pf.size === file.size)) {
-        errors.push(`文件 "${file.name}" 已添加`);
+        errors.push(t("knowledge.create.validation.duplicateFile", { name: file.name }));
         return;
       }
 
@@ -411,7 +388,7 @@ export default function DatasetCreatePage() {
     if (newFiles.length > 0) {
       setPendingFiles((prev) => [...prev, ...newFiles]);
     }
-  }, [pendingFiles]);
+  }, [pendingFiles, t]);
 
   const handleRemoveFile = useCallback((id: string) => {
     setPendingFiles((prev) => prev.filter((f) => f.id !== id));
@@ -421,15 +398,15 @@ export default function DatasetCreatePage() {
     const trimmedUrl = urlInput.trim();
     if (!trimmedUrl) return;
 
-    // URL格式验证
+    // URL format validation
     if (!URL_PATTERN.test(trimmedUrl)) {
-      message.error("请输入有效的URL地址，需以 http:// 或 https:// 开头");
+      message.error(t("knowledge.create.validation.invalidUrl"));
       return;
     }
 
-    // 重复检查
+    // Duplicate check
     if (pendingUrls.some(pu => pu.url === trimmedUrl)) {
-      message.warning("该URL已添加");
+      message.warning(t("knowledge.create.validation.duplicateUrl"));
       return;
     }
 
@@ -442,7 +419,7 @@ export default function DatasetCreatePage() {
     setPendingUrls((prev) => [...prev, newUrl]);
     setUrlInput("");
     setUrlTitle("");
-  }, [urlInput, urlTitle, pendingUrls]);
+  }, [urlInput, urlTitle, pendingUrls, t]);
 
   const handleRemoveUrl = useCallback((id: string) => {
     setPendingUrls((prev) => prev.filter((u) => u.id !== id));
@@ -483,6 +460,14 @@ export default function DatasetCreatePage() {
               enabled: rerankModel !== "default",
               model: rerankModel === "default" ? "gte-rerank" : rerankModel,
             },
+            ...((islamicMultiQuery || islamicCitation || islamicAuthoritySort) && {
+              islamic: {
+                multi_query: islamicMultiQuery,
+                citation_format: islamicCitation,
+                authority_sort: islamicAuthoritySort,
+                max_expanded_queries: islamicMaxQueries,
+              },
+            }),
           },
         },
       });
@@ -503,7 +488,7 @@ export default function DatasetCreatePage() {
           setPendingFiles((prev) =>
             prev.map((f) =>
               f.id === pf.id
-                ? { ...f, status: "error", error: err instanceof Error ? err.message : "上传失败" }
+                ? { ...f, status: "error", error: err instanceof Error ? err.message : t("knowledge.create.uploadFailed") }
                 : f
             )
           );
@@ -524,7 +509,7 @@ export default function DatasetCreatePage() {
           setPendingUrls((prev) =>
             prev.map((u) =>
               u.id === pu.id
-                ? { ...u, status: "error", error: err instanceof Error ? err.message : "获取失败" }
+                ? { ...u, status: "error", error: err instanceof Error ? err.message : t("knowledge.create.fetchFailed") }
                 : u
             )
           );
@@ -535,32 +520,33 @@ export default function DatasetCreatePage() {
       navigate(`/knowledge/${datasetId}`);
     } catch (err) {
       console.error("Failed to create dataset:", err);
-      setError(err instanceof Error ? err.message : "创建知识库失败");
+      setError(err instanceof Error ? err.message : t("knowledge.create.createError"));
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // 处理下一步点击，带验证
+  // Handle next step click with validation
   const handleNextStep = () => {
     if (step === 1) {
-      // Step 1 验证
+      // Step 1 validation
       const trimmedName = name.trim();
       if (!trimmedName) {
-        setNameError("请输入知识库名称");
-        message.error("请输入知识库名称");
+        setNameError(t("knowledge.create.nameRequired"));
+        message.error(t("knowledge.create.nameRequired"));
         return;
       }
       if (trimmedName.length > MAX_NAME_LENGTH) {
-        setNameError(`名称长度不能超过 ${MAX_NAME_LENGTH} 个字符`);
-        message.error(`名称长度不能超过 ${MAX_NAME_LENGTH} 个字符`);
+        const errorMsg = t("knowledge.create.nameTooLong", { max: MAX_NAME_LENGTH });
+        setNameError(errorMsg);
+        message.error(errorMsg);
         return;
       }
       setNameError(null);
       setStep(2);
     } else if (step === 2) {
-      // Step 2 无需强制验证，允许创建空知识库
-      // 后续可通过 Confluence 同步或手动添加文件
+      // Step 2 has no mandatory validation, allows creating empty knowledge base
+      // Content can be added later via Confluence sync or manual file upload
       setStep(3);
     }
   };
@@ -581,7 +567,7 @@ export default function DatasetCreatePage() {
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div className="text-muted-foreground/70">/</div>
-          <h1 className="text-lg font-semibold text-foreground">创建知识库</h1>
+          <h1 className="text-lg font-semibold text-foreground">{t("knowledge.create.title")}</h1>
         </div>
       </div>
 
@@ -590,9 +576,9 @@ export default function DatasetCreatePage() {
         <div className="max-w-4xl mx-auto px-6 py-6">
           <div className="flex items-center justify-center gap-4">
             {[
-              { num: 1, label: "基础信息" },
-              { num: 2, label: "选择数据" },
-              { num: 3, label: "索引设置" },
+              { num: 1, label: t("knowledge.create.step1") },
+              { num: 2, label: t("knowledge.create.step2") },
+              { num: 3, label: t("knowledge.create.step3") },
             ].map((s, i) => (
               <div key={s.num} className="flex items-center">
                 <div className="flex items-center gap-2">
@@ -628,11 +614,11 @@ export default function DatasetCreatePage() {
       {/* Content */}
       <div className="max-w-4xl mx-auto px-6 py-8">
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
+          <div className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3">
             <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="text-sm font-medium text-red-800">创建失败</p>
-              <p className="text-sm text-red-600 mt-1">{error}</p>
+              <p className="text-sm font-medium text-red-800 dark:text-red-300">{t("knowledge.create.createFailed")}</p>
+              <p className="text-sm text-red-600 dark:text-red-400 mt-1">{error}</p>
             </div>
           </div>
         )}
@@ -642,11 +628,11 @@ export default function DatasetCreatePage() {
           <div className="space-y-6">
             <div>
               <Label className="text-sm font-medium">
-                知识库名称 <span className="text-red-500">*</span>
+                {t("knowledge.create.nameLabel")} <span className="text-red-500">*</span>
               </Label>
               <Input
                 className={`mt-2 ${nameError ? "border-red-500" : ""}`}
-                placeholder="请输入知识库名称"
+                placeholder={t("knowledge.create.namePlaceholder")}
                 value={name}
                 maxLength={MAX_NAME_LENGTH}
                 onChange={(e) => {
@@ -658,7 +644,7 @@ export default function DatasetCreatePage() {
                 {nameError ? (
                   <span className="text-xs text-red-500">{nameError}</span>
                 ) : (
-                  <span className="text-xs text-muted-foreground/70">1-100个字符</span>
+                  <span className="text-xs text-muted-foreground/70">{t("knowledge.create.nameLength")}</span>
                 )}
                 <span className={`text-xs ${name.length > MAX_NAME_LENGTH ? "text-red-500" : "text-muted-foreground/70"}`}>
                   {name.length}/{MAX_NAME_LENGTH}
@@ -667,10 +653,10 @@ export default function DatasetCreatePage() {
             </div>
 
             <div>
-              <Label className="text-sm font-medium">知识库描述</Label>
+              <Label className="text-sm font-medium">{t("knowledge.create.descriptionLabel")}</Label>
               <Textarea
                 className="mt-2"
-                placeholder="请输入知识库描述"
+                placeholder={t("knowledge.create.descriptionPlaceholder")}
                 rows={4}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -678,7 +664,7 @@ export default function DatasetCreatePage() {
             </div>
 
             <div>
-              <Label className="text-sm font-medium">Embedding 模型</Label>
+              <Label className="text-sm font-medium">{t("knowledge.create.embeddingModel")}</Label>
               <Select value={embeddingModel} onValueChange={setEmbeddingModel}>
                 <SelectTrigger className="mt-2">
                   <SelectValue />
@@ -688,8 +674,8 @@ export default function DatasetCreatePage() {
                     <SelectItem key={`${m.provider}:${m.model}`} value={`${m.provider}:${m.model}`}>
                       <div className="flex items-center gap-2">
                         <Sparkles className="h-4 w-4 text-primary" />
-                        <span>{m.name}</span>
-                        <span className="text-muted-foreground/70 text-xs">({m.dimension}维)</span>
+                        <span>{t(m.nameKey)}</span>
+                        <span className="text-muted-foreground/70 text-xs">({t("knowledge.create.dimension", { dim: m.dimension })})</span>
                       </div>
                     </SelectItem>
                   ))}
@@ -697,11 +683,11 @@ export default function DatasetCreatePage() {
               </Select>
             </div>
 
-            {/* 知识库类型选择 */}
+            {/* Knowledge base type selection */}
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <Label className="text-sm font-medium">
-                  知识库类型 <span className="text-red-500">*</span>
+                  {t("knowledge.create.kbType")} <span className="text-red-500">*</span>
                 </Label>
                 <TooltipProvider>
                   <Tooltip>
@@ -709,7 +695,7 @@ export default function DatasetCreatePage() {
                       <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p className="max-w-xs">选择知识库类型以匹配您的数据类型和使用场景</p>
+                      <p className="max-w-xs">{t("knowledge.create.kbTypeHint")}</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -733,7 +719,7 @@ export default function DatasetCreatePage() {
                         </div>
                         <div className="flex-1">
                           <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium">{opt.name}</span>
+                            <span className="text-sm font-medium">{t(opt.nameKey)}</span>
                             <div
                               className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
                                 kbType === opt.id
@@ -746,7 +732,7 @@ export default function DatasetCreatePage() {
                               )}
                             </div>
                           </div>
-                          <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                          <p className="text-xs text-muted-foreground mt-1">{t(opt.descKey)}</p>
                         </div>
                       </div>
                     </Card>
@@ -755,17 +741,17 @@ export default function DatasetCreatePage() {
               </div>
             </div>
 
-            {/* 使用场景选择 */}
+            {/* Use case selection */}
             <div>
               <div className="flex items-center gap-2 mb-3">
-                <Label className="text-sm font-medium">使用场景</Label>
+                <Label className="text-sm font-medium">{t("knowledge.create.useCase")}</Label>
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger>
                       <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p className="max-w-xs">选择知识库的使用场景，优化检索和回复效果</p>
+                      <p className="max-w-xs">{t("knowledge.create.useCaseHint")}</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -785,26 +771,26 @@ export default function DatasetCreatePage() {
                     >
                       <div className="flex items-center gap-2">
                         <Icon className={`h-4 w-4 ${useCase === opt.id ? "text-primary" : "text-muted-foreground"}`} />
-                        <span className="text-sm font-medium">{opt.name}</span>
+                        <span className="text-sm font-medium">{t(opt.nameKey)}</span>
                       </div>
-                      <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t(opt.descKey)}</p>
                     </Card>
                   );
                 })}
               </div>
             </div>
 
-            {/* 可见性设置 */}
+            {/* Visibility settings */}
             <div>
               <div className="flex items-center gap-2 mb-3">
-                <Label className="text-sm font-medium">访问权限</Label>
+                <Label className="text-sm font-medium">{t("knowledge.create.visibility")}</Label>
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger>
                       <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p className="max-w-xs">设置知识库的访问权限，决定谁可以查看和使用此知识库</p>
+                      <p className="max-w-xs">{t("knowledge.create.visibilityHint")}</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -824,9 +810,9 @@ export default function DatasetCreatePage() {
                     >
                       <div className="flex items-center gap-2">
                         <Icon className={`h-4 w-4 ${visibility === opt.id ? "text-primary" : "text-muted-foreground"}`} />
-                        <span className="text-sm font-medium">{opt.name}</span>
+                        <span className="text-sm font-medium">{t(opt.nameKey)}</span>
                       </div>
-                      <p className="text-xs text-muted-foreground mt-1">{opt.desc}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{t(opt.descKey)}</p>
                     </Card>
                   );
                 })}
@@ -841,7 +827,7 @@ export default function DatasetCreatePage() {
             {/* Optional Hint */}
             <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-lg">
               <p className="text-sm text-blue-700 dark:text-blue-300">
-                <span className="font-medium">提示：</span>此步骤为可选项。您可以先创建空知识库，后续通过 Confluence 同步或手动上传文件添加内容。
+                {t("knowledge.create.optionalHint")}
               </p>
             </div>
 
@@ -860,11 +846,11 @@ export default function DatasetCreatePage() {
               }}
             >
               <Upload className="h-10 w-10 mx-auto text-muted-foreground/70" />
-              <p className="mt-3 text-sm font-medium text-foreground/80">点击或拖拽上传文件</p>
+              <p className="mt-3 text-sm font-medium text-foreground/80">{t("knowledge.create.uploadFiles")}</p>
               <p className="text-xs text-muted-foreground mt-1">
-                支持 .pdf, .doc, .docx, .txt, .md, .pptx, .ppt, .png, .jpg, .jpeg, .bmp, .gif, .xls, .xlsx 等格式
+                {t("knowledge.create.supportedFormats")}
               </p>
-              <p className="text-xs text-muted-foreground/70 mt-1">单文档最大限制 100MB 或 1000 页，单图片最大限制 20MB</p>
+              <p className="text-xs text-muted-foreground/70 mt-1">{t("knowledge.create.fileSizeLimit")}</p>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -884,7 +870,7 @@ export default function DatasetCreatePage() {
                     className="flex items-center justify-between p-3 bg-card rounded-lg border"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-red-50 rounded">
+                      <div className="p-2 bg-red-500/10 dark:bg-red-500/15 rounded">
                         <FileText className="h-5 w-5 text-red-500" />
                       </div>
                       <div>
@@ -920,16 +906,16 @@ export default function DatasetCreatePage() {
 
             {/* URL Input */}
             <div className="pt-4 border-t">
-              <Label className="text-sm font-medium">或添加网页URL</Label>
+              <Label className="text-sm font-medium">{t("knowledge.create.addUrl")}</Label>
               <div className="mt-2 flex gap-2">
                 <div className="flex-1 space-y-2">
                   <Input
-                    placeholder="输入网页URL，如 https://example.com/doc.html"
+                    placeholder={t("knowledge.create.urlPlaceholder")}
                     value={urlInput}
                     onChange={(e) => setUrlInput(e.target.value)}
                   />
                   <Input
-                    placeholder="文档标题 (可选)"
+                    placeholder={t("knowledge.create.urlTitle")}
                     value={urlTitle}
                     onChange={(e) => setUrlTitle(e.target.value)}
                   />
@@ -941,7 +927,7 @@ export default function DatasetCreatePage() {
                   className="self-start"
                 >
                   <Link className="h-4 w-4 mr-1" />
-                  添加
+                  {t("knowledge.create.addButton")}
                 </Button>
               </div>
             </div>
@@ -995,7 +981,7 @@ export default function DatasetCreatePage() {
             {/* Chunking Mode */}
             <div>
               <Label className="text-sm font-medium">
-                切片方式 <span className="text-red-500">*</span>
+                {t("knowledge.create.chunkingMode")} <span className="text-red-500">*</span>
               </Label>
               <div className="mt-3 grid grid-cols-3 gap-3">
                 {CHUNKING_MODES.map((mode) => (
@@ -1008,7 +994,7 @@ export default function DatasetCreatePage() {
                     onClick={() => setChunkingMode(mode.id)}
                   >
                     <div className="flex items-start justify-between">
-                      <h4 className="text-sm font-medium text-foreground">{mode.name}</h4>
+                      <h4 className="text-sm font-medium text-foreground">{t(mode.nameKey)}</h4>
                       <div
                         className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${chunkingMode === mode.id
                           ? "border-primary bg-primary/50"
@@ -1020,7 +1006,7 @@ export default function DatasetCreatePage() {
                         )}
                       </div>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{mode.desc}</p>
+                    <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{t(mode.descKey)}</p>
                   </Card>
                 ))}
               </div>
@@ -1030,7 +1016,7 @@ export default function DatasetCreatePage() {
             <div className="p-4 bg-muted/40 rounded-lg">
               <div className="flex items-center justify-between mb-3">
                 <Label className="text-sm font-medium">
-                  最大分段长度 <span className="text-red-500">*</span>
+                  {t("knowledge.create.maxChunkSize")} <span className="text-red-500">*</span>
                 </Label>
               </div>
               <div className="flex items-center gap-4">
@@ -1072,14 +1058,14 @@ export default function DatasetCreatePage() {
             <div className="space-y-4">
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">Metadata 抽取</span>
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.metadataExtract")}</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
                         <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p className="max-w-xs">自动提取文档标题、作者、日期等元数据</p>
+                        <p className="max-w-xs">{t("knowledge.create.metadataExtractHint")}</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1089,14 +1075,14 @@ export default function DatasetCreatePage() {
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">Excel 表头拼装</span>
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.excelHeaderConcat")}</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
                         <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p className="max-w-xs">将Excel表格的列标题拼接到每个单元格内容中，提高检索准确度</p>
+                        <p className="max-w-xs">{t("knowledge.create.excelHeaderConcatHint")}</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1106,14 +1092,14 @@ export default function DatasetCreatePage() {
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">多轮对话改写</span>
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.multiTurnRewrite")}</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
                         <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p className="max-w-xs">在多轮对话中自动改写用户问题，提升检索效果</p>
+                        <p className="max-w-xs">{t("knowledge.create.multiTurnRewriteHint")}</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1122,18 +1108,123 @@ export default function DatasetCreatePage() {
               </div>
             </div>
 
-            {/* Retrieval Settings */}
+            {/* Islamic Enhancements (opt-in) */}
             <div className="space-y-4 pt-4 border-t">
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <Label className="text-sm font-medium">排序模型</Label>
+              <div className="flex items-center gap-2 mb-1">
+                <Label className="text-sm font-medium">{t("knowledge.create.islamicEnhancements")}</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger>
+                      <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="max-w-xs">{t("knowledge.create.islamicEnhancementsHint")}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicMultiQuery")}</span>
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger>
                         <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p className="max-w-xs">使用重排序模型优化检索结果的相关性排序</p>
+                        <p className="max-w-xs">{t("knowledge.create.islamicMultiQueryHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch checked={islamicMultiQuery} onCheckedChange={setIslamicMultiQuery} />
+              </div>
+
+              {islamicMultiQuery && (
+                <div className="ml-4 p-3 rounded-lg bg-muted/30 border border-dashed">
+                  <div className="flex items-center justify-between mb-2">
+                    <Label className="text-xs font-medium text-muted-foreground">{t("knowledge.create.islamicMaxQueries")}</Label>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={2}
+                      max={5}
+                      step={1}
+                      value={islamicMaxQueries}
+                      onChange={(e) => setIslamicMaxQueries(Number(e.target.value))}
+                      className="flex-1"
+                    />
+                    <span className="text-sm font-mono w-6 text-center">{islamicMaxQueries}</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicCitation")}</span>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.islamicCitationHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch checked={islamicCitation} onCheckedChange={setIslamicCitation} />
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicAuthoritySort")}</span>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.islamicAuthoritySortHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch checked={islamicAuthoritySort} onCheckedChange={setIslamicAuthoritySort} />
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border opacity-50">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicContextualPrefix")}</span>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.islamicContextualPrefixHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch checked={false} disabled />
+              </div>
+            </div>
+
+            {/* Retrieval Settings */}
+            <div className="space-y-4 pt-4 border-t">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Label className="text-sm font-medium">{t("knowledge.create.rerankModel")}</Label>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.rerankModelHint")}</p>
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
@@ -1147,7 +1238,7 @@ export default function DatasetCreatePage() {
                       <SelectItem key={m.id} value={m.id}>
                         <div className="flex items-center gap-2">
                           <Sparkles className="h-4 w-4 text-primary" />
-                          <span>{m.name}</span>
+                          <span>{m.nameKey ? t(m.nameKey) : m.name}</span>
                         </div>
                       </SelectItem>
                     ))}
@@ -1158,14 +1249,14 @@ export default function DatasetCreatePage() {
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
-                    <Label className="text-sm font-medium">相似度阈值</Label>
+                    <Label className="text-sm font-medium">{t("knowledge.create.scoreThreshold")}</Label>
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger>
                           <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p className="max-w-xs">低于此阈值的检索结果将被过滤</p>
+                          <p className="max-w-xs">{t("knowledge.create.scoreThresholdHint")}</p>
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
@@ -1197,7 +1288,7 @@ export default function DatasetCreatePage() {
 
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <Label className="text-sm font-medium">最大召回数量</Label>
+                  <Label className="text-sm font-medium">{t("knowledge.create.maxRecall")}</Label>
                 </div>
                 <div className="flex items-center gap-4">
                   <input
@@ -1230,20 +1321,20 @@ export default function DatasetCreatePage() {
           <div>
             {step > 1 && (
               <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
-                上一步
+                {t("knowledge.create.previous")}
               </Button>
             )}
           </div>
           <div className="flex items-center gap-3">
             <Button variant="outline" onClick={() => navigate("/knowledge")}>
-              取消
+              {t("knowledge.create.cancel")}
             </Button>
             {step < 3 ? (
               <Button
                 onClick={handleNextStep}
                 className="bg-primary hover:bg-primary/90"
               >
-                下一步
+                {t("knowledge.create.next")}
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             ) : (
@@ -1255,10 +1346,10 @@ export default function DatasetCreatePage() {
                 {isSubmitting ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    创建中...
+                    {t("knowledge.create.creating")}
                   </>
                 ) : (
-                  "确认"
+                  t("knowledge.create.confirm")
                 )}
               </Button>
             )}

@@ -4,7 +4,7 @@ LLM-based QA testing service for knowledge base retrieval validation.
 Provides a complete RAG flow:
 1. Query → Retrieval → Context Assembly → LLM Answer
 
-Supports DeepSeek and OpenAI-compatible LLM APIs.
+Supports DeepSeek, Gemini, and DashScope LLM APIs.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
     DEEPSEEK = "deepseek"
-    OPENAI = "openai"
+    GEMINI = "gemini"
     DASHSCOPE = "dashscope"
     CUSTOM = "custom"
 
@@ -106,10 +106,10 @@ Context will be provided in the user message."""
         
         defaults = {
             LLMProvider.DEEPSEEK: "https://api.deepseek.com/v1",
-            LLMProvider.OPENAI: "https://api.openai.com/v1",
+            LLMProvider.GEMINI: "https://generativelanguage.googleapis.com/v1beta/openai",
             LLMProvider.DASHSCOPE: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
-        return defaults.get(self.provider, "https://api.openai.com/v1")
+        return defaults.get(self.provider, "https://api.deepseek.com/v1")
     
     def get_api_key(self) -> Optional[str]:
         """Get API key from config or environment."""
@@ -124,7 +124,7 @@ Context will be provided in the user message."""
         # Then try provider-specific keys
         env_keys = {
             LLMProvider.DEEPSEEK: ["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
-            LLMProvider.OPENAI: ["OPENAI_API_KEY", "OPENAI_KEY"],
+            LLMProvider.GEMINI: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             LLMProvider.DASHSCOPE: ["DASHSCOPE_API_KEY", "ALIYUN_KEY", "Aliyun_KEY"],
         }
         
@@ -801,13 +801,13 @@ def get_deepseek_config(api_key: Optional[str] = None) -> LLMConfig:
     )
 
 
-def get_openai_config(
+def get_gemini_config(
     api_key: Optional[str] = None,
-    model: str = "gpt-4o-mini",
+    model: str = "gemini-2.0-flash",
 ) -> LLMConfig:
-    """Create an OpenAI LLM configuration."""
+    """Create a Gemini LLM configuration."""
     return LLMConfig(
-        provider=LLMProvider.OPENAI,
+        provider=LLMProvider.GEMINI,
         model=model,
         api_key=api_key,
         temperature=0.1,

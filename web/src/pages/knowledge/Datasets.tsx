@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import {
   Card,
   Input,
@@ -50,11 +51,11 @@ const { Text, Title, Paragraph } = Typography;
 
 // 类型 Tab 配置
 const typeOptions = [
-  { value: "all", label: "全部", icon: <DatabaseOutlined /> },
-  { value: "document", label: "文档", icon: <FileTextOutlined /> },
-  { value: "data", label: "数据", icon: <TableOutlined /> },
-  { value: "image", label: "图片", icon: <PictureOutlined /> },
-  { value: "audio_video", label: "音视频", icon: <PlaySquareOutlined /> },
+  { value: "all", labelKey: "knowledge.datasets.typeAll", icon: <DatabaseOutlined /> },
+  { value: "document", labelKey: "knowledge.datasets.typeDocument", icon: <FileTextOutlined /> },
+  { value: "data", labelKey: "knowledge.datasets.typeData", icon: <TableOutlined /> },
+  { value: "image", labelKey: "knowledge.datasets.typeImage", icon: <PictureOutlined /> },
+  { value: "audio_video", labelKey: "knowledge.datasets.typeAudioVideo", icon: <PlaySquareOutlined /> },
 ];
 
 // 根据知识库类型获取图标
@@ -72,18 +73,18 @@ function getKBTypeIcon(kbType?: string) {
   }
 }
 
-// 根据知识库类型获取标签文字
-function getKBTypeLabel(kbType?: string) {
+// 根据知识库类型获取标签翻译 key
+function getKBTypeLabelKey(kbType?: string) {
   switch (kbType) {
     case "data":
-      return "数据查询";
+      return "knowledge.datasets.typeDataQuery";
     case "image":
-      return "图片问答";
+      return "knowledge.datasets.typeImageQA";
     case "audio_video":
-      return "音视频搜索";
+      return "knowledge.datasets.typeAVSearch";
     case "document":
     default:
-      return "文档搜索";
+      return "knowledge.datasets.typeDocSearch";
   }
 }
 
@@ -119,38 +120,39 @@ function DatasetCard({
 }) {
   const [copied, setCopied] = useState(false);
   const { darkMode } = useAppStore();
+  const { t } = useTranslation();
 
   const copyId = (e: React.MouseEvent) => {
     e.stopPropagation();
     copyToClipboard(dataset.dataset_id);
     setCopied(true);
-    message.success("ID 已复制到剪贴板");
+    message.success(t("knowledge.datasets.idCopied"));
     setTimeout(() => setCopied(false), 2000);
   };
 
   const menuItems: MenuProps["items"] = [
     {
       key: "view",
-      label: "查看详情",
+      label: t("knowledge.datasets.viewDetail"),
       icon: <EyeOutlined />,
       onClick: () => onViewDetail(),
     },
     {
       key: "edit",
-      label: "编辑配置",
+      label: t("knowledge.datasets.editConfig"),
       icon: <EditOutlined />,
       onClick: () => onEdit(),
     },
     {
       key: "test",
-      label: "命中测试",
+      label: t("knowledge.datasets.hitTest"),
       icon: <ExperimentOutlined />,
       onClick: () => onHitTest(),
     },
     { type: "divider" },
     {
       key: "delete",
-      label: "删除知识库",
+      label: t("knowledge.datasets.deleteKB"),
       icon: <DeleteOutlined />,
       danger: true,
       onClick: () => onDelete(),
@@ -205,7 +207,7 @@ function DatasetCard({
               fontWeight: 500,
             }}
           >
-            {getKBTypeLabel(dataset.kb_type)}
+            {t(getKBTypeLabelKey(dataset.kb_type))}
           </Tag>
 
           <Dropdown
@@ -278,7 +280,7 @@ function DatasetCard({
               lineHeight: "20px",
             }}
           >
-            {dataset.description || "暂无描述"}
+            {dataset.description || t("knowledge.datasets.noDescription")}
           </Paragraph>
         </div>
 
@@ -296,14 +298,14 @@ function DatasetCard({
             <FileTextOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
             <div>
               <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{docCount}</Text>
-              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>文档</Text>
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t("knowledge.datasets.documents")}</Text>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <NodeIndexOutlined style={{ fontSize: 16, color: colors.neutral[400] }} />
             <div>
               <Text strong style={{ fontSize: 18, lineHeight: 1 }}>{segCount}</Text>
-              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>段落</Text>
+              <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t("knowledge.datasets.segments")}</Text>
             </div>
           </div>
         </div>
@@ -327,7 +329,7 @@ function DatasetCard({
             >
               {dataset.dataset_id.slice(0, 10)}...
             </Text>
-            <Tooltip title={copied ? "已复制" : "复制 ID"}>
+            <Tooltip title={copied ? t("knowledge.datasets.copied") : t("knowledge.datasets.copyId")}>
               <span
                 onClick={copyId}
                 style={{ cursor: "pointer", display: "flex" }}
@@ -351,10 +353,10 @@ function DatasetCard({
             }}
           >
             {dataset.visibility === "private"
-              ? "私有"
+              ? t("knowledge.datasets.visPrivate")
               : dataset.visibility === "tenant"
-                ? "团队"
-                : "公开"}
+                ? t("knowledge.datasets.visTenant")
+                : t("knowledge.datasets.visPublic")}
           </Tag>
         </div>
       </div>
@@ -419,6 +421,7 @@ function StatCard({
 // 空状态组件
 function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
   const { darkMode } = useAppStore();
+  const { t } = useTranslation();
 
   return (
     <div
@@ -448,7 +451,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
       </div>
 
       <Title level={4} style={{ marginBottom: 8 }}>
-        还没有知识库
+        {t("knowledge.datasets.emptyTitle")}
       </Title>
       <Paragraph
         type="secondary"
@@ -457,8 +460,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
           margin: "0 auto 24px",
         }}
       >
-        创建您的第一个知识库，上传文档或添加 URL 构建 AI 知识体系，
-        让 AI 更智能地理解您的业务
+        {t("knowledge.datasets.emptyDesc")}
       </Paragraph>
 
       <Space size={12}>
@@ -473,7 +475,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
             paddingInline: 20,
           }}
         >
-          创建知识库
+          {t("knowledge.datasets.create")}
         </Button>
         <Button
           size="large"
@@ -484,7 +486,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
             paddingInline: 20,
           }}
         >
-          导入知识库
+          {t("knowledge.datasets.import")}
         </Button>
       </Space>
     </div>
@@ -498,6 +500,7 @@ export function KnowledgeDatasetsPage() {
   const datasetsQuery = useDatasets();
   const datasets = datasetsQuery.data || [];
   const { darkMode } = useAppStore();
+  const { t } = useTranslation();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
@@ -540,11 +543,11 @@ export function KnowledgeDatasetsPage() {
     try {
       await deleteDataset(deletingDataset.dataset_id);
       await qc.invalidateQueries({ queryKey: ["kb-datasets"] });
-      message.success("知识库已删除");
+      message.success(t("knowledge.datasets.deleteSuccess"));
       setDeleteModalOpen(false);
       setDeletingDataset(null);
     } catch (e) {
-      message.error("删除失败: " + (e instanceof Error ? e.message : String(e)));
+      message.error(t("knowledge.datasets.deleteFailed") + ": " + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -562,10 +565,10 @@ export function KnowledgeDatasetsPage() {
         >
           <div>
             <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
-              知识库管理
+              {t("knowledge.datasets.title")}
             </Title>
             <Text type="secondary" style={{ fontSize: 14 }}>
-              管理和检索您的 AI 知识资产
+              {t("knowledge.datasets.subtitle")}
             </Text>
           </div>
 
@@ -575,7 +578,7 @@ export function KnowledgeDatasetsPage() {
               onClick={() => qc.invalidateQueries({ queryKey: ["kb-datasets"] })}
               style={{ borderRadius: 6 }}
             >
-              刷新
+              {t("knowledge.datasets.refresh")}
             </Button>
             <Button
               type="primary"
@@ -583,7 +586,7 @@ export function KnowledgeDatasetsPage() {
               onClick={() => nav("/knowledge/create")}
               style={{ borderRadius: 6 }}
             >
-              创建知识库
+              {t("knowledge.datasets.create")}
             </Button>
           </Space>
         </div>
@@ -593,7 +596,7 @@ export function KnowledgeDatasetsPage() {
       <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={8}>
           <StatCard
-            title="知识库总数"
+            title={t("knowledge.datasets.totalKB")}
             value={stats.total}
             icon={<DatabaseOutlined />}
             color={colors.primary[500]}
@@ -602,7 +605,7 @@ export function KnowledgeDatasetsPage() {
         </Col>
         <Col xs={24} sm={8}>
           <StatCard
-            title="文档总数"
+            title={t("knowledge.datasets.totalDocs")}
             value={stats.documents}
             icon={<FileTextOutlined />}
             color={colors.primary[400]}
@@ -611,7 +614,7 @@ export function KnowledgeDatasetsPage() {
         </Col>
         <Col xs={24} sm={8}>
           <StatCard
-            title="段落总数"
+            title={t("knowledge.datasets.totalSegments")}
             value={stats.segments}
             icon={<NodeIndexOutlined />}
             color={colors.primary[600]}
@@ -641,7 +644,7 @@ export function KnowledgeDatasetsPage() {
         >
           {/* 左侧：搜索框 */}
           <Input
-            placeholder="搜索知识库名称、ID 或描述..."
+            placeholder={t("knowledge.datasets.searchPlaceholder")}
             prefix={<SearchOutlined style={{ color: colors.neutral[400] }} />}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -661,7 +664,7 @@ export function KnowledgeDatasetsPage() {
               label: (
                 <Space size={6}>
                   {opt.icon}
-                  <span>{opt.label}</span>
+                  <span>{t(opt.labelKey)}</span>
                 </Space>
               ),
             }))}
@@ -681,7 +684,7 @@ export function KnowledgeDatasetsPage() {
         <div style={{ textAlign: "center", padding: "80px 0" }}>
           <Spin size="large" />
           <div style={{ marginTop: 16 }}>
-            <Text type="secondary">加载中...</Text>
+            <Text type="secondary">{t("knowledge.datasets.loading")}</Text>
           </div>
         </div>
       ) : filteredDatasets.length === 0 ? (
@@ -715,7 +718,7 @@ export function KnowledgeDatasetsPage() {
         title={
           <Space>
             <DeleteOutlined style={{ color: "#EF4444" }} />
-            <span>确认删除</span>
+            <span>{t("knowledge.datasets.deleteConfirmTitle")}</span>
           </Space>
         }
         open={deleteModalOpen}
@@ -724,20 +727,19 @@ export function KnowledgeDatasetsPage() {
           setDeletingDataset(null);
         }}
         onOk={handleDelete}
-        okText="确认删除"
-        cancelText="取消"
+        okText={t("knowledge.datasets.deleteConfirm")}
+        cancelText={t("common.cancel")}
         okButtonProps={{
           danger: true,
         }}
       >
         <div style={{ padding: "12px 0" }}>
           <Text>
-            确定要删除知识库{" "}
-            <Text strong>"{deletingDataset?.name}"</Text> 吗？
+            {t("knowledge.datasets.deleteConfirmText", { name: deletingDataset?.name })}
           </Text>
           <br />
           <Text type="secondary" style={{ fontSize: 13 }}>
-            此操作不可恢复，知识库中的所有文档和段落都将被删除。
+            {t("knowledge.datasets.deleteWarning")}
           </Text>
         </div>
       </Modal>

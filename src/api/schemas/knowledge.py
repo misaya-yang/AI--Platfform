@@ -22,7 +22,7 @@ class DatasetCreateSchema(BaseModel):
     use_case: str = "basic_qa"  # basic_qa|rich_text_response
 
     # Text-First RAG: Default to Gemini embedding
-    embedding_provider: str = "gemini"  # gemini|openai|dashscope|local
+    embedding_provider: str = "gemini"  # gemini|dashscope|local
     embedding_model: str = "gemini-embedding-001"
     embedding_dimension: Optional[int] = 1024  # Gemini supports 768/1024/1536/3072
     embedding_config: Dict[str, Any] = Field(default_factory=dict)
@@ -70,8 +70,8 @@ class PreProcessingRuleSchema(BaseModel):
 
 class SegmentationConfigSchema(BaseModel):
     separator: str = "\n"
-    max_tokens: int = 500
-    chunk_overlap: int = 50
+    max_tokens: int = 500          # token limit for embedding models
+    chunk_overlap: int = 50        # legacy overlap (tokens)
 
 
 class ProcessRuleSchema(BaseModel):
@@ -197,6 +197,12 @@ class RetrieveRequestSchema(BaseModel):
     image_score_threshold: Optional[float] = None  # Score threshold for images (lower than text)
     use_separate_thresholds: bool = False  # Use different thresholds for text vs image
 
+    # Islamic knowledge traceability filters
+    source_type_filter: Optional[str] = None  # Filter by source: quran|hadith|fiqh|tafseer
+    language_filter: Optional[str] = None     # Filter by language: ar|en|ar_en
+    multi_query: bool = False                 # Enable Islamic multi-query expansion
+    authority_sort: bool = False              # Sort results by Islamic authority (Quran > Hadith > Fiqh)
+
 
 class AssociatedImageSchema(BaseModel):
     """Schema for associated image in retrieval results."""
@@ -220,6 +226,11 @@ class RetrieveHitSchema(BaseModel):
     image_url: Optional[str] = None  # For image segments
     vlm_description: Optional[str] = None  # VLM-generated description for images
     associated_images: List[AssociatedImageSchema] = Field(default_factory=list)  # Associated images for text segments
+
+    # Islamic knowledge traceability fields
+    source_type: Optional[str] = None  # quran|hadith|tafseer|fiqh|general_islamic
+    citation_text: Optional[str] = None  # Pre-formatted citation string
+    source_reference: Dict[str, Any] = Field(default_factory=dict)  # Structured reference data
 
 
 class RetrieveResponseSchema(BaseModel):
@@ -336,7 +347,7 @@ class LLMConfigSchema(BaseModel):
     """LLM configuration for QA testing"""
     model_config = ConfigDict(extra="allow")
     
-    provider: str = "deepseek"  # deepseek | openai | dashscope
+    provider: str = "deepseek"  # deepseek | gemini | dashscope
     model: str = "deepseek-chat"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -504,12 +515,13 @@ class ChunkingConfigSchema(BaseModel):
     - regex: Split by regex pattern
     - recursive: Recursive multi-level splitting
     - qa: Question-answer pair format
+    - islamic: Islamic text-aware chunking (Quran/Hadith/Fiqh/Tafseer)
     """
     model_config = ConfigDict(extra="allow")
     
     mode: str = "automatic"
-    chunk_size: int = 500
-    chunk_overlap: int = 50
+    chunk_size: int = 2000       # ~400-500 tokens, matches ChunkingConfig default
+    chunk_overlap: int = 300     # 15% overlap, matches ChunkingConfig default
     
     # Separator mode
     separator: str = "\n"
@@ -537,6 +549,11 @@ class ChunkingConfigSchema(BaseModel):
     question_prefix: Optional[str] = None
     answer_prefix: Optional[str] = None
     
+    # Islamic text options (for islamic mode)
+    islamic_source_type: Optional[str] = None  # quran|hadith|fiqh|tafseer|auto
+    preserve_verse_integrity: bool = True
+    preserve_hadith_integrity: bool = True
+
     # Pre-processing
     remove_extra_spaces: bool = True
     remove_urls_emails: bool = False

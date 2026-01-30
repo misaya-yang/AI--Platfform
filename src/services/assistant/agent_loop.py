@@ -237,7 +237,7 @@ class AgentLoopConfig:
 
     # RAG configuration (JIT Retrieval - optimized for TTFT and relevance)
     kb_dataset_ids: List[str] = field(default_factory=list)
-    kb_top_k: int = 3  # Reduced for faster retrieval (was 5)
+    kb_top_k: int = 5  # Number of KB results to retrieve
     kb_min_relevance: float = 0.6  # Higher threshold for quality (was 0.5)
     kb_max_queries: int = 1  # Single query for speed (was 3)
     kb_results_per_query: int = 3  # Results per query

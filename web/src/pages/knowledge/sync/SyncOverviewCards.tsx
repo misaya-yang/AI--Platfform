@@ -6,6 +6,7 @@
 
 import { useMemo } from "react";
 import { Cloud, FileText, Clock, RefreshCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import type { ConfluenceBinding } from "@/types/confluence";
 
@@ -14,6 +15,8 @@ interface SyncOverviewCardsProps {
 }
 
 export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
+  const { t, i18n } = useTranslation();
+
   const stats = useMemo(() => {
     const totalSources = bindings.length;
     const totalPages = bindings.reduce((sum, b) => sum + b.total_page_count, 0);
@@ -24,7 +27,7 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
     const syncTimes = bindings
       .map((b) => b.last_sync_at)
       .filter(Boolean)
-      .map((t) => new Date(t!).getTime());
+      .map((dateStr) => new Date(dateStr!).getTime());
     const lastSyncAt = syncTimes.length > 0 ? new Date(Math.max(...syncTimes)) : null;
 
     return { totalSources, totalPages, syncedPages, activeSyncs, lastSyncAt };
@@ -37,18 +40,18 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
     const diffHours = Math.floor(diffMins / 60);
     const diffDays = Math.floor(diffHours / 24);
 
-    if (diffMins < 1) return "刚刚";
-    if (diffMins < 60) return `${diffMins} 分钟前`;
-    if (diffHours < 24) return `${diffHours} 小时前`;
-    if (diffDays < 7) return `${diffDays} 天前`;
-    return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+    if (diffMins < 1) return t("knowledge.sync.justNow");
+    if (diffMins < 60) return t("knowledge.sync.minutesAgo", { count: diffMins });
+    if (diffHours < 24) return t("knowledge.sync.hoursAgo", { count: diffHours });
+    if (diffDays < 7) return t("knowledge.sync.daysAgo", { count: diffDays });
+    return date.toLocaleDateString(i18n.language === "zh-CN" ? "zh-CN" : "en-US", { month: "short", day: "numeric" });
   };
 
   const cards = [
     {
       key: "sources",
       icon: Cloud,
-      label: "同步源",
+      label: t("knowledge.sync.syncSources"),
       value: stats.totalSources,
       color: "from-blue-500/10 to-cyan-500/10 border-blue-500/20",
       iconColor: "text-blue-500",
@@ -56,7 +59,7 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
     {
       key: "pages",
       icon: FileText,
-      label: "已同步页面",
+      label: t("knowledge.sync.syncedPagesCount"),
       value: `${stats.syncedPages}/${stats.totalPages}`,
       color: "from-emerald-500/10 to-teal-500/10 border-emerald-500/20",
       iconColor: "text-emerald-500",
@@ -64,15 +67,15 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
     {
       key: "lastSync",
       icon: Clock,
-      label: "最后同步",
-      value: stats.lastSyncAt ? formatRelativeTime(stats.lastSyncAt) : "从未",
+      label: t("knowledge.sync.lastSync"),
+      value: stats.lastSyncAt ? formatRelativeTime(stats.lastSyncAt) : t("knowledge.sync.never"),
       color: "from-amber-500/10 to-orange-500/10 border-amber-500/20",
       iconColor: "text-amber-500",
     },
     {
       key: "active",
       icon: RefreshCcw,
-      label: "进行中",
+      label: t("knowledge.sync.inProgress"),
       value: stats.activeSyncs,
       color: stats.activeSyncs > 0
         ? "from-purple-500/10 to-pink-500/10 border-purple-500/20"

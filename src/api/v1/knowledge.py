@@ -214,6 +214,7 @@ async def upload_document(
 ):
     try:
         content = await file.read()
+        logger.info("Upload started: file=%s, size=%d, dataset=%s", file.filename, len(content), dataset_id)
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
@@ -221,8 +222,141 @@ async def upload_document(
             content_bytes=content,
             mime_type=file.content_type,
         )
+        logger.info("Document created: id=%s, enqueueing for ingestion...", doc["document_id"])
         await worker.enqueue(dataset_id, doc["document_id"])
+        logger.info("Document enqueued: id=%s, worker queue size ~%d", doc["document_id"], worker.queue.qsize())
         return doc
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/knowledge/{dataset_id}/documents/batch-upload")
+async def batch_upload_documents(
+    dataset_id: str,
+    files: List[UploadFile] = File(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    批量上传文档到知识库（支持并行处理）
+    
+    支持格式: PDF, DOCX, TXT, MD, HTML
+    最大文件数: 50
+    最大单文件大小: 由系统配置决定
+    
+    使用流式写入临时文件，避免大文件占用过多内存。
+    
+    返回:
+        {
+            "batch_id": "uuid",
+            "total": 5,
+            "accepted": 5,
+            "rejected": 0,
+            "documents": [...],
+            "errors": []
+        }
+    """
+    import uuid as uuid_lib
+    import tempfile
+    import aiofiles
+    import os
+    
+    try:
+        await svc.require_dataset_access(user, dataset_id, required="editor")
+        
+        MAX_FILES = 50
+        CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming
+        ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
+        
+        if len(files) > MAX_FILES:
+            raise ValidationFailedError(f"Maximum {MAX_FILES} files allowed per batch")
+        
+        if not files:
+            raise ValidationFailedError("No files provided")
+        
+        batch_id = str(uuid_lib.uuid4())
+        documents = []
+        errors = []
+        
+        for file in files:
+            filename = file.filename or "unknown"
+            ext = Path(filename).suffix.lower()
+            
+            # Validate extension
+            if ext not in ALLOWED_EXTENSIONS:
+                errors.append({
+                    "filename": filename,
+                    "error": f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+                })
+                continue
+            
+            temp_path = None
+            try:
+                # Stream file to temp location to avoid memory exhaustion
+                # Use tempfile with delete=False so we control cleanup
+                with tempfile.NamedTemporaryFile(
+                    delete=False, 
+                    suffix=ext,
+                    prefix=f"batch_{batch_id[:8]}_"
+                ) as tmp:
+                    temp_path = tmp.name
+                
+                # Stream write using aiofiles
+                async with aiofiles.open(temp_path, 'wb') as out_file:
+                    while True:
+                        chunk = await file.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        await out_file.write(chunk)
+                
+                # Read back for processing (file is now on disk, not all in memory at once)
+                async with aiofiles.open(temp_path, 'rb') as in_file:
+                    content = await in_file.read()
+                
+                # Create document record
+                doc = await svc.create_document_from_upload(
+                    user,
+                    dataset_id,
+                    filename=filename,
+                    content_bytes=content,
+                    mime_type=file.content_type,
+                )
+                
+                # Add batch metadata
+                doc["batch_id"] = batch_id
+                documents.append(doc)
+                
+            except Exception as e:
+                errors.append({
+                    "filename": filename,
+                    "error": str(e)
+                })
+            finally:
+                # Clean up temp file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
+        
+        # Enqueue all documents for parallel processing
+        # Worker will process them based on document_worker_concurrency setting
+        for doc in documents:
+            await worker.enqueue(dataset_id, doc["document_id"])
+        
+        return {
+            "batch_id": batch_id,
+            "total": len(files),
+            "accepted": len(documents),
+            "rejected": len(errors),
+            "documents": documents,
+            "errors": errors,
+        }
+        
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -450,6 +584,12 @@ async def reindex_document(
     try:
         await svc.require_dataset_access(user, dataset_id, required="editor")
         await worker.enqueue(dataset_id, document_id)
+        # Update status immediately so UI shows "解析中" after refetch instead of staying "已上传"
+        try:
+            await svc.db.update_document_status(document_id, status="parsing", progress=0)
+        except Exception as e:
+            logger.warning("Could not update document status after reindex enqueue: %s", e)
+        logger.info("Reindex queued for document %s (dataset=%s)", document_id, dataset_id)
         return {"status": "queued", "document_id": document_id}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -555,6 +695,10 @@ async def retrieve(
                 include_images=payload.include_images,
                 content_type_filter=payload.content_type_filter,
                 multimodal_rerank=payload.multimodal_rerank,
+                source_type_filter=payload.source_type_filter,
+                language_filter=payload.language_filter,
+                multi_query=payload.multi_query,
+                authority_sort=payload.authority_sort,
                 # Advanced multimodal parameters
                 image_search_enabled=payload.image_search_enabled,
                 vlm_rerank_weight=payload.vlm_rerank_weight,
@@ -588,9 +732,13 @@ async def retrieve(
                 mmr=payload.mmr,
                 mmr_lambda=payload.mmr_lambda,
                 mmr_threshold=payload.mmr_threshold,
+                source_type_filter=payload.source_type_filter,
+                language_filter=payload.language_filter,
+                multi_query=payload.multi_query,
+                authority_sort=payload.authority_sort,
             )
 
-        # Build response with multimodal fields
+        # Build response with multimodal + Islamic traceability fields
         return {
             "results": [
                 {
@@ -604,6 +752,10 @@ async def retrieve(
                     "image_url": getattr(r, "image_url", None),
                     "vlm_description": getattr(r, "vlm_description", None),
                     "associated_images": getattr(r, "associated_images", []),
+                    # Islamic knowledge traceability fields
+                    "source_type": (r.metadata or {}).get("source_type"),
+                    "citation_text": (r.metadata or {}).get("citation_text"),
+                    "source_reference": (r.metadata or {}).get("source_reference", {}),
                 }
                 for r in results
             ],
@@ -1339,25 +1491,31 @@ async def update_dataset_config(
         # Update retrieval config
         if payload.retrieval_config:
             retrieval = payload.retrieval_config.model_dump(exclude_none=True)
-            
-            # Convert flat structure to nested for compatibility
+
+            # Extract nested objects sent by frontend
+            fusion_cfg = retrieval.get("fusion", {}) or {}
+            rerank_cfg = retrieval.get("rerank", {}) or {}
+            mmr_cfg = retrieval.get("mmr", {}) or {}
+
             index_config["retrieval"] = {
                 "mode": retrieval.get("mode", "hybrid"),
                 "top_k": retrieval.get("top_k", 5),
                 "score_threshold": retrieval.get("score_threshold"),
                 "vector_top_k": retrieval.get("vector_top_k", 20),
                 "keyword_top_k": retrieval.get("keyword_top_k", 20),
-                "fusion": retrieval.get("fusion_strategy", "rrf"),
-                "rrf_k": retrieval.get("rrf_k", 60),
-                "alpha": retrieval.get("alpha", 0.75),
+                "fusion": {
+                    "strategy": fusion_cfg.get("strategy", "rrf"),
+                    "alpha": fusion_cfg.get("alpha", 0.7),
+                    "rrf_k": fusion_cfg.get("rrf_k", 60),
+                },
                 "rerank": {
-                    "enabled": retrieval.get("rerank_enabled", False),
-                    "model": retrieval.get("rerank_model", "gte-rerank"),
-                    "top_n": retrieval.get("rerank_top_n"),
+                    "enabled": rerank_cfg.get("enabled", False),
+                    "model": rerank_cfg.get("model", "gte-rerank"),
+                    "top_n": rerank_cfg.get("top_n"),
                 },
                 "mmr": {
-                    "enabled": retrieval.get("mmr_enabled", False),
-                    "lambda": retrieval.get("mmr_lambda", 0.5),
+                    "enabled": mmr_cfg.get("enabled", False),
+                    "lambda": mmr_cfg.get("lambda", 0.5),
                 },
             }
         
@@ -1421,7 +1579,8 @@ async def preview_chunks(
         from src.services.knowledge.chunking import (
             ChunkingConfig,
             process_document,
-            flatten_chunks
+            flatten_chunks,
+            merge_small_chunks,
         )
 
         # Get chunking config - use provided or fall back to dataset defaults
@@ -1437,6 +1596,11 @@ async def preview_chunks(
         # Process text
         chunks = process_document(payload.text, config)
         flat_chunks = flatten_chunks(chunks)
+        flat_chunks = merge_small_chunks(
+            flat_chunks,
+            min_size=config.min_chunk_size,
+            max_size=config.max_chunk_size,
+        )
 
         # Format response
         preview_items = [
@@ -1889,3 +2053,30 @@ async def restore_document_version(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/knowledge/worker/status")
+async def get_worker_status(
+    worker: KnowledgeWorker = Depends(get_knowledge_worker),
+):
+    """Diagnostic endpoint to check worker status."""
+    return {
+        "running": worker._running,
+        "queue_size": worker.queue.qsize(),
+        "worker_count": len(worker._workers),
+        "workers_alive": [not t.done() for t in worker._workers],
+    }
+
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/force-complete")
+async def force_complete_document(
+    dataset_id: str,
+    document_id: str,
+    svc: KnowledgeService = Depends(get_knowledge_service),
+):
+    """Force complete a stuck document (admin/debug only)."""
+    try:
+        await svc.db.update_document_status(document_id, status="completed", progress=100)
+        return {"status": "completed", "document_id": document_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

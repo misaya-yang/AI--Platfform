@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import type { RetrieveHit } from "@/types/knowledge";
 import { Badge } from "@/components/ui/badge";
@@ -13,19 +14,20 @@ export function RetrievalResultCard({
   index: number;
   highlightTerms?: string[];
 }) {
+  const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
 
   const highlightText = (text: string, terms: string[]) => {
     if (!terms.length || !text) return text;
-    const escapedTerms = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const escapedTerms = terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
     const regex = new RegExp(`(${escapedTerms.join("|")})`, "gi");
     const parts = text.split(regex);
 
     return parts.map((part, i) => {
-      const isMatch = terms.some((t) => t.toLowerCase() === part.toLowerCase());
+      const isMatch = terms.some((term) => term.toLowerCase() === part.toLowerCase());
       if (isMatch) {
         return (
-          <mark key={i} className="bg-amber-200/70 px-0.5 rounded font-medium">
+          <mark key={i} className="bg-amber-500/25 dark:bg-amber-500/30 text-inherit px-0.5 rounded font-medium">
             {part}
           </mark>
         );
@@ -39,11 +41,11 @@ export function RetrievalResultCard({
   const showExpandButton = textLength > 200;
 
   const getScoreColor = (score: number) => {
-    if (score >= 0.8) return "bg-emerald-100 text-emerald-800 border-emerald-300";
-    if (score >= 0.6) return "bg-teal-50 text-teal-700 border-teal-200";
-    if (score >= 0.4) return "bg-amber-50 text-amber-700 border-amber-200";
-    if (score >= 0.2) return "bg-yellow-50 text-yellow-700 border-yellow-200";
-    return "bg-rose-50 text-rose-700 border-rose-200";
+    if (score >= 0.8) return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30";
+    if (score >= 0.6) return "bg-teal-500/15 text-teal-700 dark:text-teal-400 border-teal-500/30";
+    if (score >= 0.4) return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30";
+    if (score >= 0.2) return "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/30";
+    return "bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30";
   };
 
   const hasExactMatch = hit.metadata?._exact_match === true;
@@ -70,9 +72,9 @@ export function RetrievalResultCard({
     <div
       className={`bg-card rounded-xl border p-4 hover:border-primary/30 hover:shadow-md transition-all ${
         !hasText
-          ? "border-rose-200 bg-rose-50/30"
+          ? "border-rose-500/30 bg-rose-500/10"
           : hasExactMatch
-            ? "border-emerald-300 bg-emerald-50/30 ring-2 ring-emerald-200"
+            ? "border-emerald-500/30 bg-emerald-500/10 ring-2 ring-emerald-500/20"
             : "border-border/60"
       }`}
     >
@@ -91,13 +93,13 @@ export function RetrievalResultCard({
             {hit.segment_id.slice(0, 10)}...
           </span>
           {hasExactMatch && (
-            <Badge className="bg-emerald-100 text-emerald-700 border-emerald-300 text-xs font-medium">
-              ✓ 精确匹配
+            <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-xs font-medium">
+              {`\u2713 ${t("knowledge.retrieval.exactMatch")}`}
             </Badge>
           )}
           {!hasExactMatch && termMatches !== undefined && termMatches > 0 && (
             <Badge className="bg-primary/10 text-primary border-primary/20 text-xs">
-              {termMatches} 词匹配
+              {t("knowledge.retrieval.termMatches", { count: termMatches })}
             </Badge>
           )}
         </div>
@@ -122,11 +124,11 @@ export function RetrievalResultCard({
             >
               {isExpanded ? (
                 <>
-                  收起 <ChevronUp className="h-3 w-3" />
+                  {t("knowledge.retrieval.collapse")} <ChevronUp className="h-3 w-3" />
                 </>
               ) : (
                 <>
-                  展开全部 ({textLength} 字符) <ChevronDown className="h-3 w-3" />
+                  {t("knowledge.retrieval.expand", { count: textLength })} <ChevronDown className="h-3 w-3" />
                 </>
               )}
             </button>
@@ -134,7 +136,7 @@ export function RetrievalResultCard({
         </div>
       ) : (
         <p className="text-sm text-rose-500 italic">
-          ⚠️ 无文本内容 - 请重新处理该文档
+          {`\u26A0\uFE0F ${t("knowledge.status.noTextContent")}`}
         </p>
       )}
 
@@ -142,7 +144,7 @@ export function RetrievalResultCard({
         <div className="mt-3 pt-3 border-t border-border/60">
           {Array.isArray(hit.metadata._sources) && hit.metadata._sources.length > 0 && (
             <div className="mb-2 text-xs">
-              <span className="text-muted-foreground font-medium">来源: </span>
+              <span className="text-muted-foreground font-medium">{t("knowledge.retrieval.source")} </span>
               {(hit.metadata._sources as string[]).map((src, i) => {
                 const srcLower = src.toLowerCase();
                 const isDense = srcLower === "dense" || srcLower === "vector";
@@ -152,10 +154,10 @@ export function RetrievalResultCard({
                     className={`ml-1 text-xs ${
                       isDense
                         ? "bg-primary/10 text-primary border-primary/20"
-                        : "bg-amber-100 text-amber-700"
+                        : "bg-amber-500/15 text-amber-700 dark:text-amber-400"
                     }`}
                   >
-                    {isDense ? "向量" : "BM25"}
+                    {isDense ? t("knowledge.retrieval.vector") : "BM25"}
                   </Badge>
                 );
               })}
@@ -165,7 +167,7 @@ export function RetrievalResultCard({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
             <div className="bg-muted/60 rounded p-2">
               <div className="text-muted-foreground text-[10px] mb-1">
-                Dense (向量)
+                {t("knowledge.retrieval.denseScore")}
               </div>
               <div
                 className={`font-mono ${
@@ -181,13 +183,13 @@ export function RetrievalResultCard({
 
             <div className="bg-muted/60 rounded p-2">
               <div className="text-muted-foreground text-[10px] mb-1">
-                BM25 (关键词)
+                {t("knowledge.retrieval.bm25Score")}
               </div>
               <div
                 className={`font-mono ${
                   isScoreAvailable(hit.metadata._bm25_score_norm) ||
                   isScoreAvailable(hit.metadata._keyword_score)
-                    ? "text-amber-700"
+                    ? "text-amber-700 dark:text-amber-400"
                     : "text-muted-foreground"
                 }`}
               >
@@ -197,7 +199,7 @@ export function RetrievalResultCard({
 
             <div className="bg-muted/60 rounded p-2">
               <div className="text-muted-foreground text-[10px] mb-1">
-                Fusion (融合)
+                {t("knowledge.retrieval.fusionScore")}
               </div>
               <div
                 className={`font-mono ${
@@ -213,7 +215,7 @@ export function RetrievalResultCard({
 
             <div className="bg-muted/60 rounded p-2">
               <div className="text-muted-foreground text-[10px] mb-1">
-                Rerank (重排)
+                {t("knowledge.retrieval.rerankScore")}
               </div>
               <div
                 className={`font-mono ${

@@ -42,6 +42,7 @@ class ChunkingMode(str, Enum):
     RECURSIVE = "recursive"     # 递归切分
     HIERARCHICAL = "hierarchical"  # 父子切分
     QA = "qa"                   # QA对切分
+    ISLAMIC = "islamic"         # 伊斯兰文本切分
 
 
 class ContentType(str, Enum):
@@ -153,10 +154,9 @@ class ChunkingConfig:
 
     # Heading detection (for heading mode)
     heading_patterns: List[str] = field(default_factory=lambda: [
-        r"^#{1,6}\s+.+$",           # Markdown headings
-        r"^第[一二三四五六七八九十\d]+[章节条款]",  # Chinese chapter markers
-        r"^\d+\.\s+.+$",           # Numbered sections
-        r"^[A-Z][A-Z\s]+:?\s*$",   # ALL CAPS headings
+        r"^#{1,6}\s+.+$",                             # Markdown headings
+        r"^第[一二三四五六七八九十\d]+[章节条款]",      # Chinese chapter markers
+        r"^[A-Z][A-Z\s]{4,}:?\s*$",                   # ALL CAPS headings (5+ chars)
     ])
 
     # Hierarchical/Parent-child (optimized for retrieval)
@@ -207,6 +207,7 @@ class ChunkingConfig:
             "hierarchical": ChunkingMode.HIERARCHICAL,
             "parent_child": ChunkingMode.HIERARCHICAL,
             "qa": ChunkingMode.QA,
+            "islamic": ChunkingMode.ISLAMIC,
         }
         mode = mode_map.get(mode_str, ChunkingMode.AUTOMATIC)
         
@@ -424,22 +425,64 @@ class TextPreprocessor:
         
         return result.strip()
     
+    # Simple language detection heuristics (no external dependency)
+    _CJK_RANGE = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]')
+    _ARABIC_RANGE = re.compile(r'[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]')
+    _CYRILLIC_RANGE = re.compile(r'[\u0400-\u04ff]')
+    _HANGUL_RANGE = re.compile(r'[\uac00-\ud7af\u1100-\u11ff]')
+    _HIRAGANA_KATAKANA = re.compile(r'[\u3040-\u309f\u30a0-\u30ff]')
+
+    @classmethod
+    def _detect_language(cls, text: str) -> str:
+        """Detect primary language from character distribution (lightweight, no deps)."""
+        sample = text[:5000]
+        total = max(len(sample), 1)
+        cjk = len(cls._CJK_RANGE.findall(sample))
+        arabic = len(cls._ARABIC_RANGE.findall(sample))
+        cyrillic = len(cls._CYRILLIC_RANGE.findall(sample))
+        hangul = len(cls._HANGUL_RANGE.findall(sample))
+        kana = len(cls._HIRAGANA_KATAKANA.findall(sample))
+
+        scores = {"zh": cjk, "ar": arabic, "ru": cyrillic, "ko": hangul, "ja": kana}
+        best = max(scores, key=scores.get)  # type: ignore[arg-type]
+        if scores[best] / total > 0.05:
+            return best
+        return "en"
+
+    @classmethod
+    def _extract_keywords(cls, text: str, top_k: int = 10) -> List[str]:
+        """Extract keywords via simple TF heuristic (no external dependency)."""
+        # Tokenise: lowercase, alpha-only, 3+ chars
+        words = re.findall(r'\b[a-zA-Z\u4e00-\u9fff]{3,}\b', text.lower())
+        stopwords = {
+            "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+            "her", "was", "one", "our", "out", "has", "have", "this", "that", "with",
+            "from", "they", "been", "said", "each", "which", "their", "will", "other",
+            "about", "many", "then", "them", "these", "some", "would", "make", "like",
+            "into", "more", "than", "its", "over", "such", "also", "most",
+        }
+        freq: Dict[str, int] = {}
+        for w in words:
+            if w not in stopwords and len(w) >= 3:
+                freq[w] = freq.get(w, 0) + 1
+        sorted_words = sorted(freq, key=freq.get, reverse=True)  # type: ignore[arg-type]
+        return sorted_words[:top_k]
+
     @classmethod
     def extract_metadata(cls, text: str, fields: List[str]) -> Dict[str, Any]:
         """Extract metadata from document text"""
         metadata = {}
-        
-        # Try to extract title (first line or heading)
+
+        # Title: first heading or short first line
         if "title" in fields:
             lines = text.strip().split('\n')
             if lines:
                 first_line = lines[0].strip()
                 if first_line and len(first_line) < 200:
-                    # Check if it looks like a title
                     if first_line.startswith('#') or len(first_line) < 100:
                         metadata["title"] = first_line.lstrip('#').strip()
-        
-        # Try to extract date
+
+        # Date: scan first 1000 chars
         if "date" in fields:
             date_patterns = [
                 r'\d{4}[-/]\d{1,2}[-/]\d{1,2}',
@@ -450,11 +493,20 @@ class TextPreprocessor:
                 if match:
                     metadata["date"] = match.group()
                     break
-        
-        # Word count
-        metadata["word_count"] = len(text.split())
-        metadata["char_count"] = len(text)
-        
+
+        # Language detection
+        if "language" in fields:
+            metadata["language"] = cls._detect_language(text)
+
+        # Keyword extraction
+        if "keywords" in fields:
+            metadata["keywords"] = cls._extract_keywords(text)
+
+        # Word / char counts (always useful for traceability)
+        if "word_count" in fields or "char_count" in fields:
+            metadata["word_count"] = len(text.split())
+            metadata["char_count"] = len(text)
+
         return metadata
 
 
@@ -647,11 +699,11 @@ class HeadingChunker(BaseChunker):
         if not text:
             return []
         
-        # Compile heading patterns
+        # Compile heading patterns — avoid matching numbered list items
         patterns = self.config.heading_patterns or [
-            r"^#{1,6}\s+.+$",
-            r"^第[一二三四五六七八九十\d]+[章节条款]",
-            r"^\d+\.\s+.+$",
+            r"^#{1,6}\s+.+$",                             # Markdown headings
+            r"^第[一二三四五六七八九十\d]+[章节条款]",      # Chinese chapter markers
+            r"^[A-Z][A-Z\s]{4,}:?\s*$",                   # ALL CAPS headings (5+ chars)
         ]
         
         combined_pattern = '|'.join(f'({p})' for p in patterns)
@@ -797,33 +849,46 @@ class RecursiveChunker(BaseChunker):
         return self._recursive_split(text, separators, 0)
     
     def _recursive_split(
-        self, 
-        text: str, 
-        separators: List[str], 
+        self,
+        text: str,
+        separators: List[str],
         depth: int
     ) -> List[Chunk]:
         """Recursively split text using separator hierarchy"""
         if not text.strip():
             return []
-        
-        # Base case: text fits in chunk size
-        if len(text) <= self.config.chunk_size:
-            return [self._create_chunk(text, 0)]
-        
-        # No more separators: fall back to fixed size split
-        if not separators:
+
+        # Safety limit: prevent infinite recursion
+        MAX_RECURSION_DEPTH = 20
+        if depth > MAX_RECURSION_DEPTH:
+            logger.warning(f"Recursive chunking depth limit ({MAX_RECURSION_DEPTH}) reached, falling back to fixed-size split")
             return [
-                self._create_chunk(t, i) 
+                self._create_chunk(t, i)
                 for i, t in enumerate(self._split_with_overlap(
-                    text, 
-                    self.config.chunk_size, 
+                    text,
+                    self.config.chunk_size,
                     self.config.chunk_overlap
                 ))
             ]
-        
+
+        # Base case: text fits in chunk size
+        if len(text) <= self.config.chunk_size:
+            return [self._create_chunk(text, 0)]
+
+        # No more separators: fall back to fixed size split
+        if not separators:
+            return [
+                self._create_chunk(t, i)
+                for i, t in enumerate(self._split_with_overlap(
+                    text,
+                    self.config.chunk_size,
+                    self.config.chunk_overlap
+                ))
+            ]
+
         sep = separators[0]
         remaining_seps = separators[1:]
-        
+
         # Special case for empty separator (char split)
         if sep == "":
             return [
@@ -834,21 +899,23 @@ class RecursiveChunker(BaseChunker):
                     self.config.chunk_overlap
                 ))
             ]
-            
+
         # Try splitting with current separator
         parts = text.split(sep)
-        
-        # Include separator in chunks if desired, but for now simple split
-        # We need to re-assemble parts into chunks < size
-        
+
+        # If this separator doesn't actually split (only 1 part), try next
+        if len(parts) <= 1:
+            return self._recursive_split(text, remaining_seps, depth + 1)
+
+        # Re-assemble parts into chunks within size limits
         chunks = []
         current_chunk_parts = []
         current_len = 0
-        
+
         for part in parts:
             part_len = len(part)
             sep_len = len(sep)
-            
+
             # If single part is too big, it needs to be processed recursively
             if part_len > self.config.chunk_size:
                 # First, flush current buffer if any
@@ -857,13 +924,13 @@ class RecursiveChunker(BaseChunker):
                     chunks.append(self._create_chunk(completed_text, len(chunks)))
                     current_chunk_parts = []
                     current_len = 0
-                
+
                 # Recursively split this large part
                 sub_chunks = self._recursive_split(part, remaining_seps, depth + 1)
                 for sub in sub_chunks:
                     sub.index = len(chunks)
                     chunks.append(sub)
-                    
+
             else:
                 # If adding this part exceeds size, flush buffer
                 if current_len + sep_len + part_len > self.config.chunk_size:
@@ -877,12 +944,12 @@ class RecursiveChunker(BaseChunker):
                         current_len += sep_len
                     current_chunk_parts.append(part)
                     current_len += part_len
-                    
+
         # Flush final buffer
         if current_chunk_parts:
             completed_text = sep.join(current_chunk_parts)
             chunks.append(self._create_chunk(completed_text, len(chunks)))
-            
+
         return chunks
 
 
@@ -935,7 +1002,7 @@ class HierarchicalChunker(BaseChunker):
         child_chunker = RecursiveChunker(child_config)
 
         for parent_idx, parent in enumerate(parents):
-            parent.index = len(all_chunks)  # Use global unique index instead of parent_idx
+            parent.index = len(all_chunks)
             parent.metadata["is_parent"] = True
             parent.metadata["chunk_type"] = "parent"
             all_chunks.append(parent)
@@ -953,7 +1020,9 @@ class HierarchicalChunker(BaseChunker):
                 child.parent_id = parent.hash_id
 
                 parent.children.append(child)
-                all_chunks.append(child)
+                # NOTE: Do NOT add children to all_chunks here.
+                # flatten_chunks() will extract them from parent.children,
+                # adding them here too would cause duplication.
 
         return all_chunks
 
@@ -983,27 +1052,46 @@ class AutomaticChunker(BaseChunker):
         r'\[IMAGE:.*?\]',       # Custom placeholder
     ]
 
+    # Structural heading patterns (must look like real section headings, not list items)
+    HEADING_PATTERNS_STRICT = [
+        r'^#{1,6}\s+.+$',                                    # Markdown headings
+        r'^第[一二三四五六七八九十\d]+[章节条款]',             # Chinese chapter markers
+        r'^[A-Z][A-Z\s]{4,}:?\s*$',                          # ALL CAPS headings (5+ chars)
+    ]
+
+    # Minimum heading count to consider document "structured"
+    MIN_HEADINGS_FOR_STRUCTURE = 3
+
+    def _count_headings(self, text: str) -> int:
+        """Count actual structural headings (not numbered list items)."""
+        count = 0
+        combined = '|'.join(f'({p})' for p in self.HEADING_PATTERNS_STRICT)
+        for line in text.split('\n'):
+            if re.match(combined, line.strip(), re.MULTILINE):
+                count += 1
+        return count
+
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
             return []
 
+        # Note: Islamic text chunking is handled via explicit config.mode == ISLAMIC
+        # (see create_chunker()), NOT via auto-detection here.
+
         # Analyze document characteristics
-        has_headings = bool(re.search(
-            r'^#{1,6}\s+|^第[一二三四五六七八九十\d]+[章节条款]|^\d+\.\d*\s+\w',
-            text, re.MULTILINE
-        ))
+        heading_count = self._count_headings(text)
+        has_headings = heading_count >= self.MIN_HEADINGS_FOR_STRUCTURE
         has_images = any(re.search(p, text) for p in self.IMAGE_PATTERNS)
         doc_length = len(text)
 
-        # Strategy 1: Structured documents with headings
+        # Strategy 1: Structured documents with real section headings
         if has_headings:
-            # Use heading-based chunking for structured documents
             return HeadingChunker(self.config).chunk(text)
 
-        # Strategy 2: Long documents benefit from hierarchical chunking
+        # Strategy 2: Long documents — use recursive (not hierarchical) to avoid bloat
+        # Hierarchical is only useful when explicitly requested via config
         if doc_length > 5000:
-            # Use parent-child for better context preservation
-            return HierarchicalChunker(self.config).chunk(text)
+            return RecursiveChunker(self.config).chunk(text)
 
         # Strategy 3: Handle documents with images
         if has_images and self.config.preserve_images:
@@ -1083,6 +1171,10 @@ class AutomaticChunker(BaseChunker):
 
 def create_chunker(config: ChunkingConfig) -> BaseChunker:
     """Factory function to create appropriate chunker"""
+    if config.mode == ChunkingMode.ISLAMIC:
+        from .islamic_chunking import IslamicTextChunker
+        return IslamicTextChunker(config)
+
     chunker_map = {
         ChunkingMode.AUTOMATIC: AutomaticChunker,
         ChunkingMode.FIXED_SIZE: FixedSizeChunker,
@@ -1095,7 +1187,7 @@ def create_chunker(config: ChunkingConfig) -> BaseChunker:
         ChunkingMode.HIERARCHICAL: HierarchicalChunker,
         ChunkingMode.QA: ParagraphChunker,
     }
-    
+
     chunker_cls = chunker_map.get(config.mode, RecursiveChunker)
     return chunker_cls(config)
 
@@ -1130,13 +1222,19 @@ def process_document(
     # Chunk
     chunker = create_chunker(config)
     chunks = chunker.chunk(processed_text)
-    
+
+    # NOTE: merge_small_chunks is NOT called here because hierarchical chunking
+    # stores children inside parent.children. Merging must happen AFTER
+    # flatten_chunks() to operate on the final leaf chunks. Callers should call:
+    #   flat = flatten_chunks(process_document(...))
+    #   flat = merge_small_chunks(flat, config.min_chunk_size, config.max_chunk_size)
+
     # Add document-level metadata
     for chunk in chunks:
         if document_id:
             chunk.metadata["document_id"] = document_id
         chunk.metadata.update(doc_metadata)
-    
+
     return chunks
 
 
@@ -1155,6 +1253,108 @@ def flatten_chunks(chunks: List[Chunk]) -> List[Chunk]:
     return result
 
 
+def merge_small_chunks(
+    chunks: List[Chunk],
+    min_size: int,
+    max_size: int,
+    separator: str = "\n\n",
+) -> List[Chunk]:
+    """
+    Merge undersized chunks with their neighbors to prevent fragment pollution.
+
+    Multi-pass algorithm:
+    1. First pass: merge small chunks into previous chunk
+    2. Second pass: merge leading tiny chunks forward
+    3. Final pass: iteratively merge remaining small chunks until stable
+    
+    This ensures no orphan tiny chunks remain.
+    """
+    if not chunks or min_size <= 0:
+        return chunks
+
+    merged: List[Chunk] = []
+
+    for chunk in chunks:
+        text = chunk.text.strip()
+        if not text:
+            continue
+
+        # Try to merge small chunk into previous
+        if len(text) < min_size and merged:
+            prev = merged[-1]
+            combined = f"{prev.text}{separator}{text}"
+            if len(combined) <= max_size:
+                combined_meta = {**chunk.metadata, **prev.metadata}
+                merged[-1] = Chunk(
+                    text=combined,
+                    index=prev.index,
+                    metadata=combined_meta,
+                    parent_id=prev.parent_id,
+                    content_type=prev.content_type,
+                    associated_images=prev.associated_images + chunk.associated_images,
+                )
+                continue
+
+        merged.append(chunk)
+
+    # Second pass: merge any leading tiny chunk forward
+    if len(merged) >= 2 and len(merged[0].text) < min_size:
+        first = merged[0]
+        second = merged[1]
+        combined = f"{first.text}{separator}{second.text}"
+        if len(combined) <= max_size:
+            combined_meta = {**first.metadata, **second.metadata}
+            merged[1] = Chunk(
+                text=combined,
+                index=second.index,
+                metadata=combined_meta,
+                parent_id=second.parent_id,
+                content_type=second.content_type,
+                associated_images=first.associated_images + second.associated_images,
+            )
+            merged.pop(0)
+
+    # Third pass: iteratively merge remaining small chunks until stable
+    # This handles cases where many consecutive small chunks exist
+    changed = True
+    max_iterations = 10  # Prevent infinite loops
+    iteration = 0
+    while changed and iteration < max_iterations:
+        changed = False
+        iteration += 1
+        new_merged: List[Chunk] = []
+        
+        for chunk in merged:
+            text = chunk.text.strip()
+            
+            # Try to merge small chunk into previous
+            if len(text) < min_size and new_merged:
+                prev = new_merged[-1]
+                combined = f"{prev.text}{separator}{text}"
+                if len(combined) <= max_size:
+                    combined_meta = {**chunk.metadata, **prev.metadata}
+                    new_merged[-1] = Chunk(
+                        text=combined,
+                        index=prev.index,
+                        metadata=combined_meta,
+                        parent_id=prev.parent_id,
+                        content_type=prev.content_type,
+                        associated_images=prev.associated_images + chunk.associated_images,
+                    )
+                    changed = True
+                    continue
+            
+            new_merged.append(chunk)
+        
+        merged = new_merged
+
+    # Re-index
+    for i, c in enumerate(merged):
+        c.index = i
+
+    return merged
+
+
 # Convenience functions
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50, mode: str = "automatic") -> List[str]:
     """Simple interface to chunk text and return list of strings"""
@@ -1164,4 +1364,6 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50, mode: str = 
         chunk_overlap=overlap,
     )
     chunks = process_document(text, config)
-    return [c.text for c in chunks]
+    flat = flatten_chunks(chunks)
+    flat = merge_small_chunks(flat, min_size=config.min_chunk_size, max_size=config.max_chunk_size)
+    return [c.text for c in flat]

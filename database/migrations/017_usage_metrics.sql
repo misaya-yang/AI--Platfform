@@ -291,7 +291,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- 创建更新时间戳触发器
+-- 创建更新时间戳触发器（保证迁移在非 schema 初始化环境下可运行）
 -- ============================================================================
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -301,7 +301,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ============================================================================
 -- 应用触发器到需要的表
+-- ============================================================================
 DROP TRIGGER IF EXISTS update_usage_daily_aggregates_updated_at ON usage_daily_aggregates;
 CREATE TRIGGER update_usage_daily_aggregates_updated_at
     BEFORE UPDATE ON usage_daily_aggregates

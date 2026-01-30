@@ -148,6 +148,9 @@ class DatabaseStorage:
             await self._auto_apply_user_extra_permissions_migration()
             await self._auto_apply_api_keys_migration()
             await self._auto_apply_assistant_memory_migration()
+            await self._auto_apply_fts_migration()
+            await self._auto_apply_islamic_metadata_migration()
+            await self._auto_apply_openai_embedding_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -378,6 +381,140 @@ class DatabaseStorage:
                 logger.info("Migration 024 already applied (session_memory table exists)")
             else:
                 logger.error(f"Failed to apply migration 024: {e}")
+
+    async def _fts_needs_migration(self) -> bool:
+        """Check if segments table is missing the text_search tsvector column."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            col = await conn.fetchval("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'segments' AND column_name = 'text_search'
+            """)
+            return col is None
+
+    async def _auto_apply_fts_migration(self) -> None:
+        """Apply full-text search migration (028) — adds tsvector + GIN index to segments."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._fts_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check FTS schema: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "028_segments_fulltext_search.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 028 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 028_segments_fulltext_search.sql (FTS GIN index)")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 028 already applied")
+            else:
+                logger.error(f"Failed to apply migration 028: {e}")
+
+    async def _auto_apply_islamic_metadata_migration(self) -> None:
+        """Add Islamic knowledge traceability columns to segments table."""
+        if not self._pool:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                # Check if source_type column exists
+                exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'segments' AND column_name = 'source_type'
+                    )
+                """)
+                if exists:
+                    return  # Already migrated
+
+                async with conn.transaction():
+                    await conn.execute("""
+                        ALTER TABLE segments
+                            ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) DEFAULT 'unknown',
+                            ADD COLUMN IF NOT EXISTS source_reference JSONB NOT NULL DEFAULT '{}'::jsonb,
+                            ADD COLUMN IF NOT EXISTS citation_text VARCHAR(500) DEFAULT '',
+                            ADD COLUMN IF NOT EXISTS page_number INTEGER,
+                            ADD COLUMN IF NOT EXISTS section_header VARCHAR(500) DEFAULT '',
+                            ADD COLUMN IF NOT EXISTS language VARCHAR(10) DEFAULT 'en',
+                            ADD COLUMN IF NOT EXISTS contextual_prefix TEXT DEFAULT '';
+                    """)
+                    await conn.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_segments_source_type ON segments(source_type);
+                        CREATE INDEX IF NOT EXISTS idx_segments_language ON segments(language);
+                    """)
+                logger.info("Applied Islamic metadata migration: added source_type, source_reference, citation_text, etc.")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Islamic metadata migration already applied")
+            else:
+                logger.error(f"Failed to apply Islamic metadata migration: {e}")
+
+    async def _openai_embedding_needs_migration(self) -> bool:
+        """Check whether OpenAI embedding migration is needed."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            col_exists = await conn.fetchval(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'datasets' AND column_name = 'needs_reindex'
+                """
+            )
+            if col_exists is None:
+                return True
+            openai_exists = await conn.fetchval(
+                """
+                SELECT 1 FROM datasets
+                WHERE embedding_provider = 'openai'
+                   OR index_config->>'embedding_provider' = 'openai'
+                LIMIT 1
+                """
+            )
+            return openai_exists is not None
+
+    async def _auto_apply_openai_embedding_migration(self) -> None:
+        """Apply migration 029 to move OpenAI embeddings to Gemini (marks needs_reindex)."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openai_embedding_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenAI embedding migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "029_migrate_openai_to_gemini.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 029 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 029_migrate_openai_to_gemini.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 029 already applied")
+            else:
+                logger.error(f"Failed to apply migration 029: {e}")
 
     # =========================================================================
     # 服务定义表 (services)
@@ -910,14 +1047,29 @@ class DatabaseStorage:
                 dataset.get("description"),
                 dataset.get("tenant_id", ""),
                 dataset.get("visibility", "private"),
-                dataset.get("embedding_provider", "openai"),
-                dataset.get("embedding_model", "text-embedding-3-small"),
-                int(dataset.get("embedding_dimension") or 0) or 1536,
+                dataset.get("embedding_provider", "gemini"),
+                dataset.get("embedding_model", "gemini-embedding-001"),
+                int(dataset.get("embedding_dimension") or 0) or 1024,
                 json.dumps(dataset.get("embedding_config", {})),
                 json.dumps(dataset.get("index_config", {})),
                 dataset.get("collection_name"),
                 dataset.get("created_by"),
             )
+
+    async def clear_dataset_needs_reindex(self, dataset_id: str) -> None:
+        """Clear the needs_reindex flag after successful document reindexing."""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE datasets 
+                SET needs_reindex = false, updated_at = NOW()
+                WHERE dataset_id = $1
+                """,
+                dataset_id,
+            )
+            logger.info(f"Cleared needs_reindex flag for dataset {dataset_id}")
 
     async def get_dataset(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         """获取 Dataset"""
@@ -1194,7 +1346,7 @@ class DatabaseStorage:
         query = """
             SELECT document_id, dataset_id, title, status, started_at, updated_at
             FROM documents
-            WHERE status IN ('parsing', 'segmenting', 'embedding')
+            WHERE status IN ('parsing', 'segmenting', 'embedding', 'embedding_images')
               AND COALESCE(started_at, updated_at, created_at)
                   < NOW() - make_interval(mins => $1)
             ORDER BY updated_at ASC
@@ -1264,7 +1416,7 @@ class DatabaseStorage:
         if not self._pool or not fields:
             return
 
-        # Allowed fields for update
+        # Allowed fields for update (content excluded — use save_document for content updates)
         allowed = {
             "title", "metadata", "enabled", "disabled_at", "disabled_by",
             "archived", "archived_reason", "archived_by", "archived_at",
@@ -1294,6 +1446,16 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
+    async def update_document_content(self, document_id: str, content: str) -> None:
+        """Internal: update document content (for re-extraction during reindex)"""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE documents SET content = $1, updated_at = NOW() WHERE document_id = $2",
+                content, document_id,
+            )
+
     async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
         """批量插入/更新 Segment (enhanced with Dify-style fields + content_hash)"""
         if not self._pool or not segments:
@@ -1301,6 +1463,14 @@ class DatabaseStorage:
 
         rows = []
         for seg in segments:
+            # Extract Islamic metadata from segment metadata dict if present
+            seg_meta = seg.get("metadata", {})
+            if isinstance(seg_meta, str):
+                try:
+                    seg_meta = json.loads(seg_meta)
+                except Exception:
+                    seg_meta = {}
+
             rows.append(
                 (
                     seg.get("segment_id"),
@@ -1320,6 +1490,14 @@ class DatabaseStorage:
                     seg.get("created_by"),
                     # Content hash for incremental updates
                     seg.get("content_hash"),
+                    # Islamic knowledge traceability fields
+                    seg.get("source_type") or seg_meta.get("source_type", "unknown"),
+                    json.dumps(seg.get("source_reference") or seg_meta.get("source_reference") or {}),
+                    seg.get("citation_text") or seg_meta.get("citation_text", ""),
+                    seg.get("page_number") or seg_meta.get("page_number"),
+                    seg.get("section_header") or seg_meta.get("section_header", ""),
+                    seg.get("language") or seg_meta.get("language", "en"),
+                    seg.get("contextual_prefix") or seg_meta.get("contextual_prefix", ""),
                 )
             )
 
@@ -1330,8 +1508,11 @@ class DatabaseStorage:
                     segment_id, dataset_id, document_id, position,
                     text, token_count, vector_id, metadata,
                     enabled, status, word_count, keywords, answer, created_by,
-                    content_hash
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    content_hash,
+                    source_type, source_reference, citation_text,
+                    page_number, section_header, language, contextual_prefix
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                          $16, $17, $18, $19, $20, $21, $22)
                 ON CONFLICT (document_id, position) DO UPDATE SET
                     segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
@@ -1345,6 +1526,13 @@ class DatabaseStorage:
                     keywords = EXCLUDED.keywords,
                     answer = EXCLUDED.answer,
                     content_hash = EXCLUDED.content_hash,
+                    source_type = EXCLUDED.source_type,
+                    source_reference = EXCLUDED.source_reference,
+                    citation_text = EXCLUDED.citation_text,
+                    page_number = EXCLUDED.page_number,
+                    section_header = EXCLUDED.section_header,
+                    language = EXCLUDED.language,
+                    contextual_prefix = EXCLUDED.contextual_prefix,
                     updated_at = NOW()
                 """,
                 rows,
@@ -1470,11 +1658,14 @@ class DatabaseStorage:
         dataset_id: str,
         terms: List[str],
         document_id: Optional[str] = None,
+        source_type: Optional[str] = None,
+        language: Optional[str] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        """Keyword candidate retrieval using ILIKE OR over terms (best-effort).
+        """Keyword candidate retrieval using PostgreSQL full-text search (GIN index).
 
-        This is intentionally lightweight and does not require extra PostgreSQL extensions.
+        Uses tsvector/tsquery for O(log N) index lookup when the text_search column
+        is populated (migration 028). Falls back to ILIKE for pre-migration databases.
         """
         if not self._pool:
             return []
@@ -1483,7 +1674,126 @@ class DatabaseStorage:
         if not cleaned:
             return []
 
-        # Start with base query - only filter by enabled if the column exists
+        # Try FTS first (fast GIN index), fall back to ILIKE
+        try:
+            result = await self._search_segments_fts(
+                dataset_id, cleaned, document_id, source_type, language, limit
+            )
+            if result is not None:
+                return result
+        except Exception:
+            pass  # Fall through to ILIKE
+
+        return await self._search_segments_ilike(
+            dataset_id, cleaned, document_id, source_type, language, limit
+        )
+
+    # Alias for retrieval_service compatibility
+    search_segments_text = search_segments_like_any
+
+    async def dataset_has_embeddings(self, dataset_id: str) -> bool:
+        """Check if dataset has any embedded segments with vectors."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM segments 
+                WHERE dataset_id = $1 AND vector_id IS NOT NULL
+                LIMIT 1
+                """,
+                dataset_id,
+            )
+            return (count or 0) > 0
+
+    async def search_segments_vector(
+        self,
+        dataset_id: str,
+        query_embedding: List[float],
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Vector search placeholder - delegates to vector_store.
+        
+        Note: Actual vector search should use VectorStore.search() directly.
+        This method exists for API compatibility.
+        """
+        # Return empty - retrieval_service should use VectorStore
+        return []
+
+    async def _search_segments_fts(
+        self,
+        dataset_id: str,
+        terms: List[str],
+        document_id: Optional[str],
+        source_type: Optional[str],
+        language: Optional[str],
+        limit: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Full-text search using tsvector + GIN index (O(log N)).
+
+        Returns None if text_search column doesn't exist (pre-migration).
+        Uses 'simple' config for multilingual compatibility.
+        """
+        if not self._pool:
+            return None
+
+        query = f"SELECT * FROM segments WHERE dataset_id = $1"
+        params: List[Any] = [dataset_id]
+        param_idx = 2
+
+        if document_id:
+            query += f" AND document_id = ${param_idx}"
+            params.append(document_id)
+            param_idx += 1
+        if source_type:
+            query += f" AND source_type = ${param_idx}"
+            params.append(source_type)
+            param_idx += 1
+        if language:
+            query += f" AND language = ${param_idx}"
+            params.append(language)
+            param_idx += 1
+
+        # Build tsquery expression with correct parameter indexing
+        # Combine all terms into a single tsquery using AND operator
+        tsquery_parts = []
+        for i, _ in enumerate(terms):
+            tsquery_parts.append(f"plainto_tsquery('simple', ${param_idx + i})")
+        tsquery_expr = " || ".join(tsquery_parts) if len(tsquery_parts) > 1 else tsquery_parts[0]
+
+        query += f" AND text_search @@ ({tsquery_expr})"
+        params.extend(terms)
+        param_idx = param_idx + len(terms)
+
+        # Order by relevance using the same tsquery expression
+        # Note: ts_rank_cd is faster and often sufficient for ranking
+        query += f" ORDER BY ts_rank_cd(text_search, ({tsquery_expr})) DESC"
+
+        query += f" LIMIT ${param_idx}"
+        params.append(int(limit))
+
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+                return [self._row_to_dict(row) for row in rows]
+        except Exception as e:
+            err_str = str(e).lower()
+            if "text_search" in err_str or "column" in err_str:
+                # Column doesn't exist yet — signal caller to use ILIKE fallback
+                return None
+            logger.error(f"FTS search error: {e}")
+            return None
+
+    async def _search_segments_ilike(
+        self,
+        dataset_id: str,
+        terms: List[str],
+        document_id: Optional[str],
+        source_type: Optional[str],
+        language: Optional[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Legacy ILIKE fallback for pre-migration databases (O(N) sequential scan)."""
         query = "SELECT * FROM segments WHERE dataset_id = $1"
         params: List[Any] = [dataset_id]
         param_idx = 2
@@ -1492,14 +1802,23 @@ class DatabaseStorage:
             query += f" AND document_id = ${param_idx}"
             params.append(document_id)
             param_idx += 1
-
-        # ILIKE any term (case-insensitive search)
-        parts = []
-        for t in cleaned:
-            parts.append(f"text ILIKE ${param_idx}")
-            params.append(f"%{t}%")
+        if source_type:
+            query += f" AND source_type = ${param_idx}"
+            params.append(source_type)
             param_idx += 1
-        
+        if language:
+            query += f" AND language = ${param_idx}"
+            params.append(language)
+            param_idx += 1
+
+        parts = []
+        for t in terms:
+            parts.append(f"text ILIKE ${param_idx}")
+            # Escape LIKE special characters to prevent wildcard injection
+            escaped = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
+            param_idx += 1
+
         if parts:
             query += " AND (" + " OR ".join(parts) + ")"
 
@@ -1511,8 +1830,7 @@ class DatabaseStorage:
                 rows = await conn.fetch(query, *params)
                 return [self._row_to_dict(row) for row in rows]
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"search_segments_like_any error: {e}, query: {query}, params: {params[:2]}...")
+            logger.error(f"ILIKE search error: {e}, params: {params[:2]}...")
             return []
 
     async def get_segment(self, segment_id: str) -> Optional[Dict[str, Any]]:

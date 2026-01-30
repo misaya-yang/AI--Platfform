@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_user_memory_access_count
 -- ============================================================================
 -- Trigger for automatic updated_at timestamp update
 -- ============================================================================
-
+-- Use independent function name to avoid conflicts with other migrations
 CREATE OR REPLACE FUNCTION update_memory_timestamp()
 RETURNS TRIGGER AS $$
 BEGIN

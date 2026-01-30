@@ -413,12 +413,14 @@ class TestHierarchicalChunker:
 
         chunks = chunker.chunk(SAMPLE_MARKDOWN)
 
-        # Should have both parents and children
+        # chunks list contains only parents; children are in parent.children
         parents = [c for c in chunks if c.metadata.get("is_parent")]
-        children = [c for c in chunks if c.metadata.get("is_child")]
-
         assert len(parents) > 0, "Should have parent chunks"
-        assert len(children) > 0, "Should have child chunks"
+
+        # Children are accessible via flatten_chunks
+        flat = flatten_chunks(chunks)
+        children = [c for c in flat if c.metadata.get("is_child")]
+        assert len(children) > 0, "Should have child chunks after flattening"
 
     def test_children_link_to_parents(self):
         """Test that children properly reference their parents"""
@@ -431,7 +433,8 @@ class TestHierarchicalChunker:
 
         chunks = chunker.chunk(SAMPLE_MARKDOWN)
 
-        children = [c for c in chunks if c.metadata.get("is_child")]
+        flat = flatten_chunks(chunks)
+        children = [c for c in flat if c.metadata.get("is_child")]
         parent_hashes = {c.hash_id for c in chunks if c.metadata.get("is_parent")}
 
         for child in children:
@@ -451,7 +454,8 @@ class TestHierarchicalChunker:
 
         chunks = chunker.chunk(SAMPLE_PLAIN_TEXT)
 
-        children = [c for c in chunks if c.metadata.get("is_child")]
+        flat = flatten_chunks(chunks)
+        children = [c for c in flat if c.metadata.get("is_child")]
 
         for child in children:
             # Allow 20% tolerance for natural boundaries

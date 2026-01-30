@@ -20,6 +20,7 @@ import {
   Hand,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -62,6 +63,7 @@ export function ConfluenceBindingCard({
   onDeleted,
 }: ConfluenceBindingCardProps) {
   const queryClient = useQueryClient();
+  const { t, i18n } = useTranslation();
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showConfigDialog, setShowConfigDialog] = useState(false);
   const [deleteDocuments, setDeleteDocuments] = useState(false);
@@ -69,35 +71,35 @@ export function ConfluenceBindingCard({
   // Status configurations
   const statusConfig = {
     pending: {
-      color: "bg-amber-500/10 text-amber-600 border-amber-200",
+      color: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
       icon: <Clock className="h-3.5 w-3.5" />,
-      label: "待同步",
+      label: t("knowledge.sync.statusPendingSync"),
     },
     syncing: {
-      color: "bg-blue-500/10 text-blue-600 border-blue-200",
+      color: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
       icon: <Loader2 className="h-3.5 w-3.5 animate-spin" />,
-      label: "同步中",
+      label: t("knowledge.sync.statusSyncing"),
     },
     completed: {
-      color: "bg-emerald-500/10 text-emerald-600 border-emerald-200",
+      color: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
       icon: <CheckCircle className="h-3.5 w-3.5" />,
-      label: "已完成",
+      label: t("knowledge.sync.statusCompleted"),
     },
     error: {
-      color: "bg-rose-500/10 text-rose-600 border-rose-200",
+      color: "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30",
       icon: <AlertCircle className="h-3.5 w-3.5" />,
-      label: "错误",
+      label: t("knowledge.sync.statusBindingError"),
     },
   };
 
   const syncModeConfig = {
     manual: {
       icon: <Hand className="h-3.5 w-3.5" />,
-      label: "手动同步",
+      label: t("knowledge.sync.manualSync"),
     },
     polling: {
       icon: <Clock className="h-3.5 w-3.5" />,
-      label: `每 ${binding.polling_interval_minutes} 分钟`,
+      label: t("knowledge.sync.pollingSync", { minutes: binding.polling_interval_minutes }),
     },
   };
 
@@ -108,11 +110,11 @@ export function ConfluenceBindingCard({
   const syncMutation = useMutation({
     mutationFn: () => triggerSync(binding.binding_id, { force: false }),
     onSuccess: () => {
-      toast.success("同步已触发", "正在后台同步 Confluence 页面");
+      toast.success(t("knowledge.sync.syncTriggered"), t("knowledge.sync.syncTriggeredDesc"));
       queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });
     },
     onError: (error) => {
-      toast.error("同步失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.syncFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -120,12 +122,12 @@ export function ConfluenceBindingCard({
   const deleteMutation = useMutation({
     mutationFn: () => deleteBinding(binding.binding_id, deleteDocuments),
     onSuccess: () => {
-      toast.success("绑定已删除", deleteDocuments ? "相关文档已一并删除" : "文档已保留");
+      toast.success(t("knowledge.sync.bindingDeleted"), deleteDocuments ? t("knowledge.sync.bindingDeletedWithDocs") : t("knowledge.sync.bindingDeletedKeepDocs"));
       queryClient.invalidateQueries({ queryKey: ["kb-confluence-bindings", datasetId] });
       onDeleted?.();
     },
     onError: (error) => {
-      toast.error("删除失败", error instanceof Error ? error.message : String(error));
+      toast.error(t("knowledge.sync.deleteFailed"), error instanceof Error ? error.message : String(error));
     },
   });
 
@@ -178,7 +180,7 @@ export function ConfluenceBindingCard({
               {/* Page count */}
               <div className="flex items-center gap-1.5">
                 <FileText className="h-3.5 w-3.5" />
-                <span>{binding.synced_page_count}/{binding.total_page_count} 页</span>
+                <span>{t("knowledge.sync.pageCount", { synced: binding.synced_page_count, total: binding.total_page_count })}</span>
               </div>
 
               {/* Sync mode */}
@@ -192,7 +194,7 @@ export function ConfluenceBindingCard({
                 <div className="flex items-center gap-1.5 text-xs">
                   <Clock className="h-3 w-3" />
                   <span>
-                    {new Date(binding.last_sync_at).toLocaleString("zh-CN", {
+                    {new Date(binding.last_sync_at).toLocaleString(i18n.language === "zh-CN" ? "zh-CN" : "en-US", {
                       month: "short",
                       day: "numeric",
                       hour: "2-digit",
@@ -220,7 +222,7 @@ export function ConfluenceBindingCard({
               className="text-muted-foreground hover:text-foreground"
             >
               <Eye className="h-4 w-4 mr-1.5" />
-              查看页面
+              {t("knowledge.sync.viewPages")}
             </Button>
 
             <Button
@@ -235,7 +237,7 @@ export function ConfluenceBindingCard({
               ) : (
                 <RefreshCcw className="h-4 w-4 mr-1.5" />
               )}
-              同步
+              {t("knowledge.sync.syncAction")}
             </Button>
 
             <DropdownMenu>
@@ -247,7 +249,7 @@ export function ConfluenceBindingCard({
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={() => setShowConfigDialog(true)}>
                   <Settings className="h-4 w-4 mr-2" />
-                  同步配置
+                  {t("knowledge.sync.syncConfig")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -255,7 +257,7 @@ export function ConfluenceBindingCard({
                   onClick={() => setShowDeleteDialog(true)}
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
-                  解除绑定
+                  {t("knowledge.sync.unbind")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -267,9 +269,9 @@ export function ConfluenceBindingCard({
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认解除绑定</AlertDialogTitle>
+            <AlertDialogTitle>{t("knowledge.sync.confirmUnbind")}</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要解除与 "{truncatedTitle}" 的同步绑定吗？
+              {t("knowledge.sync.confirmUnbindDesc", { title: truncatedTitle })}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">
@@ -280,14 +282,14 @@ export function ConfluenceBindingCard({
                 onChange={(e) => setDeleteDocuments(e.target.checked)}
                 className="rounded border-gray-300"
               />
-              同时删除已同步的文档
+              {t("knowledge.sync.alsoDeleteDocuments")}
             </label>
             <p className="text-xs text-muted-foreground mt-1 ml-6">
-              如果取消勾选，已同步的文档将保留在知识库中
+              {t("knowledge.sync.keepDocumentsHint")}
             </p>
           </div>
           <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => deleteMutation.mutate()}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
@@ -296,7 +298,7 @@ export function ConfluenceBindingCard({
               {deleteMutation.isPending ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : null}
-              确认解除
+              {t("knowledge.sync.confirmUnbindBtn")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -88,9 +88,31 @@ class StorageConfig:
     # Common settings
     url_expiry_seconds: int = 3600  # Pre-signed URL expiry
 
+    # Environment key prefix (e.g., "dev", "staging", "prod")
+    # Prepended to all storage keys for environment isolation
+    key_prefix: str = ""
+
 
 class BaseStorageBackend(ABC):
     """Abstract base class for storage backends"""
+
+    def __init__(self, key_prefix: str = ""):
+        self._key_prefix = key_prefix.strip("/") if key_prefix else ""
+
+    def _prefixed_key(self, key: str) -> str:
+        """Prepend environment prefix to storage key with path traversal protection."""
+        # Sanitize key to prevent path traversal
+        # Remove leading slashes and parent directory references
+        sanitized = key.lstrip('/')
+        # Replace any '..' sequences to prevent directory traversal
+        while '..' in sanitized:
+            sanitized = sanitized.replace('..', '_')
+        # Prevent null byte injection
+        sanitized = sanitized.replace('\x00', '')
+        
+        if self._key_prefix:
+            return f"{self._key_prefix}/{sanitized}"
+        return sanitized
 
     @abstractmethod
     async def upload(
@@ -217,13 +239,17 @@ class BaseStorageBackend(ABC):
 class LocalStorageBackend(BaseStorageBackend):
     """Local filesystem storage backend for development"""
 
-    def __init__(self, base_path: str):
+    def __init__(self, base_path: str, key_prefix: str = ""):
+        super().__init__(key_prefix)
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _get_full_path(self, key: str) -> Path:
-        """Get full path for a key"""
-        return self.base_path / key
+        """Get full path for a key, with path traversal protection"""
+        full = (self.base_path / key).resolve()
+        if not str(full).startswith(str(self.base_path.resolve())):
+            raise ValueError(f"Path traversal detected: {key}")
+        return full
 
     async def upload(
         self,
@@ -232,7 +258,8 @@ class LocalStorageBackend(BaseStorageBackend):
         content_type: str,
         metadata: Optional[Dict[str, str]] = None,
     ) -> str:
-        full_path = self._get_full_path(key)
+        pkey = self._prefixed_key(key)
+        full_path = self._get_full_path(pkey)
         full_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Write content
@@ -247,17 +274,19 @@ class LocalStorageBackend(BaseStorageBackend):
                 json.dumps({"content_type": content_type, **metadata})
             )
 
-        logger.debug(f"Uploaded {len(content)} bytes to local: {key}")
+        logger.debug(f"Uploaded {len(content)} bytes to local: {pkey}")
         return f"file://{full_path.absolute()}"
 
     async def download(self, key: str) -> bytes:
-        full_path = self._get_full_path(key)
+        pkey = self._prefixed_key(key)
+        full_path = self._get_full_path(pkey)
         if not full_path.exists():
-            raise FileNotFoundError(f"File not found: {key}")
+            raise FileNotFoundError(f"File not found: {pkey}")
         return await asyncio.to_thread(full_path.read_bytes)
 
     async def delete(self, key: str) -> bool:
-        full_path = self._get_full_path(key)
+        pkey = self._prefixed_key(key)
+        full_path = self._get_full_path(pkey)
         if full_path.exists():
             await asyncio.to_thread(full_path.unlink)
             # Also delete metadata file if exists
@@ -268,7 +297,8 @@ class LocalStorageBackend(BaseStorageBackend):
         return False
 
     async def delete_prefix(self, prefix: str) -> int:
-        prefix_path = self._get_full_path(prefix)
+        pprefix = self._prefixed_key(prefix)
+        prefix_path = self._get_full_path(pprefix)
 
         # If prefix ends with /, treat it as a directory and delete all files inside
         if prefix.endswith("/"):
@@ -297,10 +327,10 @@ class LocalStorageBackend(BaseStorageBackend):
         return deleted
 
     async def exists(self, key: str) -> bool:
-        return self._get_full_path(key).exists()
+        return self._get_full_path(self._prefixed_key(key)).exists()
 
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
-        full_path = self._get_full_path(key)
+        full_path = self._get_full_path(self._prefixed_key(key))
         return f"file://{full_path.absolute()}"
 
 
@@ -314,7 +344,9 @@ class S3StorageBackend(BaseStorageBackend):
         access_key: str,
         secret_key: str,
         endpoint_url: Optional[str] = None,
+        key_prefix: str = "",
     ):
+        super().__init__(key_prefix)
         self.bucket = bucket
         self.region = region
         self.access_key = access_key
@@ -360,6 +392,7 @@ class S3StorageBackend(BaseStorageBackend):
         content_type: str,
         metadata: Optional[Dict[str, str]] = None,
     ) -> str:
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
         extra_args = {"ContentType": content_type}
         if metadata:
@@ -371,45 +404,48 @@ class S3StorageBackend(BaseStorageBackend):
 
         await client.put_object(
             Bucket=self.bucket,
-            Key=key,
+            Key=pkey,
             Body=content,
             **extra_args,
         )
 
-        logger.debug(f"Uploaded {len(content)} bytes to S3: {key}")
+        logger.debug(f"Uploaded {len(content)} bytes to S3: {pkey}")
         return self.get_url(key)
 
     async def download(self, key: str) -> bytes:
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
         try:
-            logger.debug(f"[S3] Downloading key={key} from bucket={self.bucket}")
-            response = await client.get_object(Bucket=self.bucket, Key=key)
+            logger.debug(f"[S3] Downloading key={pkey} from bucket={self.bucket}")
+            response = await client.get_object(Bucket=self.bucket, Key=pkey)
             async with response["Body"] as stream:
                 data = await stream.read()
-                logger.debug(f"[S3] Downloaded {len(data)} bytes from key={key}")
+                logger.debug(f"[S3] Downloaded {len(data)} bytes from key={pkey}")
                 return data
         except client.exceptions.NoSuchKey:
-            logger.error(f"[S3] Key not found: bucket={self.bucket}, key={key}")
-            raise FileNotFoundError(f"S3 object not found: {key}")
+            logger.error(f"[S3] Key not found: bucket={self.bucket}, key={pkey}")
+            raise FileNotFoundError(f"S3 object not found: {pkey}")
         except Exception as e:
-            logger.error(f"[S3] Download failed: bucket={self.bucket}, key={key}, error={e}")
+            logger.error(f"[S3] Download failed: bucket={self.bucket}, key={pkey}, error={e}")
             raise
 
     async def delete(self, key: str) -> bool:
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
         try:
-            await client.delete_object(Bucket=self.bucket, Key=key)
+            await client.delete_object(Bucket=self.bucket, Key=pkey)
             return True
         except Exception as e:
-            logger.warning(f"Failed to delete {key}: {e}")
+            logger.warning(f"Failed to delete {pkey}: {e}")
             return False
 
     async def delete_prefix(self, prefix: str) -> int:
+        pprefix = self._prefixed_key(prefix)
         client = await self._get_client()
         deleted = 0
 
         paginator = client.get_paginator("list_objects_v2")
-        async for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+        async for page in paginator.paginate(Bucket=self.bucket, Prefix=pprefix):
             objects = page.get("Contents", [])
             if not objects:
                 continue
@@ -424,18 +460,20 @@ class S3StorageBackend(BaseStorageBackend):
         return deleted
 
     async def exists(self, key: str) -> bool:
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
         try:
-            await client.head_object(Bucket=self.bucket, Key=key)
+            await client.head_object(Bucket=self.bucket, Key=pkey)
             return True
         except Exception:
             return False
 
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         """Get S3 URL (non-presigned for now, can be enhanced)"""
+        pkey = self._prefixed_key(key)
         if self.endpoint_url:
-            return f"{self.endpoint_url}/{self.bucket}/{key}"
-        return f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{key}"
+            return f"{self.endpoint_url}/{self.bucket}/{pkey}"
+        return f"https://{self.bucket}.s3.{self.region}.amazonaws.com/{pkey}"
 
     async def generate_presigned_upload_url(
         self,
@@ -459,12 +497,13 @@ class S3StorageBackend(BaseStorageBackend):
         Returns:
             Dictionary with 'url', 'method', and 'headers' for PUT upload
         """
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
 
         # Build params for presigned URL
         params = {
             "Bucket": self.bucket,
-            "Key": key,
+            "Key": pkey,
             "ContentType": content_type,
         }
 
@@ -490,11 +529,12 @@ class S3StorageBackend(BaseStorageBackend):
                     "Content-Type": content_type,
                 },
                 "key": key,
+                "storage_key": pkey,
                 "bucket": self.bucket,
                 "expiry_seconds": expiry_seconds,
             }
         except Exception as e:
-            logger.error(f"Failed to generate presigned URL for {key}: {e}")
+            logger.error(f"Failed to generate presigned URL for {pkey}: {e}")
             return None
 
     async def generate_presigned_download_url(
@@ -516,11 +556,12 @@ class S3StorageBackend(BaseStorageBackend):
         """
         import urllib.parse
 
+        pkey = self._prefixed_key(key)
         client = await self._get_client()
 
         params = {
             "Bucket": self.bucket,
-            "Key": key,
+            "Key": pkey,
         }
 
         if filename:
@@ -563,7 +604,9 @@ class OSSStorageBackend(BaseStorageBackend):
         endpoint: str,
         access_key: str,
         secret_key: str,
+        key_prefix: str = "",
     ):
+        super().__init__(key_prefix)
         self.bucket_name = bucket
         self.endpoint = endpoint
         self.access_key = access_key
@@ -589,6 +632,7 @@ class OSSStorageBackend(BaseStorageBackend):
         content_type: str,
         metadata: Optional[Dict[str, str]] = None,
     ) -> str:
+        pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
 
         headers = {"Content-Type": content_type}
@@ -596,37 +640,40 @@ class OSSStorageBackend(BaseStorageBackend):
             for k, v in metadata.items():
                 headers[f"x-oss-meta-{k}"] = v
 
-        await asyncio.to_thread(bucket.put_object, key, content, headers=headers)
+        await asyncio.to_thread(bucket.put_object, pkey, content, headers=headers)
 
-        logger.debug(f"Uploaded {len(content)} bytes to OSS: {key}")
+        logger.debug(f"Uploaded {len(content)} bytes to OSS: {pkey}")
         return self.get_url(key)
 
     async def download(self, key: str) -> bytes:
+        pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
         try:
-            logger.debug(f"[OSS] Downloading key={key} from bucket={self.bucket}")
-            result = await asyncio.to_thread(bucket.get_object, key)
+            logger.debug(f"[OSS] Downloading key={pkey} from bucket={self.bucket_name}")
+            result = await asyncio.to_thread(bucket.get_object, pkey)
             data = await asyncio.to_thread(result.read)
-            logger.debug(f"[OSS] Downloaded {len(data)} bytes from key={key}")
+            logger.debug(f"[OSS] Downloaded {len(data)} bytes from key={pkey}")
             return data
         except Exception as e:
             error_str = str(e)
             if "NoSuchKey" in error_str or "404" in error_str:
-                logger.error(f"[OSS] Key not found: bucket={self.bucket}, key={key}")
-                raise FileNotFoundError(f"OSS object not found: {key}")
-            logger.error(f"[OSS] Download failed: bucket={self.bucket}, key={key}, error={e}")
+                logger.error(f"[OSS] Key not found: bucket={self.bucket_name}, key={pkey}")
+                raise FileNotFoundError(f"OSS object not found: {pkey}")
+            logger.error(f"[OSS] Download failed: bucket={self.bucket_name}, key={pkey}, error={e}")
             raise
 
     async def delete(self, key: str) -> bool:
+        pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
         try:
-            await asyncio.to_thread(bucket.delete_object, key)
+            await asyncio.to_thread(bucket.delete_object, pkey)
             return True
         except Exception as e:
-            logger.warning(f"Failed to delete {key}: {e}")
+            logger.warning(f"Failed to delete {pkey}: {e}")
             return False
 
     async def delete_prefix(self, prefix: str) -> int:
+        pprefix = self._prefixed_key(prefix)
         bucket = self._get_bucket()
         deleted = 0
 
@@ -637,7 +684,7 @@ class OSSStorageBackend(BaseStorageBackend):
             raise ImportError("oss2 is required for OSS storage. Install with: pip install oss2")
 
         def list_objects():
-            return list(oss2.ObjectIterator(bucket, prefix=prefix))
+            return list(oss2.ObjectIterator(bucket, prefix=pprefix))
 
         for obj in await asyncio.to_thread(list_objects):
             await asyncio.to_thread(bucket.delete_object, obj.key)
@@ -646,13 +693,14 @@ class OSSStorageBackend(BaseStorageBackend):
         return deleted
 
     async def exists(self, key: str) -> bool:
+        pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
-        return await asyncio.to_thread(bucket.object_exists, key)
+        return await asyncio.to_thread(bucket.object_exists, pkey)
 
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         """Get OSS URL"""
-        # Public URL (for public buckets or pre-signed URLs)
-        return f"https://{self.bucket_name}.{self.endpoint}/{quote(key)}"
+        pkey = self._prefixed_key(key)
+        return f"https://{self.bucket_name}.{self.endpoint}/{quote(pkey)}"
 
 
 class ImageStorageService:
@@ -701,6 +749,7 @@ class ImageStorageService:
 
     def _create_backend(self) -> BaseStorageBackend:
         """Create storage backend based on configuration"""
+        kp = self.config.key_prefix
         if self.config.backend == StorageBackend.S3:
             return S3StorageBackend(
                 bucket=self.config.s3_bucket,
@@ -708,6 +757,7 @@ class ImageStorageService:
                 access_key=self.config.s3_access_key,
                 secret_key=self.config.s3_secret_key,
                 endpoint_url=self.config.s3_endpoint_url,
+                key_prefix=kp,
             )
         elif self.config.backend == StorageBackend.OSS:
             return OSSStorageBackend(
@@ -715,9 +765,10 @@ class ImageStorageService:
                 endpoint=self.config.oss_endpoint,
                 access_key=self.config.oss_access_key,
                 secret_key=self.config.oss_secret_key,
+                key_prefix=kp,
             )
         else:
-            return LocalStorageBackend(self.config.local_base_path)
+            return LocalStorageBackend(self.config.local_base_path, key_prefix=kp)
 
     @staticmethod
     def _generate_key(
@@ -768,7 +819,7 @@ class ImageStorageService:
             "document_id": document_id,
             "attachment_id": attachment_id,
             "original_filename": _sanitize_for_s3_metadata(filename),
-            "content_hash": hashlib.md5(content).hexdigest(),
+            "content_hash": hashlib.sha256(content).hexdigest(),
         }
         if metadata:
             # Sanitize all incoming metadata values to ensure S3 compatibility
@@ -785,6 +836,59 @@ class ImageStorageService:
 
         logger.info(f"Uploaded image {filename} ({len(content)} bytes) -> {key}")
         return url
+
+    async def upload_original_file(
+        self,
+        tenant_id: str,
+        document_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> str:
+        """
+        Upload the original document file to storage for future re-extraction.
+
+        Args:
+            tenant_id: Tenant ID
+            document_id: Document ID
+            filename: Original filename
+            content: Raw file bytes
+            content_type: MIME type (e.g., "application/pdf")
+
+        Returns:
+            Logical storage key (without environment prefix). Retrieval MUST go
+            through download_original_file() which applies the prefix internally.
+        """
+        import urllib.parse
+        safe_filename = urllib.parse.quote(filename, safe="._-")
+        if not safe_filename or safe_filename == ".":
+            safe_filename = "document"
+        storage_key = f"knowledge/documents/{tenant_id}/{document_id}/original/{safe_filename}"
+
+        file_metadata = {
+            "tenant_id": tenant_id,
+            "document_id": document_id,
+            "original_filename": _sanitize_for_s3_metadata(filename),
+            "content_hash": hashlib.sha256(content).hexdigest(),
+        }
+
+        await self._backend.upload(storage_key, content, content_type, file_metadata)
+        logger.info(
+            f"Uploaded original file {filename} ({len(content)} bytes) -> {storage_key}"
+        )
+        return storage_key
+
+    async def download_original_file(self, storage_key: str) -> bytes:
+        """
+        Download an original document file by its storage key.
+
+        Args:
+            storage_key: The storage key returned by upload_original_file
+
+        Returns:
+            Raw file bytes
+        """
+        return await self._backend.download(storage_key)
 
     async def upload_images_batch(
         self,

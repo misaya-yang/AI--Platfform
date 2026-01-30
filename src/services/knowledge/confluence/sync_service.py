@@ -1067,7 +1067,7 @@ class ConfluenceSyncService:
 
         Text-First RAG 架构:
         - 使用 VLM 描述作为文本内容进行 embedding
-        - 统一使用 dataset 配置的 embedding provider (Gemini/DashScope/OpenAI)
+        - 统一使用 dataset 配置的 embedding provider (Gemini/DashScope)
         - 图片通过 S3 URL 存储，检索时返回 presigned URL
         """
         try:

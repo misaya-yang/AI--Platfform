@@ -211,22 +211,22 @@ function ExpandableBindingCard({
   // Status configurations
   const statusConfig = {
     pending: {
-      color: "bg-amber-500/10 text-amber-600 border-amber-200",
+      color: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
       icon: <Clock className="h-3.5 w-3.5" />,
       label: t("confluence.bindingStatus.pending"),
     },
     syncing: {
-      color: "bg-blue-500/10 text-blue-600 border-blue-200",
+      color: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30",
       icon: <Loader2 className="h-3.5 w-3.5 animate-spin" />,
       label: t("confluence.bindingStatus.syncing"),
     },
     completed: {
-      color: "bg-emerald-500/10 text-emerald-600 border-emerald-200",
+      color: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
       icon: <CheckCircle className="h-3.5 w-3.5" />,
       label: t("confluence.bindingStatus.completed"),
     },
     error: {
-      color: "bg-rose-500/10 text-rose-600 border-rose-200",
+      color: "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/30",
       icon: <AlertCircle className="h-3.5 w-3.5" />,
       label: t("confluence.status.error"),
     },

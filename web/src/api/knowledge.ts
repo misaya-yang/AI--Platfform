@@ -90,6 +90,46 @@ export async function uploadDocument(datasetId: string, file: File) {
   return data;
 }
 
+/**
+ * 批量上传结果
+ */
+export interface BatchUploadResult {
+  batch_id: string;
+  total: number;
+  accepted: number;
+  rejected: number;
+  documents: Document[];
+  errors: Array<{
+    filename: string;
+    error: string;
+  }>;
+}
+
+/**
+ * 批量上传文档到知识库
+ * 支持格式: PDF, DOCX, TXT, MD, HTML
+ * 最大文件数: 50
+ * 
+ * 优势:
+ * - 一次请求上传多个文件
+ * - 并行处理（Worker并发由服务器配置决定）
+ * - 返回batch_id用于追踪处理进度
+ */
+export async function batchUploadDocuments(datasetId: string, files: File[]): Promise<BatchUploadResult> {
+  const form = new FormData();
+  files.forEach((file) => {
+    form.append("files", file);
+  });
+  const { data } = await api.post<BatchUploadResult>(
+    `/api/v1/knowledge/${datasetId}/documents/batch-upload`,
+    form,
+    {
+      timeout: 300000, // 5 minutes for large batch uploads
+    }
+  );
+  return data;
+}
+
 export interface ImageUploadResult {
   uploaded: Array<{
     document_id: string;

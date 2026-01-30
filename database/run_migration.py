@@ -1,13 +1,36 @@
 """
 Run database migrations.
-Usage: python database/run_migration.py [migration_file]
+Usage: python database/run_migration.py <migration_file>
+
+NOTE: This is a legacy script. Prefer using: python database/cli.py migrate
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 import asyncpg
+
+
+def get_dsn() -> str:
+    """Get database DSN from environment or settings."""
+    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    if dsn:
+        return dsn
+
+    try:
+        project_root = str(Path(__file__).parent.parent)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from src.config.settings import Settings
+        settings = Settings()
+        if getattr(settings, "database", None) and settings.database.dsn:
+            return settings.database.dsn
+    except Exception:
+        pass
+
+    return "postgresql://postgres:postgres@localhost:5432/gateway"
 
 
 async def run_migration(file_path: str, dsn: str):
@@ -20,7 +43,8 @@ async def run_migration(file_path: str, dsn: str):
         with open(file_path, "r", encoding="utf-8") as f:
             sql = f.read()
 
-        await conn.execute(sql)
+        async with conn.transaction():
+            await conn.execute(sql)
         print(f"Migration completed successfully: {file_path}")
 
     except asyncpg.PostgresSyntaxError as e:
@@ -34,17 +58,18 @@ async def run_migration(file_path: str, dsn: str):
 
 
 async def main():
-    dsn = "postgresql://postgres:111111@127.0.0.1:5433/gateway"
+    dsn = get_dsn()
 
     if len(sys.argv) > 1:
         migration_file = sys.argv[1]
     else:
-        migration_file = "database/migrations/004_confluence_integration.sql"
+        print("Usage: python database/run_migration.py <migration_file>")
+        print("Example: python database/run_migration.py database/migrations/028_segments_fulltext_search.sql")
+        sys.exit(1)
 
     file_path = Path(migration_file)
     if not file_path.exists():
-        # Try relative to script location
-        file_path = Path(__file__).parent / "migrations" / "004_confluence_integration.sql"
+        file_path = Path(__file__).parent / migration_file
 
     if not file_path.exists():
         print(f"Migration file not found: {file_path}")

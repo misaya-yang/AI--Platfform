@@ -480,9 +480,11 @@ class TestChatStreamWithPlanning:
         self, assistant_service, user_context, mock_model_registry
     ):
         """Test that planning events are included when enabled."""
+        # Use traditional path (not agent loop) to test task planning
         config = AssistantConfig(
             enable_task_planning=True,
             model_id="gpt-4o",
+            use_agent_loop=False,
         )
 
         # Mock the model streaming
@@ -535,10 +537,12 @@ class TestChatStreamWithPlanning:
         self, assistant_service, user_context, mock_model_registry
     ):
         """Test that a plan confirmation gate is emitted when confirm_plan=True."""
+        # Use traditional path (not agent loop) to test task planning
         config = AssistantConfig(
             enable_task_planning=True,
             confirm_plan=True,  # When True, user wants to confirm plan before execution
             model_id="gpt-4o",
+            use_agent_loop=False,
         )
 
         async def mock_stream(*args, **kwargs):

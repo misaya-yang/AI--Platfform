@@ -338,6 +338,7 @@ def create_app() -> FastAPI:
                 oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "secret_key", "") or "",
                 local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/artifacts",
                 url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
+                key_prefix=getattr(getattr(settings, "storage", None), "key_prefix", None) or "",
             )
             # Get signing key for local file URLs (security)
             signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
@@ -406,6 +407,20 @@ def create_app() -> FastAPI:
             )
             app.state.knowledge_worker = KnowledgeWorker(app.state.knowledge_service)
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
+
+            # 恢复服务重启前未完成的任务（使用 0 分钟阈值，立即恢复所有处理中的任务）
+            try:
+                recovery_result = await app.state.knowledge_service.recover_stuck_documents(
+                    stuck_threshold_minutes=0,
+                    worker=app.state.knowledge_worker
+                )
+                if recovery_result["recovered_count"] > 0:
+                    logger.info(
+                        f"恢复了 {recovery_result['recovered_count']} 个未完成文档, "
+                        f"重新入队 {recovery_result['requeued_count']} 个"
+                    )
+            except Exception as e:
+                logger.warning(f"恢复未完成文档失败: {e}")
 
             if multimodal_embedding:
                 vlm_status = "with VLM" if knowledge_vlm_service else "no VLM"

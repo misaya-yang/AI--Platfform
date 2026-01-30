@@ -1,5 +1,6 @@
-﻿import React from "react";
+import React from "react";
 import { AlertCircle, CheckCircle, File, Loader2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -16,12 +17,8 @@ type StatusBadgeProps = {
 };
 
 export function StatusBadge({ status, error, progress }: StatusBadgeProps) {
+  const { t } = useTranslation();
   const s = (status || "").toLowerCase();
-
-  const formatProgress = (p?: number) => {
-    if (p === undefined || p === null) return "";
-    return ` ${Math.round(p)}%`;
-  };
 
   const configs: Record<
     string,
@@ -29,35 +26,55 @@ export function StatusBadge({ status, error, progress }: StatusBadgeProps) {
   > = {
     completed: {
       icon: <CheckCircle className="h-3 w-3" />,
-      label: "已完成",
-      className: "bg-emerald-50 text-emerald-700 border-emerald-200",
+      label: t("knowledge.status.completed"),
+      className: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
     },
     failed: {
       icon: <AlertCircle className="h-3 w-3" />,
-      label: "失败",
-      className: "bg-rose-50 text-rose-700 border-rose-200",
+      label: t("knowledge.status.failed"),
+      className: "bg-rose-500/15 text-rose-700 dark:text-rose-400 border-rose-500/30",
     },
     embedding: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `向量化中${formatProgress(progress)}`,
-      className: "bg-primary/10 text-primary border-primary/20",
+      label: progress
+        ? t("knowledge.status.embeddingProgress", { progress: Math.round(progress) })
+        : t("knowledge.status.embedding"),
+      className: "bg-primary/15 text-primary border-primary/30",
+    },
+    embedding_images: {
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: progress
+        ? t("knowledge.status.embeddingImagesProgress", { progress: Math.round(progress) })
+        : t("knowledge.status.embeddingImages"),
+      className: "bg-violet-500/15 text-violet-700 dark:text-violet-400 border-violet-500/30",
+    },
+    uploading_images: {
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: progress
+        ? t("knowledge.status.uploadingImagesProgress", { progress: Math.round(progress) })
+        : t("knowledge.status.uploadingImages"),
+      className: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 border-indigo-500/30",
     },
     segmenting: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `分段中${formatProgress(progress)}`,
-      className: "bg-amber-50 text-amber-700 border-amber-200",
+      label: progress
+        ? t("knowledge.status.segmentingProgress", { progress: Math.round(progress) })
+        : t("knowledge.status.segmenting"),
+      className: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30",
     },
     parsing: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
-      label: `解析中${formatProgress(progress)}`,
-      className: "bg-accent/10 text-accent border-accent/20",
+      label: progress
+        ? t("knowledge.status.parsingProgress", { progress: Math.round(progress) })
+        : t("knowledge.status.parsing"),
+      className: "bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30",
     },
   };
 
   const config = configs[s] || {
     icon: <File className="h-3 w-3" />,
-    label: "已上传",
-    className: "bg-muted/60 text-muted-foreground border-border",
+    label: t("knowledge.status.uploaded"),
+    className: "bg-muted/40 text-muted-foreground border-border/60",
   };
 
   const badge = (

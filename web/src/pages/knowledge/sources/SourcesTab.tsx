@@ -7,6 +7,7 @@
 
 import { Upload, Link, Cloud, FileText, ArrowRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -31,6 +32,7 @@ export function SourcesTab({
   onUrlClick,
   documentStats,
 }: SourcesTabProps) {
+  const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const showConfluence = searchParams.get("source") === "confluence";
 
@@ -46,7 +48,7 @@ export function SourcesTab({
           className="mb-2"
         >
           <ArrowRight className="h-4 w-4 mr-1.5 rotate-180" />
-          返回数据源
+          {t("knowledge.sources.backToSources")}
         </Button>
 
         {/* Full Confluence Sync UI */}
@@ -59,8 +61,8 @@ export function SourcesTab({
   const sourceCards = [
     {
       key: "file",
-      title: "文件上传",
-      description: "上传本地文件到知识库，支持 PDF、Word、TXT、Markdown 等格式",
+      title: t("knowledge.sources.fileUpload"),
+      description: t("knowledge.sources.fileUploadDesc"),
       icon: Upload,
       colorClass: {
         gradient: "from-emerald-500/10 to-teal-500/10",
@@ -70,18 +72,18 @@ export function SourcesTab({
         buttonHover: "hover:bg-emerald-500/10 hover:text-emerald-600 hover:border-emerald-500/30",
       },
       stat: {
-        label: "已上传文件",
+        label: t("knowledge.sources.uploadedFiles"),
         value: documentStats.uploaded,
       },
       action: {
-        label: "上传文件",
+        label: t("knowledge.sources.uploadFile"),
         onClick: onUploadClick,
       },
     },
     {
       key: "url",
-      title: "网页导入",
-      description: "从 URL 抓取网页内容导入知识库，支持单页和站点爬取",
+      title: t("knowledge.sources.webImport"),
+      description: t("knowledge.sources.webImportDesc"),
       icon: Link,
       colorClass: {
         gradient: "from-violet-500/10 to-purple-500/10",
@@ -91,18 +93,18 @@ export function SourcesTab({
         buttonHover: "hover:bg-violet-500/10 hover:text-violet-600 hover:border-violet-500/30",
       },
       stat: {
-        label: "已导入网页",
+        label: t("knowledge.sources.importedPages"),
         value: documentStats.fromUrl,
       },
       action: {
-        label: "导入网页",
+        label: t("knowledge.sources.importPage"),
         onClick: onUrlClick,
       },
     },
     {
       key: "confluence",
-      title: "Confluence 同步",
-      description: "连接 Confluence 空间，自动同步页面内容并保持更新",
+      title: t("knowledge.sources.confluenceSync"),
+      description: t("knowledge.sources.confluenceSyncDesc"),
       icon: Cloud,
       colorClass: {
         gradient: "from-blue-500/10 to-cyan-500/10",
@@ -112,11 +114,11 @@ export function SourcesTab({
         buttonHover: "hover:bg-blue-500/10 hover:text-blue-600 hover:border-blue-500/30",
       },
       stat: {
-        label: "已同步页面",
+        label: t("knowledge.sources.syncedPages"),
         value: documentStats.fromConfluence,
       },
       action: {
-        label: "管理同步",
+        label: t("knowledge.sources.manageSync"),
         onClick: () => setSearchParams({ source: "confluence" }),
       },
     },
@@ -127,9 +129,9 @@ export function SourcesTab({
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold">数据源管理</h3>
+          <h3 className="text-lg font-semibold">{t("knowledge.sources.sourceManagement")}</h3>
           <p className="text-sm text-muted-foreground mt-1">
-            选择一种方式添加数据到知识库
+            {t("knowledge.sources.sourceManagementDesc")}
           </p>
         </div>
       </div>
@@ -180,7 +182,7 @@ export function SourcesTab({
 
       {/* Total Summary */}
       <div className="text-center text-sm text-muted-foreground pt-4 border-t">
-        共 {documentStats.total} 个文档来源
+        {t("knowledge.sources.totalDocSources", { count: documentStats.total })}
       </div>
     </div>
   );

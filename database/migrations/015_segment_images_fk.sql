@@ -10,10 +10,17 @@
 DELETE FROM segment_images
 WHERE image_segment_id NOT IN (SELECT segment_id FROM segments);
 
--- Add the foreign key constraint
-ALTER TABLE segment_images
-ADD CONSTRAINT fk_segment_images_image_segment
-FOREIGN KEY (image_segment_id) REFERENCES segments(segment_id) ON DELETE CASCADE;
+-- Add the foreign key constraint (idempotent: skip if already exists)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_segment_images_image_segment'
+    ) THEN
+        ALTER TABLE segment_images
+        ADD CONSTRAINT fk_segment_images_image_segment
+        FOREIGN KEY (image_segment_id) REFERENCES segments(segment_id) ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- Add a comment explaining the constraint
 COMMENT ON CONSTRAINT fk_segment_images_image_segment ON segment_images

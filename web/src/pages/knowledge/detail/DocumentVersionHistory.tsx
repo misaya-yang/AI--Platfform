@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import {
   History,
   GitCompare,
@@ -63,6 +64,8 @@ export function DocumentVersionHistory({
   onOpenChange,
   onRestored,
 }: DocumentVersionHistoryProps) {
+  const { t, i18n } = useTranslation();
+
   const [versions, setVersions] = useState<DocumentVersion[]>([]);
   const [currentVersion, setCurrentVersion] = useState<number>(1);
   const [total, setTotal] = useState(0);
@@ -93,7 +96,7 @@ export function DocumentVersionHistory({
       setTotal(result.total);
     } catch (err) {
       toast({
-        title: "加载版本历史失败",
+        title: t("knowledge.versionHistory.loadFailed"),
         description: String(err),
         variant: "destructive",
       });
@@ -123,7 +126,7 @@ export function DocumentVersionHistory({
       setCompareResult(result);
     } catch (err) {
       toast({
-        title: "版本对比失败",
+        title: t("knowledge.versionHistory.compareFailed"),
         description: String(err),
         variant: "destructive",
       });
@@ -139,15 +142,15 @@ export function DocumentVersionHistory({
     try {
       await restoreDocumentVersion(datasetId, documentId, restoreVersion);
       toast({
-        title: "版本恢复成功",
-        description: `已恢复到版本 #${restoreVersion}`,
+        title: t("knowledge.versionHistory.restoreSuccess"),
+        description: t("knowledge.versionHistory.restoredTo", { version: restoreVersion }),
       });
       setRestoreVersion(null);
       onOpenChange(false);
       onRestored?.();
     } catch (err) {
       toast({
-        title: "版本恢复失败",
+        title: t("knowledge.versionHistory.restoreFailed"),
         description: String(err),
         variant: "destructive",
       });
@@ -158,16 +161,16 @@ export function DocumentVersionHistory({
 
   function getChangeTypeBadge(changeType: string) {
     const styles: Record<string, string> = {
-      created: "bg-green-100 text-green-700 border-green-200",
-      updated: "bg-blue-100 text-blue-700 border-blue-200",
-      restored: "bg-amber-100 text-amber-700 border-amber-200",
-      deleted: "bg-red-100 text-red-700 border-red-200",
+      created: "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30",
+      updated: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
+      restored: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30",
+      deleted: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
     };
     const labels: Record<string, string> = {
-      created: "创建",
-      updated: "更新",
-      restored: "回滚",
-      deleted: "删除",
+      created: t("knowledge.versionHistory.changeCreated"),
+      updated: t("knowledge.versionHistory.changeUpdated"),
+      restored: t("knowledge.versionHistory.changeRestored"),
+      deleted: t("knowledge.versionHistory.changeDeleted"),
     };
     return (
       <Badge variant="outline" className={styles[changeType] || ""}>
@@ -177,7 +180,7 @@ export function DocumentVersionHistory({
   }
 
   function formatDate(dateStr: string) {
-    return new Date(dateStr).toLocaleString("zh-CN", {
+    return new Date(dateStr).toLocaleString(i18n.language === "zh-CN" ? "zh-CN" : "en-US", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -193,7 +196,7 @@ export function DocumentVersionHistory({
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <History className="h-5 w-5 text-primary" />
-              版本历史
+              {t("knowledge.versionHistory.title")}
               <span className="text-sm font-normal text-muted-foreground">
                 - {documentTitle}
               </span>
@@ -204,10 +207,10 @@ export function DocumentVersionHistory({
           <div className="flex items-center justify-between border-b border-border pb-3">
             <div className="flex items-center gap-2">
               <Badge variant="secondary">
-                共 {total} 个版本
+                {t("knowledge.versionHistory.totalVersions", { count: total })}
               </Badge>
               <Badge variant="outline">
-                当前版本: #{currentVersion}
+                {t("knowledge.versionHistory.currentVersion", { version: currentVersion })}
               </Badge>
             </div>
             <div className="flex items-center gap-2">
@@ -219,7 +222,7 @@ export function DocumentVersionHistory({
                   disabled={versions.length < 2}
                 >
                   <GitCompare className="h-4 w-4 mr-1.5" />
-                  版本对比
+                  {t("knowledge.versionHistory.compare")}
                 </Button>
               ) : (
                 <>
@@ -232,7 +235,7 @@ export function DocumentVersionHistory({
                       setCompareResult(null);
                     }}
                   >
-                    取消对比
+                    {t("knowledge.versionHistory.cancelCompare")}
                   </Button>
                   <Button
                     size="sm"
@@ -244,7 +247,7 @@ export function DocumentVersionHistory({
                     ) : (
                       <GitCompare className="h-4 w-4 mr-1.5" />
                     )}
-                    对比选中 ({selectedForCompare.length}/2)
+                    {t("knowledge.versionHistory.compareSelected", { count: selectedForCompare.length })}
                   </Button>
                 </>
               )}
@@ -262,18 +265,18 @@ export function DocumentVersionHistory({
               <div className="h-full flex flex-col">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2 text-sm">
-                    <Badge variant="outline">版本 #{compareResult.from_version}</Badge>
+                    <Badge variant="outline">{t("knowledge.versionHistory.version", { number: compareResult.from_version })}</Badge>
                     <ArrowRight className="h-4 w-4 text-muted-foreground" />
-                    <Badge variant="outline">版本 #{compareResult.to_version}</Badge>
+                    <Badge variant="outline">{t("knowledge.versionHistory.version", { number: compareResult.to_version })}</Badge>
                   </div>
                   <div className="flex items-center gap-3 text-sm">
                     <span className="text-green-600 flex items-center gap-1">
                       <Plus className="h-3.5 w-3.5" />
-                      {compareResult.stats.additions} 新增
+                      {t("knowledge.versionHistory.additions", { count: compareResult.stats.additions })}
                     </span>
                     <span className="text-red-600 flex items-center gap-1">
                       <Minus className="h-3.5 w-3.5" />
-                      {compareResult.stats.deletions} 删除
+                      {t("knowledge.versionHistory.deletions", { count: compareResult.stats.deletions })}
                     </span>
                     <Button
                       variant="ghost"
@@ -291,9 +294,9 @@ export function DocumentVersionHistory({
                         key={idx}
                         className={`px-2 py-0.5 ${
                           item.type === "insert"
-                            ? "bg-green-50 text-green-800"
+                            ? "bg-emerald-500/10 dark:bg-emerald-500/15 text-emerald-800 dark:text-emerald-300"
                             : item.type === "delete"
-                            ? "bg-red-50 text-red-800"
+                            ? "bg-red-500/10 dark:bg-red-500/15 text-red-800 dark:text-red-300"
                             : "text-muted-foreground"
                         }`}
                       >
@@ -305,7 +308,7 @@ export function DocumentVersionHistory({
                     ))}
                     {compareResult.diff.length === 0 && (
                       <div className="text-center py-8 text-muted-foreground">
-                        两个版本内容相同
+                        {t("knowledge.versionHistory.sameContent")}
                       </div>
                     )}
                   </div>
@@ -314,8 +317,8 @@ export function DocumentVersionHistory({
             ) : versions.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-48 text-muted-foreground">
                 <History className="h-12 w-12 mb-3 opacity-50" />
-                <p>暂无版本历史</p>
-                <p className="text-sm mt-1">文档更新时将自动保存版本</p>
+                <p>{t("knowledge.versionHistory.noHistory")}</p>
+                <p className="text-sm mt-1">{t("knowledge.versionHistory.autoSaveHint")}</p>
               </div>
             ) : (
               /* Version List */
@@ -347,11 +350,11 @@ export function DocumentVersionHistory({
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="font-semibold">
-                                版本 #{version.version_number}
+                                {t("knowledge.versionHistory.version", { number: version.version_number })}
                               </span>
                               {version.version_number === currentVersion && (
                                 <Badge className="bg-primary/10 text-primary border-primary/20">
-                                  当前版本
+                                  {t("knowledge.versionHistory.currentLabel")}
                                 </Badge>
                               )}
                               {getChangeTypeBadge(version.change_type)}
@@ -363,7 +366,7 @@ export function DocumentVersionHistory({
                               </span>
                               <span className="flex items-center gap-1">
                                 <FileText className="h-3.5 w-3.5" />
-                                {version.word_count} 字
+                                {t("knowledge.versionHistory.words", { count: version.word_count })}
                               </span>
                               {version.confluence_version && (
                                 <span className="flex items-center gap-1">
@@ -384,10 +387,10 @@ export function DocumentVersionHistory({
                             variant="ghost"
                             size="sm"
                             onClick={() => setRestoreVersion(version.version_number)}
-                            className="text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                            className="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 hover:bg-amber-500/10"
                           >
                             <RotateCcw className="h-4 w-4 mr-1.5" />
-                            回滚
+                            {t("knowledge.versionHistory.rollback")}
                           </Button>
                         )}
                       </div>
@@ -404,18 +407,18 @@ export function DocumentVersionHistory({
       <AlertDialog open={restoreVersion !== null} onOpenChange={() => setRestoreVersion(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>确认回滚到版本 #{restoreVersion}？</AlertDialogTitle>
+            <AlertDialogTitle>{t("knowledge.versionHistory.confirmRollback", { version: restoreVersion })}</AlertDialogTitle>
             <AlertDialogDescription className="space-y-2">
               <span className="block">
-                将把文档 "{documentTitle}" 恢复到版本 #{restoreVersion} 的内容。
+                {t("knowledge.versionHistory.rollbackDesc", { title: documentTitle, version: restoreVersion })}
               </span>
               <span className="block text-amber-600">
-                当前内容将被保存为新版本，此操作可撤销。
+                {t("knowledge.versionHistory.rollbackWarning")}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={restoring}>取消</AlertDialogCancel>
+            <AlertDialogCancel disabled={restoring}>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleRestore}
               disabled={restoring}
@@ -424,12 +427,12 @@ export function DocumentVersionHistory({
               {restoring ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-                  恢复中...
+                  {t("knowledge.versionHistory.restoring")}
                 </>
               ) : (
                 <>
                   <RotateCcw className="h-4 w-4 mr-1.5" />
-                  确认回滚
+                  {t("knowledge.versionHistory.confirmRollbackBtn")}
                 </>
               )}
             </AlertDialogAction>

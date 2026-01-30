@@ -27,11 +27,27 @@ class KnowledgeWorker:
         # allow KnowledgeService.enqueue_ingest() convenience
         setattr(self.service, "_worker", self)
 
-    async def start(self, concurrency: int = 1) -> None:
+    async def start(self, concurrency: Optional[int] = None) -> None:
+        """Start worker with configurable concurrency.
+        
+        Args:
+            concurrency: Number of parallel workers. If None, uses
+                service.settings.knowledge.document_worker_concurrency (default: 3)
+        """
         if self._running:
             return
         self._running = True
-        for _ in range(max(int(concurrency), 1)):
+        
+        # Use settings-based concurrency if not explicitly provided
+        if concurrency is None:
+            # Get settings from the KnowledgeService instance
+            knowledge_settings = getattr(self.service.settings, "knowledge", None)
+            concurrency = getattr(knowledge_settings, "document_worker_concurrency", 3) if knowledge_settings else 3
+        
+        num_workers = max(int(concurrency), 1)
+        logger.info(f"Starting KnowledgeWorker with {num_workers} parallel workers")
+        
+        for _ in range(num_workers):
             self._workers.append(asyncio.create_task(self._run()))
 
     async def stop(self) -> None:
@@ -42,6 +58,7 @@ class KnowledgeWorker:
 
     async def enqueue(self, dataset_id: str, document_id: str) -> None:
         await self.queue.put(KnowledgeIngestTask(dataset_id=dataset_id, document_id=document_id))
+        logger.info(f"Enqueued document {document_id} for ingestion (dataset={dataset_id}), queue size ~{self.queue.qsize()}")
 
     async def _run(self) -> None:
         while self._running:
