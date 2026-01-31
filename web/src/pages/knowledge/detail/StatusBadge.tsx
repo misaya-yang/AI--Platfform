@@ -50,6 +50,11 @@ export function StatusBadge({ status, error, progress, metadata }: StatusBadgePr
       label: t("knowledge.status.queued"),
       className: "bg-slate-500/15 text-slate-700 dark:text-slate-400 border-slate-500/30",
     },
+    detecting: {
+      icon: <Loader2 className="h-3 w-3 animate-spin" />,
+      label: t("knowledge.status.detecting"),
+      className: "bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-500/30",
+    },
     processing: {
       icon: <Loader2 className="h-3 w-3 animate-spin" />,
       label: hasPageProgress

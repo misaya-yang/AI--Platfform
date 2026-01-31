@@ -101,6 +101,10 @@ export interface Segment {
   hit_count?: number;
   created_at?: string;
   created_by?: string;
+  // Hierarchical segment fields
+  level?: 1 | 2 | 3; // 1=document, 2=section(parent), 3=paragraph(child)
+  parent_segment_id?: string;
+  summary?: string;
   // Image segment fields
   content_type?: "text" | "image";
   image_url?: string;

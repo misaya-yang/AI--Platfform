@@ -144,7 +144,7 @@ class ChunkingConfig:
         "！", "!",   # Exclamations
         "？", "?",   # Questions
         "；", ";",   # Semicolons
-        "，", ",",   # Commas
+        "،", ",",   # Arabic comma, English comma
         " ",         # Words (last resort)
     ])
     primary_separator: str = "\n\n"
@@ -557,9 +557,9 @@ class BaseChunker(ABC):
                 search_start = max(start, end - int(chunk_size * 0.2))
                 search_text = text[search_start:end]
                 
-                # Priority: paragraph > sentence > word
+                # Priority: paragraph > sentence > word (supports multiple languages)
                 best_pos = -1
-                for pattern in ['\n\n', '\n', '。', '.', '！', '!', '？', '?']:
+                for pattern in ['\n\n', '\n', '。', '.', '！', '!', '？', '?', '۔', '؟']:
                     pos = search_text.rfind(pattern)
                     if pos > 0:
                         best_pos = search_start + pos + len(pattern)

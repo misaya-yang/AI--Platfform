@@ -420,9 +420,38 @@ def create_app() -> FastAPI:
                 except Exception as e:
                     logger.warning(f"Failed to initialize VisionPDFProcessor: {e}")
             
+            # Initialize Document Type Detector for auto processing mode
+            detector = None
+            try:
+                from .services.knowledge.document_detector import DocumentTypeDetector
+                detector = DocumentTypeDetector()
+                logger.info("DocumentTypeDetector initialized for auto processing mode")
+            except Exception as e:
+                logger.warning(f"Failed to initialize DocumentTypeDetector: {e}")
+            
+            # Initialize Hierarchical Indexer for large document processing
+            hierarchical_indexer = None
+            summary_generator = None
+            try:
+                from .services.knowledge.summary_generator import SummaryGenerator
+                from .services.knowledge.hierarchical_indexer import HierarchicalIndexer
+                
+                summary_generator = SummaryGenerator(llm_service=container.llm_service)
+                hierarchical_indexer = HierarchicalIndexer(
+                    vector_store=app.state.knowledge_service.vector_store,
+                    database=container.database,
+                    embedder=app.state.knowledge_service.embedder,
+                    summary_generator=summary_generator,
+                )
+                logger.info("HierarchicalIndexer initialized for large document processing")
+            except Exception as e:
+                logger.warning(f"Failed to initialize HierarchicalIndexer: {e}")
+            
             app.state.knowledge_worker = KnowledgeWorker(
                 app.state.knowledge_service,
                 vision_processor=vision_processor,
+                detector=detector,
+                hierarchical_indexer=hierarchical_indexer,
             )
             await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
 

@@ -1,18 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, List, Optional, TYPE_CHECKING
 
+from ...config.settings import settings
 from ...core.observability.logging import get_logger
 from .processing_mode import ProcessingMode, parse_processing_mode
+from .streaming_loader import StreamingDocumentLoader
 
 if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
     from .vision_pdf_processor import VisionPDFProcessor
+    from .document_detector import DocumentTypeDetector
+    from .hierarchical_indexer import HierarchicalIndexer
 
 
 logger = get_logger(__name__)
+
+# Large file threshold from configuration
+LARGE_FILE_THRESHOLD = settings.knowledge.large_file_threshold
 
 
 @dataclass(frozen=True)
@@ -22,13 +32,27 @@ class KnowledgeIngestTask:
 
 
 class KnowledgeWorker:
+    """
+    Knowledge base document ingestion worker.
+    
+    Processes documents with:
+    - Intelligent type detection (auto mode)
+    - Streaming processing for large files (>50MB)
+    - Hierarchical indexing (L1/L2/L3)
+    - Multiple processing modes (text/scanned/multimodal)
+    """
+    
     def __init__(
         self,
         service: "KnowledgeService",
         vision_processor: Optional["VisionPDFProcessor"] = None,
+        detector: Optional["DocumentTypeDetector"] = None,
+        hierarchical_indexer: Optional["HierarchicalIndexer"] = None,
     ):
         self.service = service
         self.vision_processor = vision_processor
+        self.detector = detector
+        self.hierarchical_indexer = hierarchical_indexer
         self.queue: asyncio.Queue[KnowledgeIngestTask] = asyncio.Queue()
         self._workers: List[asyncio.Task] = []
         self._running = False
@@ -103,10 +127,19 @@ class KnowledgeWorker:
         
         metadata = doc.get("metadata", {})
         mode_str = metadata.get("processing_mode", "text_only")
+        file_size = doc.get("size_bytes", 0)
+        is_large_file = file_size > LARGE_FILE_THRESHOLD
+        
+        # Handle auto detection mode
+        if mode_str == "auto" and self.detector:
+            await self._process_with_auto_detection(task, doc, is_large_file)
+            return
+        
         mode = parse_processing_mode(mode_str)
         
         logger.info(
-            f"[Worker] Processing document {task.document_id} with mode={mode.value}"
+            f"[Worker] Processing document {task.document_id} with mode={mode.value}, "
+            f"size={file_size/1024/1024:.1f}MB, large_file={is_large_file}"
         )
         
         # Update status to processing
@@ -116,12 +149,441 @@ class KnowledgeWorker:
             progress=5,
         )
         
+        # Route to appropriate processor
         if mode == ProcessingMode.SCANNED:
-            # Use VisionPDFProcessor for scanned documents
             await self._process_scanned(task, doc)
+        elif is_large_file:
+            # Use streaming processing for large files
+            await self._process_large_file(task, doc, mode)
+        elif self.hierarchical_indexer:
+            # Use hierarchical indexer for better chunking (L2/L3 structure)
+            await self._process_with_hierarchical_indexer(task, doc, mode)
         else:
-            # Use existing ingest_document for text_only and multimodal
+            # Fallback to standard ingestion
             await self.service.ingest_document(task.dataset_id, task.document_id)
+    
+    async def _process_with_auto_detection(
+        self,
+        task: KnowledgeIngestTask,
+        doc: dict,
+        is_large_file: bool,
+    ) -> None:
+        """Process document with automatic type detection."""
+        metadata = doc.get("metadata", {})
+        original_key = metadata.get("original_file_key")
+        
+        if not original_key or not self.detector:
+            # Fallback to text_only
+            await self.service.ingest_document(task.dataset_id, task.document_id)
+            return
+        
+        # Update status
+        await self.service.db.update_document_status(
+            task.document_id,
+            status="detecting",
+            progress=2,
+        )
+        
+        # Load file for detection (avoid full in-memory load for large files)
+        temp_path = None
+        try:
+            if is_large_file:
+                temp_path = await self._download_original_to_temp(original_key)
+                content = temp_path
+            else:
+                content = await self.service.image_storage_service.download_original_file(original_key)
+            
+            # Detect document type
+            detection = await self.detector.detect(
+                content=content,
+                filename=doc.get("title", ""),
+                mime_type=doc.get("mime_type", ""),
+            )
+            
+            mode = detection.recommended_mode
+            
+            # Update document metadata with detection result
+            await self.service.db.update_document_status(
+                task.document_id,
+                status="processing",
+                progress=5,
+            )
+            # Update detection_result and processing_mode separately
+            try:
+                await self.service.db.execute(
+                    """UPDATE documents 
+                       SET detection_result = $1::jsonb, 
+                           metadata = jsonb_set(
+                               COALESCE(metadata, '{}'::jsonb),
+                               '{processing_mode}',
+                               to_jsonb($2::text)
+                           )
+                       WHERE document_id = $3""",
+                    json.dumps(detection.to_dict()),
+                    mode.value,
+                    task.document_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update detection result: {e}")
+            
+            logger.info(
+                f"[Worker] Auto-detected {task.document_id}: "
+                f"type={detection.document_type.value}, mode={mode.value}, "
+                f"confidence={detection.confidence:.2f}"
+            )
+            
+        except Exception as e:
+            logger.warning(f"[Worker] Detection failed, using text_only: {e}")
+            mode = ProcessingMode.TEXT_ONLY
+        
+        # Route to appropriate processor
+        if mode == ProcessingMode.SCANNED:
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            await self._process_scanned(task, doc)
+        elif is_large_file:
+            await self._process_large_file(task, doc, mode, source_path=temp_path)
+        else:
+            if temp_path:
+                await self._cleanup_temp_file(temp_path)
+            await self.service.ingest_document(task.dataset_id, task.document_id)
+    
+    async def _process_large_file(
+        self,
+        task: KnowledgeIngestTask,
+        doc: dict,
+        mode: ProcessingMode,
+        source_path: Optional[str] = None,
+    ) -> None:
+        """Process large file using streaming loader."""
+        metadata = doc.get("metadata", {})
+        original_key = metadata.get("original_file_key")
+        
+        if not original_key:
+            raise ValueError("No original file key found")
+        
+        logger.info(f"[Worker] Starting streaming processing for large file: {task.document_id}")
+        
+        temp_path = source_path
+        if not temp_path:
+            temp_path = await self._download_original_to_temp(original_key)
+
+        # Initialize streaming loader
+        loader = StreamingDocumentLoader(
+            batch_size=20,
+            extract_images=(mode == ProcessingMode.MULTIMODAL),
+            storage_service=self.service.image_storage_service,
+        )
+        
+        total_pages = 0
+        text_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+        text_temp_path = text_temp_file.name
+        text_temp_file.close()
+        
+        # Process in batches
+        async def on_progress(progress: float) -> None:
+            await self.service.db.update_document_status(
+                task.document_id,
+                status="processing",
+                progress=int(5 + progress * 85),
+            )
+
+        try:
+            try:
+                async for batch in loader.iter_batches(temp_path, on_progress):
+                    total_pages = batch.total_pages
+
+                    # Collect text from batch (append to temp file to avoid large in-memory buffers)
+                    batch_text_parts = []
+                    for page in batch.pages:
+                        if page.text.strip():
+                            batch_text_parts.append(f"[Page {page.page_number}]\n{page.text}")
+
+                    if batch_text_parts:
+                        batch_text = "\n\n".join(batch_text_parts) + "\n\n"
+                        await asyncio.to_thread(self._append_text, text_temp_path, batch_text)
+
+                    logger.info(
+                        f"[Worker] Processed batch {batch.batch_index}: "
+                        f"pages {batch.start_page}-{batch.end_page}/{total_pages}"
+                    )
+            finally:
+                if temp_path:
+                    await self._cleanup_temp_file(temp_path)
+
+            preview_text = await asyncio.to_thread(self._read_text_preview, text_temp_path, 100000)
+            if not preview_text.strip():
+                await self.service.db.update_document_status(
+                    task.document_id,
+                    status="failed",
+                    progress=100,
+                    error="No text extracted from document",
+                )
+                return
+
+            # Update document content and metadata
+            try:
+                await self.service.db.execute(
+                    """UPDATE documents 
+                       SET content = $1,
+                           metadata = metadata || $2::jsonb
+                       WHERE document_id = $3""",
+                    preview_text,  # Truncate for storage
+                    json.dumps({
+                        "total_pages": total_pages,
+                        "streaming_processed": True,
+                    }),
+                    task.document_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update document content: {e}")
+
+            # Use hierarchical indexer if available
+            if self.hierarchical_indexer:
+                full_text = await asyncio.to_thread(self._read_text_full, text_temp_path)
+                # Load chunking config from dataset
+                chunking_config = None
+                try:
+                    from .chunking import ChunkingConfig
+                    dataset = await self.service.db.get_dataset(task.dataset_id)
+                    if dataset:
+                        index_config = dataset.get("index_config") or {}
+                        chunking_dict = index_config.get("chunking") if isinstance(index_config, dict) else {}
+                        if chunking_dict:
+                            chunking_config = ChunkingConfig.from_dict(chunking_dict)
+                            logger.info(f"Loaded chunking config for {task.document_id}: {chunking_dict}")
+                except Exception as e:
+                    logger.warning(f"Failed to load chunking config: {e}")
+
+                result = await self.hierarchical_indexer.index_document(
+                    document_id=task.document_id,
+                    dataset_id=task.dataset_id,
+                    text=full_text,
+                    metadata=metadata,
+                    chunking_config=chunking_config,
+                )
+
+                await self.service.db.update_document_status(
+                    task.document_id,
+                    status="completed" if result.success else "failed",
+                    progress=100,
+                )
+                # Update segment counts in metadata
+                try:
+                    await self.service.db.execute(
+                        """UPDATE documents 
+                           SET metadata = metadata || $1::jsonb
+                           WHERE document_id = $2""",
+                        json.dumps({
+                            "l1_segments": result.l1_count,
+                            "l2_segments": result.l2_count,
+                            "l3_segments": result.l3_count,
+                            "total_vectors": result.total_vectors,
+                        }),
+                        task.document_id,
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to update segment counts: {e}")
+            else:
+                # Fallback to standard ingestion
+                await self.service.ingest_document(task.dataset_id, task.document_id)
+        finally:
+            await self._cleanup_temp_file(text_temp_path)
+    
+    async def _download_original_to_temp(self, storage_key: str) -> str:
+        """Download a file to a temporary path to avoid large memory spikes."""
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+        temp_path = temp_file.name
+        temp_file.close()
+        try:
+            await self.service.image_storage_service.download_original_file_to_path(storage_key, temp_path)
+            return temp_path
+        except Exception:
+            await self._cleanup_temp_file(temp_path)
+            raise
+
+    async def _cleanup_temp_file(self, path: Optional[str]) -> None:
+        """Remove a temporary file safely.
+        
+        Args:
+            path: Path to the temporary file, or None.
+        """
+        if not path:
+            return
+        try:
+            await asyncio.to_thread(Path(path).unlink)
+        except FileNotFoundError:
+            pass  # File already deleted, this is normal
+        except PermissionError:
+            logger.warning(f"Permission denied when cleaning up temp file: {path}")
+        except OSError as e:
+            logger.warning(f"OS error when cleaning up temp file {path}: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected error when cleaning up temp file {path}: {e}")
+
+    @staticmethod
+    def _append_text(path: str, text: str) -> None:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+
+    @staticmethod
+    def _read_text_preview(path: str, max_chars: int) -> str:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read(max_chars)
+
+    @staticmethod
+    def _read_text_full(path: str) -> str:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    
+    async def _process_with_hierarchical_indexer(
+        self,
+        task: KnowledgeIngestTask,
+        doc: dict,
+        mode: ProcessingMode,
+    ) -> None:
+        """Process document using hierarchical indexer for L2/L3 chunking."""
+        metadata = doc.get("metadata", {})
+        original_key = metadata.get("original_file_key")
+        
+        if not original_key:
+            # No original file, fallback to standard ingestion
+            await self.service.ingest_document(task.dataset_id, task.document_id)
+            return
+        
+        logger.info(f"[Worker] Processing with hierarchical indexer: {task.document_id}")
+        
+        try:
+            # Download and extract text
+            content = await self.service.image_storage_service.download_original_file(original_key)
+            if not content:
+                raise ValueError("Failed to download original file")
+            
+            # Extract text based on file type
+            full_text = await self._extract_text_from_content(content, metadata.get("mime_type", ""))
+            
+            if not full_text.strip():
+                await self.service.db.update_document_status(
+                    task.document_id,
+                    status="failed",
+                    progress=100,
+                    error="No text extracted from document",
+                )
+                return
+            
+            # Update progress
+            await self.service.db.update_document_status(
+                task.document_id,
+                status="processing",
+                progress=50,
+            )
+            
+            # Load chunking config
+            chunking_config = None
+            try:
+                from .chunking import ChunkingConfig
+                dataset = await self.service.db.get_dataset(task.dataset_id)
+                if dataset:
+                    index_config = dataset.get("index_config") or {}
+                    chunking_dict = index_config.get("chunking") if isinstance(index_config, dict) else {}
+                    if chunking_dict:
+                        chunking_config = ChunkingConfig.from_dict(chunking_dict)
+            except Exception as e:
+                logger.debug(f"Failed to load chunking config: {e}")
+            
+            # Index with hierarchical indexer
+            result = await self.hierarchical_indexer.index_document(
+                document_id=task.document_id,
+                dataset_id=task.dataset_id,
+                text=full_text,
+                metadata=metadata,
+                chunking_config=chunking_config,
+            )
+            
+            await self.service.db.update_document_status(
+                task.document_id,
+                status="completed" if result.success else "failed",
+                progress=100,
+            )
+            
+            # Update metadata with segment counts
+            try:
+                await self.service.db.execute(
+                    """UPDATE documents 
+                       SET metadata = metadata || $1::jsonb
+                       WHERE document_id = $2""",
+                    json.dumps({
+                        "l1_segments": result.l1_count,
+                        "l2_segments": result.l2_count,
+                        "l3_segments": result.l3_count,
+                        "total_vectors": result.total_vectors,
+                    }),
+                    task.document_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update segment counts: {e}")
+            
+            logger.info(
+                f"[Worker] Hierarchical indexing completed for {task.document_id}: "
+                f"L1={result.l1_count}, L2={result.l2_count}, L3={result.l3_count}"
+            )
+            
+        except Exception as e:
+            logger.error(f"Hierarchical indexing failed for {task.document_id}: {e}")
+            # Fallback to standard ingestion
+            await self.service.ingest_document(task.dataset_id, task.document_id)
+    
+    async def _extract_text_from_content(self, content: bytes, mime_type: str) -> str:
+        """Extract text from file content based on mime type.
+        
+        Args:
+            content: File content as bytes
+            mime_type: MIME type string (may be empty)
+            
+        Returns:
+            Extracted text or empty string
+        """
+        if not content:
+            return ""
+        
+        mime = (mime_type or "").lower()
+        
+        # Use magic bytes for more reliable detection
+        if content.startswith(b'%PDF') or "pdf" in mime:
+            # Extract text from PDF
+            try:
+                import fitz
+                doc = fitz.open(stream=content, filetype="pdf")
+                text_parts = []
+                for page in doc:
+                    text_parts.append(page.get_text())
+                doc.close()
+                return "\n\n".join(text_parts)
+            except Exception as e:
+                logger.warning(f"PDF text extraction failed: {e}")
+                return ""
+        
+        elif content.startswith(b'PK\x03\x04') or "word" in mime or "docx" in mime:
+            # Try to extract from DOCX
+            try:
+                import docx
+                from io import BytesIO
+                document = docx.Document(BytesIO(content))
+                return "\n\n".join([para.text for para in document.paragraphs if para.text.strip()])
+            except Exception as e:
+                logger.warning(f"DOCX text extraction failed: {e}")
+                return content.decode("utf-8", errors="ignore")
+        
+        elif "text" in mime or "plain" in mime or "markdown" in mime or "md" in mime:
+            # Plain text
+            return content.decode("utf-8", errors="ignore")
+        
+        else:
+            # Try UTF-8 decoding as fallback
+            try:
+                return content.decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
     
     async def _process_scanned(self, task: KnowledgeIngestTask, doc: dict) -> None:
         """Process a scanned document using VisionPDFProcessor."""

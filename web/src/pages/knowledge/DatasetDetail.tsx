@@ -71,6 +71,7 @@ import {
   batchReindexDocuments,
   batchDeleteDocuments,
   type ChunkPreviewItem,
+  type ProcessingMode,
 } from "@/api/knowledge";
 import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
 
@@ -106,7 +107,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { toast } from "@/hooks/use-toast";
 import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
-import { SegmentCard } from "@/pages/knowledge/detail/SegmentCard";
+import { SegmentList } from "@/pages/knowledge/detail/SegmentList";
 import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
 import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
 import { ConfluenceBindingManager } from "./components/ConfluenceBindingManager";
@@ -173,8 +174,8 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   
-  // Processing mode for upload: text_only | scanned | multimodal
-  const [uploadProcessingMode, setUploadProcessingMode] = useState<"text_only" | "scanned" | "multimodal">("text_only");
+  // Processing mode for upload: auto | text_only | scanned | multimodal
+  const [uploadProcessingMode, setUploadProcessingMode] = useState<ProcessingMode>("auto");
   
   // Chunking config for upload
   const [uploadChunkMode, setUploadChunkMode] = useState("automatic");
@@ -220,6 +221,7 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadTableMode, setUploadTableMode] = useState<"markdown" | "row_based" | "structured">("markdown");
   const [uploadTableIncludeHeaders, setUploadTableIncludeHeaders] = useState(true);
   const [uploadTableGenerateSummary, setUploadTableGenerateSummary] = useState(false);
+  const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState("dashscope:text-embedding-v4");
 
   // Rerank model selection
   const [rerankEnabled, setRerankEnabled] = useState(true);
@@ -717,6 +719,10 @@ export function KnowledgeDatasetDetailPage() {
       // Build chunking config based on mode
       const chunkingConfig = buildChunkingConfig();
 
+      // Parse embedding model selection
+      const [embeddingProvider, embeddingModel] = uploadEmbeddingModel.split(":");
+      const selectedModel = EMBEDDING_MODELS.find(m => m.provider === embeddingProvider && m.model === embeddingModel);
+
       await updateDatasetConfig(datasetId, {
         chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
         retrieval_config: {
@@ -725,6 +731,9 @@ export function KnowledgeDatasetDetailPage() {
             model: rerankModel,
           },
         },
+        embedding_provider: embeddingProvider,
+        embedding_model: embeddingModel,
+        embedding_dimension: selectedModel?.dimension || 1024,
       });
 
       // Small delay to ensure config is persisted before upload triggers ingest
@@ -1604,17 +1613,11 @@ export function KnowledgeDatasetDetailPage() {
                       <p className="text-sm text-muted-foreground/70 mt-1">{t("knowledge.detail.noSegmentsHint")}</p>
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                      {segments.map((seg, i) => (
-                        <SegmentCard
-                          key={seg.segment_id}
-                          segment={seg}
-                          index={i}
-                          onEdit={() => openEdit(seg.segment_id, seg.text)}
-                          onDelete={() => handleDeleteSegment(seg.segment_id)}
-                        />
-                      ))}
-                    </div>
+                    <SegmentList
+                      segments={segments}
+                      onEdit={(id, text) => openEdit(id, text)}
+                      onDelete={(id) => handleDeleteSegment(id)}
+                    />
                   )}
                 </div>
               </Card>
@@ -3498,8 +3501,15 @@ for chunk in results.get("chunks", []):
                 <Label className="text-sm font-medium text-foreground mb-3 block">
                   {t("knowledge.detail.processingMode")}
                 </Label>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {[
+                    { 
+                      id: "auto" as const, 
+                      name: t("knowledge.detail.processingModes.auto"),
+                      desc: t("knowledge.detail.processingModes.autoDesc"),
+                      icon: "🔍",
+                      recommended: true,
+                    },
                     { 
                       id: "text_only" as const, 
                       name: t("knowledge.detail.processingModes.text_only"),
@@ -3530,7 +3540,14 @@ for chunk in results.get("chunks", []):
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-lg">{mode.icon}</span>
-                        <h4 className="text-sm font-medium">{mode.name}</h4>
+                        <h4 className="text-sm font-medium">
+                          {mode.name}
+                          {mode.recommended && (
+                            <span className="ml-1 text-[10px] px-1.5 py-0.5 bg-green-500/20 text-green-700 dark:text-green-400 rounded">
+                              {t("knowledge.detail.recommended")}
+                            </span>
+                          )}
+                        </h4>
                       </div>
                       <p className="text-xs text-muted-foreground">{mode.desc}</p>
                     </div>
@@ -3541,10 +3558,15 @@ for chunk in results.get("chunks", []):
                     {t("knowledge.detail.scannedModeNote")}
                   </div>
                 )}
+                {uploadProcessingMode === "auto" && (
+                  <div className="mt-3 p-2 bg-blue-500/10 rounded text-xs text-blue-700 dark:text-blue-400">
+                    {t("knowledge.detail.autoModeNote")}
+                  </div>
+                )}
               </div>
 
-              {/* Chunking Mode Selection - Card Grid (hidden for scanned mode) */}
-              {uploadProcessingMode !== "scanned" && (
+              {/* Chunking Mode Selection - Card Grid (hidden for scanned and auto mode) */}
+              {uploadProcessingMode !== "scanned" && uploadProcessingMode !== "auto" && (
               <div className="border rounded-lg p-4">
                 <Label className="text-sm font-medium text-foreground mb-3 block">{t("knowledge.detail.chunkingMethod")}</Label>
                 <div className="grid grid-cols-3 gap-2 mb-4">
@@ -4058,6 +4080,47 @@ for chunk in results.get("chunks", []):
                         </SelectContent>
                       </Select>
                     )}
+                  </div>
+
+                  {/* Embedding Model */}
+                  <div className="p-4 bg-muted/40 rounded-lg">
+                    <Label className="text-sm font-medium mb-2 block">{t("knowledge.detail.embeddingModelSelect")}</Label>
+                    <p className="text-xs text-muted-foreground mb-3">{t("knowledge.detail.embeddingModelSelectHint")}</p>
+                    <Select value={uploadEmbeddingModel} onValueChange={setUploadEmbeddingModel}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="dashscope:text-embedding-v4">
+                          <div className="flex items-center gap-2">
+                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
+                            <span>通义向量 v4</span>
+                            <span className="text-xs text-muted-foreground">(1024维)</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="dashscope:text-embedding-v3">
+                          <div className="flex items-center gap-2">
+                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
+                            <span>通义向量 v3</span>
+                            <span className="text-xs text-muted-foreground">(1024维)</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="dashscope:text-embedding-v2">
+                          <div className="flex items-center gap-2">
+                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
+                            <span>通义向量 v2</span>
+                            <span className="text-xs text-muted-foreground">(1536维)</span>
+                          </div>
+                        </SelectItem>
+                        <SelectItem value="gemini:gemini-embedding-001">
+                          <div className="flex items-center gap-2">
+                            <span className="w-5 h-5 rounded bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold">G</span>
+                            <span>Gemini Embedding 001</span>
+                            <span className="text-xs text-muted-foreground">(1024维)</span>
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               </div>

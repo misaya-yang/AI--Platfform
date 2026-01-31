@@ -223,6 +223,49 @@ class KnowledgeSettings(BaseModel):
     
     # Scanned PDF: min embeddable images to use image-only (no text extraction)
     scanned_min_images_for_image_only: int = 5
+    
+    # =============================================
+    # Large File & Streaming Processing
+    # =============================================
+    # Size threshold for large files (bytes) - files larger than this use streaming
+    large_file_threshold: int = 50 * 1024 * 1024  # 50MB
+    
+    # Maximum content size for memory-based processing (bytes)
+    max_memory_processing_size: int = 100 * 1024 * 1024  # 100MB
+    
+    # Streaming batch size for large document processing (pages per batch)
+    streaming_batch_size: int = 20
+    
+    # Streaming batch size limits
+    streaming_min_batch_size: int = 5
+    streaming_max_batch_size: int = 50
+    
+    # =============================================
+    # Document Type Detection
+    # =============================================
+    # Number of pages to sample for document type detection
+    detection_sample_pages: int = 5
+    
+    # Text coverage thresholds for PDF classification
+    detection_native_pdf_threshold: float = 0.8    # > 80% pages with text -> native
+    detection_scanned_pdf_threshold: float = 0.2   # < 20% pages with text -> scanned
+    
+    # Minimum characters per page to consider it "has text"
+    detection_min_chars_per_page: int = 50
+    
+    # =============================================
+    # Hierarchical Indexing (L1/L2/L3)
+    # =============================================
+    # Default chunk sizes for hierarchical indexing (in characters, ~4 chars per token)
+    hierarchical_l2_chunk_size: int = 8000    # ~2000 tokens (section level)
+    hierarchical_l2_chunk_overlap: int = 400
+    hierarchical_l3_chunk_size: int = 2000    # ~500 tokens (paragraph level)
+    hierarchical_l3_chunk_overlap: int = 200
+    
+    # Default top-k values for hierarchical retrieval
+    hierarchical_l1_top_k: int = 5   # Documents to consider at L1 (summary level)
+    hierarchical_l2_top_k: int = 10  # Sections to consider at L2 (section level)
+    hierarchical_l3_top_k: int = 5   # Final results at L3 (paragraph level)
 
 
 class ConfluenceSettings(BaseModel):

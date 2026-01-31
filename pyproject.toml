@@ -107,8 +107,9 @@ aiohttp = [
 
 # Cloud Storage (S3, OSS)
 storage = [
-    "aioboto3>=14.0.0",  # AWS S3 async client
-    "oss2>=2.18.0",      # Alibaba Cloud OSS client
+    "aioboto3>=14.0.0",   # AWS S3 async client
+    "oss2>=2.18.0",       # Alibaba Cloud OSS client
+    "aiofiles>=24.0.0",   # Async file I/O for streaming downloads
 ]
 
 # All optional dependencies

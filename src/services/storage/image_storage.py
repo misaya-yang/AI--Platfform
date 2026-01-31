@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -148,6 +149,28 @@ class BaseStorageBackend(ABC):
             Binary content
         """
         pass
+
+    async def download_to_path(self, key: str, target_path: str) -> str:
+        """
+        Download content and write it to a local file path.
+
+        Backends can override for streaming efficiency.
+        """
+        try:
+            import aiofiles
+            data = await self.download(key)
+            path = Path(target_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(path, "wb") as handle:
+                await handle.write(data)
+            return str(path)
+        except ImportError:
+            # Fallback to sync I/O if aiofiles not available
+            data = await self.download(key)
+            path = Path(target_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_bytes, data)
+            return str(path)
 
     @abstractmethod
     async def delete(self, key: str) -> bool:
@@ -283,6 +306,16 @@ class LocalStorageBackend(BaseStorageBackend):
         if not full_path.exists():
             raise FileNotFoundError(f"File not found: {pkey}")
         return await asyncio.to_thread(full_path.read_bytes)
+
+    async def download_to_path(self, key: str, target_path: str) -> str:
+        pkey = self._prefixed_key(key)
+        full_path = self._get_full_path(pkey)
+        if not full_path.exists():
+            raise FileNotFoundError(f"File not found: {pkey}")
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.copyfile, full_path, target)
+        return str(target)
 
     async def delete(self, key: str) -> bool:
         pkey = self._prefixed_key(key)
@@ -427,6 +460,42 @@ class S3StorageBackend(BaseStorageBackend):
             raise FileNotFoundError(f"S3 object not found: {pkey}")
         except Exception as e:
             logger.error(f"[S3] Download failed: bucket={self.bucket}, key={pkey}, error={e}")
+            raise
+
+    async def download_to_path(self, key: str, target_path: str) -> str:
+        pkey = self._prefixed_key(key)
+        client = await self._get_client()
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            logger.debug(f"[S3] Streaming download key={pkey} to {target}")
+            response = await client.get_object(Bucket=self.bucket, Key=pkey)
+            
+            # Use aiofiles for non-blocking file I/O
+            try:
+                import aiofiles
+                async with response["Body"] as stream:
+                    async with aiofiles.open(target, "wb") as handle:
+                        while True:
+                            chunk = await stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            await handle.write(chunk)
+            except ImportError:
+                # Fallback to sync I/O
+                async with response["Body"] as stream:
+                    with open(target, "wb") as handle:
+                        while True:
+                            chunk = await stream.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+            return str(target)
+        except client.exceptions.NoSuchKey:
+            logger.error(f"[S3] Key not found: bucket={self.bucket}, key={pkey}")
+            raise FileNotFoundError(f"S3 object not found: {pkey}")
+        except Exception as e:
+            logger.error(f"[S3] Streaming download failed: bucket={self.bucket}, key={pkey}, error={e}")
             raise
 
     async def delete(self, key: str) -> bool:
@@ -662,6 +731,23 @@ class OSSStorageBackend(BaseStorageBackend):
             logger.error(f"[OSS] Download failed: bucket={self.bucket_name}, key={pkey}, error={e}")
             raise
 
+    async def download_to_path(self, key: str, target_path: str) -> str:
+        pkey = self._prefixed_key(key)
+        bucket = self._get_bucket()
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            logger.debug(f"[OSS] Streaming download key={pkey} to {target}")
+            await asyncio.to_thread(bucket.get_object_to_file, pkey, str(target))
+            return str(target)
+        except Exception as e:
+            error_str = str(e)
+            if "NoSuchKey" in error_str or "404" in error_str:
+                logger.error(f"[OSS] Key not found: bucket={self.bucket_name}, key={pkey}")
+                raise FileNotFoundError(f"OSS object not found: {pkey}")
+            logger.error(f"[OSS] Streaming download failed: bucket={self.bucket_name}, key={pkey}, error={e}")
+            raise
+
     async def delete(self, key: str) -> bool:
         pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
@@ -889,6 +975,19 @@ class ImageStorageService:
             Raw file bytes
         """
         return await self._backend.download(storage_key)
+
+    async def download_original_file_to_path(self, storage_key: str, target_path: str) -> str:
+        """
+        Download an original document file and write it to a local path.
+
+        Args:
+            storage_key: The storage key returned by upload_original_file
+            target_path: Local file path to write to
+
+        Returns:
+            The local path written
+        """
+        return await self._backend.download_to_path(storage_key, target_path)
 
     async def upload_images_batch(
         self,

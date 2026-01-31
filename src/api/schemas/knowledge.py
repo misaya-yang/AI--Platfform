@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# ============================================================
+# Enums
+# ============================================================
+
+class HierarchicalStrategy(str, Enum):
+    """Hierarchical retrieval strategies."""
+    CASCADE = "cascade"
+    PARALLEL = "parallel"
+    ADAPTIVE = "adaptive"
 
 
 # ============================================================
@@ -202,6 +214,13 @@ class RetrieveRequestSchema(BaseModel):
     language_filter: Optional[str] = None     # Filter by language: ar|en|ar_en
     multi_query: bool = False                 # Enable Islamic multi-query expansion
     authority_sort: bool = False              # Sort results by Islamic authority (Quran > Hadith > Fiqh)
+
+    # Hierarchical retrieval options (for large document collections)
+    hierarchical: bool = False                 # Enable hierarchical 3-level retrieval
+    hierarchical_strategy: HierarchicalStrategy = HierarchicalStrategy.CASCADE
+    l1_top_k: int = 5                          # Documents to consider at L1 (summary level)
+    l2_top_k: int = 10                         # Sections to consider at L2 (section level)
+    include_context: bool = True               # Include parent context in L3 results
 
 
 class AssociatedImageSchema(BaseModel):

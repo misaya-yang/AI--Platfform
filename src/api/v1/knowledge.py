@@ -208,7 +208,7 @@ async def create_document_text(
 async def upload_document(
     dataset_id: str,
     file: UploadFile = File(...),
-    processing_mode: str = Form("text_only"),  # text_only | scanned | multimodal
+    processing_mode: str = Form("auto"),  # auto | text_only | scanned | multimodal
     svc: KnowledgeService = Depends(get_knowledge_service),
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
@@ -220,7 +220,8 @@ async def upload_document(
         dataset_id: Target dataset ID
         file: Document file (PDF, DOCX, TXT, etc.)
         processing_mode: Processing mode - one of:
-            - text_only: Traditional OCR + text embedding (default)
+            - auto: Automatic detection (default) - intelligently detects document type
+            - text_only: Traditional OCR + text embedding
             - scanned: Page-as-Image vision embedding (for scanned PDFs)
             - multimodal: Combined text + image embedding
     """
@@ -681,6 +682,49 @@ async def retrieve(
     user: UserContext = Depends(get_user_context),
 ):
     try:
+        # Use hierarchical retrieval if enabled
+        if payload.hierarchical:
+            from ...services.knowledge.hierarchical_retriever import hierarchical_retrieve
+            
+            results, meta = await hierarchical_retrieve(
+                query=payload.query,
+                dataset_id=dataset_id,
+                vector_store=svc.vector_store,
+                embedder=svc.embedder,
+                database=svc.db,
+                top_k=payload.top_k,
+                strategy=payload.hierarchical_strategy.value,
+                l1_top_k=payload.l1_top_k,
+                l2_top_k=payload.l2_top_k,
+                include_context=payload.include_context,
+                score_threshold=payload.score_threshold,
+            )
+            
+            # Build hierarchical response
+            return {
+                "results": [
+                    {
+                        "segment_id": r.segment_id,
+                        "document_id": r.document_id,
+                        "score": r.score,
+                        "text": r.text,
+                        "level": r.level,
+                        "metadata": r.metadata,
+                        "parent_context": r.parent_context,
+                        "document_summary": r.document_summary,
+                    }
+                    for r in results
+                ],
+                "metadata": {
+                    "strategy": meta.strategy,
+                    "l1_candidates": meta.l1_candidates,
+                    "l2_candidates": meta.l2_candidates,
+                    "l3_results": meta.l3_results,
+                    "total_time_ms": meta.total_time_ms,
+                    "filtered_documents": meta.filtered_documents,
+                },
+            }
+        
         # Use multimodal retrieval if include_associated_images is requested
         if payload.include_associated_images:
             results, meta = await svc.retrieve_with_images(

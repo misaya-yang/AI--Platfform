@@ -8,16 +8,16 @@ Implements hierarchical RAG retrieval strategies:
 """
 
 import asyncio
-import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from qdrant_client.http import models as qmodels
 
+from ...core.observability.logging import get_logger
 from .hierarchical_indexer import IndexLevel
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class RetrievalStrategy(str, Enum):

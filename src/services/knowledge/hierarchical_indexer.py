@@ -11,7 +11,6 @@ Parent-child relationships are maintained for context retrieval.
 
 import asyncio
 import hashlib
-import logging
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -19,7 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from qdrant_client.http import models as qmodels
 
-logger = logging.getLogger(__name__)
+from ...config.settings import settings
+from ...core.observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class IndexLevel(IntEnum):
@@ -81,11 +83,11 @@ class HierarchicalIndexer:
     - L3: Paragraph chunks for precise retrieval
     """
     
-    # Default chunk sizes (in characters, ~4 chars per token)
-    L2_CHUNK_SIZE = 8000   # ~2000 tokens
-    L2_CHUNK_OVERLAP = 400
-    L3_CHUNK_SIZE = 2000   # ~500 tokens
-    L3_CHUNK_OVERLAP = 200
+    # Default chunk sizes from configuration (in characters, ~4 chars per token)
+    L2_CHUNK_SIZE = settings.knowledge.hierarchical_l2_chunk_size
+    L2_CHUNK_OVERLAP = settings.knowledge.hierarchical_l2_chunk_overlap
+    L3_CHUNK_SIZE = settings.knowledge.hierarchical_l3_chunk_size
+    L3_CHUNK_OVERLAP = settings.knowledge.hierarchical_l3_chunk_overlap
     L2_POSITION_OFFSET = 1_000_000
     
     # Collection name patterns
@@ -198,6 +200,7 @@ class HierarchicalIndexer:
         """Create L2 section and L3 paragraph chunks with parent links."""
         from .chunking import create_chunker, ChunkingConfig, ChunkingMode
 
+        # Base hierarchical config with default values
         config = ChunkingConfig(
             mode=ChunkingMode.HIERARCHICAL,
             parent_chunk_size=self.L2_CHUNK_SIZE,
@@ -207,8 +210,36 @@ class HierarchicalIndexer:
             parent_mode="section",
         )
 
+        # Merge with user-provided chunking config if available
         if chunking_config:
-            config = chunking_config
+            # Use user-provided chunk_size as child_chunk_size if available
+            child_size = getattr(chunking_config, 'child_chunk_size', None) or \
+                         getattr(chunking_config, 'chunk_size', None) or \
+                         self.L3_CHUNK_SIZE
+            
+            child_overlap = getattr(chunking_config, 'child_overlap', None) or \
+                           getattr(chunking_config, 'chunk_overlap', None) or \
+                           self.L3_CHUNK_OVERLAP
+            
+            # Parent size is typically 4x child size for hierarchical retrieval
+            parent_size = getattr(chunking_config, 'parent_chunk_size', None) or \
+                         (child_size * 4)
+            parent_overlap = getattr(chunking_config, 'parent_overlap', None) or \
+                            (child_overlap * 2)
+            
+            config = ChunkingConfig(
+                mode=ChunkingMode.HIERARCHICAL,
+                parent_chunk_size=parent_size,
+                parent_overlap=parent_overlap,
+                child_chunk_size=child_size,
+                child_overlap=child_overlap,
+                parent_mode="section",
+            )
+            
+            logger.info(
+                f"Hierarchical chunking with user config: "
+                f"child_size={child_size}, parent_size={parent_size}"
+            )
 
         chunker = create_chunker(config)
         parents = chunker.chunk(text)
@@ -314,7 +345,7 @@ class HierarchicalIndexer:
         vector_dim: int,
         base_collection: str,
     ) -> None:
-        """Index L3 segments to the main collection."""
+        """Index L3 segments to the main collection with transactional consistency."""
         if not segments:
             return
 
@@ -331,12 +362,14 @@ class HierarchicalIndexer:
         if not vectors or len(vectors) != len(segments):
             raise ValueError("Embedding count mismatch")
         
-        # Build points
+        # Build points and segment rows
         points = []
         segment_rows = []
+        failed_segments = []
         
         for segment, vector in zip(segments, vectors):
             if vector is None:
+                failed_segments.append(segment.segment_id)
                 continue
             
             payload = {
@@ -371,12 +404,44 @@ class HierarchicalIndexer:
                 "metadata": segment.metadata,
             })
         
-        # Upsert to Qdrant
-        if points:
-            await self.vector_store.upsert(collection_name=collection, points=points)
+        if not points:
+            logger.warning(f"No valid embeddings generated for {len(segments)} segments")
+            return
         
-        # Save to database
-        await self.db.insert_segments(segment_rows)
+        vector_success = False
+
+        try:
+            # Step 1: Upsert to Qdrant
+            await self.vector_store.upsert(collection_name=collection, points=points)
+            vector_success = True
+
+            # Step 2: Save to database
+            await self.db.insert_segments(segment_rows)
+
+            if failed_segments:
+                logger.warning(f"Partial indexing: {len(failed_segments)} segments failed embedding")
+
+        except Exception as e:
+            logger.error(f"Indexing failed - vector upsert success: {vector_success}: {e}")
+
+            # Attempt rollback if vectors were written but DB failed
+            if vector_success:
+                logger.warning("Vector store succeeded but DB failed - attempting vector cleanup")
+                try:
+                    await self.vector_store.delete(
+                        collection_name=collection,
+                        points_selector=qmodels.PointIdsList(points=[p.id for p in points]),
+                    )
+                    logger.info("Vector cleanup successful")
+                except Exception as cleanup_error:
+                    logger.error(f"Vector cleanup also failed: {cleanup_error}")
+                    # Create chained exception to preserve both errors with full context
+                    raise RuntimeError(
+                        f"Indexing failed: {e}. Vector cleanup also failed: {cleanup_error}"
+                    ) from e
+
+            # Re-raise the original exception to preserve traceback
+            raise
     
     async def _index_sections(
         self,
@@ -385,7 +450,7 @@ class HierarchicalIndexer:
         vector_dim: int,
         base_collection: str,
     ) -> None:
-        """Index L2 sections to a separate collection."""
+        """Index L2 sections to a separate collection with transactional consistency."""
         if not segments:
             return
 
@@ -438,10 +503,36 @@ class HierarchicalIndexer:
                 "metadata": segment.metadata,
             })
         
-        if points:
+        if not points:
+            logger.warning(f"No valid embeddings for {len(segments)} sections")
+            return
+        
+        # Transactional consistency: vectors first, then DB (with rollback on DB failure)
+        vector_success = False
+        try:
             await self.vector_store.upsert(collection_name=collection, points=points)
-        if segment_rows:
+            vector_success = True
+
             await self.db.insert_segments(segment_rows)
+
+        except Exception as e:
+            logger.error(f"Section indexing failed - vector upsert success: {vector_success}: {e}")
+
+            if vector_success:
+                logger.warning("Section vectors written but DB failed - attempting vector cleanup")
+                try:
+                    await self.vector_store.delete(
+                        collection_name=collection,
+                        points_selector=qmodels.PointIdsList(points=[p.id for p in points]),
+                    )
+                    logger.info("Section vector cleanup successful")
+                except Exception as cleanup_error:
+                    logger.error(f"Section vector cleanup also failed: {cleanup_error}")
+                    raise RuntimeError(
+                        f"Section indexing failed: {e}. Vector cleanup also failed: {cleanup_error}"
+                    ) from e
+
+            raise
     
     async def _index_summary(
         self,
@@ -450,7 +541,7 @@ class HierarchicalIndexer:
         vector_dim: int,
         base_collection: str,
     ) -> None:
-        """Index L1 document summary."""
+        """Index L1 document summary with transactional consistency."""
         collection = await self._ensure_collection(
             dataset_id=dataset_id,
             vector_size=vector_dim,
@@ -461,6 +552,7 @@ class HierarchicalIndexer:
         vectors = await self._embed_texts([segment.summary or segment.text])
         
         if not vectors or not vectors[0]:
+            logger.warning(f"No embedding generated for document summary: {segment.document_id}")
             return
         
         payload = {
@@ -479,10 +571,12 @@ class HierarchicalIndexer:
             payload=payload,
         )
         
-        await self.vector_store.upsert(collection_name=collection, points=[point])
-        
-        # Save to document_summaries table
+        # Transactional consistency: vectors first, then DB (with rollback on DB failure)
+        vector_success = False
         try:
+            await self.vector_store.upsert(collection_name=collection, points=[point])
+            vector_success = True
+
             await self.db.save_document_summary({
                 "document_id": segment.document_id,
                 "summary": segment.summary,
@@ -490,17 +584,67 @@ class HierarchicalIndexer:
                 "topics": segment.metadata.get("topics", []),
                 "vector_id": segment.segment_id,
             })
+
         except Exception as e:
-            logger.debug(f"Failed to save document summary to DB: {e}")
+            logger.error(f"Summary indexing failed for {segment.document_id} - vector upsert success: {vector_success}: {e}")
+
+            if vector_success:
+                logger.warning(f"Summary vector written but DB failed - attempting vector cleanup for {segment.document_id}")
+                try:
+                    await self.vector_store.delete(
+                        collection_name=collection,
+                        points_selector=qmodels.PointIdsList(points=[point.id]),
+                    )
+                    logger.info("Summary vector cleanup successful")
+                except Exception as cleanup_error:
+                    logger.error(f"Summary vector cleanup also failed: {cleanup_error}")
+                    raise RuntimeError(
+                        f"Summary indexing failed for {segment.document_id}: {e}. Vector cleanup also failed: {cleanup_error}"
+                    ) from e
+
+            raise
     
-    async def _embed_texts(self, texts: List[str]) -> List[Optional[List[float]]]:
-        """Generate embeddings for texts."""
-        try:
-            vectors = await self.embedder.embed_documents(texts)
-            return vectors
-        except Exception as e:
-            logger.error(f"Embedding failed: {e}")
-            return [None] * len(texts)
+    async def _embed_texts(
+        self, 
+        texts: List[str],
+        max_retries: int = 3,
+    ) -> List[Optional[List[float]]]:
+        """Generate embeddings for texts with retry.
+        
+        Args:
+            texts: List of texts to embed
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            List of embedding vectors (None for failed texts)
+        """
+        for attempt in range(max_retries):
+            try:
+                vectors = await self.embedder.embed_documents(texts)
+                
+                # Validate return result
+                if len(vectors) != len(texts):
+                    raise ValueError(
+                        f"Embedding count mismatch: {len(vectors)} vs {len(texts)}"
+                    )
+                
+                # Check for None values in results
+                none_count = sum(1 for v in vectors if v is None)
+                if none_count > 0:
+                    logger.warning(f"Embedding returned {none_count} None values")
+                
+                return vectors
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Embedding failed after {max_retries} attempts: {e}")
+                    return [None] * len(texts)
+                
+                wait_time = 0.5 * (attempt + 1)  # Linear backoff
+                logger.warning(
+                    f"Embedding attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
+                )
+                await asyncio.sleep(wait_time)
     
     async def _get_vector_dimension(self) -> int:
         """Get embedding dimension from embedder."""
@@ -537,8 +681,22 @@ class HierarchicalIndexer:
                 collection_name = None
         return await self._ensure_collection(dataset_id, vector_dim, collection_name)
     
-    async def delete_document_index(self, document_id: str, dataset_id: str) -> None:
-        """Delete all index entries for a document across all levels."""
+    async def delete_document_index(
+        self, 
+        document_id: str, 
+        dataset_id: str,
+        max_retries: int = 3,
+    ) -> Dict[str, bool]:
+        """Delete all index entries for a document across all levels.
+        
+        Args:
+            document_id: Document ID to delete
+            dataset_id: Dataset ID
+            max_retries: Maximum retry attempts per collection
+            
+        Returns:
+            Dictionary mapping collection names to success status
+        """
         vector_dim = await self._get_vector_dimension()
         
         collections = [
@@ -547,20 +705,45 @@ class HierarchicalIndexer:
             f"kb_{dataset_id}_{vector_dim}{self.SUMMARY_COLLECTION_SUFFIX}",
         ]
         
+        results = {}
+        
         for collection in collections:
-            try:
-                await self.vector_store.delete(
-                    collection_name=collection,
-                    points_selector=qmodels.FilterSelector(
-                        filter=qmodels.Filter(
-                            must=[
-                                qmodels.FieldCondition(
-                                    key="document_id",
-                                    match=qmodels.MatchValue(value=document_id),
-                                )
-                            ]
+            success = False
+            last_error = None
+            
+            for attempt in range(max_retries):
+                try:
+                    await self.vector_store.delete(
+                        collection_name=collection,
+                        points_selector=qmodels.FilterSelector(
+                            filter=qmodels.Filter(
+                                must=[
+                                    qmodels.FieldCondition(
+                                        key="document_id",
+                                        match=qmodels.MatchValue(value=document_id),
+                                    )
+                                ]
+                            )
+                        ),
+                    )
+                    success = True
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait_time = 0.1 * (attempt + 1)  # Exponential backoff
+                        logger.warning(
+                            f"Delete attempt {attempt + 1} failed for {collection}, "
+                            f"retrying in {wait_time}s: {e}"
                         )
-                    ),
-                )
-            except Exception as e:
-                logger.debug(f"Failed to delete from {collection}: {e}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(
+                            f"Failed to delete from {collection} after {max_retries} attempts: {e}"
+                        )
+            
+            results[collection] = success
+            if not success and last_error:
+                logger.error(f"Final delete error for {collection}: {last_error}")
+        
+        return results
