@@ -1471,12 +1471,21 @@ class DatabaseStorage:
                 except Exception:
                     seg_meta = {}
 
+            level = seg.get("level")
+            if level is None:
+                level = 3
+
             rows.append(
                 (
                     seg.get("segment_id"),
                     seg.get("dataset_id"),
                     seg.get("document_id"),
                     int(seg.get("position", 0) or 0),
+                    int(level),
+                    seg.get("parent_segment_id"),
+                    seg.get("summary"),
+                    seg.get("page_start") or seg_meta.get("page_start"),
+                    seg.get("page_end") or seg_meta.get("page_end"),
                     seg.get("text", ""),
                     int(seg.get("token_count", 0) or 0),
                     seg.get("vector_id"),
@@ -1506,16 +1515,22 @@ class DatabaseStorage:
                 """
                 INSERT INTO segments (
                     segment_id, dataset_id, document_id, position,
+                    level, parent_segment_id, summary, page_start, page_end,
                     text, token_count, vector_id, metadata,
                     enabled, status, word_count, keywords, answer, created_by,
                     content_hash,
                     source_type, source_reference, citation_text,
                     page_number, section_header, language, contextual_prefix
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                          $16, $17, $18, $19, $20, $21, $22)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                          $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
                 ON CONFLICT (document_id, position) DO UPDATE SET
                     segment_id = EXCLUDED.segment_id,
                     dataset_id = EXCLUDED.dataset_id,
+                    level = EXCLUDED.level,
+                    parent_segment_id = EXCLUDED.parent_segment_id,
+                    summary = EXCLUDED.summary,
+                    page_start = EXCLUDED.page_start,
+                    page_end = EXCLUDED.page_end,
                     text = EXCLUDED.text,
                     token_count = EXCLUDED.token_count,
                     vector_id = EXCLUDED.vector_id,
@@ -5886,3 +5901,128 @@ class DatabaseStorage:
             )
 
             return int(result.split()[-1]) if result else 0
+
+    # ============================================
+    # Document Summaries (Hierarchical Indexing)
+    # ============================================
+
+    async def save_document_summary(self, data: Dict[str, Any]) -> bool:
+        """
+        Save or update a document summary for L1 hierarchical indexing.
+        
+        Args:
+            data: Dictionary containing:
+                - document_id: UUID
+                - summary: Text summary
+                - keywords: List of keywords
+                - topics: List of topics
+                - vector_id: Qdrant vector ID
+        
+        Returns:
+            True if saved successfully
+        """
+        if not self._pool:
+            return False
+        
+        document_id = data.get("document_id")
+        if not document_id:
+            return False
+        
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO document_summaries (
+                    document_id, summary, keywords, topics, vector_id
+                ) VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (document_id) DO UPDATE SET
+                    summary = EXCLUDED.summary,
+                    keywords = EXCLUDED.keywords,
+                    topics = EXCLUDED.topics,
+                    vector_id = EXCLUDED.vector_id,
+                    updated_at = NOW()
+                """,
+                document_id,
+                data.get("summary", ""),
+                data.get("keywords", []),
+                data.get("topics", []),
+                data.get("vector_id"),
+            )
+            return True
+
+    async def get_document_summary(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get document summary for L1 retrieval context.
+        
+        Args:
+            document_id: Document UUID
+            
+        Returns:
+            Summary dict or None if not found
+        """
+        if not self._pool:
+            return None
+        
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT document_id, summary, keywords, topics, vector_id, created_at, updated_at
+                FROM document_summaries
+                WHERE document_id = $1
+                """,
+                document_id,
+            )
+            return self._row_to_dict(row) if row else None
+
+    async def delete_document_summary(self, document_id: str) -> bool:
+        """
+        Delete document summary.
+        
+        Args:
+            document_id: Document UUID
+            
+        Returns:
+            True if deleted
+        """
+        if not self._pool:
+            return False
+        
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM document_summaries WHERE document_id = $1",
+                document_id,
+            )
+            return "DELETE" in result
+
+    async def get_dataset_summaries(
+        self,
+        dataset_id: str,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all document summaries in a dataset.
+        
+        Args:
+            dataset_id: Dataset UUID
+            limit: Max summaries to return
+            
+        Returns:
+            List of summary dicts
+        """
+        if not self._pool:
+            return []
+        
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT ds.document_id, ds.summary, ds.keywords, ds.topics, 
+                       ds.vector_id, ds.created_at, d.title as document_title
+                FROM document_summaries ds
+                JOIN documents d ON ds.document_id = d.document_id
+                WHERE d.dataset_id = $1
+                ORDER BY ds.created_at DESC
+                LIMIT $2
+                """,
+                dataset_id,
+                limit,
+            )
+            return [self._row_to_dict(row) for row in rows]
