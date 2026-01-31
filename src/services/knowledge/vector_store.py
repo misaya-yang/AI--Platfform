@@ -167,6 +167,8 @@ class VectorStore:
         language: Optional[str] = None,
         with_payload: bool = True,
         with_vectors: bool = False,
+        query_filter: Optional[qmodels.Filter] = None,
+        score_threshold: Optional[float] = None,
     ) -> List[VectorSearchHit]:
         conditions = []
         if document_id:
@@ -191,6 +193,15 @@ class VectorStore:
                 )
             )
         flt = qmodels.Filter(must=conditions) if conditions else None
+        if query_filter is not None:
+            if flt is None:
+                flt = query_filter
+            else:
+                flt = qmodels.Filter(
+                    must=[*(query_filter.must or []), *conditions],
+                    should=query_filter.should,
+                    must_not=query_filter.must_not,
+                )
 
         # qdrant-client >= 1.11 uses `query_points` as the unified entry point.
         resp = await self._call(
@@ -201,6 +212,7 @@ class VectorStore:
                 with_payload=with_payload,
                 with_vectors=with_vectors,
                 query_filter=flt,
+                score_threshold=score_threshold,
             )
         )
         hits = list(getattr(resp, "points", None) or [])
