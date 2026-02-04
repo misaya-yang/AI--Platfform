@@ -58,14 +58,12 @@ export function WebSearchToggle({
                 : "text-slate-600 dark:text-slate-300"
             )}
           >
-            Web
+            {t("assistant.webSearchLabel")}
           </span>
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        {enabled
-          ? t("assistant.webSearchOn", "点击关闭联网搜索")
-          : t("assistant.webSearchOff", "点击开启联网搜索")}
+        {enabled ? t("assistant.webSearchOn") : t("assistant.webSearchOff")}
       </TooltipContent>
     </Tooltip>
   );

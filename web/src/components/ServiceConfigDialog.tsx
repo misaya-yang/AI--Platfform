@@ -24,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { getService, updateService, deleteService as deleteServiceDef } from "@/api/gateway";
 import type { ServiceDetail } from "@/types/gateway";
+import { useTranslation } from "react-i18next";
 
 interface ServiceConfig {
   rate_limit: {
@@ -86,6 +87,7 @@ export function ServiceConfigDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("basic");
   const [basicError, setBasicError] = useState<string | null>(null);
@@ -200,7 +202,7 @@ export function ServiceConfigDialog({
       onOpenChange(false);
     },
     onError: (err) => {
-      const msg = err instanceof Error ? err.message : "更新失败";
+      const msg = err instanceof Error ? err.message : t("services.configDialog.updateFailed");
       setBasicError(msg);
     },
   });
@@ -222,7 +224,7 @@ export function ServiceConfigDialog({
   };
 
   const handleDelete = () => {
-    if (confirm(`确定要删除服务 "${serviceName}" 吗？此操作不可撤销。`)) {
+    if (confirm(t("services.configDialog.deleteConfirm", { name: serviceName }))) {
       deleteMutation.mutate();
     }
   };
@@ -254,36 +256,36 @@ export function ServiceConfigDialog({
       <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span>服务配置</span>
+            <span>{t("services.configDialog.title")}</span>
             <Badge variant="outline">{serviceName}</Badge>
           </DialogTitle>
         </DialogHeader>
 
         {(configQuery.isLoading || serviceQuery.isLoading) ? (
-          <div className="py-8 text-center text-muted-foreground">加载中...</div>
+          <div className="py-8 text-center text-muted-foreground">{t("common.loading")}</div>
         ) : (
           <Tabs value={activeTab} onValueChange={setActiveTab}>
             <TabsList className="flex flex-wrap gap-1 h-auto p-1 sm:grid sm:grid-cols-6">
-              <TabsTrigger value="basic" className="text-xs sm:text-sm">基础</TabsTrigger>
-              <TabsTrigger value="rate_limit" className="text-xs sm:text-sm">限流</TabsTrigger>
-              <TabsTrigger value="auth" className="text-xs sm:text-sm">鉴权</TabsTrigger>
-              <TabsTrigger value="cache" className="text-xs sm:text-sm">缓存</TabsTrigger>
-              <TabsTrigger value="priority" className="text-xs sm:text-sm">优先级</TabsTrigger>
-              <TabsTrigger value="danger" className="text-xs sm:text-sm">危险区</TabsTrigger>
+              <TabsTrigger value="basic" className="text-xs sm:text-sm">{t("services.configDialog.tabs.basic")}</TabsTrigger>
+              <TabsTrigger value="rate_limit" className="text-xs sm:text-sm">{t("services.configDialog.tabs.rateLimit")}</TabsTrigger>
+              <TabsTrigger value="auth" className="text-xs sm:text-sm">{t("services.configDialog.tabs.auth")}</TabsTrigger>
+              <TabsTrigger value="cache" className="text-xs sm:text-sm">{t("services.configDialog.tabs.cache")}</TabsTrigger>
+              <TabsTrigger value="priority" className="text-xs sm:text-sm">{t("services.configDialog.tabs.priority")}</TabsTrigger>
+              <TabsTrigger value="danger" className="text-xs sm:text-sm">{t("services.configDialog.tabs.danger")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="basic" className="space-y-4 pt-4">
               <div className="rounded-lg border p-4 space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>服务名称</Label>
+                    <Label>{t("services.configDialog.basic.serviceName")}</Label>
                     <Input
                       value={basicForm.name}
                       onChange={(e) => setBasicForm({ ...basicForm, name: e.target.value })}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>状态</Label>
+                    <Label>{t("services.configDialog.basic.status")}</Label>
                     <Select
                       value={basicForm.status}
                       onValueChange={(v) => setBasicForm({ ...basicForm, status: v })}
@@ -292,16 +294,16 @@ export function ServiceConfigDialog({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="active">active</SelectItem>
-                        <SelectItem value="inactive">inactive</SelectItem>
-                        <SelectItem value="disabled">disabled</SelectItem>
+                        <SelectItem value="active">{t("common.active")}</SelectItem>
+                        <SelectItem value="inactive">{t("services.configDialog.status.inactive")}</SelectItem>
+                        <SelectItem value="disabled">{t("common.disabled")}</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <Label>描述</Label>
+                  <Label>{t("services.configDialog.basic.description")}</Label>
                   <Input
                     value={basicForm.description}
                     onChange={(e) => setBasicForm({ ...basicForm, description: e.target.value })}
@@ -313,9 +315,9 @@ export function ServiceConfigDialog({
                     <Separator />
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label>LangGraph URL</Label>
+                        <Label>{t("services.configDialog.basic.langgraphUrl")}</Label>
                         <Input
-                          placeholder="http://localhost:2024"
+                          placeholder={t("services.configDialog.basic.langgraphUrlPlaceholder")}
                           value={basicForm.deployment_url}
                           onChange={(e) =>
                             setBasicForm({ ...basicForm, deployment_url: e.target.value })
@@ -323,9 +325,9 @@ export function ServiceConfigDialog({
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label>Graph/Assistant ID</Label>
+                        <Label>{t("services.configDialog.basic.graphId")}</Label>
                         <Input
-                          placeholder="agent"
+                          placeholder={t("services.configDialog.basic.graphIdPlaceholder")}
                           value={basicForm.graph_id}
                           onChange={(e) => setBasicForm({ ...basicForm, graph_id: e.target.value })}
                         />
@@ -334,8 +336,8 @@ export function ServiceConfigDialog({
 
                     <div className="flex items-center justify-between rounded-lg border p-3">
                       <div>
-                        <Label>启用会话</Label>
-                        <p className="text-xs text-muted-foreground">影响 session_id / thread 绑定</p>
+                        <Label>{t("services.configDialog.basic.sessionEnabled")}</Label>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.basic.sessionHint")}</p>
                       </div>
                       <Switch
                         checked={basicForm.session_enabled}
@@ -352,7 +354,7 @@ export function ServiceConfigDialog({
 
               <div className="flex justify-end">
                 <Button onClick={handleSaveBasic} disabled={updateServiceMutation.isPending}>
-                  {updateServiceMutation.isPending ? "保存中..." : "保存基础信息"}
+                  {updateServiceMutation.isPending ? t("common.saving") : t("services.configDialog.basic.save")}
                 </Button>
               </div>
             </TabsContent>
@@ -362,8 +364,8 @@ export function ServiceConfigDialog({
               <div className="rounded-lg border p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>启用服务限流</Label>
-                    <p className="text-xs text-muted-foreground">为此服务单独配置限流规则</p>
+                    <Label>{t("services.configDialog.rateLimit.enable")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.rateLimit.enableHint")}</p>
                   </div>
                   <Switch
                     checked={rateLimitForm.enabled}
@@ -378,7 +380,7 @@ export function ServiceConfigDialog({
                     <Separator />
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label>请求数量</Label>
+                        <Label>{t("services.configDialog.rateLimit.requests")}</Label>
                         <Input
                           type="number"
                           value={rateLimitForm.requests}
@@ -389,11 +391,11 @@ export function ServiceConfigDialog({
                             })
                           }
                         />
-                        <p className="text-xs text-muted-foreground">时间窗口内允许的最大请求数</p>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.rateLimit.requestsHint")}</p>
                       </div>
 
                       <div className="space-y-2">
-                        <Label>时间窗口（秒）</Label>
+                        <Label>{t("services.configDialog.rateLimit.window")}</Label>
                         <Input
                           type="number"
                           value={rateLimitForm.window}
@@ -404,11 +406,11 @@ export function ServiceConfigDialog({
                             })
                           }
                         />
-                        <p className="text-xs text-muted-foreground">限流计算的时间窗口</p>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.rateLimit.windowHint")}</p>
                       </div>
 
                       <div className="space-y-2">
-                        <Label>突发容量</Label>
+                        <Label>{t("services.configDialog.rateLimit.burst")}</Label>
                         <Input
                           type="number"
                           value={rateLimitForm.burst}
@@ -419,11 +421,11 @@ export function ServiceConfigDialog({
                             })
                           }
                         />
-                        <p className="text-xs text-muted-foreground">允许突发超过限制的额外请求数</p>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.rateLimit.burstHint")}</p>
                       </div>
 
                       <div className="space-y-2">
-                        <Label>限流策略</Label>
+                        <Label>{t("services.configDialog.rateLimit.strategy")}</Label>
                         <Select
                           value={rateLimitForm.strategy}
                           onValueChange={(value) =>
@@ -434,12 +436,12 @@ export function ServiceConfigDialog({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="sliding_window">滑动窗口</SelectItem>
-                            <SelectItem value="fixed_window">固定窗口</SelectItem>
-                            <SelectItem value="token_bucket">令牌桶</SelectItem>
+                            <SelectItem value="sliding_window">{t("services.configDialog.rateLimit.strategySliding")}</SelectItem>
+                            <SelectItem value="fixed_window">{t("services.configDialog.rateLimit.strategyFixed")}</SelectItem>
+                            <SelectItem value="token_bucket">{t("services.configDialog.rateLimit.strategyToken")}</SelectItem>
                           </SelectContent>
                         </Select>
-                        <p className="text-xs text-muted-foreground">限流算法</p>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.rateLimit.strategyHint")}</p>
                       </div>
                     </div>
                   </>
@@ -448,7 +450,7 @@ export function ServiceConfigDialog({
 
               <div className="flex justify-end">
                 <Button onClick={handleSaveRateLimit} disabled={updateMutation.isPending}>
-                  {updateMutation.isPending ? "保存中..." : "保存限流配置"}
+                  {updateMutation.isPending ? t("common.saving") : t("services.configDialog.rateLimit.save")}
                 </Button>
               </div>
             </TabsContent>
@@ -458,8 +460,8 @@ export function ServiceConfigDialog({
               <div className="rounded-lg border p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>启用服务鉴权</Label>
-                    <p className="text-xs text-muted-foreground">为此服务单独配置访问控制</p>
+                    <Label>{t("services.configDialog.auth.enable")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.auth.enableHint")}</p>
                   </div>
                   <Switch
                     checked={authForm.enabled}
@@ -473,8 +475,8 @@ export function ServiceConfigDialog({
 
                     <div className="flex items-center justify-between">
                       <div>
-                        <Label>公开访问</Label>
-                        <p className="text-xs text-muted-foreground">允许无需鉴权直接访问</p>
+                        <Label>{t("services.configDialog.auth.public")}</Label>
+                        <p className="text-xs text-muted-foreground">{t("services.configDialog.auth.publicHint")}</p>
                       </div>
                       <Switch
                         checked={authForm.public}
@@ -488,8 +490,8 @@ export function ServiceConfigDialog({
                       <>
                         <div className="flex items-center justify-between">
                           <div>
-                            <Label>强制鉴权</Label>
-                            <p className="text-xs text-muted-foreground">必须提供有效凭证</p>
+                            <Label>{t("services.configDialog.auth.requireAuth")}</Label>
+                            <p className="text-xs text-muted-foreground">{t("services.configDialog.auth.requireAuthHint")}</p>
                           </div>
                           <Switch
                             checked={authForm.require_auth}
@@ -500,7 +502,7 @@ export function ServiceConfigDialog({
                         </div>
 
                         <div className="space-y-2">
-                          <Label>允许的角色</Label>
+                          <Label>{t("services.configDialog.auth.allowedRoles")}</Label>
                           <div className="flex flex-wrap gap-2">
                             {["user", "developer", "admin"].map((role) => (
                               <Badge
@@ -519,7 +521,7 @@ export function ServiceConfigDialog({
                             ))}
                           </div>
                           <p className="text-xs text-muted-foreground">
-                            点击切换，留空表示允许所有已鉴权用户
+                            {t("services.configDialog.auth.rolesHint")}
                           </p>
                         </div>
                       </>
@@ -530,7 +532,7 @@ export function ServiceConfigDialog({
 
               <div className="flex justify-end">
                 <Button onClick={handleSaveAuth} disabled={updateMutation.isPending}>
-                  {updateMutation.isPending ? "保存中..." : "保存鉴权配置"}
+                  {updateMutation.isPending ? t("common.saving") : t("services.configDialog.auth.save")}
                 </Button>
               </div>
             </TabsContent>
@@ -540,8 +542,8 @@ export function ServiceConfigDialog({
               <div className="rounded-lg border p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <Label>启用响应缓存</Label>
-                    <p className="text-xs text-muted-foreground">缓存服务响应以提高性能</p>
+                    <Label>{t("services.configDialog.cache.enable")}</Label>
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.cache.enableHint")}</p>
                   </div>
                   <Switch
                     checked={cacheForm.enabled}
@@ -554,7 +556,7 @@ export function ServiceConfigDialog({
                     <Separator />
 
                     <div className="space-y-2">
-                      <Label>缓存时间（秒）</Label>
+                      <Label>{t("services.configDialog.cache.ttl")}</Label>
                       <Input
                         type="number"
                         value={cacheForm.ttl}
@@ -562,14 +564,14 @@ export function ServiceConfigDialog({
                           setCacheForm({ ...cacheForm, ttl: parseInt(e.target.value) || 300 })
                         }
                       />
-                      <p className="text-xs text-muted-foreground">缓存过期时间</p>
+                      <p className="text-xs text-muted-foreground">{t("services.configDialog.cache.ttlHint")}</p>
                     </div>
 
                     <div className="flex items-center justify-between">
                       <div>
-                        <Label>语义缓存</Label>
+                        <Label>{t("services.configDialog.cache.semantic")}</Label>
                         <p className="text-xs text-muted-foreground">
-                          基于语义相似度匹配缓存（需要 Redis）
+                          {t("services.configDialog.cache.semanticHint")}
                         </p>
                       </div>
                       <Switch
@@ -585,7 +587,7 @@ export function ServiceConfigDialog({
 
               <div className="flex justify-end">
                 <Button onClick={handleSaveCache} disabled={updateMutation.isPending}>
-                  {updateMutation.isPending ? "保存中..." : "保存缓存配置"}
+                  {updateMutation.isPending ? t("common.saving") : t("services.configDialog.cache.save")}
                 </Button>
               </div>
             </TabsContent>
@@ -594,7 +596,7 @@ export function ServiceConfigDialog({
             <TabsContent value="priority" className="space-y-4 pt-4">
               <div className="rounded-lg border p-4 space-y-4">
                 <div className="space-y-2">
-                  <Label>服务优先级</Label>
+                  <Label>{t("services.configDialog.priority.level")}</Label>
                   <div className="flex items-center gap-4">
                     <Input
                       type="range"
@@ -612,7 +614,7 @@ export function ServiceConfigDialog({
                     <span className="w-8 text-center font-mono">{priorityForm.priority}</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    1-10，数字越大优先级越高，高优先级服务在资源紧张时优先处理
+                    {t("services.configDialog.priority.levelHint")}
                   </p>
                 </div>
 
@@ -620,7 +622,7 @@ export function ServiceConfigDialog({
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label>负载均衡权重</Label>
+                    <Label>{t("services.configDialog.priority.weight")}</Label>
                     <Input
                       type="number"
                       min="1"
@@ -632,11 +634,11 @@ export function ServiceConfigDialog({
                         })
                       }
                     />
-                    <p className="text-xs text-muted-foreground">加权负载均衡时的权重值</p>
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.priority.weightHint")}</p>
                   </div>
 
                   <div className="space-y-2">
-                    <Label>最大排队数</Label>
+                    <Label>{t("services.configDialog.priority.maxQueue")}</Label>
                     <Input
                       type="number"
                       min="1"
@@ -648,14 +650,14 @@ export function ServiceConfigDialog({
                         })
                       }
                     />
-                    <p className="text-xs text-muted-foreground">异步任务最大排队数量</p>
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.priority.maxQueueHint")}</p>
                   </div>
                 </div>
               </div>
 
               <div className="flex justify-end">
                 <Button onClick={handleSavePriority} disabled={updateMutation.isPending}>
-                  {updateMutation.isPending ? "保存中..." : "保存优先级配置"}
+                  {updateMutation.isPending ? t("common.saving") : t("services.configDialog.priority.save")}
                 </Button>
               </div>
             </TabsContent>
@@ -664,13 +666,13 @@ export function ServiceConfigDialog({
             <TabsContent value="danger" className="space-y-4 pt-4">
               <div className="rounded-lg border border-destructive/50 p-4 space-y-4">
                 <div>
-                  <h3 className="text-lg font-semibold text-destructive">删除服务</h3>
+                  <h3 className="text-lg font-semibold text-destructive">{t("services.configDialog.danger.title")}</h3>
                   <p className="text-sm text-muted-foreground mt-1">
-                    删除此服务后，所有相关配置将被永久删除，无法恢复。
+                    {t("services.configDialog.danger.description")}
                   </p>
                 </div>
                 <Button variant="destructive" onClick={handleDelete} disabled={deleteMutation.isPending}>
-                  {deleteMutation.isPending ? "删除中..." : "删除此服务"}
+                  {deleteMutation.isPending ? t("services.configDialog.danger.deleting") : t("services.configDialog.danger.delete")}
                 </Button>
               </div>
             </TabsContent>
@@ -678,17 +680,15 @@ export function ServiceConfigDialog({
         )}
 
         {updateMutation.isSuccess && (
-          <div className="text-sm text-green-600 dark:text-green-400">✓ 配置已保存</div>
+          <div className="text-sm text-green-600 dark:text-green-400">{t("services.configDialog.saved")}</div>
         )}
         {updateMutation.isError && (
-          <div className="text-sm text-destructive">保存失败，请重试</div>
+          <div className="text-sm text-destructive">{t("services.configDialog.saveFailed")}</div>
         )}
       </DialogContent>
     </Dialog>
   );
 }
-
-
 
 
 

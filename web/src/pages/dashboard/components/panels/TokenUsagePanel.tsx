@@ -16,6 +16,7 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary, getUsageBreakdown, getUsageTimeSeries } from "@/api/usage";
+import { useTranslation } from "react-i18next";
 
 function formatTokens(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -24,6 +25,7 @@ function formatTokens(num: number): string {
 }
 
 export function TokenUsagePanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
 
@@ -108,7 +110,7 @@ export function TokenUsagePanel() {
 
   return (
     <PanelWrapper
-      title="Token 用量"
+      title={t("metrics.totalTokens")}
       onRefresh={refetch}
       loading={summaryQuery.isLoading}
     >
@@ -116,17 +118,17 @@ export function TokenUsagePanel() {
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 24, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
           {formatTokens(totalTokens)}
-          <span style={{ fontSize: 14, fontWeight: 400, marginLeft: 4 }}>tokens</span>
+          <span style={{ fontSize: 14, fontWeight: 400, marginLeft: 4 }}>{t("metrics.totalTokens")}</span>
         </div>
 
         {/* Input/Output bar */}
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
             <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
-              输入: {formatTokens(inputTokens)} ({inputPercent.toFixed(0)}%)
+              {t("cost.inputTokens")}: {formatTokens(inputTokens)} ({inputPercent.toFixed(0)}%)
             </span>
             <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
-              输出: {formatTokens(outputTokens)} ({(100 - inputPercent).toFixed(0)}%)
+              {t("cost.outputTokens")}: {formatTokens(outputTokens)} ({(100 - inputPercent).toFixed(0)}%)
             </span>
           </div>
           <Progress
@@ -144,7 +146,7 @@ export function TokenUsagePanel() {
         {/* Model breakdown */}
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-            模型分布
+            {t("dashboard.tokenUsage.modelBreakdown")}
           </div>
           {breakdown.slice(0, 3).map((item, index) => (
             <div
@@ -174,7 +176,7 @@ export function TokenUsagePanel() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {item.model || "Unknown"}
+                {item.model || t("common.unknown")}
               </span>
               <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>
                 {item.percentage.toFixed(0)}%
@@ -186,19 +188,12 @@ export function TokenUsagePanel() {
         {/* Provider breakdown */}
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-            厂商分布
+            {t("dashboard.tokenUsage.providerBreakdown")}
           </div>
           {providerBreakdown.slice(0, 3).map((item, index) => {
             const providerColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
             const providerName = item.provider || "unknown";
-            const displayName = {
-              "dashscope": "阿里云",
-              "openai": "OpenAI",
-              "anthropic": "Anthropic",
-              "google": "Google",
-              "deepseek": "DeepSeek",
-              "unknown": "其他",
-            }[providerName] || providerName;
+            const displayName = t(`models.providers.${providerName}`, providerName);
             return (
               <div
                 key={providerName}
@@ -245,7 +240,7 @@ export function TokenUsagePanel() {
           <XAxis dataKey="date" hide />
           <YAxis hide />
           <Tooltip
-            formatter={(value) => [formatTokens(Number(value ?? 0)), "Tokens"]}
+            formatter={(value) => [formatTokens(Number(value ?? 0)), t("metrics.totalTokens")]}
             labelFormatter={(label: string) => dayjs(label).format("MM-DD")}
           />
           <Line

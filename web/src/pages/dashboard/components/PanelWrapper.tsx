@@ -5,6 +5,7 @@ import { Tooltip } from "antd";
 import { SyncOutlined } from "@ant-design/icons";
 import { useAppStore } from "@/store/useAppStore";
 import { LAYOUT, getColors } from "../styles";
+import { useTranslation } from "react-i18next";
 
 interface PanelWrapperProps {
   title: string;
@@ -25,6 +26,7 @@ export function PanelWrapper({
   className = "",
   noPadding = false,
 }: PanelWrapperProps) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
 
@@ -67,7 +69,7 @@ export function PanelWrapper({
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {extra}
           {onRefresh && (
-            <Tooltip title="刷新">
+            <Tooltip title={t("common.refresh")}>
               <div
                 onClick={onRefresh}
                 style={{

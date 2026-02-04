@@ -43,6 +43,7 @@ import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
+import i18n from "@/i18n";
 
 // Error Boundary for ChatMessage rendering failures
 interface ErrorBoundaryProps {
@@ -75,7 +76,7 @@ class MessageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
         <div className="flex items-center gap-2 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
           <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-red-800 dark:text-red-200">消息渲染失败</p>
+            <p className="text-sm font-medium text-red-800 dark:text-red-200">{i18n.t("assistant.messageRenderFailed")}</p>
             <p className="text-xs text-red-600 dark:text-red-400 truncate">
               {this.state.error?.message || "Unknown error"}
             </p>
@@ -374,7 +375,7 @@ export function AssistantPage() {
                           error: task.error,
                         }))}
                         isThinking={isStreaming && workingMemory.tasks.some((t: any) => t.status === "in_progress")}
-                        thinkingMessage="正在执行任务..."
+                        thinkingMessage={t("assistant.taskRunning")}
                         className="mb-4"
                       />
                     )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import YAML from "yaml";
 
@@ -17,39 +17,41 @@ import { ConfigEditor } from "@/components/ConfigEditor";
 import { registerService } from "@/api/gateway";
 import { api } from "@/lib/api";
 
-const defaultYaml = `# 透明代理模式配置示例
+function buildDefaultYaml(t: (key: string) => string) {
+  return `# ${t("services.langgraph.yaml.header")}
 service_id: my-langgraph-agent
 name: "My LangGraph Agent"
-description: "LangGraph 透明代理服务"
+description: "${t("services.langgraph.yaml.description")}"
 service_type: langgraph
 supported_modes: [sync, stream]
 status: active
 
 connector_type: http
 connector_config:
-  # 透明代理配置
-  proxy_mode: transparent  # transparent | adapter
+  # ${t("services.langgraph.yaml.proxyConfig")}
+  proxy_mode: transparent  # ${t("services.langgraph.yaml.proxyMode")}
   upstream_url: "http://localhost:2024"
   assistant_id: "agent"  # LangGraph assistant ID
   
-  # 认证配置（可选）
-  auth_token: ""  # LangSmith API Key 或内部 token
-  forward_auth: true  # 是否转发原始 Authorization 头
+  # ${t("services.langgraph.yaml.authConfig")}
+  auth_token: ""  # ${t("services.langgraph.yaml.authToken")}
+  forward_auth: true  # ${t("services.langgraph.yaml.forwardAuth")}
   
-  # 超时配置
+  # ${t("services.langgraph.yaml.timeoutConfig")}
   timeout_connect: 5
   timeout_read: 300
   timeout_write: 60
   
-  # 负载均衡（可选，多实例时使用）
+  # ${t("services.langgraph.yaml.loadBalance")}
   # upstream_urls: ["http://server1:2024", "http://server2:2024"]
-  load_balance_strategy: round_robin  # round_robin | least_connections | random
+  load_balance_strategy: round_robin  # ${t("services.langgraph.yaml.loadStrategy")}
 
 session_enabled: true
 
 metadata:
   adapter_type: langgraph
 `;
+}
 
 interface LangGraphFormData {
   deploymentUrl: string;
@@ -58,7 +60,9 @@ interface LangGraphFormData {
 }
 
 export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const defaultYaml = useMemo(() => buildDefaultYaml(t), [t, i18n.language]);
+  const defaultYamlRef = useRef(defaultYaml);
   const [tab, setTab] = useState<string>("simple");
   const [yamlText, setYamlText] = useState(defaultYaml);
   const [saving, setSaving] = useState(false);
@@ -71,6 +75,13 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
     graphId: "agent",
     langsmithApiKey: "",
   });
+
+  useEffect(() => {
+    if (yamlText === defaultYamlRef.current) {
+      setYamlText(defaultYaml);
+    }
+    defaultYamlRef.current = defaultYaml;
+  }, [defaultYaml, yamlText]);
 
   async function handleSimpleRegister() {
     if (!formData.deploymentUrl || !formData.graphId) {

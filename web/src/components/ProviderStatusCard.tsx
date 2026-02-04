@@ -2,6 +2,7 @@
 // Provider Status Card - Uses Dashboard Unified Layout System
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Spin, Modal, Table, Tag, Tooltip } from "antd";
 import {
   CheckCircleOutlined,
@@ -88,6 +89,7 @@ function ProviderCard({
   modelCount,
   onClick,
 }: ProviderCardProps) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
 
@@ -202,12 +204,12 @@ function ProviderCard({
           >
             {configured && modelCount > 0 ? (
               <>
-                <span>{modelCount} 个模型</span>
+                <span>{t("services.providersStatus.modelsCount", { count: modelCount })}</span>
                 <span style={{ fontSize: 10, opacity: 0.5 }}>•</span>
-                <span style={{ color: config.color, fontSize: 11 }}>查看详情</span>
+                <span style={{ color: config.color, fontSize: 11 }}>{t("services.providersStatus.viewDetails")}</span>
               </>
             ) : (
-              "未配置"
+              t("services.providersStatus.unconfigured")
             )}
           </div>
         </div>
@@ -228,6 +230,7 @@ function ProviderDetailModal({
   providerKey: string;
   providerName: string;
 }) {
+  const { t } = useTranslation();
   const config = PROVIDER_CONFIG[providerKey] || PROVIDER_CONFIG.openai;
 
   const { data: models, isLoading } = useQuery({
@@ -243,7 +246,7 @@ function ProviderDetailModal({
 
   const columns = [
     {
-      title: "模型名称",
+      title: t("services.providersStatus.table.name"),
       dataIndex: "display_name",
       key: "display_name",
       render: (text: string, record: Model) => (
@@ -254,49 +257,51 @@ function ProviderDetailModal({
       ),
     },
     {
-      title: "上下文",
+      title: t("services.providersStatus.table.context"),
       dataIndex: "context_window",
       key: "context_window",
       width: 100,
       render: (val: number) => `${(val / 1000).toFixed(0)}K`,
     },
     {
-      title: "能力",
+      title: t("services.providersStatus.table.capabilities"),
       key: "capabilities",
       width: 120,
       render: (_: unknown, record: Model) => (
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {record.supports_vision && (
             <Tag color="blue" style={{ margin: 0, fontSize: 10 }}>
-              视觉
+              {t("services.providersStatus.table.vision")}
             </Tag>
           )}
           {record.supports_tools && (
             <Tag color="green" style={{ margin: 0, fontSize: 10 }}>
-              工具
+              {t("services.providersStatus.table.tools")}
             </Tag>
           )}
         </div>
       ),
     },
     {
-      title: "价格 ($/1K tokens)",
+      title: t("services.providersStatus.table.price"),
       key: "price",
       width: 140,
       render: (_: unknown, record: Model) => (
         <div style={{ fontSize: 12 }}>
-          <div>输入: ${record.input_price_per_1k}</div>
-          <div>输出: ${record.output_price_per_1k}</div>
+          <div>{t("services.providersStatus.table.input")}: ${record.input_price_per_1k}</div>
+          <div>{t("services.providersStatus.table.output")}: ${record.output_price_per_1k}</div>
         </div>
       ),
     },
     {
-      title: "状态",
+      title: t("services.providersStatus.table.status"),
       dataIndex: "is_enabled",
       key: "is_enabled",
       width: 80,
       render: (enabled: boolean) => (
-        <Tag color={enabled ? "success" : "default"}>{enabled ? "启用" : "禁用"}</Tag>
+        <Tag color={enabled ? "success" : "default"}>
+          {enabled ? t("services.providersStatus.table.enabled") : t("services.providersStatus.table.disabled")}
+        </Tag>
       ),
     },
   ];
@@ -319,7 +324,7 @@ function ProviderDetailModal({
           >
             {config.icon}
           </div>
-          <span>{providerName} 模型列表</span>
+          <span>{t("services.providersStatus.modal.title", { provider: providerName })}</span>
         </div>
       }
       open={open}
@@ -344,6 +349,7 @@ function ProviderDetailModal({
 }
 
 export function ProviderStatusCard() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const { data: providers, isLoading, refetch } = useProvidersHealth();
@@ -355,7 +361,7 @@ export function ProviderStatusCard() {
   if (isLoading) {
     return (
       <div style={{ marginBottom: LAYOUT.SECTION_GAP }}>
-        <PanelWrapper title="模型供应商状态" loading={true}>
+        <PanelWrapper title={t("services.providersStatus.title")} loading={true}>
           <div style={{ textAlign: "center", padding: "40px 0" }}>
             <Spin />
           </div>
@@ -380,7 +386,7 @@ export function ProviderStatusCard() {
   return (
     <div style={{ marginBottom: LAYOUT.SECTION_GAP, padding: `0 ${LAYOUT.GRID_GAP}px` }}>
       <PanelWrapper
-        title="模型供应商状态"
+        title={t("services.providersStatus.title")}
         onRefresh={refetch}
         extra={
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -393,10 +399,10 @@ export function ProviderStatusCard() {
                 fontSize: 11,
                 fontWeight: 500,
               }}
-            >
-              {configuredCount}/{providerList.length} 已配置
+              >
+              {t("services.providersStatus.configuredSummary", { configured: configuredCount, total: providerList.length })}
             </span>
-            <Tooltip title="点击已配置的供应商查看模型详情">
+            <Tooltip title={t("services.providersStatus.tooltip")}>
               <div
                 style={{
                   fontSize: 12,
@@ -407,7 +413,7 @@ export function ProviderStatusCard() {
                 }}
               >
                 <InfoCircleOutlined />
-                共 {totalModels} 个模型
+                {t("services.providersStatus.modelsTotal", { count: totalModels })}
               </div>
             </Tooltip>
           </div>

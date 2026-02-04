@@ -1,14 +1,15 @@
 import { Badge } from "@/components/ui/badge";
-
-const statusMap: Record<string, string> = {
-  healthy: "健康",
-  unhealthy: "异常",
-  error: "错误",
-  timeout: "超时",
-  unknown: "未知",
-};
+import { useTranslation } from "react-i18next";
 
 export function HealthBadge({ status }: { status?: string }) {
+  const { t } = useTranslation();
+  const statusMap: Record<string, string> = {
+    healthy: t("health.healthy"),
+    unhealthy: t("health.unhealthy"),
+    error: t("health.error"),
+    timeout: t("health.timeout"),
+    unknown: t("health.unknown"),
+  };
   const s = (status || "unknown").toLowerCase();
   const variant =
     s === "healthy"

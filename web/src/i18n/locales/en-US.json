@@ -41,7 +41,41 @@
       "minutesLater": "in {{count}} min",
       "hoursLater": "in {{count}} hr",
       "daysLater": "in {{count}} days"
-    }
+    },
+    "addAttachment": "Add attachment",
+    "chart": "Chart",
+    "code": "Code",
+    "collapse": "Collapse",
+    "configure": "Configure",
+    "description": "Description",
+    "details": "Details",
+    "download": "Download",
+    "downloadImage": "Download image",
+    "enabled": "Enabled",
+    "expand": "Expand",
+    "export": "Export",
+    "failed": "Failed",
+    "fullscreenPreview": "Fullscreen preview",
+    "generatedImage": "Generated image",
+    "image": "Image",
+    "imageLoadFailed": "Image failed to load",
+    "openInNewTab": "Open in new tab",
+    "output": "Output",
+    "preview": "Preview",
+    "recommended": "Recommended",
+    "rows": "Rows",
+    "run": "Run",
+    "running": "Running",
+    "saving": "Saving...",
+    "send": "Send",
+    "table": "Table",
+    "tableFile": "Table file",
+    "test": "Test",
+    "unknown": "Unknown"
+  },
+  "language": {
+    "zhCN": "Simplified Chinese",
+    "enUS": "English (US)"
   },
   "metrics": {
     "title": "Monitoring Dashboard",
@@ -156,7 +190,25 @@
     "profile": "Profile",
     "changePassword": "Change Password",
     "logout": "Logout",
-    "language": "Language"
+    "language": "Language",
+    "profileSettings": "Profile Settings",
+    "profileSettingsDesc": "Manage your personal profile and preferences",
+    "email": "Email",
+    "emailReadonly": "Email cannot be changed",
+    "displayName": "Display Name",
+    "displayNamePlaceholder": "Enter display name",
+    "department": "Department",
+    "departmentUnassigned": "Unassigned",
+    "departmentHint": "Department is assigned by admin",
+    "roles": "Roles",
+    "profileUpdateSuccess": "Profile updated",
+    "profileUpdateFailed": "Failed to update profile",
+    "departments": {
+      "cs": "Customer Success",
+      "sales": "Sales",
+      "tech": "Engineering",
+      "admin": "Admin"
+    }
   },
   "login": {
     "title": "Sign In",
@@ -203,8 +255,10 @@
       "title": "Usage by User & Service",
       "byUser": "By User",
       "byService": "By Service",
+      "byProvider": "By Provider",
       "selectUser": "Select user",
       "selectService": "Select service",
+      "selectProvider": "Select provider",
       "requests": "Requests",
       "cost": "Cost",
       "avgLatency": "Avg Latency",
@@ -227,7 +281,134 @@
       "delayed": "Delayed / not ingested",
       "empty": "No data",
       "error": "Data error"
+    },
+    "serviceEndpoints": "Service Endpoints",
+    "filters": {
+      "title": "Filters",
+      "dataFilters": "Data Filters",
+      "timeRange": "Time Range",
+      "selectService": "Select service",
+      "selectUser": "Select user",
+      "selectSource": "Select source",
+      "allServices": "All services",
+      "allUsers": "All users",
+      "allSources": "All sources",
+      "internal": "Internal",
+      "external": "External",
+      "internalShort": "Internal",
+      "externalShort": "External",
+      "reset": "Reset",
+      "anonymousUser": "Anonymous user {{id}}"
+    },
+    "refresh": {
+      "manual": "Manual",
+      "auto": "Auto",
+      "now": "Refresh now",
+      "seconds": "{{count}}s",
+      "minutes": "{{count}}m",
+      "lastUpdated": "Last updated: {{time}}"
+    },
+    "fullscreen": {
+      "enter": "Enter fullscreen",
+      "exit": "Exit fullscreen"
+    },
+    "trend": {
+      "vsPrevious": "vs previous period"
+    },
+    "serviceHealth": {
+      "title": "Service Health",
+      "totalServices": "Total services",
+      "availability": "Availability",
+      "errorRate": "Error rate",
+      "errorRateLabel": "Error rate",
+      "status": {
+        "healthy": "Healthy",
+        "degraded": "Degraded",
+        "down": "Down"
+      }
+    },
+    "performance": {
+      "title": "Performance",
+      "avg": "Average"
+    },
+    "tokenUsage": {
+      "modelBreakdown": "Model breakdown",
+      "providerBreakdown": "Provider breakdown"
+    },
+    "cost": {
+      "title": "Cost Analysis",
+      "trend": "Cost trend",
+      "serviceBreakdown": "Service breakdown",
+      "today": "Today",
+      "week": "This week",
+      "month": "This month"
+    },
+    "security": {
+      "title": "Security Events",
+      "total": "Total",
+      "authFailed": "Auth failed",
+      "authFailedCount": "{{count}} auth failures",
+      "rateLimited": "Rate limited",
+      "rateLimitedCount": "{{count}} rate limited",
+      "rateLimitedShort": "Rate limit",
+      "topUsers": "Top users",
+      "range": {
+        "today": "Today",
+        "week": "This week"
+      }
+    },
+    "userQuota": {
+      "title": "User Quota",
+      "sort": {
+        "usage": "By usage",
+        "cost": "By cost"
+      },
+      "status": {
+        "normal": "Normal",
+        "warning": "Warning",
+        "exceeded": "Exceeded"
+      },
+      "alert": {
+        "warning": "Approaching limit",
+        "exceeded": "Limit exceeded",
+        "hint": "Upgrade to increase quota",
+        "upgradeAction": "Upgrade plan",
+        "upgradeHint": "Contact admin to adjust quota"
+      }
+    },
+    "requestTrace": {
+      "title": "Request Trace",
+      "loading": "Loading trace...",
+      "searchPlaceholder": "Search request ID...",
+      "notFound": "Request not found",
+      "emptyTitle": "No traces",
+      "emptyDesc": "Trace data will appear here once requests are processed.",
+      "demoHint": "Showing sample data",
+      "totalDuration": "Total duration",
+      "status": {
+        "success": "Success",
+        "error": "Error"
+      },
+      "spans": {
+        "auth": "Auth validation",
+        "rateLimit": "Rate limit check",
+        "transform": "Request transform",
+        "upstream": "Upstream request",
+        "response": "Response handling",
+        "logging": "Logging"
+      }
     }
+  },
+  "errors": {
+    "rateLimitTitle": "Rate limit hit",
+    "rateLimitDesc": "Too many requests. Please try again later."
+  },
+  "health": {
+    "healthy": "Healthy",
+    "unhealthy": "Unhealthy",
+    "timeout": "Timeout",
+    "error": "Error",
+    "unknown": "Unknown"
   },
   "users": {
     "title": "User Management",
@@ -244,6 +425,53 @@
       "status": "Status",
       "lastLogin": "Last Login",
       "createdAt": "Created At"
+    },
+    "status": {
+      "active": "Active",
+      "disabled": "Disabled"
+    },
+    "permissions": {
+      "categories": {
+        "console": "Console",
+        "conversation": "Conversation",
+        "knowledge": "Knowledge",
+        "user": "User",
+        "role": "Role",
+        "admin": "Admin"
+      }
+    },
+    "edit": {
+      "loadFailed": "Failed to load user",
+      "saved": "User updated",
+      "saveFailed": "Failed to save changes",
+      "notFound": "User not found",
+      "backToList": "Back to list",
+      "basicInfo": {
+        "title": "Basic Info",
+        "desc": "Update profile and account settings"
+      },
+      "displayNamePlaceholder": "Enter display name",
+      "departmentPlaceholder": "Select department",
+      "roles": {
+        "title": "Role Assignment",
+        "desc": "Assign roles to define base permissions",
+        "system": "System",
+        "noDescription": "No description",
+        "permissionCount": "{{count}} permissions",
+        "noAccess": "You don't have permission to view roles"
+      },
+      "extraPermissions": {
+        "title": "Extra Permissions",
+        "desc": "Direct permissions assigned to user (outside roles)",
+        "tipLabel": "Tip",
+        "tipText": "Role permissions are shown in gray. Extra permissions grant access beyond roles.",
+        "categoryCount": "{{count}} permissions",
+        "fromRole": "Granted via role",
+        "roleBadge": "Role",
+        "noAccess": "You don't have permission to view permissions"
+      },
+      "unsavedChanges": "You have unsaved changes",
+      "saveChanges": "Save changes"
     },
     "actions": {
       "edit": "Edit",
@@ -373,6 +601,9 @@
       },
       "scheduler": {
         "title": "Scheduler Status",
+        "active": "Active",
+        "loading": "Loading...",
+        "tasks": "Tasks",
         "running": "Running",
         "stopped": "Stopped",
         "activeTasks": "Active Tasks",
@@ -706,6 +937,11 @@
       "embeddingDashscopeV4": "DashScope Text Embedding v4",
       "embeddingDashscopeV3": "DashScope Text Embedding v3",
       "embeddingDashscopeV2": "DashScope Text Embedding v2",
+      "embeddingBgeM3": "SiliconFlow BGE-M3 (8192D)",
+      "embeddingBgeM3Pro": "SiliconFlow BGE-M3 Pro (8192D)",
+      "embeddingBgeLargeZh15": "SiliconFlow BGE-Large-ZH v1.5 (1024D)",
+      "embeddingBgeLargeEn15": "SiliconFlow BGE-Large-EN v1.5 (1024D)",
+      "embeddingBceBase": "SiliconFlow BCE-Embedding-Base (512D)",
       "rerankDefault": "Default (No Rerank)"
     },
     "status": {
@@ -1347,6 +1583,8 @@
       "previousStep": "Previous",
       "nextStep": "Next",
       "createBinding": "Create Binding",
+      "moreSources": "More sources coming soon",
+      "moreSourcesHint": "Notion, Google Drive, and more sources are coming soon",
       "bindingCreated": "Binding created",
       "bindingCreatedDesc": "Confluence space has been bound to the knowledge base",
       "bindingExists": "Binding already exists",
@@ -1472,7 +1710,117 @@
   "help": {
     "title": "Help",
     "platformName": "AI Platform",
-    "description": "Enterprise AI Service Gateway Platform"
+    "description": "Enterprise AI Service Gateway Platform",
+    "intro": "AI Gateway centralizes model routing, access control, and usage monitoring so teams can ship AI features faster.",
+    "quickStart": {
+      "title": "Quick Start",
+      "steps": {
+        "register": {
+          "title": "Register a service",
+          "desc": "Add your LLM or LangGraph service to the gateway."
+        },
+        "knowledge": {
+          "title": "Create a knowledge base",
+          "desc": "Upload documents or connect Confluence to enable RAG."
+        },
+        "chat": {
+          "title": "Start chatting",
+          "desc": "Open Assistant or Playground and run a test query."
+        },
+        "integrate": {
+          "title": "Integrate API",
+          "desc": "Use the API to route requests through the gateway."
+        }
+      }
+    },
+    "sectionsTitle": "Feature Modules",
+    "sections": {
+      "dashboard": {
+        "title": "Dashboard",
+        "description": "Monitor traffic, latency, and system health in real time.",
+        "bullets": {
+          "health": "Health status and availability",
+          "metrics": "Request volume and latency metrics",
+          "overview": "Cost and usage overview"
+        }
+      },
+      "services": {
+        "title": "Services",
+        "description": "Manage service registration, configuration, and health checks.",
+        "bullets": {
+          "registerTitle": "Register service",
+          "registerDesc": "Add new model or agent endpoints.",
+          "configureTitle": "Configure",
+          "configureDesc": "Set auth, rate limits, and caching.",
+          "healthTitle": "Health",
+          "healthDesc": "Track status, latency, and errors.",
+          "typesTitle": "Service types",
+          "typesDesc": "Support assistant, langgraph, proxy, and more."
+        }
+      },
+      "knowledge": {
+        "title": "Knowledge Base",
+        "coreTag": "Core",
+        "description": "Build enterprise knowledge bases for retrieval-augmented generation.",
+        "featuresTitle": "Key features",
+        "features": {
+          "createTitle": "Create datasets",
+          "createDesc": "Create knowledge bases with metadata and permissions.",
+          "uploadTitle": "Upload documents",
+          "uploadDesc": "Upload PDFs, docs, images, and more.",
+          "urlTitle": "Add URLs",
+          "urlDesc": "Ingest web pages by URL.",
+          "segmentTitle": "Chunking",
+          "segmentDesc": "Split documents into optimal chunks.",
+          "hitTitle": "Retrieval test",
+          "hitDesc": "Test recall quality with queries.",
+          "qaTitle": "Q&A",
+          "qaDesc": "Run question answering over your data."
+        },
+        "modesTitle": "Retrieval modes",
+        "modes": {
+          "vector": "Vector",
+          "keyword": "Keyword",
+          "hybrid": "Hybrid",
+          "rerank": "Rerank"
+        }
+      },
+      "playground": {
+        "title": "Playground",
+        "description": "Chat with models, use tools, and test workflows.",
+        "bullets": {
+          "multiTurnTitle": "Multi-turn chat",
+          "multiTurnDesc": "Maintain context across turns.",
+          "streamingTitle": "Streaming",
+          "streamingDesc": "See responses in real time.",
+          "sessionsTitle": "Sessions",
+          "sessionsDesc": "Manage conversation history.",
+          "toolsTitle": "Tools",
+          "toolsDesc": "Call tools and function APIs.",
+          "multimodalTitle": "Multimodal",
+          "multimodalDesc": "Support text, images, and files."
+        }
+      },
+      "tasks": {
+        "title": "Tasks",
+        "description": "Query and track async job status.",
+        "bullets": {
+          "queryStatus": "Check task status",
+          "results": "View results and logs",
+          "longRunning": "Monitor long-running jobs"
+        }
+      },
+      "settings": {
+        "title": "Settings",
+        "description": "Manage system configurations and policies.",
+        "bullets": {
+          "llm": "Manage LLM providers and models",
+          "embedding": "Configure embedding and rerank models",
+          "system": "Set global auth and rate limit policies"
+        }
+      }
+    },
+    "support": "Need help? Contact your admin or support team."
   },
   "confluence": {
     "title": "Confluence",
@@ -1728,6 +2076,9 @@
       "depthExplanation": "Depth controls how many levels of child pages to traverse during sync. For example, depth 2 syncs the selected pages plus their direct children. Choose Unlimited to sync all levels.",
       "includeAttachments": "Include Attachments",
       "includeAttachmentsDesc": "Sync file attachments from pages",
+      "syncImages": "Sync Images",
+      "syncImagesDesc": "Sync images inside pages",
+      "maxImageSize": "Max image size",
       "includeComments": "Include Comments",
       "includeCommentsDesc": "Sync page comments as part of content",
       "createBinding": "Create Binding",
@@ -1745,6 +2096,7 @@
       "count": "{{synced}}/{{total}} pages",
       "lastSync": "Last sync: {{time}}"
     },
+    "pagesLabel": "pages",
     "spaceType": {
       "global": "Global Space",
       "personal": "Personal Space"
@@ -1752,6 +2104,7 @@
     "syncedPages": {
       "title": "Synced Pages",
       "subtitle": "{{count}} pages total",
+      "invalidPageId": "Invalid page ID",
       "searchPlaceholder": "Search page title...",
       "syncAll": "Sync All",
       "syncPage": "Re-sync",
@@ -1917,7 +2270,166 @@
       "observing": "Analyzing results...",
       "writing": "Writing content...",
       "completing": "Completing..."
+    },
+    "attachments": {
+      "analyze": "Analyze attachments",
+      "notice": "Attachments will be analyzed together with your prompt",
+      "placeholder": "Add files or images"
+    },
+    "upload": {
+      "compressing": "Compressing...",
+      "failedNotice": "Upload failed. Please try again."
+    },
+    "toolArguments": "Arguments",
+    "analyzedFiles": "Analyzed {{count}} files",
+    "foundResults": "Found {{count}} results",
+    "readSources": "Retrieved {{count}} sources",
+    "researchComplete": "Research complete",
+    "researching": "Researching",
+    "searchComplete": "Search complete",
+    "searchFailed": "Search failed",
+    "webSearchLabel": "Web",
+    "generateImage": "Generate image",
+    "generateImagePrompt": "Describe the image you want",
+    "generatedImage": "Generated image",
+    "generatedWith": "Generated with",
+    "generating": "Generating...",
+    "imagePlaceholder": "Generated image preview",
+    "inputPlaceholder": "Type your message...",
+    "messageRenderFailed": "Failed to render message",
+    "multimodal": "Multimodal",
+    "citationsHeader": "Citations",
+    "noCitations": "No citations",
+    "relevanceScore": "Relevance score",
+    "citedTextLabel": "Cited text",
+    "contextPreview": "Context preview",
+    "collectedInfo": "Collected info",
+    "document": "Document",
+    "downloadDocument": "Download document",
+    "error": "Error",
+    "showArtifacts": "Show artifacts",
+    "slideOutline": {
+      "title": "Outline",
+      "subtitle": "Slide outline",
+      "points": "{{count}} points"
+    },
+    "outline": {
+      "goal": "Generate {{format}} document",
+      "taskCreate": "Create slide outline: {{title}}",
+      "taskSummary": "Slide outline: {{title}}"
+    },
+    "taskGoal": "Goal",
+    "taskGoalFallback": "Task goal",
+    "taskList": "Tasks",
+    "taskRunning": "Task running...",
+    "taskCompleted": "{{completed}}/{{total}} tasks completed",
+    "styles": {
+      "custom": {
+        "name": "Custom",
+        "desc": "Use the default assistant behavior"
+      },
+      "concise": {
+        "name": "Concise",
+        "desc": "Short and direct answers",
+        "prompt": "Respond briefly and directly. Avoid long explanations unless asked."
+      },
+      "formal": {
+        "name": "Formal",
+        "desc": "Professional and structured responses",
+        "prompt": "Respond in a formal, structured tone with clear sections and precise language."
+      },
+      "socratic": {
+        "name": "Socratic",
+        "desc": "Guide with questions and reasoning",
+        "prompt": "Guide the user with questions and reasoning steps rather than giving the final answer immediately."
+      },
+      "comprehensive": {
+        "name": "Comprehensive",
+        "desc": "Detailed and thorough explanations",
+        "prompt": "Provide detailed, comprehensive answers with context, steps, and examples when helpful."
+      }
+    },
+    "suggestions": {
+      "category": {
+        "learning": "Learning",
+        "development": "Development",
+        "analysis": "Analysis",
+        "creative": "Creative"
+      },
+      "explain": {
+        "title": "Explain a concept",
+        "prompt": "Explain a complex concept in simple terms with an example."
+      },
+      "code": {
+        "title": "Refactor code",
+        "prompt": "Help me refactor this code for readability and maintainability."
+      },
+      "doc": {
+        "title": "Summarize a document",
+        "prompt": "Summarize the key points from this document."
+      },
+      "insights": {
+        "title": "Find insights",
+        "prompt": "Analyze this data and highlight notable trends or insights."
+      },
+      "brainstorm": {
+        "title": "Brainstorm ideas",
+        "prompt": "Brainstorm 10 creative ideas for this topic."
+      },
+      "solve": {
+        "title": "Solve a problem",
+        "prompt": "Help me solve this problem step by step."
+      }
     }
+  },
+  "agent": {
+    "status": {
+      "thinking": "AI Assistant is thinking and planning...",
+      "retrieving": "Searching knowledge base (RAG)...",
+      "searchQuery": "Search query",
+      "searchResults": "{{count}} results",
+      "searching": "Searching...",
+      "executingTool": "Executing tool: {{name}}",
+      "toolComplete": "Tool completed: {{name}}",
+      "viewArgs": "View parameters",
+      "running": "Running...",
+      "completedIn": "Completed in {{ms}}ms",
+      "completed": "Completed",
+      "generating": "Generating response...",
+      "tokens": "tokens generated",
+      "documents": "documents",
+      "codeExecution": "Code execution ({{language}})",
+      "generateImage": "Generating image",
+      "generateDocument": "Generating {{type}} document",
+      "outlineReady": "Outline ready: {{title}}",
+      "unknown": "Unknown"
+    },
+    "timeline": {
+      "running": "Agent Running",
+      "completed": "Agent Completed",
+      "error": "Agent Error",
+      "cancelled": "Agent Cancelled",
+      "idle": "Agent",
+      "steps": "steps",
+      "cancel": "Cancel"
+    },
+    "artifact": {
+      "document": "Document",
+      "generatedImage": "Generated image"
+    },
+    "errors": {
+      "title": "Error details",
+      "fatalTitle": "Fatal error",
+      "showMore": "Show more",
+      "showLess": "Show less"
+    }
+  },
+  "artifact": {
+    "download": "Download",
+    "files": "Files",
+    "noPreview": "No preview available",
+    "openInNewTab": "Open in new tab",
+    "preview": "Preview"
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -1961,7 +2473,150 @@
       "graphId": "Assistant / Graph ID",
       "graphIdDesc": "Graph name or Assistant ID, auto-injected when calling",
       "langsmithApiKey": "LangSmith API Key",
-      "langsmithApiKeyDesc": "Not required for local deployment, only needed for cloud LangGraph"
+      "langsmithApiKeyDesc": "Not required for local deployment, only needed for cloud LangGraph",
+      "yaml": {
+        "header": "LangGraph Service Configuration",
+        "description": "Service description",
+        "proxyConfig": "Proxy configuration",
+        "proxyMode": "Transparent proxy mode",
+        "authConfig": "Auth configuration",
+        "authToken": "API auth token",
+        "forwardAuth": "Forward Authorization header",
+        "timeoutConfig": "Timeout configuration",
+        "loadBalance": "Load balancing",
+        "loadStrategy": "Load balance strategy"
+      }
+    },
+    "status": {
+      "active": "Active",
+      "inactive": "Inactive"
+    },
+    "types": {
+      "assistant": "Assistant",
+      "langgraph": "LangGraph",
+      "proxy": "Proxy",
+      "generative": "Generative",
+      "embedding": "Embedding",
+      "classification": "Classification",
+      "conversational": "Conversational",
+      "processing": "Processing",
+      "custom": "Custom"
+    },
+    "badge": {
+      "core": "Core"
+    },
+    "selected": "Selected",
+    "search": {
+      "noResults": "No matching services"
+    },
+    "empty": {
+      "hint": "Get started by registering your first service."
+    },
+    "providersStatus": {
+      "title": "Provider Status",
+      "tooltip": "View provider configuration and model counts",
+      "configuredSummary": "{{configured}}/{{total}} providers configured",
+      "unconfigured": "Not configured",
+      "viewDetails": "View details",
+      "modelsTotal": "{{count}} models",
+      "modelsCount": "{{count}} models",
+      "modal": {
+        "title": "{{provider}} Models"
+      },
+      "table": {
+        "name": "Model",
+        "context": "Context",
+        "capabilities": "Capabilities",
+        "vision": "Vision",
+        "tools": "Tools",
+        "price": "Price",
+        "input": "Input",
+        "output": "Output",
+        "status": "Status",
+        "enabled": "Enabled",
+        "disabled": "Disabled"
+      }
+    },
+    "configDialog": {
+      "title": "Service Configuration",
+      "tabs": {
+        "basic": "Basic",
+        "rateLimit": "Rate Limit",
+        "auth": "Auth",
+        "cache": "Cache",
+        "priority": "Priority",
+        "danger": "Danger Zone"
+      },
+      "basic": {
+        "serviceName": "Service Name",
+        "status": "Status",
+        "description": "Description",
+        "langgraphUrl": "LangGraph URL",
+        "langgraphUrlPlaceholder": "http://localhost:2024",
+        "graphId": "Graph ID",
+        "graphIdPlaceholder": "agent",
+        "sessionEnabled": "Enable Sessions",
+        "sessionHint": "Maintain session context on the server",
+        "save": "Save Basic Settings"
+      },
+      "rateLimit": {
+        "enable": "Enable Rate Limit",
+        "enableHint": "Protect service from burst traffic",
+        "requests": "Requests",
+        "requestsHint": "Max requests per window",
+        "window": "Window (seconds)",
+        "windowHint": "Time window in seconds",
+        "burst": "Burst",
+        "burstHint": "Allow short bursts",
+        "strategy": "Strategy",
+        "strategyHint": "Choose rate limit strategy",
+        "strategyFixed": "Fixed window",
+        "strategySliding": "Sliding window",
+        "strategyToken": "Token bucket",
+        "save": "Save Rate Limit"
+      },
+      "auth": {
+        "enable": "Enable Auth",
+        "enableHint": "Require authentication for this service",
+        "public": "Public access",
+        "publicHint": "Allow access without API key",
+        "requireAuth": "Require API key",
+        "requireAuthHint": "Only allow requests with API key",
+        "allowedRoles": "Allowed Roles",
+        "rolesHint": "Select roles that can access this service",
+        "save": "Save Auth Settings"
+      },
+      "cache": {
+        "enable": "Enable Cache",
+        "enableHint": "Cache identical requests",
+        "ttl": "TTL (seconds)",
+        "ttlHint": "Cache lifetime",
+        "semantic": "Semantic Cache",
+        "semanticHint": "Enable semantic cache for similar queries",
+        "save": "Save Cache"
+      },
+      "priority": {
+        "level": "Priority Level",
+        "levelHint": "Higher priority gets more resources",
+        "weight": "Weight",
+        "weightHint": "Traffic weight for load balancing",
+        "maxQueue": "Max Queue",
+        "maxQueueHint": "Max queued requests",
+        "save": "Save Priority"
+      },
+      "danger": {
+        "title": "Danger Zone",
+        "description": "Delete this service and its configuration",
+        "delete": "Delete Service",
+        "deleting": "Deleting..."
+      },
+      "status": {
+        "inactive": "Inactive"
+      },
+      "saved": "Saved",
+      "saveFailed": "Save failed",
+      "updateFailed": "Update failed",
+      "deleteConfirm": "Are you sure you want to delete \"{{name}}\"?"
     },
     "errors": {
       "requiredFields": "Please fill in Deployment URL and Assistant ID",
@@ -1970,6 +2625,8 @@
     "register": "Register Service",
     "registering": "Registering...",
     "page": {
+      "title": "Service Management",
+      "subtitle": "Manage all your AI services, providers, and models in one place.",
       "tabs": {
         "services": "Services",
         "providers": "Providers",
@@ -1977,6 +2634,7 @@
       },
       "addProvider": "Add Provider",
       "addModel": "Add Model",
+      "searchPlaceholder": "Search...",
       "loading": "Loading...",
       "noServices": "No services found. Click button above to add.",
       "noProviders": "No providers found. Click button above to add.",
@@ -2008,6 +2666,59 @@
         "confirm": "Delete",
         "deleting": "Deleting..."
       }
+    }
+  },
+  "models": {
+    "empty": "No model data",
+    "search": {
+      "noResults": "No matching models"
+    },
+    "table": {
+      "model": "Model",
+      "provider": "Provider",
+      "context": "Context",
+      "outputLimit": "Output Limit",
+      "price": "Price",
+      "capabilities": "Capabilities",
+      "accessLevel": "Access",
+      "status": "Status",
+      "actions": "Actions"
+    },
+    "price": {
+      "input": "In",
+      "output": "Out",
+      "free": "Free"
+    },
+    "capabilities": {
+      "vision": "Vision",
+      "tools": "Tools"
+    },
+    "access": {
+      "public": "Public",
+      "premium": "Premium",
+      "admin": "Admin"
+    },
+    "providers": {
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "google": "Google",
+      "azure": "Azure",
+      "cohere": "Cohere",
+      "mistral": "Mistral",
+      "xai": "xAI",
+      "groq": "Groq",
+      "together": "Together",
+      "deepseek": "DeepSeek",
+      "dashscope": "DashScope"
+    }
+  },
+  "providers": {
+    "search": {
+      "noResults": "No matching providers"
+    },
+    "apiKey": {
+      "configured": "API key configured",
+      "missing": "API key missing"
     }
   },
   "llm": {

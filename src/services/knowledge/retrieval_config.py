@@ -281,6 +281,7 @@ class IslamicEnhancementConfig:
     citation_format: bool = False   # POST_RANKING: attach formatted citations to results
     authority_sort: bool = False    # POST_RANKING: sort results by Quran > Hadith > Tafseer > Fiqh
     contextual_prefix: bool = False # INDEX-TIME: prepend context prefix before embedding (requires re-index)
+    strict_section_traceability: bool = False  # INDEX-TIME: enforce section_title on every chunk (Imam-type datasets)
 
     # multi_query parameters
     max_expanded_queries: int = 3   # Maximum number of expanded queries (including original)
@@ -291,6 +292,7 @@ class IslamicEnhancementConfig:
             "citation_format": self.citation_format,
             "authority_sort": self.authority_sort,
             "contextual_prefix": self.contextual_prefix,
+            "strict_section_traceability": self.strict_section_traceability,
             "max_expanded_queries": self.max_expanded_queries,
         }
 
@@ -306,6 +308,7 @@ class IslamicEnhancementConfig:
             citation_format=bool(data.get("citation_format", False)),
             authority_sort=bool(data.get("authority_sort", False)),
             contextual_prefix=bool(data.get("contextual_prefix", False)),
+            strict_section_traceability=bool(data.get("strict_section_traceability", False)),
             max_expanded_queries=int(data.get("max_expanded_queries", 3)),
         )
 
@@ -340,7 +343,7 @@ class RetrievalConfig:
         }
         # Only include islamic config if any feature is enabled (keep output clean for non-Islamic datasets)
         islamic_dict = self.islamic.to_dict()
-        if any(islamic_dict.get(k) for k in ("multi_query", "citation_format", "authority_sort", "contextual_prefix")):
+        if any(islamic_dict.get(k) for k in ("multi_query", "citation_format", "authority_sort", "contextual_prefix", "strict_section_traceability")):
             result["islamic"] = islamic_dict
         return result
     
@@ -498,6 +501,21 @@ DEFAULT_CONFIGS = {
             multi_query=True,
             citation_format=True,
             authority_sort=True,
+        ),
+    ),
+    # Islamic strict with section traceability: For Imam-type datasets requiring chapter/section citations
+    "islamic_strict_traceability": RetrievalConfig(
+        mode=RetrievalMode.HYBRID,
+        top_k=10,
+        score_threshold=0.25,
+        fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
+        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        mmr=MMRConfig(enabled=True, lambda_mult=0.6),
+        islamic=IslamicEnhancementConfig(
+            multi_query=True,
+            citation_format=True,
+            authority_sort=True,
+            strict_section_traceability=True,  # Enable strict section traceability
         ),
     ),
 }

@@ -103,10 +103,10 @@ export function UserManagementPage() {
 
   // Department options
   const departmentOptions = [
-    { value: "cs", label: "客服部 (CS)" },
-    { value: "sales", label: "销售部 (Sales)" },
-    { value: "tech", label: "技术部 (Tech)" },
-    { value: "admin", label: "管理部 (Admin)" },
+    { value: "cs", label: t("user.departments.cs") },
+    { value: "sales", label: t("user.departments.sales") },
+    { value: "tech", label: t("user.departments.tech") },
+    { value: "admin", label: t("user.departments.admin") },
   ];
 
   // Load users

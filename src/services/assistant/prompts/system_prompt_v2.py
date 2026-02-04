@@ -1059,6 +1059,7 @@ def get_ttft_optimized_prompt(
     user_role: str = "user",
     available_datasets: Optional[List[str]] = None,
     enabled_tools: Optional[List[str]] = None,
+    scenario_rules: str = "",
 ) -> str:
     """
     Get a TTFT-optimized system prompt designed for maximum KV-Cache hit rate.
@@ -1086,6 +1087,7 @@ def get_ttft_optimized_prompt(
         user_role=user_role,
         available_datasets=available_datasets,
         enabled_tools=enabled_tools,
+        scenario_rules=scenario_rules,
         # Minimal sections for smaller token footprint
         include_guardrails=True,           # Essential: safety rules
         include_agent_freedom=False,       # Remove: adds ~500 tokens

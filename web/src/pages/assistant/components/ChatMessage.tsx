@@ -48,17 +48,17 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
     // Get action text (what's being done)
     const actionText = isSearching
       ? isKB
-        ? t("assistant.searchingKB", "正在搜索知识库")
+        ? t("assistant.searchingKB")
         : isFiles
-        ? t("assistant.processingFiles", "正在分析文件")
-        : t("assistant.searchingWeb", "正在搜索")
+        ? t("assistant.processingFiles")
+        : t("assistant.searchingWeb")
       : isCompleted
       ? isKB
-        ? t("assistant.readSources", "已检索 {{count}} 个来源", { count: item.resultCount || 0 })
+        ? t("assistant.readSources", { count: item.resultCount || 0 })
         : isFiles
-        ? t("assistant.analyzedFiles", "已分析 {{count}} 个文件", { count: item.resultCount || 0 })
-        : t("assistant.foundResults", "已找到 {{count}} 条结果", { count: item.resultCount || 0 })
-      : item.error || t("assistant.searchFailed", "搜索失败");
+        ? t("assistant.analyzedFiles", { count: item.resultCount || 0 })
+        : t("assistant.foundResults", { count: item.resultCount || 0 })
+      : item.error || t("assistant.searchFailed");
 
     return {
       icon: isKB ? Database : isFiles ? FileText : Search,
@@ -103,8 +103,8 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
           <div className="flex-1 text-left">
             <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
               {allCompleted
-                ? t("assistant.researchComplete", "研究完成")
-                : t("assistant.researching", "正在研究")}
+                ? t("assistant.researchComplete")
+                : t("assistant.researching")}
             </span>
             <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">
               {completedCount}/{totalCount}
@@ -197,43 +197,43 @@ function AgentPhaseDisplay({ phase }: { phase: AgentPhaseStatus }) {
       icon: <Brain className="h-3 w-3" />,
       color: "text-blue-600 dark:text-blue-400",
       bgColor: "bg-blue-100 dark:bg-blue-900/40",
-      label: t("assistant.phase.analyzing", "分析任务"),
+      label: t("assistant.phase.analyzing"),
     },
     thinking: {
       icon: <Brain className="h-3 w-3" />,
       color: "text-violet-600 dark:text-violet-400",
       bgColor: "bg-violet-100 dark:bg-violet-900/40",
-      label: t("assistant.phase.thinking", "思考中"),
+      label: t("assistant.phase.thinking"),
     },
     planning: {
       icon: <ListTodo className="h-3 w-3" />,
       color: "text-amber-600 dark:text-amber-400",
       bgColor: "bg-amber-100 dark:bg-amber-900/40",
-      label: t("assistant.phase.planning", "规划任务"),
+      label: t("assistant.phase.planning"),
     },
     executing: {
       icon: <Cog className="h-3 w-3" />,
       color: "text-emerald-600 dark:text-emerald-400",
       bgColor: "bg-emerald-100 dark:bg-emerald-900/40",
-      label: t("assistant.phase.executing", "执行中"),
+      label: t("assistant.phase.executing"),
     },
     observing: {
       icon: <Eye className="h-3 w-3" />,
       color: "text-cyan-600 dark:text-cyan-400",
       bgColor: "bg-cyan-100 dark:bg-cyan-900/40",
-      label: t("assistant.phase.observing", "分析结果"),
+      label: t("assistant.phase.observing"),
     },
     writing: {
       icon: <PenTool className="h-3 w-3" />,
       color: "text-pink-600 dark:text-pink-400",
       bgColor: "bg-pink-100 dark:bg-pink-900/40",
-      label: t("assistant.phase.writing", "撰写内容"),
+      label: t("assistant.phase.writing"),
     },
     completing: {
       icon: <CheckCircle2 className="h-3 w-3" />,
       color: "text-emerald-600 dark:text-emerald-400",
       bgColor: "bg-emerald-100 dark:bg-emerald-900/40",
-      label: t("assistant.phase.completing", "完成中"),
+      label: t("assistant.phase.completing"),
     },
   };
 
@@ -387,25 +387,25 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
     switch (status) {
       case "completed":
         return {
-          label: t("assistant.toolStatus.completed", "已完成"),
+          label: t("assistant.toolStatus.completed"),
           color: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
           dot: "bg-emerald-500"
         };
       case "running":
         return {
-          label: t("assistant.toolStatus.running", "执行中"),
+          label: t("assistant.toolStatus.running"),
           color: "bg-blue-500/10 text-blue-500 border-blue-500/20",
           dot: "bg-blue-500 animate-pulse"
         };
       case "error":
         return {
-          label: t("assistant.toolStatus.error", "失败"),
+          label: t("assistant.toolStatus.error"),
           color: "bg-red-500/10 text-red-500 border-red-500/20",
           dot: "bg-red-500"
         };
       default:
         return {
-          label: t("assistant.toolStatus.pending", "等待中"),
+          label: t("assistant.toolStatus.pending"),
           color: "bg-slate-500/10 text-slate-500 border-slate-500/20",
           dot: "bg-slate-500"
         };
@@ -490,7 +490,7 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
               {tc.arguments && Object.keys(tc.arguments).length > 0 && (
                 <div className="space-y-2">
                   <div className="text-[10px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                    {t("assistant.toolArguments", "参数")}
+                    {t("assistant.toolArguments")}
                   </div>
                   <pre className="text-[11px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">
                     {JSON.stringify(tc.arguments, null, 2)}
@@ -516,7 +516,7 @@ function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls
       {/* Section header */}
       <div className="flex items-center gap-2 text-xs font-medium text-violet-500 dark:text-violet-400">
         <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
-        {t("assistant.toolCalls", "工具调用")}
+        {t("assistant.toolCalls")}
       </div>
 
       {/* Tool call cards */}
@@ -560,7 +560,7 @@ function ImageGeneratingPlaceholder({ prompt }: { prompt?: string }) {
 
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              {t("assistant.creatingImage", "生成图片中")}
+              {t("assistant.creatingImage")}
             </span>
             <div className="flex gap-0.5">
               {[0, 1, 2].map((i) => (
@@ -620,7 +620,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
         className={cn(
           "flex flex-col min-w-0",
           isUser
-            ? "max-w-[85%] items-end"
+            ? "max-w-[calc(100%-48px)] items-end"
             : "max-w-full lg:max-w-[90%] items-start flex-1"
         )}
       >
@@ -691,7 +691,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                         ))}
                       </div>
                       <span className="text-sm text-slate-500 dark:text-slate-400">
-                        {t("assistant.thinking", "思考中...")}
+                        {t("assistant.thinking")}
                       </span>
                     </div>
                   )}

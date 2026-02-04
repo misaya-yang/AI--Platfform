@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,15 +21,16 @@ interface ProfileModalProps {
 }
 
 // Department display mapping
-const departmentLabels: Record<string, string> = {
-  cs: "客服部 (CS)",
-  sales: "销售部 (Sales)",
-  tech: "技术部 (Tech)",
-  admin: "管理部 (Admin)",
-};
-
 export function ProfileModal({ open, onClose }: ProfileModalProps) {
+  const { t } = useTranslation();
   const { user, updateUser } = useAuthStore();
+
+  const departmentLabels: Record<string, string> = {
+    cs: t("user.departments.cs"),
+    sales: t("user.departments.sales"),
+    tech: t("user.departments.tech"),
+    admin: t("user.departments.admin"),
+  };
 
   const [displayName, setDisplayName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -58,7 +60,7 @@ export function ProfileModal({ open, onClose }: ProfileModalProps) {
 
       // Update local state
       updateUser({ display_name: displayName.trim() });
-      setSuccess("个人信息已更新");
+      setSuccess(t("user.profileUpdateSuccess"));
 
       // Close after short delay
       setTimeout(() => {
@@ -66,7 +68,7 @@ export function ProfileModal({ open, onClose }: ProfileModalProps) {
       }, 1000);
     } catch (err: unknown) {
       const axiosError = err as { response?: { data?: { detail?: string } } };
-      setError(axiosError.response?.data?.detail || "更新失败，请重试");
+      setError(axiosError.response?.data?.detail || t("user.profileUpdateFailed"));
     } finally {
       setIsLoading(false);
     }
@@ -78,56 +80,56 @@ export function ProfileModal({ open, onClose }: ProfileModalProps) {
     <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>个人设置</DialogTitle>
+          <DialogTitle>{t("user.profileSettings")}</DialogTitle>
           <DialogDescription>
-            查看和修改您的个人信息
+            {t("user.profileSettingsDesc")}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* Email - Read only */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground">邮箱</Label>
+            <Label className="text-muted-foreground">{t("user.email")}</Label>
             <Input
               value={user.email || ""}
               disabled
               className="bg-muted"
             />
-            <p className="text-xs text-muted-foreground">邮箱无法修改</p>
+            <p className="text-xs text-muted-foreground">{t("user.emailReadonly")}</p>
           </div>
 
           {/* Display Name - Editable */}
           <div className="space-y-2">
-            <Label htmlFor="displayName">显示名称</Label>
+            <Label htmlFor="displayName">{t("user.displayName")}</Label>
             <Input
               id="displayName"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="请输入您的姓名"
+              placeholder={t("user.displayNamePlaceholder")}
               disabled={isLoading}
             />
           </div>
 
           {/* Department - Read only, assigned by admin */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground">所属部门</Label>
+            <Label className="text-muted-foreground">{t("user.department")}</Label>
             <div className="flex items-center gap-2 p-2 bg-muted rounded-md min-h-[40px]">
               {user.department ? (
                 <Badge variant="secondary">
                   {departmentLabels[user.department] || user.department}
                 </Badge>
               ) : (
-                <span className="text-sm text-muted-foreground">未分配部门</span>
+                <span className="text-sm text-muted-foreground">{t("user.departmentUnassigned")}</span>
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              部门由管理员分配，如需修改请联系管理员
+              {t("user.departmentHint")}
             </p>
           </div>
 
           {/* Roles - Read only */}
           <div className="space-y-2">
-            <Label className="text-muted-foreground">角色</Label>
+            <Label className="text-muted-foreground">{t("user.roles")}</Label>
             <div className="flex flex-wrap gap-2 p-2 bg-muted rounded-md min-h-[40px]">
               {user.roles.map((role) => (
                 <Badge key={role} variant="outline">
@@ -146,10 +148,10 @@ export function ProfileModal({ open, onClose }: ProfileModalProps) {
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={isLoading}>
-              {isLoading ? "保存中..." : "保存"}
+              {isLoading ? t("common.saving") : t("common.save")}
             </Button>
           </DialogFooter>
         </form>

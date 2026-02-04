@@ -1,13 +1,19 @@
 """Retrieval service for knowledge base.
 
 This service handles document retrieval, search, and ranking.
+
+Cross-Language Retrieval (2025 Best Practice):
+- Automatic query expansion for Islamic terms (EN <-> AR)
+- Language-adaptive weights for hybrid search
+- Merged results from multi-language queries
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from ...config.settings import Settings
 from ...core.observability.logging import get_logger
@@ -15,8 +21,276 @@ from ...persistence.database import DatabaseStorage
 from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize
 from .embedding import create_embedding, get_cached_embedder
 from .chunking import Chunk
+from .retrieval_v2 import detect_query_language, get_language_adaptive_weights
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# Cross-Language Query Expansion for Islamic Content
+# =============================================================================
+
+# Islamic term translations (English -> Arabic)
+# These are common terms that should trigger cross-language search
+ISLAMIC_TERM_TRANSLATIONS_EN_AR: Dict[str, str] = {
+    # Worship and Prayer
+    "prayer": "صلاة",
+    "salah": "صلاة",
+    "salat": "صلاة",
+    "fajr": "فجر",
+    "dhuhr": "ظهر",
+    "asr": "عصر",
+    "maghrib": "مغرب",
+    "isha": "عشاء",
+    "wudu": "وضوء",
+    "ablution": "وضوء",
+    "tayammum": "تيمم",
+    "mosque": "مسجد",
+    "masjid": "مسجد",
+    
+    # Pillars of Islam
+    "fasting": "صيام",
+    "sawm": "صيام",
+    "ramadan": "رمضان",
+    "zakat": "زكاة",
+    "charity": "زكاة",
+    "hajj": "حج",
+    "pilgrimage": "حج",
+    "umrah": "عمرة",
+    "shahada": "شهادة",
+    
+    # Quran and Hadith
+    "quran": "قرآن",
+    "hadith": "حديث",
+    "sunnah": "سنة",
+    "surah": "سورة",
+    "ayah": "آية",
+    "verse": "آية",
+    "tafsir": "تفسير",
+    "tafseer": "تفسير",
+    
+    # Jurisprudence
+    "fiqh": "فقه",
+    "fatwa": "فتوى",
+    "halal": "حلال",
+    "haram": "حرام",
+    "makruh": "مكروه",
+    "mustahab": "مستحب",
+    "wajib": "واجب",
+    "fard": "فرض",
+    "sunnah": "سنة",
+    
+    # Schools of thought
+    "hanafi": "حنفي",
+    "maliki": "مالكي",
+    "shafi": "شافعي",
+    "shafii": "شافعي",
+    "hanbali": "حنبلي",
+    "madhhab": "مذهب",
+    
+    # Beliefs
+    "iman": "إيمان",
+    "faith": "إيمان",
+    "aqeedah": "عقيدة",
+    "tawhid": "توحيد",
+    "shirk": "شرك",
+    
+    # People and Places
+    "prophet": "نبي",
+    "messenger": "رسول",
+    "imam": "إمام",
+    "scholar": "عالم",
+    "mecca": "مكة",
+    "medina": "المدينة",
+    "kaaba": "الكعبة",
+    
+    # Other common terms
+    "islam": "إسلام",
+    "muslim": "مسلم",
+    "eid": "عيد",
+    "dua": "دعاء",
+    "dhikr": "ذكر",
+    "nisab": "نصاب",
+    "riba": "ربا",
+    "interest": "ربا",
+}
+
+# Arabic -> English reverse mapping
+ISLAMIC_TERM_TRANSLATIONS_AR_EN: Dict[str, str] = {
+    v: k for k, v in ISLAMIC_TERM_TRANSLATIONS_EN_AR.items()
+}
+
+# Arabic pattern for detection
+_ARABIC_PATTERN = re.compile(r'[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]')
+
+
+def expand_query_cross_language(query: str) -> Tuple[str, List[str], str]:
+    """
+    Expand query for cross-language retrieval.
+    
+    Strategy:
+    - Detect query language
+    - Find Islamic terms in the query
+    - Add translations of those terms
+    - Return expanded queries for both languages
+    
+    Args:
+        query: Original user query
+        
+    Returns:
+        Tuple of (original_query, expanded_queries, detected_language)
+    """
+    lang = detect_query_language(query)
+    query_lower = query.lower()
+    
+    expanded_terms: Set[str] = set()
+    expanded_queries: List[str] = [query]  # Always include original
+    
+    if lang == "en":
+        # English query: find and add Arabic equivalents
+        for en_term, ar_term in ISLAMIC_TERM_TRANSLATIONS_EN_AR.items():
+            # Check for word boundary matches
+            pattern = rf'\b{re.escape(en_term)}\b'
+            if re.search(pattern, query_lower, re.IGNORECASE):
+                expanded_terms.add(ar_term)
+        
+        if expanded_terms:
+            # Create expanded query with Arabic terms
+            arabic_expansion = query + " " + " ".join(expanded_terms)
+            expanded_queries.append(arabic_expansion)
+            
+    elif lang == "ar":
+        # Arabic query: find and add English equivalents
+        for ar_term, en_term in ISLAMIC_TERM_TRANSLATIONS_AR_EN.items():
+            if ar_term in query:
+                expanded_terms.add(en_term)
+        
+        if expanded_terms:
+            # Create expanded query with English terms
+            english_expansion = query + " " + " ".join(expanded_terms)
+            expanded_queries.append(english_expansion)
+    
+    return query, expanded_queries, lang
+
+
+# =============================================================================
+# Cross-Language Query Expander Class
+# =============================================================================
+
+class CrossLanguageQueryExpander:
+    """
+    Cross-language query expander for Arabic-English retrieval.
+    
+    This class provides:
+    - Language detection
+    - Query expansion with translations
+    - Islamic term normalization
+    
+    Usage:
+        expander = CrossLanguageQueryExpander()
+        lang = expander.detect_query_language("ما هي أركان الإسلام؟")
+        expansions = await expander.expand_query("What is zakat?")
+    """
+    
+    def __init__(
+        self,
+        translations_en_ar: Optional[Dict[str, str]] = None,
+        translations_ar_en: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Initialize query expander.
+        
+        Args:
+            translations_en_ar: Custom EN->AR translations
+            translations_ar_en: Custom AR->EN translations
+        """
+        self.translations_en_ar = translations_en_ar or ISLAMIC_TERM_TRANSLATIONS_EN_AR
+        self.translations_ar_en = translations_ar_en or ISLAMIC_TERM_TRANSLATIONS_AR_EN
+    
+    def detect_query_language(self, query: str) -> str:
+        """
+        Detect the primary language of a query.
+        
+        Args:
+            query: Input query text
+            
+        Returns:
+            Language code: "ar", "en", or "mixed"
+        """
+        return detect_query_language(query)
+    
+    async def expand_query(
+        self,
+        query: str,
+        max_expansions: int = 3,
+    ) -> List[str]:
+        """
+        Expand query with cross-language translations.
+        
+        Args:
+            query: Original query
+            max_expansions: Maximum number of expansion queries
+            
+        Returns:
+            List of expanded queries (includes original)
+        """
+        _, expanded_queries, _ = expand_query_cross_language(query)
+        return expanded_queries[:max_expansions]
+    
+    async def _translate_query(self, query: str) -> str:
+        """
+        Translate query (placeholder for LLM-based translation).
+        
+        Override this method to use actual translation API.
+        """
+        # Default: use term-based expansion
+        _, expanded, _ = expand_query_cross_language(query)
+        if len(expanded) > 1:
+            # Return the expanded terms only (not the full query)
+            return expanded[1].replace(query, "").strip()
+        return ""
+    
+    def normalize_islamic_term(self, term: str) -> Optional[str]:
+        """
+        Normalize Islamic term to canonical form.
+        
+        Handles common spelling variations:
+        - Quran, Qur'an, Koran -> quran
+        - Muhammad, Mohammed -> muhammad
+        - Ramadan, Ramadhan -> ramadan
+        
+        Args:
+            term: Input term (any case)
+            
+        Returns:
+            Normalized canonical form, or None if not a known term
+        """
+        term_lower = term.lower().strip()
+        
+        # Normalization mappings
+        normalizations = {
+            # Quran variants
+            "quran": "quran", "qur'an": "quran", "koran": "quran", 
+            "القرآن": "quran", "قرآن": "quran",
+            
+            # Prophet name variants
+            "muhammad": "muhammad", "mohammed": "muhammad", "mohamed": "muhammad",
+            "محمد": "muhammad",
+            
+            # Ramadan variants
+            "ramadan": "ramadan", "ramadhan": "ramadan", "رمضان": "ramadan",
+            
+            # Salat/Prayer variants
+            "salat": "salah", "salah": "salah", "صلاة": "salah", "prayer": "salah",
+            
+            # Zakat variants
+            "zakat": "zakat", "zakah": "zakat", "زكاة": "zakat",
+            
+            # Hajj variants
+            "hajj": "hajj", "haj": "hajj", "حج": "hajj",
+        }
+        
+        return normalizations.get(term_lower)
 
 
 @dataclass(frozen=True)
@@ -43,6 +317,11 @@ class RetrievalConfig:
     mmr_diversity: float = 0.3
     expand_queries: bool = False
     max_query_expansions: int = 3
+    
+    # Cross-language retrieval (P1 enhancement)
+    enable_cross_language: bool = True  # Enable EN<->AR query expansion
+    fusion_method: str = "rrf"  # "rrf" or "weighted"
+    use_adaptive_weights: bool = True  # Language-aware weights
 
 
 class RetrievalService:
@@ -69,13 +348,22 @@ class RetrievalService:
         config: Optional[RetrievalConfig] = None,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrieveResult]:
-        """Retrieve relevant segments from dataset."""
+        """Retrieve relevant segments from dataset.
+        
+        Supports cross-language retrieval for Islamic content (EN <-> AR).
+        """
         config = config or RetrievalConfig()
 
         # Determine retrieval mode
         mode = config.mode
         if mode == "auto":
             mode = await self._determine_optimal_mode(dataset_id, query)
+
+        # Check if cross-language retrieval is enabled
+        if config.enable_cross_language:
+            return await self._retrieve_with_cross_language(
+                dataset_id, query, mode, config, filters
+            )
 
         logger.info(f"Retrieving with mode={mode}, query='{query[:50]}...'")
 
@@ -88,6 +376,111 @@ class RetrievalService:
         else:
             # Default to dense
             return await self._dense_retrieval(dataset_id, query, config, filters)
+    
+    async def _retrieve_with_cross_language(
+        self,
+        dataset_id: str,
+        query: str,
+        mode: str,
+        config: RetrievalConfig,
+        filters: Optional[Dict[str, Any]],
+    ) -> List[RetrieveResult]:
+        """
+        Retrieve with automatic cross-language query expansion.
+        
+        Strategy:
+        1. Detect query language
+        2. Expand query with translations of Islamic terms
+        3. Execute searches for all expanded queries
+        4. Merge and deduplicate results
+        5. Re-rank by combined score
+        
+        This significantly improves recall for multilingual Islamic content.
+        """
+        # Expand query for cross-language retrieval
+        _, expanded_queries, query_lang = expand_query_cross_language(query)
+        
+        logger.info(
+            f"Cross-language retrieval: lang={query_lang}, "
+            f"queries={len(expanded_queries)}, mode={mode}"
+        )
+        
+        # Execute retrieval for all queries
+        
+        # Create tasks for parallel execution
+        async def retrieve_single(q: str) -> List[RetrieveResult]:
+            if mode == "dense":
+                return await self._dense_retrieval(dataset_id, q, config, filters)
+            elif mode == "sparse":
+                return await self._sparse_retrieval(dataset_id, q, config, filters)
+            elif mode == "hybrid":
+                return await self._hybrid_retrieval(dataset_id, q, config, filters)
+            else:
+                return await self._dense_retrieval(dataset_id, q, config, filters)
+        
+        # Run all queries (original + expanded)
+        tasks = [retrieve_single(q) for q in expanded_queries]
+        results_lists = await asyncio.gather(*tasks)
+        
+        # Merge results with score boosting for multi-query hits
+        segment_scores: Dict[str, float] = {}
+        segment_results: Dict[str, RetrieveResult] = {}
+        segment_query_hits: Dict[str, int] = {}  # Track how many queries found this segment
+        
+        for results in results_lists:
+            for r in results:
+                seg_id = r.segment_id
+                
+                # Track query hits
+                segment_query_hits[seg_id] = segment_query_hits.get(seg_id, 0) + 1
+                
+                # Combine scores (take max + bonus for multi-hit)
+                current_score = segment_scores.get(seg_id, 0.0)
+                if r.score > current_score:
+                    segment_scores[seg_id] = r.score
+                    segment_results[seg_id] = r
+        
+        # Apply multi-hit bonus: segments found by multiple queries get a boost
+        for seg_id, hits in segment_query_hits.items():
+            if hits > 1:
+                # 10% bonus per additional hit, capped at 30%
+                bonus = min(0.3, (hits - 1) * 0.1)
+                segment_scores[seg_id] = min(1.0, segment_scores[seg_id] * (1 + bonus))
+        
+        # Sort by final score
+        sorted_segments = sorted(
+            segment_scores.items(),
+            key=lambda x: (-x[1], x[0])  # Descending score, ascending ID for determinism
+        )
+        
+        # Build final results
+        final_results: List[RetrieveResult] = []
+        for seg_id, score in sorted_segments[:config.top_k]:
+            original = segment_results[seg_id]
+            # Create new result with updated score
+            final_results.append(RetrieveResult(
+                segment_id=original.segment_id,
+                document_id=original.document_id,
+                score=score,
+                text=original.text,
+                metadata={
+                    **original.metadata,
+                    "cross_language_hits": segment_query_hits[seg_id],
+                    "query_language": query_lang,
+                },
+                content_type=original.content_type,
+                image_url=original.image_url,
+                vlm_description=original.vlm_description,
+                associated_images=original.associated_images,
+            ))
+        
+        logger.info(
+            f"Cross-language retrieval complete: "
+            f"found {len(final_results)} results, "
+            f"multi-hit segments: {sum(1 for h in segment_query_hits.values() if h > 1)}"
+        )
+        
+        return final_results
 
     async def retrieve_batch(
         self,
@@ -214,7 +607,7 @@ class RetrievalService:
         return results[:config.top_k]
 
     # ========================================================================
-    # Hybrid Retrieval
+    # Hybrid Retrieval - PARALLEL execution with real component integration
     # ========================================================================
 
     async def _hybrid_retrieval(
@@ -224,24 +617,200 @@ class RetrievalService:
         config: RetrievalConfig,
         filters: Optional[Dict[str, Any]],
     ) -> List[RetrieveResult]:
-        """Hybrid retrieval combining dense and sparse."""
-        # Run both in parallel
-        dense_task = self._dense_retrieval(
-            dataset_id, query, 
-            RetrievalConfig(mode="dense", top_k=config.top_k * 2),
-            filters
-        )
-        sparse_task = self._sparse_retrieval(
+        """Hybrid retrieval with parallel dense + sparse + optional rerank.
+        
+        Components executed in parallel for minimal latency:
+        1. Dense retrieval (vector search)
+        2. Sparse retrieval (BM25)
+        3. Query expansion (if enabled)
+        
+        Then: RRF fusion -> Optional Rerank -> Optional MMR
+        """
+        import time
+        start_time = time.time()
+        
+        # Run dense and sparse in parallel
+        dense_task = asyncio.create_task(self._dense_retrieval(
             dataset_id, query,
-            RetrievalConfig(mode="sparse", top_k=config.top_k * 2),
+            RetrievalConfig(mode="dense", top_k=config.top_k * 3, use_mmr=False),
             filters
+        ))
+        sparse_task = asyncio.create_task(self._sparse_retrieval(
+            dataset_id, query,
+            RetrievalConfig(mode="sparse", top_k=config.top_k * 3, use_mmr=False),
+            filters
+        ))
+
+        # Wait for both with timeout to ensure we don't hang
+        try:
+            dense_results, sparse_results = await asyncio.wait_for(
+                asyncio.gather(dense_task, sparse_task, return_exceptions=True),
+                timeout=5.0  # 5 second timeout for retrieval
+            )
+        except asyncio.TimeoutError:
+            logger.error("[Retrieval] Dense/Sparse retrieval timeout")
+            for task in (dense_task, sparse_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
+
+            dense_results = []
+            if dense_task.done() and not dense_task.cancelled():
+                exc = dense_task.exception()
+                if exc is None:
+                    dense_results = dense_task.result()
+
+            sparse_results = []
+            if sparse_task.done() and not sparse_task.cancelled():
+                exc = sparse_task.exception()
+                if exc is None:
+                    sparse_results = sparse_task.result()
+
+        # Handle exceptions
+        if isinstance(dense_results, Exception):
+            logger.error(f"[Retrieval] Dense retrieval failed: {dense_results}")
+            dense_results = []
+        if isinstance(sparse_results, Exception):
+            logger.error(f"[Retrieval] Sparse retrieval failed: {sparse_results}")
+            sparse_results = []
+
+        # Log retrieval stats
+        logger.info(
+            f"[Retrieval] Dense: {len(dense_results)} results, "
+            f"Sparse: {len(sparse_results)} results"
         )
 
-        dense_results, sparse_results = await asyncio.gather(dense_task, sparse_task)
+        # RRF Fusion
+        fusion_start = time.time()
+        fused = self._fuse_results(dense_results, sparse_results, config.top_k * 2)
+        logger.debug(f"[Retrieval] RRF fusion took {(time.time() - fusion_start)*1000:.1f}ms")
 
-        # Fuse results using RRF
-        fused = self._fuse_results(dense_results, sparse_results, config.top_k)
-        return fused
+        # Rerank if enabled - CRITICAL FIX: actually call reranker
+        if config.rerank and config.rerank.enabled:
+            rerank_start = time.time()
+            fused = await self._apply_reranking(fused, query, config.rerank)
+            logger.info(f"[Retrieval] Rerank took {(time.time() - rerank_start)*1000:.1f}ms")
+
+        # MMR if enabled - CRITICAL FIX: actually apply MMR
+        if config.use_mmr and len(fused) > config.top_k:
+            mmr_start = time.time()
+            fused = await self._apply_mmr_async(fused, query, config.mmr_diversity)
+            logger.info(f"[Retrieval] MMR took {(time.time() - mmr_start)*1000:.1f}ms")
+
+        total_time = (time.time() - start_time) * 1000
+        logger.info(f"[Retrieval] Total hybrid retrieval took {total_time:.1f}ms")
+
+        return fused[:config.top_k]
+
+    async def _apply_reranking(
+        self,
+        results: List[RetrieveResult],
+        query: str,
+        rerank_config: Any,
+    ) -> List[RetrieveResult]:
+        """Apply cross-encoder reranking to results."""
+        if not results or not rerank_config.enabled:
+            return results
+
+        try:
+            from .text_reranker import create_reranker
+            
+            # Get API key from settings
+            api_key = rerank_config.api_key
+            if not api_key:
+                api_key = getattr(self.settings, f"{rerank_config.provider}_api_key", None)
+            
+            reranker = create_reranker(
+                provider=rerank_config.provider.value if hasattr(rerank_config.provider, 'value') else str(rerank_config.provider),
+                api_key=api_key,
+                model=rerank_config.model,
+            )
+            
+            # Prepare documents for reranking
+            documents = [r.text for r in results]
+            top_n = rerank_config.top_n or len(results)
+            
+            # Run reranking
+            rerank_results = await reranker.rerank(
+                query=query,
+                documents=documents,
+                top_n=min(top_n, len(results)),
+            )
+            
+            # Reorder results based on rerank scores
+            reranked = []
+            for r in rerank_results:
+                if 0 <= r.index < len(results):
+                    original = results[r.index]
+                    # Create new result with updated score
+                    reranked.append(RetrieveResult(
+                        segment_id=original.segment_id,
+                        document_id=original.document_id,
+                        score=r.relevance_score,  # Use rerank score
+                        text=original.text,
+                        metadata={**original.metadata, "reranked": True, "original_score": original.score},
+                        content_type=original.content_type,
+                        image_url=original.image_url,
+                        vlm_description=original.vlm_description,
+                        associated_images=original.associated_images,
+                    ))
+            
+            logger.info(f"[Rerank] Reranked {len(results)} -> {len(reranked)} results")
+            return reranked if reranked else results
+            
+        except Exception as e:
+            logger.error(f"[Rerank] Reranking failed: {e}")
+            return results
+
+    async def _apply_mmr_async(
+        self,
+        results: List[RetrieveResult],
+        query: str,
+        diversity: float,
+    ) -> List[RetrieveResult]:
+        """Apply MMR (Maximal Marginal Relevance) for diversity."""
+        if not results or len(results) <= 1:
+            return results
+
+        try:
+            # Get embeddings for MMR calculation
+            embedder = await get_cached_embedder(self.settings)
+            query_embedding = await embedder.embed_query(query)
+            
+            # Get result embeddings (from metadata or compute)
+            result_embeddings = []
+            for r in results:
+                emb = r.metadata.get("embedding")
+                if emb:
+                    result_embeddings.append(emb)
+                else:
+                    # Compute embedding if not cached
+                    try:
+                        emb = await embedder.embed_query(r.text[:500])  # Truncate for speed
+                        result_embeddings.append(emb)
+                    except Exception:
+                        result_embeddings.append([0.0] * len(query_embedding))
+            
+            # Import MMR from retrieval module
+            from .retrieval import mmr_select
+            
+            # MMR selection
+            selected_indices = mmr_select(
+                query_embedding,
+                result_embeddings,
+                k=len(results),
+                lambda_param=1 - diversity,
+            )
+            
+            # Reorder results
+            mmr_results = [results[i] for i in selected_indices]
+            
+            logger.info(f"[MMR] Applied diversity={diversity}, selected {len(mmr_results)} results")
+            return mmr_results
+            
+        except Exception as e:
+            logger.error(f"[MMR] MMR failed: {e}")
+            return results
 
     def _fuse_results(
         self,

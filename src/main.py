@@ -415,6 +415,7 @@ def create_app() -> FastAPI:
                         embedder=multimodal_embedding,
                         vector_store=app.state.knowledge_service.vector_store,
                         database=container.database,
+                        position_offset=int(getattr(settings.knowledge, "image_position_offset", 1_000_000)),
                     )
                     logger.info("VisionPDFProcessor initialized for scanned document support")
                 except Exception as e:
@@ -424,7 +425,7 @@ def create_app() -> FastAPI:
             detector = None
             try:
                 from .services.knowledge.document_detector import DocumentTypeDetector
-                detector = DocumentTypeDetector()
+                detector = DocumentTypeDetector(settings.knowledge)
                 logger.info("DocumentTypeDetector initialized for auto processing mode")
             except Exception as e:
                 logger.warning(f"Failed to initialize DocumentTypeDetector: {e}")
@@ -442,6 +443,7 @@ def create_app() -> FastAPI:
                     database=container.database,
                     embedder=app.state.knowledge_service.embedder,
                     summary_generator=summary_generator,
+                    knowledge_settings=settings.knowledge,
                 )
                 logger.info("HierarchicalIndexer initialized for large document processing")
             except Exception as e:

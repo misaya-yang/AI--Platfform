@@ -6,6 +6,7 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useAppStore } from "@/store/useAppStore";
 import { useServices, useHealth } from "@/hooks/useServices";
 import { getColors } from "../../styles";
+import { useTranslation } from "react-i18next";
 
 interface ServiceCardProps {
   name: string;
@@ -16,13 +17,14 @@ interface ServiceCardProps {
 }
 
 function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCardProps) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
 
   const statusConfig = {
-    healthy: { color: colors.success, bg: `${colors.success}10`, icon: <CheckCircleOutlined />, text: "运行正常" },
-    degraded: { color: colors.warning, bg: `${colors.warning}10`, icon: <WarningOutlined />, text: "性能下降" },
-    down: { color: colors.error, bg: `${colors.error}10`, icon: <CloseCircleOutlined />, text: "服务异常" },
+    healthy: { color: colors.success, bg: `${colors.success}10`, icon: <CheckCircleOutlined />, text: t("dashboard.serviceHealth.status.healthy") },
+    degraded: { color: colors.warning, bg: `${colors.warning}10`, icon: <WarningOutlined />, text: t("dashboard.serviceHealth.status.degraded") },
+    down: { color: colors.error, bg: `${colors.error}10`, icon: <CloseCircleOutlined />, text: t("dashboard.serviceHealth.status.down") },
   };
 
   const config = statusConfig[status];
@@ -87,14 +89,14 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
         </div>
         <div style={{ width: 1, background: colors.border, alignSelf: "stretch" }} />
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>延迟</div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>{t("metrics.avgLatency")}</div>
           <div style={{ fontSize: 18, fontWeight: 800, color: colors.textPrimary, letterSpacing: "-0.02em" }}>
             {latency}<span style={{ fontSize: 11, fontWeight: 500, marginLeft: 1 }}>ms</span>
           </div>
         </div>
         <div style={{ width: 1, background: colors.border, alignSelf: "stretch" }} />
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>错误率</div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: colors.textMuted, marginBottom: 4 }}>{t("dashboard.serviceHealth.errorRateLabel")}</div>
           <div
             style={{
               fontSize: 18,
@@ -112,6 +114,7 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
 }
 
 export function ServiceHealthPanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const servicesQuery = useServices();
@@ -147,7 +150,7 @@ export function ServiceHealthPanel() {
 
   return (
     <PanelWrapper
-      title="服务健康状态"
+      title={t("dashboard.serviceHealth.title")}
       onRefresh={refetch}
       loading={servicesQuery.isLoading || healthQuery.isLoading}
     >
@@ -164,14 +167,14 @@ export function ServiceHealthPanel() {
         }}
       >
         <Statistic
-          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>可用性</span>}
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.serviceHealth.availability")}</span>}
           value={totalServices > 0 ? ((healthyCount / totalServices) * 100).toFixed(1) : 0}
           suffix="%"
           styles={{ content: { color: colors.success, fontSize: 24, fontWeight: 700 } }}
         />
         <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
         <Statistic
-          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>错误率</span>}
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.serviceHealth.errorRate")}</span>}
           value={avgErrorRate.toFixed(2)}
           suffix="%"
           styles={{
@@ -184,7 +187,7 @@ export function ServiceHealthPanel() {
         />
         <div style={{ width: 1, background: colors.border, margin: "8px 0" }} />
         <Statistic
-          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>服务数</span>}
+          title={<span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.serviceHealth.totalServices")}</span>}
           value={totalServices}
           styles={{ content: { fontSize: 24, fontWeight: 700, color: colors.textPrimary } }}
         />

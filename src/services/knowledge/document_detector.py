@@ -15,7 +15,6 @@ from enum import Enum
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ...config.settings import settings
 from ...core.observability.logging import get_logger
 from .processing_mode import ProcessingMode
 
@@ -75,35 +74,54 @@ class DocumentTypeDetector:
     Uses sampling (first N pages) for large files to minimize I/O.
     """
     
-    # Thresholds from configuration
-    LARGE_FILE_THRESHOLD = settings.knowledge.large_file_threshold
-    SAMPLE_PAGES = settings.knowledge.detection_sample_pages
+    # Threshold defaults (mirror KnowledgeSettings)
+    DEFAULT_LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50MB
+    DEFAULT_SAMPLE_PAGES = 5
     
     # Text coverage thresholds for PDF classification
-    NATIVE_PDF_THRESHOLD = settings.knowledge.detection_native_pdf_threshold
-    SCANNED_PDF_THRESHOLD = settings.knowledge.detection_scanned_pdf_threshold
+    DEFAULT_NATIVE_PDF_THRESHOLD = 0.8
+    DEFAULT_SCANNED_PDF_THRESHOLD = 0.2
     
     # Minimum characters per page to consider it "has text"
-    MIN_CHARS_PER_PAGE = settings.knowledge.detection_min_chars_per_page
+    DEFAULT_MIN_CHARS_PER_PAGE = 50
     
     # Maximum content size for memory processing
-    MAX_MEMORY_SIZE = settings.knowledge.max_memory_processing_size
+    DEFAULT_MAX_MEMORY_SIZE = 100 * 1024 * 1024  # 100MB
     
-    def __init__(self):
+    def __init__(self, knowledge_settings: Optional[Any] = None):
         """Initialize detector."""
         self._fitz = None
+        ks = knowledge_settings or {}
+        self.large_file_threshold = getattr(
+            ks, "large_file_threshold", self.DEFAULT_LARGE_FILE_THRESHOLD
+        )
+        self.sample_pages = getattr(ks, "detection_sample_pages", self.DEFAULT_SAMPLE_PAGES)
+        self.native_pdf_threshold = getattr(
+            ks, "detection_native_pdf_threshold", self.DEFAULT_NATIVE_PDF_THRESHOLD
+        )
+        self.scanned_pdf_threshold = getattr(
+            ks, "detection_scanned_pdf_threshold", self.DEFAULT_SCANNED_PDF_THRESHOLD
+        )
+        self.min_chars_per_page = getattr(
+            ks, "detection_min_chars_per_page", self.DEFAULT_MIN_CHARS_PER_PAGE
+        )
+        self.max_memory_size = getattr(ks, "max_memory_processing_size", self.DEFAULT_MAX_MEMORY_SIZE)
     
     def _get_fitz(self):
         """Lazy load PyMuPDF."""
         if self._fitz is None:
             try:
-                import fitz
+                import pymupdf as fitz
                 self._fitz = fitz
             except ImportError:
-                raise ImportError(
-                    "PyMuPDF (fitz) is required for document type detection. "
-                    "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
-                )
+                try:
+                    import fitz  # type: ignore
+                    self._fitz = fitz
+                except ImportError as exc:
+                    raise ImportError(
+                        "PyMuPDF is required for document type detection. "
+                        "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
+                    ) from exc
         return self._fitz
     
     async def detect(
@@ -126,13 +144,13 @@ class DocumentTypeDetector:
         file_size = self._resolve_file_size(content)
         
         # FIX: Check content size for memory-based processing
-        if isinstance(content, bytes) and len(content) > self.MAX_MEMORY_SIZE:
+        if isinstance(content, bytes) and len(content) > self.max_memory_size:
             raise ValueError(
                 f"Content too large for memory processing ({len(content)} bytes). "
-                f"Maximum allowed: {self.MAX_MEMORY_SIZE} bytes. Use file path instead."
+                f"Maximum allowed: {self.max_memory_size} bytes. Use file path instead."
             )
         
-        is_large = file_size > self.LARGE_FILE_THRESHOLD
+        is_large = file_size > self.large_file_threshold
         
         # Normalize filename
         name = (filename or "").strip().lower()
@@ -226,7 +244,7 @@ class DocumentTypeDetector:
                 doc = fitz.open(stream=content, filetype="pdf")
             
             total_pages = len(doc)
-            pages_to_check = min(self.SAMPLE_PAGES, total_pages)
+            pages_to_check = min(self.sample_pages, total_pages)
             
             pages_with_text = 0
             pages_with_images = 0
@@ -243,7 +261,7 @@ class DocumentTypeDetector:
                 char_count = len(text)
                 total_chars += char_count
                 
-                if char_count >= self.MIN_CHARS_PER_PAGE:
+                if char_count >= self.min_chars_per_page:
                     pages_with_text += 1
                 
                 # Check for images
@@ -256,11 +274,11 @@ class DocumentTypeDetector:
             has_images = pages_with_images > 0
             
             # Determine type and mode
-            if text_coverage >= self.NATIVE_PDF_THRESHOLD:
+            if text_coverage >= self.native_pdf_threshold:
                 doc_type = DocumentType.NATIVE_PDF
                 mode = ProcessingMode.MULTIMODAL if has_images else ProcessingMode.TEXT_ONLY
                 confidence = 0.9
-            elif text_coverage <= self.SCANNED_PDF_THRESHOLD:
+            elif text_coverage <= self.scanned_pdf_threshold:
                 doc_type = DocumentType.SCANNED_PDF
                 mode = ProcessingMode.SCANNED
                 confidence = 0.9

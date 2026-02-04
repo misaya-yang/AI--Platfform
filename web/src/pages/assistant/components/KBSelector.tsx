@@ -67,7 +67,7 @@ export function KBSelector({
                 {dataset.is_multimodal && (
                   <Badge className="bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-300 border-violet-200 dark:border-violet-800/50 text-[9px] px-1.5 py-0 h-4 gap-0.5 shrink-0">
                     <ImageIcon className="h-2.5 w-2.5" />
-                    多模态
+                    {t("assistant.multimodal")}
                   </Badge>
                 )}
               </div>

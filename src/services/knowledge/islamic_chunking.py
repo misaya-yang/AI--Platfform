@@ -23,6 +23,7 @@ from .chunking import (
     RecursiveChunker,
     HeadingChunker,
 )
+from .section_extractor import SectionExtractor, get_section_aware_citation
 
 
 class IslamicSourceType(str, Enum):
@@ -48,7 +49,12 @@ QURAN_PATTERNS = [
     # Arabic: سورة البقرة آية ٢٥٥
     re.compile(r'سورة\s+[\u0600-\u06ff\s]+[،,]?\s*(?:آية|الآية)\s*[\d٠-٩]+'),
     re.compile(r'﴿[^﴾]+﴾'),  # Quranic brackets ﴿...﴾
+    # Tanzil line format: 2|255|text
+    re.compile(r'^\s*\d{1,3}\|\d{1,3}\|', re.MULTILINE),
 ]
+
+# Tanzil format: sura|ayah|text (one verse per line)
+TANZIL_LINE_PATTERN = re.compile(r'^\s*(\d{1,3})\|(\d{1,3})\|(.+)$')
 
 # Hadith markers
 HADITH_PATTERNS = [
@@ -177,7 +183,12 @@ class IslamicTextChunker(BaseChunker):
     2. Apply type-specific boundary detection
     3. Group content units into chunks respecting size limits
     4. Fallback to RecursiveChunker for unrecognized sections
+    5. (Optional) Apply strict section traceability for Imam-type datasets
     """
+
+    def __init__(self, config: ChunkingConfig):
+        super().__init__(config)
+        self.section_extractor = SectionExtractor() if config.strict_section_traceability else None
 
     def chunk(self, text: str) -> List[Chunk]:
         if not text:
@@ -201,6 +212,59 @@ class IslamicTextChunker(BaseChunker):
         for c in chunks:
             c.metadata["islamic_source_type"] = source_type.value
 
+        # Apply strict section traceability if enabled
+        if self.config.strict_section_traceability:
+            chunks = self._apply_section_traceability(text, chunks)
+
+        return chunks
+
+    def _apply_section_traceability(self, text: str, chunks: List[Chunk]) -> List[Chunk]:
+        """
+        Apply strict section traceability to all chunks.
+        
+        Ensures every chunk has:
+        - section_title: The section/chapter heading
+        - citation_text: Formatted citation including section
+        """
+        if not self.section_extractor:
+            return chunks
+
+        # Get section metadata for all chunks
+        section_metadata_list = self.section_extractor.assign_section_to_chunks(text, chunks)
+
+        # Apply section metadata to chunks
+        for i, (chunk, section_metadata) in enumerate(zip(chunks, section_metadata_list)):
+            if not section_metadata.get('section_title'):
+                # Force section title if missing
+                forced = self.section_extractor.force_section_title(
+                    [chunk],
+                    document_title=chunk.metadata.get('source_document'),
+                    default_section="Main Content"
+                )
+                if forced:
+                    section_metadata.update(forced[0])
+
+            # Update chunk metadata with section info
+            chunk.metadata.update(section_metadata)
+
+            # Build section-aware citation
+            doc_name = chunk.metadata.get('source_document') or chunk.metadata.get('document_title')
+            citation = get_section_aware_citation(
+                chunk.metadata,
+                document_name=doc_name,
+                position=chunk.metadata.get('paragraph_index') or i
+            )
+            
+            # Only set citation_text if not already present from Islamic metadata
+            if not chunk.metadata.get('citation_text'):
+                chunk.metadata['citation_text'] = citation
+            elif section_metadata.get('section_title'):
+                # Append section to existing citation
+                existing = chunk.metadata['citation_text']
+                section = section_metadata['section_title']
+                if section not in existing:
+                    chunk.metadata['citation_text'] = f"{existing} — Section: {section}"
+
         return chunks
 
     # ------------------------------------------------------------------
@@ -213,6 +277,15 @@ class IslamicTextChunker(BaseChunker):
         Splits at Surah boundaries (Bismillah) and groups consecutive verses
         to stay within chunk_size. Individual verses are never split.
         """
+        from .chunking import get_token_counter
+        
+        # Prefer Tanzil line format if detected (sura|ayah|text)
+        tanzil_verses, total_lines = self._parse_tanzil_lines(text)
+        if tanzil_verses and total_lines > 0:
+            ratio = len(tanzil_verses) / max(total_lines, 1)
+            if ratio >= 0.7:
+                return self._chunk_quran_tanzil_lines(tanzil_verses)
+
         # Split at Bismillah (new Surah marker)
         surah_sections = BISMILLAH_PATTERN.split(text)
         if len(surah_sections) <= 1:
@@ -220,24 +293,187 @@ class IslamicTextChunker(BaseChunker):
             return self._chunk_by_verse_groups(text)
 
         chunks: List[Chunk] = []
-        for section in surah_sections:
-            section = section.strip()
-            if not section:
-                continue
+        
+        # Use token-based limits when enabled
+        if self.config.use_token_count:
+            token_counter = get_token_counter()
+            token_limit = self.config.token_limit
+            
+            for section in surah_sections:
+                section = section.strip()
+                if not section:
+                    continue
 
-            if len(section) <= self.config.chunk_size:
-                chunks.append(self._create_chunk(
-                    section, len(chunks),
-                    {"islamic_source_type": "quran", "chunk_strategy": "surah_section"}
-                ))
-            else:
-                # Section too large - split by verse groups within it
-                sub_chunks = self._chunk_by_verse_groups(section)
-                for sc in sub_chunks:
-                    sc.index = len(chunks)
-                    chunks.append(sc)
+                section_tokens = token_counter.count_tokens(section)
+                if section_tokens <= token_limit:
+                    chunks.append(self._create_chunk(
+                        section, len(chunks),
+                        {"islamic_source_type": "quran", "chunk_strategy": "surah_section"}
+                    ))
+                else:
+                    # Section too large - split by verse groups within it
+                    sub_chunks = self._chunk_by_verse_groups(section)
+                    for sc in sub_chunks:
+                        sc.index = len(chunks)
+                        chunks.append(sc)
+        else:
+            # Character-based chunking (fallback)
+            for section in surah_sections:
+                section = section.strip()
+                if not section:
+                    continue
+
+                if len(section) <= self.config.chunk_size:
+                    chunks.append(self._create_chunk(
+                        section, len(chunks),
+                        {"islamic_source_type": "quran", "chunk_strategy": "surah_section"}
+                    ))
+                else:
+                    # Section too large - split by verse groups within it
+                    sub_chunks = self._chunk_by_verse_groups(section)
+                    for sc in sub_chunks:
+                        sc.index = len(chunks)
+                        chunks.append(sc)
 
         return chunks or RecursiveChunker(self.config).chunk(text)
+
+    def _parse_tanzil_lines(self, text: str) -> Tuple[List[Tuple[int, int, str]], int]:
+        """Parse Tanzil line format into (sura, ayah, text)."""
+        verses: List[Tuple[int, int, str]] = []
+        lines = [line for line in text.splitlines() if line.strip()]
+        for line in lines:
+            match = TANZIL_LINE_PATTERN.match(line.strip())
+            if not match:
+                continue
+            sura = int(match.group(1))
+            ayah = int(match.group(2))
+            verse_text = match.group(3).strip()
+            if verse_text:
+                verses.append((sura, ayah, verse_text))
+        return verses, len(lines)
+
+    def _chunk_quran_tanzil_lines(
+        self, verses: List[Tuple[int, int, str]]
+    ) -> List[Chunk]:
+        """Create verse-grouped chunks from Tanzil line format.
+
+        Preserves verse integrity while grouping consecutive verses to
+        honor token/char limits (better chunk size stability).
+        """
+        from .chunking import get_token_counter
+
+        chunks: List[Chunk] = []
+        token_counter = get_token_counter() if self.config.use_token_count else None
+        max_limit = self.config.token_limit if self.config.use_token_count else self.config.chunk_size
+
+        current_sura: Optional[int] = None
+        current_start_ayah: Optional[int] = None
+        current_end_ayah: Optional[int] = None
+        current_texts: List[str] = []
+        current_size = 0
+
+        def flush_group() -> None:
+            nonlocal current_sura, current_start_ayah, current_end_ayah, current_texts, current_size
+            if not current_texts or current_sura is None or current_start_ayah is None:
+                return
+
+            text = "\n".join(current_texts).strip()
+            if not text:
+                current_texts = []
+                current_size = 0
+                current_sura = None
+                current_start_ayah = None
+                current_end_ayah = None
+                return
+
+            ayah_start = current_start_ayah
+            ayah_end = current_end_ayah if current_end_ayah is not None else ayah_start
+            citation = (
+                f"Quran {current_sura}:{ayah_start}"
+                if ayah_end == ayah_start
+                else f"Quran {current_sura}:{ayah_start}-{ayah_end}"
+            )
+
+            source_ref = {
+                "sura": current_sura,
+                "ayah_start": ayah_start,
+                "ayah_end": ayah_end,
+                "source": "tanzil",
+                "text_version": "1.0",
+                "download": "https://tanzil.net/pub/download/v1.0/",
+            }
+            if ayah_end == ayah_start:
+                source_ref["ayah"] = ayah_start
+
+            metadata = {
+                "source_type": "quran",
+                "source_reference": source_ref,
+                "citation_text": citation,
+                "section_header": f"Surah {current_sura}",
+                "language": "ar",
+            }
+
+            chunk = self._create_chunk(text, len(chunks), metadata)
+            chunks.append(chunk)
+            current_texts = []
+            current_size = 0
+            current_sura = None
+            current_start_ayah = None
+            current_end_ayah = None
+
+        for sura, ayah, verse_text in verses:
+            verse_text = verse_text.strip()
+            if not verse_text:
+                continue
+
+            # Reset group on sura change
+            if current_sura is not None and sura != current_sura:
+                flush_group()
+
+            if current_sura is None:
+                current_sura = sura
+                current_start_ayah = ayah
+                current_end_ayah = ayah
+
+            verse_size = (
+                token_counter.count_tokens(verse_text)
+                if token_counter
+                else len(verse_text)
+            )
+
+            # If single verse exceeds limit, emit it as a standalone chunk
+            if max_limit and verse_size > max_limit:
+                flush_group()
+                current_sura = sura
+                current_start_ayah = ayah
+                current_end_ayah = ayah
+                current_texts = [verse_text]
+                current_size = verse_size
+                flush_group()
+                current_sura = None
+                current_start_ayah = None
+                current_end_ayah = None
+                continue
+
+            # If adding this verse exceeds limit, flush current group
+            if current_texts and max_limit and (current_size + verse_size > max_limit):
+                flush_group()
+                current_sura = sura
+                current_start_ayah = ayah
+                current_end_ayah = ayah
+
+            # Start new group if needed
+            if current_sura is None:
+                current_sura = sura
+                current_start_ayah = ayah
+                current_end_ayah = ayah
+
+            current_texts.append(verse_text)
+            current_end_ayah = ayah
+            current_size += verse_size
+
+        flush_group()
+        return chunks
 
     def _chunk_by_verse_groups(self, text: str) -> List[Chunk]:
         """Group Quran verses into chunks respecting size limits.
@@ -416,51 +652,109 @@ class IslamicTextChunker(BaseChunker):
 
         Small parts are merged with neighbors; large parts are sub-chunked.
         """
+        from .chunking import get_token_counter
+        
         chunks: List[Chunk] = []
         current_text = ""
-        chunk_size = self.config.chunk_size
+        
+        # Use token-based limits when enabled
+        if self.config.use_token_count:
+            token_counter = get_token_counter()
+            token_limit = self.config.token_limit
+            current_tokens = 0
 
-        for part in parts:
-            if not part:
-                continue
+            for part in parts:
+                if not part:
+                    continue
 
-            # If adding this part would exceed size, flush current buffer
-            if current_text and len(current_text) + len(part) + 2 > chunk_size:
-                if current_text.strip():
-                    chunks.append(self._create_chunk(
-                        current_text.strip(),
-                        len(chunks),
-                        {"islamic_source_type": source_type, "chunk_strategy": strategy},
-                    ))
-                current_text = ""
+                part_tokens = token_counter.count_tokens(part)
 
-            # If single part exceeds size, sub-chunk it
-            if len(part) > chunk_size:
-                # Flush any accumulated text first
-                if current_text.strip():
-                    chunks.append(self._create_chunk(
-                        current_text.strip(),
-                        len(chunks),
-                        {"islamic_source_type": source_type, "chunk_strategy": strategy},
-                    ))
+                # If adding this part would exceed token limit, flush current buffer
+                if current_text and current_tokens + part_tokens > token_limit:
+                    if current_text.strip():
+                        chunks.append(self._create_chunk(
+                            current_text.strip(),
+                            len(chunks),
+                            {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        ))
+                    current_text = ""
+                    current_tokens = 0
+
+                # If single part exceeds token limit, sub-chunk it
+                if part_tokens > token_limit:
+                    # Flush any accumulated text first
+                    if current_text.strip():
+                        chunks.append(self._create_chunk(
+                            current_text.strip(),
+                            len(chunks),
+                            {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        ))
+                        current_text = ""
+                        current_tokens = 0
+
+                    # Sub-chunk the oversized part with RecursiveChunker (which supports token_limit)
+                    sub_chunks = RecursiveChunker(self.config).chunk(part)
+                    for sc in sub_chunks:
+                        sc.index = len(chunks)
+                        sc.metadata["islamic_source_type"] = source_type
+                        sc.metadata["chunk_strategy"] = f"{strategy}_sub"
+                        chunks.append(sc)
+                else:
+                    current_text = f"{current_text}\n\n{part}" if current_text else part
+                    current_tokens += part_tokens
+
+            # Flush remaining
+            if current_text.strip():
+                chunks.append(self._create_chunk(
+                    current_text.strip(),
+                    len(chunks),
+                    {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                ))
+        else:
+            # Character-based chunking (fallback)
+            chunk_size = self.config.chunk_size
+
+            for part in parts:
+                if not part:
+                    continue
+
+                # If adding this part would exceed size, flush current buffer
+                if current_text and len(current_text) + len(part) + 2 > chunk_size:
+                    if current_text.strip():
+                        chunks.append(self._create_chunk(
+                            current_text.strip(),
+                            len(chunks),
+                            {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        ))
                     current_text = ""
 
-                # Sub-chunk the oversized part with RecursiveChunker
-                sub_chunks = RecursiveChunker(self.config).chunk(part)
-                for sc in sub_chunks:
-                    sc.index = len(chunks)
-                    sc.metadata["islamic_source_type"] = source_type
-                    sc.metadata["chunk_strategy"] = f"{strategy}_sub"
-                    chunks.append(sc)
-            else:
-                current_text = f"{current_text}\n\n{part}" if current_text else part
+                # If single part exceeds size, sub-chunk it
+                if len(part) > chunk_size:
+                    # Flush any accumulated text first
+                    if current_text.strip():
+                        chunks.append(self._create_chunk(
+                            current_text.strip(),
+                            len(chunks),
+                            {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        ))
+                        current_text = ""
 
-        # Flush remaining
-        if current_text.strip():
-            chunks.append(self._create_chunk(
-                current_text.strip(),
-                len(chunks),
-                {"islamic_source_type": source_type, "chunk_strategy": strategy},
-            ))
+                    # Sub-chunk the oversized part with RecursiveChunker
+                    sub_chunks = RecursiveChunker(self.config).chunk(part)
+                    for sc in sub_chunks:
+                        sc.index = len(chunks)
+                        sc.metadata["islamic_source_type"] = source_type
+                        sc.metadata["chunk_strategy"] = f"{strategy}_sub"
+                        chunks.append(sc)
+                else:
+                    current_text = f"{current_text}\n\n{part}" if current_text else part
+
+            # Flush remaining
+            if current_text.strip():
+                chunks.append(self._create_chunk(
+                    current_text.strip(),
+                    len(chunks),
+                    {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                ))
 
         return chunks or RecursiveChunker(self.config).chunk("\n\n".join(parts))

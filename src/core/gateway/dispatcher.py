@@ -12,6 +12,7 @@ from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
 from ..auth.rbac import RBAC
 from ..exceptions import ServiceNotFoundError, RateLimitExceededError
+from ..utils import estimate_tokens
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
 from .validator import RequestValidator
@@ -185,13 +186,6 @@ class GatewayDispatcher:
                         stats["total_tokens"] = in_toks + out_toks
 
                 # Estimate tokens if missing
-                def estimate_tokens(text: str) -> int:
-                    if not text:
-                        return 0
-                    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-                    non_cjk_count = max(len(text) - cjk_count, 0)
-                    return max(1, cjk_count // 2 + non_cjk_count // 4)
-
                 if "input_tokens" not in stats or "output_tokens" not in stats:
                     user_text = self._inputs_to_text(request)
                     stats.setdefault("input_tokens", estimate_tokens(user_text))
@@ -346,8 +340,9 @@ class GatewayDispatcher:
                                 usage_stats = {}
                             usage_stats.update(chunk_usage)
 
-                except Exception:
-                    pass
+                except (AttributeError, TypeError, KeyError) as e:
+                    # 只捕获已知的元数据处理错误，避免隐藏严重问题
+                    logger.debug(f"Error processing chunk metadata in stream: {e}", exc_info=True)
                 # Ensure the gateway "stream_end" event is the only final marker
                 # so clients don't stop before stats/tool_calls are emitted.
                 if event_type == StreamEventType.FINAL and getattr(chunk, "is_final", False):
@@ -376,14 +371,6 @@ class GatewayDispatcher:
             # Estimate tokens if not provided by upstream
             if "input_tokens" not in stats or "output_tokens" not in stats:
                 user_text = self._inputs_to_text(request)
-                # Simple estimation: ~4 chars per token for English, ~2 for CJK
-                def estimate_tokens(text: str) -> int:
-                    if not text:
-                        return 0
-                    # Count CJK characters
-                    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-                    non_cjk_count = max(len(text) - cjk_count, 0)
-                    return max(1, cjk_count // 2 + non_cjk_count // 4)
 
                 if "input_tokens" not in stats:
                     stats["input_tokens"] = estimate_tokens(user_text)
@@ -427,14 +414,6 @@ class GatewayDispatcher:
                 # Estimate tokens if not provided by upstream
                 if "input_tokens" not in final_stats or "output_tokens" not in final_stats:
                     user_text = self._inputs_to_text(request)
-                    # Simple estimation: ~4 chars per token for English, ~2 for CJK
-                    def estimate_tokens(text: str) -> int:
-                        if not text:
-                            return 0
-                        # Count CJK characters
-                        cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-                        non_cjk_count = max(len(text) - cjk_count, 0)
-                        return max(1, cjk_count // 2 + non_cjk_count // 4)
 
                     if "input_tokens" not in final_stats:
                         final_stats["input_tokens"] = estimate_tokens(user_text)

@@ -85,6 +85,7 @@ from .prompts.system_prompt_v2 import (
     inject_document_context,
     inject_user_preferences,
 )
+from .domain_policies import DomainPolicyResolver, ImamPolicy
 from .scenario_aware_retriever import (
     ScenarioAwareRetriever,
     create_scenario_aware_retriever,
@@ -548,6 +549,9 @@ Please use this web search context to inform your response when relevant."""
         # This enables "Manus-like" expert analysis capabilities
         self.scenario_analyzer = create_scenario_analyzer()
 
+        # Domain policies (e.g., Imam assistant)
+        self.domain_policy_resolver = DomainPolicyResolver()
+
     def validate_generated_content(
         self,
         content: str,
@@ -564,6 +568,67 @@ Please use this web search context to inform your response when relevant."""
             ValidationResult with issues if any
         """
         return self.quality_guardrails.validate(content, doc_type)
+
+    async def _resolve_domain_policy(
+        self,
+        user: UserContext,
+        dataset_ids: List[str],
+    ) -> tuple[Optional[ImamPolicy], List[Dict[str, Any]]]:
+        """Resolve domain policy based on dataset metadata."""
+        if not dataset_ids or not self.kb_service:
+            return None, []
+
+        async def _load_dataset(ds_id: str) -> Optional[Dict[str, Any]]:
+            try:
+                return await self.kb_service.require_dataset_access(
+                    user, ds_id, required="viewer"
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to load dataset {ds_id} for policy resolution: {exc}")
+                return None
+
+        results = await asyncio.gather(
+            *[_load_dataset(ds_id) for ds_id in dataset_ids],
+            return_exceptions=True,
+        )
+        datasets = [r for r in results if isinstance(r, dict)]
+        policy = self.domain_policy_resolver.resolve(datasets)
+        return policy, datasets
+
+    async def _repair_with_policy(
+        self,
+        policy: ImamPolicy,
+        user_message: str,
+        context_text: str,
+        answer: str,
+        model_id: str,
+        temperature: float,
+        max_tokens: Optional[int],
+        issues: List[str],
+    ) -> str:
+        """Attempt a single repair pass to satisfy policy constraints."""
+        repair_instructions = policy.build_repair_instructions(issues)
+        system_prompt = (
+            "You are a compliance-focused editor. "
+            "Revise the answer to meet the rules without adding external knowledge."
+        )
+        user_prompt = (
+            f"Context:\n{context_text}\n\n"
+            f"Question:\n{user_message}\n\n"
+            f"Draft Answer:\n{answer}\n\n"
+            f"Repair Instructions:\n{repair_instructions}\n"
+        )
+        messages = [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt),
+        ]
+        repaired, _ = await self.model_registry.chat(
+            model_id=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return repaired
 
     def validate_tool_call(
         self,
@@ -706,6 +771,65 @@ Please use this web search context to inform your response when relevant."""
 
         # ========== LATENCY DEBUG: Track timing for each step ==========
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
+
+        domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
+        if domain_policy:
+            if persist_messages and self.session_manager:
+                try:
+                    await self.session_manager.add_message(
+                        session_id=session_id,
+                        role="user",
+                        content=message,
+                        metadata={"timestamp": datetime.utcnow().isoformat()},
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to persist user message (policy branch): {exc}")
+
+            # For strict-domain assistants, use buffered generation to enforce policies.
+            result = await self.chat(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                history=history,
+            )
+            if persist_messages and self.session_manager:
+                try:
+                    await self.session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=result.get("content", ""),
+                        metadata={
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "model_id": config.model_id,
+                            "contexts": result.get("contexts"),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to persist assistant message (policy branch): {exc}")
+
+            for ctx in result.get("contexts", []):
+                yield AssistantStreamEvent(
+                    event_type="context_retrieved",
+                    data=ctx,
+                )
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data=result.get("content", ""),
+            )
+            yield AssistantStreamEvent(
+                event_type="usage",
+                data=result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
+            )
+            yield AssistantStreamEvent(
+                event_type="done",
+                data={
+                    "session_id": session_id,
+                    "duration_ms": result.get("duration_ms", 0),
+                    "total_length": len(result.get("content", "")),
+                },
+            )
+            return
 
         # ========== Agent Loop Mode (Experimental) ==========
         # If use_agent_loop is enabled, delegate to the unified 8-step AgentLoop
@@ -2216,6 +2340,18 @@ Please use this web search context to inform your response when relevant."""
         start_time = time.time()
         history = history or []
 
+        domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
+        if domain_policy:
+            decision = domain_policy.precheck_query(message)
+            if decision and decision.action == "decline":
+                return {
+                    "content": decision.response or "",
+                    "usage": {},
+                    "contexts": [],
+                    "duration_ms": (time.time() - start_time) * 1000,
+                    "model_id": config.model_id,
+                }
+
         # Retrieve KB context
         retrieved_contexts: List[RetrievedContext] = []
         if config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service:
@@ -2228,6 +2364,21 @@ Please use this web search context to inform your response when relevant."""
                 include_images=config.kb_include_images,
             )
 
+        if domain_policy:
+            ctx_payload = [
+                {"dataset_id": ctx.dataset_id, "dataset_name": ctx.dataset_name, "chunks": ctx.chunks}
+                for ctx in retrieved_contexts
+            ]
+            decision = domain_policy.precheck_context(message, ctx_payload)
+            if decision and decision.action == "decline":
+                return {
+                    "content": decision.response or "",
+                    "usage": {},
+                    "contexts": ctx_payload,
+                    "duration_ms": (time.time() - start_time) * 1000,
+                    "model_id": config.model_id,
+                }
+
         # Build messages
         messages = self._build_messages(
             message=message,
@@ -2235,6 +2386,9 @@ Please use this web search context to inform your response when relevant."""
             config=config,
             retrieved_contexts=retrieved_contexts,
             session_id=session_id,
+            domain_rules=domain_policy.scenario_rules() if domain_policy else "",
+            include_citations=bool(domain_policy),
+            authority_sort=False,
         )
 
         # Get response
@@ -2244,6 +2398,27 @@ Please use this web search context to inform your response when relevant."""
             temperature=config.temperature,
             max_tokens=config.max_tokens,
         )
+
+        if domain_policy:
+            issues = domain_policy.validate_answer(content)
+            if issues:
+                context_text = self._format_context(
+                    retrieved_contexts,
+                    include_citations=True,
+                    authority_sort=False,
+                )
+                repaired = await self._repair_with_policy(
+                    policy=domain_policy,
+                    user_message=message,
+                    context_text=context_text,
+                    answer=content,
+                    model_id=config.model_id,
+                    temperature=min(config.temperature, 0.3),
+                    max_tokens=config.max_tokens,
+                    issues=issues,
+                )
+                if not domain_policy.validate_answer(repaired):
+                    content = repaired
 
         elapsed_ms = (time.time() - start_time) * 1000
 
@@ -2348,7 +2523,12 @@ Please use this web search context to inform your response when relevant."""
 
                 # Convert results to serializable format
                 chunks = []
+                scores: List[float] = []
                 for r in results:
+                    try:
+                        scores.append(float(r.score))
+                    except (TypeError, ValueError):
+                        pass
                     chunk = {
                         "content": r.text,
                         "score": r.score,
@@ -2356,6 +2536,9 @@ Please use this web search context to inform your response when relevant."""
                         "segment_id": r.segment_id,
                         "document_id": r.document_id,
                     }
+                    citation_text = (r.metadata or {}).get("citation_text")
+                    if citation_text:
+                        chunk["citation_text"] = citation_text
                     source_url = (r.metadata or {}).get("source_url") or (r.metadata or {}).get("source_uri")
                     if source_url:
                         chunk["source_url"] = source_url
@@ -2364,12 +2547,16 @@ Please use this web search context to inform your response when relevant."""
                     chunks.append(chunk)
 
                 if chunks:
+                    avg_score = sum(scores) / len(scores) if scores else 0.0
+                    top_score = max(scores) if scores else 0.0
                     return RetrievedContext(
                         dataset_id=dataset_id,
                         dataset_name=meta.get("dataset_name", dataset_id),
                         chunks=chunks,
                         query=query,
                         took_ms=took_ms,
+                        avg_score=avg_score,
+                        top_score=top_score,
                     )
                 return None
 
@@ -2922,6 +3109,9 @@ Please use this web search context to inform your response when relevant."""
         session_id: Optional[str] = None,
         user_preferences: Optional[str] = None,
         scenario_detection: Optional[ScenarioDetectionResult] = None,
+        domain_rules: str = "",
+        include_citations: bool = False,
+        authority_sort: bool = False,
     ) -> List[ChatMessage]:
         """Build the message list for the model.
 
@@ -2952,6 +3142,9 @@ Please use this web search context to inform your response when relevant."""
                 model_supports_vision=model_supports_vision,
                 session_id=session_id,
                 user_preferences=user_preferences,
+                domain_rules=domain_rules,
+                include_citations=include_citations,
+                authority_sort=authority_sort,
             )
 
         # Legacy message building (original implementation) - Now with Manus-style prompts
@@ -2961,6 +3154,8 @@ Please use this web search context to inform your response when relevant."""
         if config.system_prompt:
             # User provided custom system prompt, use it directly
             system_content = config.system_prompt
+            if domain_rules:
+                system_content = f"{system_content}\n\n{domain_rules}"
             logger.info("[SYSTEM PROMPT] Using custom system prompt from config")
         else:
             # Build Manus-style system prompt with scenario rules
@@ -2972,6 +3167,9 @@ Please use this web search context to inform your response when relevant."""
                 logger.info(f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}")
             elif scenario_detection:
                 logger.info(f"[SCENARIO SKIP] Skipping scenario injection (agent_loop={config.use_agent_loop}, confidence={scenario_detection.confidence:.2f})")
+
+            if domain_rules:
+                scenario_rules = f"{scenario_rules}\n{domain_rules}".strip()
 
             # Get dataset names for display
             dataset_names = None
@@ -2992,7 +3190,11 @@ Please use this web search context to inform your response when relevant."""
 
         # Inject KB context using new modular function
         if retrieved_contexts:
-            context_text = self._format_context(retrieved_contexts)
+            context_text = self._format_context(
+                retrieved_contexts,
+                include_citations=include_citations,
+                authority_sort=authority_sort,
+            )
             logger.info(f"[KB INJECT] Injecting context from {len(retrieved_contexts)} datasets, text length: {len(context_text)}")
             logger.debug(f"[KB INJECT] Context preview: {context_text[:500]}...")
             system_content = inject_kb_context(system_content, context_text)
@@ -3098,6 +3300,9 @@ Please use this web search context to inform your response when relevant."""
         model_supports_vision: bool = False,
         session_id: Optional[str] = None,
         user_preferences: Optional[str] = None,
+        domain_rules: str = "",
+        include_citations: bool = False,
+        authority_sort: bool = False,
     ) -> List[ChatMessage]:
         """Build messages using Context Engine for KV-Cache optimization.
 
@@ -3131,7 +3336,11 @@ Please use this web search context to inform your response when relevant."""
         # Build current context (KB + web search results)
         current_context_parts: List[str] = []
         if retrieved_contexts:
-            context_text = self._format_context(retrieved_contexts)
+            context_text = self._format_context(
+                retrieved_contexts,
+                include_citations=include_citations,
+                authority_sort=authority_sort,
+            )
             current_context_parts.append(self.CONTEXT_TEMPLATE.format(context=context_text))
             logger.info(f"[CONTEXT ENGINE] KB context: {len(context_text)} chars")
 
@@ -3160,8 +3369,11 @@ Please use this web search context to inform your response when relevant."""
             effective_system_prompt = get_ttft_optimized_prompt(
                 user_role="user",
                 available_datasets=config.kb_dataset_ids,
+                scenario_rules=domain_rules,
             )
             logger.info("[CONTEXT ENGINE] Built TTFT-optimized system prompt (no timestamps)")
+        elif domain_rules:
+            effective_system_prompt = f"{effective_system_prompt}\n\n{domain_rules}"
 
         context_structure = ContextStructure(
             system_prompt=effective_system_prompt,
@@ -3610,6 +3822,8 @@ Please use this web search context to inform your response when relevant."""
         self,
         contexts: List[RetrievedContext],
         max_content_length: int = 400,  # TTFT optimization: truncate long chunks
+        include_citations: bool = False,
+        authority_sort: bool = False,
     ) -> str:
         """
         Format retrieved contexts for injection into the prompt.
@@ -3624,19 +3838,43 @@ Please use this web search context to inform your response when relevant."""
         parts = []
         for ctx in contexts:
             parts.append(f"### From: {ctx.dataset_name}")
-            for i, chunk in enumerate(ctx.chunks, 1):
+            chunks = list(ctx.chunks)
+            if authority_sort:
+                try:
+                    from ..knowledge.islamic_metadata import get_authority_order
+
+                    def _authority_key(ch: Dict[str, Any]) -> int:
+                        meta = ch.get("metadata") or {}
+                        source_type = (
+                            meta.get("source_type")
+                            or meta.get("islamic_source_type")
+                            or "unknown"
+                        )
+                        return get_authority_order(str(source_type))
+
+                    chunks = sorted(chunks, key=_authority_key)
+                except Exception as exc:
+                    logger.debug(f"Authority sort skipped: {exc}")
+
+            for i, chunk in enumerate(chunks, 1):
                 content = chunk["content"]
                 score = chunk.get("score", 0)
                 source = chunk.get("source_url", "")
+                citation_text = None
+                if include_citations:
+                    meta = chunk.get("metadata") or {}
+                    citation_text = meta.get("citation_text") or chunk.get("citation_text")
 
                 # TTFT optimization: truncate long content to reduce tokens
                 if len(content) > max_content_length:
                     content = content[:max_content_length] + "..."
 
+                header = f"\n[{i}] (relevance: {score:.2f})"
                 if source:
-                    parts.append(f"\n[{i}] (relevance: {score:.2f}) [Source: {source}]\n{content}")
-                else:
-                    parts.append(f"\n[{i}] (relevance: {score:.2f})\n{content}")
+                    header += f" [Source: {source}]"
+                if citation_text:
+                    header += f" [Citation: {citation_text}]"
+                parts.append(f"{header}\n{content}")
 
         return "\n".join(parts)
 

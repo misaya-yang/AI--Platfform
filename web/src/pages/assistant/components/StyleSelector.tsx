@@ -31,9 +31,8 @@ export function StyleSelector({
   onSelect,
   disabled,
 }: StyleSelectorProps) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const isZh = i18n.language?.startsWith("zh");
   const currentStyle = ASSISTANT_STYLES.find((s) => s.id === selectedStyle);
 
   const handleSelect = (styleId: string) => {
@@ -52,14 +51,14 @@ export function StyleSelector({
         >
           <Settings2 className="h-3.5 w-3.5 text-slate-500" />
           <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
-            {isZh ? currentStyle?.nameZh : currentStyle?.name}
+            {currentStyle ? t(currentStyle.nameKey) : ""}
           </span>
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-center">
-            {t("assistant.styleTitle", "自定义回复风格")}
+            {t("assistant.styleTitle")}
           </DialogTitle>
         </DialogHeader>
         <div className="grid grid-cols-1 gap-3 py-4">
@@ -68,13 +67,12 @@ export function StyleSelector({
               key={style.id}
               style={style}
               isSelected={selectedStyle === style.id}
-              isZh={isZh}
               onClick={() => handleSelect(style.id)}
             />
           ))}
         </div>
         <p className="text-xs text-center text-slate-500 dark:text-slate-400">
-          {t("assistant.styleHint", "从上面选择一个风格，定制 AI 的回复风格。")}
+          {t("assistant.styleHint")}
         </p>
       </DialogContent>
     </Dialog>
@@ -84,14 +82,13 @@ export function StyleSelector({
 function StyleCard({
   style,
   isSelected,
-  isZh,
   onClick,
 }: {
   style: AssistantStyle;
   isSelected: boolean;
-  isZh: boolean;
   onClick: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <motion.button
       whileHover={{ scale: 1.01 }}
@@ -111,10 +108,10 @@ function StyleCard({
       )}
       <div className="flex-1 pr-6">
         <div className="font-medium text-slate-800 dark:text-slate-200">
-          {isZh ? style.nameZh : style.name}
+          {t(style.nameKey)}
         </div>
         <div className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-          {isZh ? style.descriptionZh : style.description}
+          {t(style.descriptionKey)}
         </div>
       </div>
     </motion.button>

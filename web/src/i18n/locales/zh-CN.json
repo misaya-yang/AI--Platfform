@@ -44,7 +44,40 @@
       "minutesLater": "{{count}}分钟后",
       "hoursLater": "{{count}}小时后",
       "daysLater": "{{count}}天后"
-    }
+    },
+    "addAttachment": "添加附件",
+    "chart": "图表",
+    "code": "代码",
+    "collapse": "收起",
+    "configure": "配置",
+    "description": "描述",
+    "details": "详情",
+    "download": "下载",
+    "downloadImage": "下载图片",
+    "enabled": "已启用",
+    "expand": "展开",
+    "export": "导出",
+    "failed": "失败",
+    "fullscreenPreview": "全屏预览",
+    "generatedImage": "生成图片",
+    "image": "图片",
+    "imageLoadFailed": "图片加载失败",
+    "openInNewTab": "新标签页打开",
+    "output": "输出",
+    "preview": "预览",
+    "recommended": "推荐",
+    "rows": "行",
+    "run": "运行",
+    "running": "运行中",
+    "saving": "保存中...",
+    "send": "发送",
+    "table": "表格",
+    "tableFile": "表格文件",
+    "unknown": "未知"
+  },
+  "language": {
+    "zhCN": "简体中文",
+    "enUS": "英语（美国）"
   },
   "metrics": {
     "title": "监控面板",
@@ -159,7 +192,25 @@
     "profile": "个人资料",
     "changePassword": "修改密码",
     "logout": "退出登录",
-    "language": "语言"
+    "language": "语言",
+    "profileSettings": "个人设置",
+    "profileSettingsDesc": "管理个人资料和偏好设置",
+    "email": "邮箱",
+    "emailReadonly": "邮箱不可修改",
+    "displayName": "显示名称",
+    "displayNamePlaceholder": "请输入显示名称",
+    "department": "部门",
+    "departmentUnassigned": "未分配",
+    "departmentHint": "部门由管理员分配",
+    "roles": "角色",
+    "profileUpdateSuccess": "资料更新成功",
+    "profileUpdateFailed": "资料更新失败",
+    "departments": {
+      "cs": "客户成功",
+      "sales": "销售",
+      "tech": "技术",
+      "admin": "管理员"
+    }
   },
   "login": {
     "title": "账号登录",
@@ -206,8 +257,10 @@
       "title": "按用户/服务用量统计",
       "byUser": "按用户",
       "byService": "按服务",
+      "byProvider": "按厂商",
       "selectUser": "选择用户",
       "selectService": "选择服务",
+      "selectProvider": "选择厂商",
       "requests": "请求数",
       "cost": "成本",
       "avgLatency": "平均延迟",
@@ -230,7 +283,134 @@
       "delayed": "数据延迟/尚未入库",
       "empty": "暂无数据",
       "error": "数据错误"
+    },
+    "serviceEndpoints": "服务入口",
+    "filters": {
+      "title": "筛选",
+      "dataFilters": "数据筛选",
+      "timeRange": "时间范围",
+      "selectService": "选择服务",
+      "selectUser": "选择用户",
+      "selectSource": "选择来源",
+      "allServices": "全部服务",
+      "allUsers": "全部用户",
+      "allSources": "全部来源",
+      "internal": "内部",
+      "external": "外部",
+      "internalShort": "内",
+      "externalShort": "外",
+      "reset": "重置",
+      "anonymousUser": "匿名用户 {{id}}"
+    },
+    "refresh": {
+      "manual": "手动",
+      "auto": "自动",
+      "now": "立即刷新",
+      "seconds": "{{count}}秒",
+      "minutes": "{{count}}分钟",
+      "lastUpdated": "最近更新：{{time}}"
+    },
+    "fullscreen": {
+      "enter": "进入全屏",
+      "exit": "退出全屏"
+    },
+    "trend": {
+      "vsPrevious": "较上期"
+    },
+    "serviceHealth": {
+      "title": "服务健康",
+      "totalServices": "服务总数",
+      "availability": "可用率",
+      "errorRate": "错误率",
+      "errorRateLabel": "错误率",
+      "status": {
+        "healthy": "健康",
+        "degraded": "降级",
+        "down": "不可用"
+      }
+    },
+    "performance": {
+      "title": "性能监控",
+      "avg": "平均延迟"
+    },
+    "tokenUsage": {
+      "modelBreakdown": "模型分布",
+      "providerBreakdown": "厂商分布"
+    },
+    "cost": {
+      "title": "成本分析",
+      "trend": "成本趋势",
+      "serviceBreakdown": "按服务分解",
+      "today": "今日",
+      "week": "本周",
+      "month": "本月"
+    },
+    "security": {
+      "title": "安全事件",
+      "total": "总计",
+      "authFailed": "鉴权失败",
+      "authFailedCount": "{{count}} 次鉴权失败",
+      "rateLimited": "限流触发",
+      "rateLimitedCount": "{{count}} 次限流",
+      "rateLimitedShort": "限流",
+      "topUsers": "高频用户",
+      "range": {
+        "today": "今日",
+        "week": "本周"
+      }
+    },
+    "userQuota": {
+      "title": "用户配额",
+      "sort": {
+        "usage": "按用量",
+        "cost": "按成本"
+      },
+      "status": {
+        "normal": "正常",
+        "warning": "预警",
+        "exceeded": "超额"
+      },
+      "alert": {
+        "warning": "接近上限",
+        "exceeded": "已超额",
+        "hint": "升级可提升配额",
+        "upgradeAction": "升级方案",
+        "upgradeHint": "联系管理员调整配额"
+      }
+    },
+    "requestTrace": {
+      "title": "请求追踪",
+      "loading": "加载追踪中...",
+      "searchPlaceholder": "搜索请求 ID...",
+      "notFound": "未找到请求",
+      "emptyTitle": "暂无追踪",
+      "emptyDesc": "请求处理后将在此显示追踪数据",
+      "demoHint": "展示示例数据",
+      "totalDuration": "总耗时",
+      "status": {
+        "success": "成功",
+        "error": "失败"
+      },
+      "spans": {
+        "auth": "鉴权校验",
+        "rateLimit": "限流检查",
+        "transform": "请求转换",
+        "upstream": "上游请求",
+        "response": "响应处理",
+        "logging": "日志记录"
+      }
     }
+  },
+  "errors": {
+    "rateLimitTitle": "触发限流",
+    "rateLimitDesc": "请求过于频繁，请稍后再试。"
+  },
+  "health": {
+    "healthy": "健康",
+    "unhealthy": "异常",
+    "timeout": "超时",
+    "error": "错误",
+    "unknown": "未知"
   },
   "users": {
     "title": "用户管理",
@@ -247,6 +427,53 @@
       "status": "状态",
       "lastLogin": "最后登录",
       "createdAt": "创建时间"
+    },
+    "status": {
+      "active": "启用",
+      "disabled": "禁用"
+    },
+    "permissions": {
+      "categories": {
+        "console": "控制台",
+        "conversation": "对话",
+        "knowledge": "知识库",
+        "user": "用户",
+        "role": "角色",
+        "admin": "管理"
+      }
+    },
+    "edit": {
+      "loadFailed": "加载用户失败",
+      "saved": "用户已更新",
+      "saveFailed": "保存失败",
+      "notFound": "未找到用户",
+      "backToList": "返回列表",
+      "basicInfo": {
+        "title": "基础信息",
+        "desc": "更新用户资料与账户设置"
+      },
+      "displayNamePlaceholder": "请输入显示名称",
+      "departmentPlaceholder": "选择部门",
+      "roles": {
+        "title": "角色分配",
+        "desc": "选择用户角色，角色决定基础权限",
+        "system": "系统",
+        "noDescription": "无描述",
+        "permissionCount": "{{count}} 个权限",
+        "noAccess": "无权限查看角色列表"
+      },
+      "extraPermissions": {
+        "title": "额外权限",
+        "desc": "直接分配给用户的独立权限（角色权限之外）",
+        "tipLabel": "提示",
+        "tipText": "角色已包含的权限显示为灰色。额外权限用于授予角色之外的特殊权限。",
+        "categoryCount": "{{count}} 个权限",
+        "fromRole": "已通过角色获得此权限",
+        "roleBadge": "角色",
+        "noAccess": "无权限查看权限列表"
+      },
+      "unsavedChanges": "您有未保存的更改",
+      "saveChanges": "保存更改"
     },
     "actions": {
       "edit": "编辑",
@@ -376,6 +603,9 @@
       },
       "scheduler": {
         "title": "调度器状态",
+        "active": "活跃",
+        "loading": "加载中...",
+        "tasks": "任务",
         "running": "运行中",
         "stopped": "已停止",
         "activeTasks": "活跃任务",
@@ -704,7 +934,16 @@
       "islamicAuthoritySortHint": "按伊斯兰权威等级排列结果：古兰经 > 圣训 > 经注 > 教法学 > 其他。",
       "islamicContextualPrefix": "上下文前缀",
       "islamicContextualPrefixHint": "在嵌入前为文本块添加结构化上下文前缀（如「此段落来自白格勒章」）。需要重新索引，即将推出。",
-      "islamicMaxQueries": "最大扩展查询数"
+      "islamicMaxQueries": "最大扩展查询数",
+      "embeddingGemini001": "Google Gemini Embedding 001",
+      "embeddingDashscopeV4": "DashScope Text Embedding v4",
+      "embeddingDashscopeV3": "DashScope Text Embedding v3",
+      "embeddingDashscopeV2": "DashScope Text Embedding v2",
+      "embeddingBgeM3": "SiliconFlow BGE-M3 (8192维)",
+      "embeddingBgeM3Pro": "SiliconFlow BGE-M3 Pro (8192维)",
+      "embeddingBgeLargeZh15": "SiliconFlow BGE-Large-ZH v1.5 (1024维)",
+      "embeddingBgeLargeEn15": "SiliconFlow BGE-Large-EN v1.5 (1024维)",
+      "embeddingBceBase": "SiliconFlow BCE-Embedding-Base (512维)"
     },
     "status": {
       "completed": "已完成",
@@ -1345,6 +1584,8 @@
       "previousStep": "上一步",
       "nextStep": "下一步",
       "createBinding": "创建绑定",
+      "moreSources": "更多数据源即将支持",
+      "moreSourcesHint": "Notion、Google Drive 等数据源即将支持",
       "bindingCreated": "绑定创建成功",
       "bindingCreatedDesc": "Confluence 空间已绑定到知识库",
       "bindingExists": "绑定已存在",
@@ -1470,7 +1711,117 @@
   "help": {
     "title": "帮助",
     "platformName": "AI Platform",
-    "description": "企业级AI服务网关平台"
+    "description": "企业级 AI 服务网关平台",
+    "intro": "AI Gateway 集中管理模型路由、访问控制和用量监控，帮助团队更快交付 AI 能力。",
+    "quickStart": {
+      "title": "快速开始",
+      "steps": {
+        "register": {
+          "title": "注册服务",
+          "desc": "将 LLM 或 LangGraph 服务接入网关。"
+        },
+        "knowledge": {
+          "title": "创建知识库",
+          "desc": "上传文档或连接 Confluence 以启用 RAG。"
+        },
+        "chat": {
+          "title": "开始对话",
+          "desc": "打开助手或 Playground 进行测试查询。"
+        },
+        "integrate": {
+          "title": "接入 API",
+          "desc": "通过 API 让请求统一走网关。"
+        }
+      }
+    },
+    "sectionsTitle": "功能模块",
+    "sections": {
+      "dashboard": {
+        "title": "仪表盘",
+        "description": "实时监控流量、延迟和系统健康状况。",
+        "bullets": {
+          "health": "健康状态与可用率",
+          "metrics": "请求量与延迟指标",
+          "overview": "成本与用量概览"
+        }
+      },
+      "services": {
+        "title": "服务管理",
+        "description": "管理服务注册、配置与健康检查。",
+        "bullets": {
+          "registerTitle": "注册服务",
+          "registerDesc": "新增模型或 Agent 端点。",
+          "configureTitle": "配置",
+          "configureDesc": "设置鉴权、限流与缓存。",
+          "healthTitle": "健康",
+          "healthDesc": "监控状态、延迟与错误。",
+          "typesTitle": "服务类型",
+          "typesDesc": "支持助手、LangGraph、代理等类型。"
+        }
+      },
+      "knowledge": {
+        "title": "知识库",
+        "coreTag": "核心",
+        "description": "构建企业知识库，支持检索增强生成。",
+        "featuresTitle": "核心功能",
+        "features": {
+          "createTitle": "创建数据集",
+          "createDesc": "创建带有元数据和权限的知识库。",
+          "uploadTitle": "上传文档",
+          "uploadDesc": "支持 PDF、文档、图片等。",
+          "urlTitle": "添加 URL",
+          "urlDesc": "通过 URL 采集网页内容。",
+          "segmentTitle": "分块",
+          "segmentDesc": "将文档切分为最优片段。",
+          "hitTitle": "检索测试",
+          "hitDesc": "用查询测试召回质量。",
+          "qaTitle": "问答",
+          "qaDesc": "在数据之上进行问答。"
+        },
+        "modesTitle": "检索模式",
+        "modes": {
+          "vector": "向量",
+          "keyword": "关键词",
+          "hybrid": "混合",
+          "rerank": "重排"
+        }
+      },
+      "playground": {
+        "title": "Playground",
+        "description": "与模型对话，使用工具并测试流程。",
+        "bullets": {
+          "multiTurnTitle": "多轮对话",
+          "multiTurnDesc": "保持上下文连续",
+          "streamingTitle": "流式输出",
+          "streamingDesc": "实时查看响应",
+          "sessionsTitle": "会话管理",
+          "sessionsDesc": "管理对话历史",
+          "toolsTitle": "工具调用",
+          "toolsDesc": "调用工具与函数 API",
+          "multimodalTitle": "多模态",
+          "multimodalDesc": "支持文本、图片与文件"
+        }
+      },
+      "tasks": {
+        "title": "任务",
+        "description": "查询并跟踪异步任务状态。",
+        "bullets": {
+          "queryStatus": "查看任务状态",
+          "results": "查看结果与日志",
+          "longRunning": "监控长任务"
+        }
+      },
+      "settings": {
+        "title": "设置",
+        "description": "管理系统配置与策略。",
+        "bullets": {
+          "llm": "管理 LLM 厂商与模型",
+          "embedding": "配置向量与重排模型",
+          "system": "设置全局鉴权和限流策略"
+        }
+      }
+    },
+    "support": "需要帮助？请联系管理员或支持团队。"
   },
   "confluence": {
     "title": "Confluence",
@@ -1726,6 +2077,9 @@
       "depthExplanation": "深度控制同步时向下遍历页面的层数。例如，深度 2 会同步选中的页面及其直接子页面。选择「无限制」则同步所有层级。",
       "includeAttachments": "包含附件",
       "includeAttachmentsDesc": "同步页面的文件附件",
+      "syncImages": "同步图片",
+      "syncImagesDesc": "同步页面中的图片",
+      "maxImageSize": "图片大小上限",
       "includeComments": "包含评论",
       "includeCommentsDesc": "将页面评论作为内容一部分同步",
       "createBinding": "创建绑定",
@@ -1743,6 +2097,7 @@
       "count": "{{synced}}/{{total}} 页",
       "lastSync": "上次同步: {{time}}"
     },
+    "pagesLabel": "页",
     "spaceType": {
       "global": "团队空间",
       "personal": "个人空间"
@@ -1750,6 +2105,7 @@
     "syncedPages": {
       "title": "同步页面",
       "subtitle": "共 {{count}} 个页面",
+      "invalidPageId": "无效的页面 ID",
       "searchPlaceholder": "搜索页面标题...",
       "syncAll": "同步全部",
       "syncPage": "重新同步",
@@ -1915,7 +2271,166 @@
       "observing": "分析结果...",
       "writing": "撰写内容...",
       "completing": "完成中..."
+    },
+    "attachments": {
+      "analyze": "分析附件",
+      "notice": "附件将与提示词一起分析",
+      "placeholder": "添加文件或图片"
+    },
+    "upload": {
+      "compressing": "压缩中...",
+      "failedNotice": "上传失败，请重试。"
+    },
+    "toolArguments": "参数",
+    "analyzedFiles": "已分析 {{count}} 个文件",
+    "foundResults": "已找到 {{count}} 条结果",
+    "readSources": "已检索 {{count}} 个来源",
+    "researchComplete": "研究完成",
+    "researching": "正在研究",
+    "searchComplete": "搜索完成",
+    "searchFailed": "搜索失败",
+    "webSearchLabel": "网页",
+    "generateImage": "生成图片",
+    "generateImagePrompt": "描述你想要的图片",
+    "generatedImage": "生成图片",
+    "generatedWith": "生成于",
+    "generating": "生成中...",
+    "imagePlaceholder": "生成图片预览",
+    "inputPlaceholder": "输入消息...",
+    "messageRenderFailed": "消息渲染失败",
+    "multimodal": "多模态",
+    "citationsHeader": "引用",
+    "noCitations": "暂无引用",
+    "relevanceScore": "相关性评分",
+    "citedTextLabel": "引用内容",
+    "contextPreview": "上下文预览",
+    "collectedInfo": "收集信息",
+    "document": "文档",
+    "downloadDocument": "下载文档",
+    "error": "错误",
+    "showArtifacts": "查看产物",
+    "slideOutline": {
+      "title": "大纲",
+      "subtitle": "幻灯片大纲",
+      "points": "{{count}} 个要点"
+    },
+    "outline": {
+      "goal": "生成{{format}}文档",
+      "taskCreate": "创建幻灯片大纲：{{title}}",
+      "taskSummary": "幻灯片大纲：{{title}}"
+    },
+    "taskGoal": "目标",
+    "taskGoalFallback": "任务目标",
+    "taskList": "任务列表",
+    "taskRunning": "任务进行中...",
+    "taskCompleted": "已完成 {{completed}}/{{total}} 项任务",
+    "styles": {
+      "custom": {
+        "name": "自定义",
+        "desc": "使用默认风格"
+      },
+      "concise": {
+        "name": "简洁",
+        "desc": "简短直接的回答",
+        "prompt": "简洁直达地回答，除非被要求，不要展开。"
+      },
+      "formal": {
+        "name": "正式",
+        "desc": "专业且结构化",
+        "prompt": "用正式、结构化的语气回复，条理清晰。"
+      },
+      "socratic": {
+        "name": "苏格拉底",
+        "desc": "用提问引导思考",
+        "prompt": "通过提问和推理引导用户，而不是直接给出最终答案。"
+      },
+      "comprehensive": {
+        "name": "全面",
+        "desc": "详尽深入的解释",
+        "prompt": "提供详细而全面的回答，必要时给出背景、步骤和示例。"
+      }
+    },
+    "suggestions": {
+      "category": {
+        "learning": "学习",
+        "development": "开发",
+        "analysis": "分析",
+        "creative": "创意"
+      },
+      "explain": {
+        "title": "解释概念",
+        "prompt": "用简单语言解释一个复杂概念，并给出例子。"
+      },
+      "code": {
+        "title": "重构代码",
+        "prompt": "帮我重构这段代码，提升可读性和可维护性。"
+      },
+      "doc": {
+        "title": "总结文档",
+        "prompt": "总结这份文档的关键要点。"
+      },
+      "insights": {
+        "title": "分析洞察",
+        "prompt": "分析这份数据并指出关键趋势或洞察。"
+      },
+      "brainstorm": {
+        "title": "头脑风暴",
+        "prompt": "为这个主题头脑风暴 10 个创意想法。"
+      },
+      "solve": {
+        "title": "解决问题",
+        "prompt": "一步步帮我解决这个问题。"
+      }
     }
+  },
+  "agent": {
+    "status": {
+      "thinking": "AI 助手正在思考和规划...",
+      "retrieving": "正在搜索知识库（RAG）...",
+      "searchQuery": "搜索关键词",
+      "searchResults": "{{count}} 条结果",
+      "searching": "搜索中...",
+      "executingTool": "执行工具：{{name}}",
+      "toolComplete": "工具完成：{{name}}",
+      "viewArgs": "查看参数",
+      "running": "运行中...",
+      "completedIn": "完成耗时 {{ms}}ms",
+      "completed": "已完成",
+      "generating": "生成回复中...",
+      "tokens": "已生成 token",
+      "documents": "文档",
+      "codeExecution": "代码执行（{{language}}）",
+      "generateImage": "生成图片",
+      "generateDocument": "生成 {{type}} 文档",
+      "outlineReady": "大纲已就绪：{{title}}",
+      "unknown": "未知"
+    },
+    "timeline": {
+      "running": "Agent 运行中",
+      "completed": "Agent 已完成",
+      "error": "Agent 出错",
+      "cancelled": "Agent 已取消",
+      "idle": "Agent",
+      "steps": "步",
+      "cancel": "取消"
+    },
+    "artifact": {
+      "document": "文档",
+      "generatedImage": "生成图片"
+    },
+    "errors": {
+      "title": "错误详情",
+      "fatalTitle": "致命错误",
+      "showMore": "展开更多",
+      "showLess": "收起"
+    }
+  },
+  "artifact": {
+    "download": "下载",
+    "files": "文件",
+    "noPreview": "无法预览",
+    "openInNewTab": "新标签页打开",
+    "preview": "预览"
   },
   "analytics": {
     "title": "使用量分析",
@@ -1974,7 +2489,149 @@
       "graphId": "Assistant / Graph ID",
       "graphIdDesc": "Graph 名称或 Assistant ID，用于调用时自动注入",
       "langsmithApiKey": "LangSmith API Key",
-      "langsmithApiKeyDesc": "本地部署无需填写，仅云端 LangGraph 需要"
+      "langsmithApiKeyDesc": "本地部署无需填写，仅云端 LangGraph 需要",
+      "yaml": {
+        "header": "LangGraph 服务配置",
+        "description": "服务描述",
+        "proxyConfig": "代理配置",
+        "proxyMode": "透明代理模式",
+        "authConfig": "鉴权配置",
+        "authToken": "API 鉴权令牌",
+        "forwardAuth": "转发 Authorization 头",
+        "timeoutConfig": "超时配置",
+        "loadBalance": "负载均衡",
+        "loadStrategy": "负载均衡策略"
+      }
+    },
+    "status": {
+      "active": "启用",
+      "inactive": "停用"
+    },
+    "types": {
+      "assistant": "AI 助手",
+      "langgraph": "LangGraph",
+      "proxy": "代理",
+      "generative": "生成",
+      "embedding": "向量",
+      "classification": "分类",
+      "conversational": "对话",
+      "processing": "处理",
+      "custom": "自定义"
+    },
+    "badge": {
+      "core": "核心"
+    },
+    "search": {
+      "noResults": "没有匹配的服务"
+    },
+    "empty": {
+      "hint": "从注册第一个服务开始"
+    },
+    "providersStatus": {
+      "title": "厂商状态",
+      "tooltip": "查看厂商配置与模型数量",
+      "configuredSummary": "{{configured}}/{{total}} 个厂商已配置",
+      "unconfigured": "未配置",
+      "viewDetails": "查看详情",
+      "modelsTotal": "{{count}} 个模型",
+      "modelsCount": "{{count}} 个模型",
+      "modal": {
+        "title": "{{provider}} 模型"
+      },
+      "table": {
+        "name": "模型",
+        "context": "上下文",
+        "capabilities": "能力",
+        "vision": "视觉",
+        "tools": "工具",
+        "price": "价格",
+        "input": "输入",
+        "output": "输出",
+        "status": "状态",
+        "enabled": "已启用",
+        "disabled": "已禁用"
+      }
+    },
+    "configDialog": {
+      "title": "服务配置",
+      "tabs": {
+        "basic": "基础",
+        "rateLimit": "限流",
+        "auth": "鉴权",
+        "cache": "缓存",
+        "priority": "优先级",
+        "danger": "危险区"
+      },
+      "basic": {
+        "serviceName": "服务名称",
+        "status": "状态",
+        "description": "描述",
+        "langgraphUrl": "LangGraph 地址",
+        "langgraphUrlPlaceholder": "http://localhost:2024",
+        "graphId": "Graph ID",
+        "graphIdPlaceholder": "agent",
+        "sessionEnabled": "启用会话",
+        "sessionHint": "在服务端保持会话上下文",
+        "save": "保存基础配置"
+      },
+      "rateLimit": {
+        "enable": "启用限流",
+        "enableHint": "防止突发流量",
+        "requests": "请求数",
+        "requestsHint": "窗口内最大请求数",
+        "window": "时间窗口（秒）",
+        "windowHint": "以秒为单位的时间窗口",
+        "burst": "突发",
+        "burstHint": "允许短时突发",
+        "strategy": "策略",
+        "strategyHint": "选择限流策略",
+        "strategyFixed": "固定窗口",
+        "strategySliding": "滑动窗口",
+        "strategyToken": "令牌桶",
+        "save": "保存限流配置"
+      },
+      "auth": {
+        "enable": "启用鉴权",
+        "enableHint": "此服务需要鉴权",
+        "public": "公开访问",
+        "publicHint": "允许无 API Key 访问",
+        "requireAuth": "需要 API Key",
+        "requireAuthHint": "仅允许携带 API Key 的请求",
+        "allowedRoles": "允许角色",
+        "rolesHint": "选择可访问该服务的角色",
+        "save": "保存鉴权配置"
+      },
+      "cache": {
+        "enable": "启用缓存",
+        "enableHint": "缓存重复请求",
+        "ttl": "TTL（秒）",
+        "ttlHint": "缓存有效期",
+        "semantic": "语义缓存",
+        "semanticHint": "为相似查询启用语义缓存",
+        "save": "保存缓存配置"
+      },
+      "priority": {
+        "level": "优先级等级",
+        "levelHint": "更高优先级获得更多资源",
+        "weight": "权重",
+        "weightHint": "用于负载均衡的流量权重",
+        "maxQueue": "最大队列",
+        "maxQueueHint": "最大排队请求数",
+        "save": "保存优先级"
+      },
+      "danger": {
+        "title": "危险区",
+        "description": "删除此服务及其配置",
+        "delete": "删除服务",
+        "deleting": "删除中..."
+      },
+      "status": {
+        "inactive": "停用"
+      },
+      "saved": "已保存",
+      "saveFailed": "保存失败",
+      "updateFailed": "更新失败",
+      "deleteConfirm": "确定要删除\"{{name}}\"吗？"
     },
     "errors": {
       "requiredFields": "请填写 Deployment URL 和 Assistant ID",
@@ -2053,11 +2710,30 @@
     },
     "price": {
       "input": "入",
-      "output": "出"
+      "output": "出",
+      "free": "免费"
     },
     "capabilities": {
       "vision": "视觉",
       "tools": "工具"
+    },
+    "access": {
+      "public": "公开",
+      "premium": "高级",
+      "admin": "管理员"
+    },
+    "providers": {
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "google": "Google",
+      "azure": "Azure",
+      "cohere": "Cohere",
+      "mistral": "Mistral",
+      "xai": "xAI",
+      "groq": "Groq",
+      "together": "Together",
+      "deepseek": "DeepSeek",
+      "dashscope": "通义千问"
     }
   },
   "llm": {

@@ -7,6 +7,7 @@ import { marked } from "marked";
 import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
+import { useTranslation } from "react-i18next";
 
 /**
  * Custom URL transform that allows data: URLs for base64 images.
@@ -101,9 +102,10 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const { t } = useTranslation();
 
   const isBase64 = src?.startsWith("data:");
-  const displayAlt = alt || "Generated Image";
+  const displayAlt = alt || t("common.generatedImage");
 
   // Download image - supports both base64 and URL images
   const handleDownload = async () => {
@@ -163,7 +165,7 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
     return (
       <span className="flex flex-col items-center justify-center p-6 my-3 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700" style={{ display: 'flex' }}>
         <ImageIcon className="h-10 w-10 text-slate-400 mb-2" />
-        <span className="text-sm text-slate-500">图片加载失败</span>
+        <span className="text-sm text-slate-500">{t("common.imageLoadFailed")}</span>
       </span>
     );
   }
@@ -200,14 +202,14 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
             onClick={handleDownload}
             disabled={isDownloading}
             className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors disabled:opacity-50"
-            title="下载图片"
+            title={t("common.downloadImage")}
           >
             <Download className={`h-4 w-4 ${isDownloading ? 'animate-pulse' : ''}`} />
           </button>
           <button
             onClick={handleOpenInNewTab}
             className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
-            title="在新标签页打开"
+            title={t("common.openInNewTab")}
           >
             <ExternalLink className="h-4 w-4" />
           </button>

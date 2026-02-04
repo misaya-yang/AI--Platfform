@@ -172,13 +172,29 @@ class IslamicMetadataExtractor:
         - Tafseer: "Tafsir [Author], Surah [X], Verse [X]"
         - Fiqh: "[Book], [School], [Topic]"
         """
+        def _doc_context(meta: Optional[Dict[str, Any]]) -> str:
+            meta = meta or {}
+            doc_name = meta.get("title") or meta.get("name") or meta.get("source_document") or ""
+            section = meta.get("section_title") or ""
+            para = meta.get("paragraph_index")
+            if para is None:
+                para = meta.get("chunk_index")
+            if para is None:
+                para = meta.get("position")
+            parts = []
+            if doc_name:
+                parts.append(str(doc_name))
+            if section:
+                parts.append(f"Section {section}")
+            if para is not None:
+                parts.append(f"Paragraph {para}")
+            return ", ".join(parts)
+
+        doc_context = _doc_context(doc_meta)
+
         if not reference:
             # Fallback to document-level citation
-            doc_meta = doc_meta or {}
-            doc_name = doc_meta.get("title") or doc_meta.get("name") or ""
-            if doc_name:
-                return doc_name
-            return ""
+            return doc_context or ""
 
         if source_type == IslamicSourceType.QURAN:
             surah = reference.get("surah")
@@ -190,8 +206,9 @@ class IslamicMetadataExtractor:
                 if verse_end and verse_end != verse_start:
                     verse_str = f"{verse_start}-{verse_end}"
                 name_part = f" - {surah_name}" if surah_name else ""
-                return f"Quran {surah}:{verse_str}{name_part}"
-            return "Quran"
+                base = f"Quran {surah}:{verse_str}{name_part}"
+                return f"{doc_context} — {base}" if doc_context else base
+            return f"{doc_context} — Quran" if doc_context else "Quran"
 
         elif source_type == IslamicSourceType.HADITH:
             collection = reference.get("collection", "")
@@ -209,7 +226,8 @@ class IslamicMetadataExtractor:
             if narrator and not parts:
                 parts.append(f"Narrated by {narrator}")
 
-            return ", ".join(parts) if parts else "Hadith"
+            base = ", ".join(parts) if parts else "Hadith"
+            return f"{doc_context} — {base}" if doc_context else base
 
         elif source_type == IslamicSourceType.TAFSEER:
             author = reference.get("author", "")
@@ -229,7 +247,7 @@ class IslamicMetadataExtractor:
                 base += f", Surah {surah_name or surah}"
             if verse:
                 base += f", Verse {verse}"
-            return base
+            return f"{doc_context} — {base}" if doc_context else base
 
         elif source_type == IslamicSourceType.FIQH:
             school = reference.get("school", "")
@@ -245,9 +263,10 @@ class IslamicMetadataExtractor:
                 parts.append(school.title())
             if topic:
                 parts.append(topic)
-            return ", ".join(parts) if parts else "Islamic Jurisprudence"
+            base = ", ".join(parts) if parts else "Islamic Jurisprudence"
+            return f"{doc_context} — {base}" if doc_context else base
 
-        return ""
+        return doc_context or ""
 
     # ------------------------------------------------------------------
     # Internal reference extraction

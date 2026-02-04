@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import time
+import os
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -325,13 +326,21 @@ async def get_user_context(
                 await _record_auth_failure(request, _derive_api_key_user_id(api_key), None)
                 raise
             logger.info(f"[AUTH][TIMING] API_KEY_STATIC total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+            
+            # Validate static role against whitelist for security
+            ALLOWED_STATIC_ROLES = frozenset(["user", "admin", "operator", "developer"])
+            static_role = os.getenv("GATEWAY_AUTHENTICATION__API_KEY__STATIC_ROLE", "user").strip() or "user"
+            if static_role not in ALLOWED_STATIC_ROLES:
+                logger.warning(f"Invalid static role '{static_role}', falling back to 'user'")
+                static_role = "user"
+            
             return _cache_and_return(UserContext(
                 user_id=_derive_api_key_user_id(api_key),
                 tenant_id="",
-                tier="normal",
+                tier="admin" if static_role == "admin" else "normal",
                 is_authenticated=True,
                 ip=client_ip,
-                roles=["user"],
+                roles=[static_role],
             ))
 
     # 3) Anonymous (stable ID minted by middleware)

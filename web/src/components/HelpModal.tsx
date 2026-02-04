@@ -12,6 +12,7 @@ import {
   BulbOutlined,
 } from "@ant-design/icons";
 import { colors } from "@/theme/themeConfig";
+import { useTranslation } from "react-i18next";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -21,24 +22,25 @@ interface HelpModalProps {
 }
 
 export function HelpModal({ open, onClose }: HelpModalProps) {
+  const { t } = useTranslation();
   const features = [
     {
       key: "dashboard",
       label: (
         <Space>
           <DashboardOutlined style={{ color: colors.primary[500] }} />
-          <span>仪表盘</span>
+          <span>{t("help.sections.dashboard.title")}</span>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            仪表盘是系统的概览页面，展示所有已注册服务的状态和关键指标。
+            {t("help.sections.dashboard.description")}
           </Paragraph>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li>查看所有服务的健康状态</li>
-            <li>监控服务调用次数和响应时间</li>
-            <li>快速了解系统整体运行情况</li>
+            <li>{t("help.sections.dashboard.bullets.health")}</li>
+            <li>{t("help.sections.dashboard.bullets.metrics")}</li>
+            <li>{t("help.sections.dashboard.bullets.overview")}</li>
           </ul>
         </div>
       ),
@@ -48,19 +50,19 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       label: (
         <Space>
           <CloudServerOutlined style={{ color: colors.primary[400] }} />
-          <span>服务管理</span>
+          <span>{t("help.sections.services.title")}</span>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            管理所有已注册的 AI 服务，包括 LLM 模型、LangGraph Agent 等。
+            {t("help.sections.services.description")}
           </Paragraph>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li><strong>注册服务</strong>：添加新的 AI 服务端点</li>
-            <li><strong>配置参数</strong>：设置服务的 API 密钥、模型参数等</li>
-            <li><strong>健康检查</strong>：监控服务可用性</li>
-            <li><strong>服务类型</strong>：支持 OpenAI、Anthropic、LangGraph 等</li>
+            <li><strong>{t("help.sections.services.bullets.registerTitle")}</strong>：{t("help.sections.services.bullets.registerDesc")}</li>
+            <li><strong>{t("help.sections.services.bullets.configureTitle")}</strong>：{t("help.sections.services.bullets.configureDesc")}</li>
+            <li><strong>{t("help.sections.services.bullets.healthTitle")}</strong>：{t("help.sections.services.bullets.healthDesc")}</li>
+            <li><strong>{t("help.sections.services.bullets.typesTitle")}</strong>：{t("help.sections.services.bullets.typesDesc")}</li>
           </ul>
         </div>
       ),
@@ -70,31 +72,31 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       label: (
         <Space>
           <DatabaseOutlined style={{ color: colors.primary[500] }} />
-          <span>知识库</span>
-          <Tag color="blue" style={{ marginLeft: 4 }}>核心功能</Tag>
+          <span>{t("help.sections.knowledge.title")}</span>
+          <Tag color="blue" style={{ marginLeft: 4 }}>{t("help.sections.knowledge.coreTag")}</Tag>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            构建和管理 AI 知识库，支持文档上传、向量检索和智能问答。
+            {t("help.sections.knowledge.description")}
           </Paragraph>
-          <Title level={5} style={{ marginTop: 12 }}>主要功能：</Title>
+          <Title level={5} style={{ marginTop: 12 }}>{t("help.sections.knowledge.featuresTitle")}</Title>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li><strong>创建知识库</strong>：选择嵌入模型，配置检索策略</li>
-            <li><strong>上传文档</strong>：支持 PDF、Word、TXT、Markdown 等格式</li>
-            <li><strong>URL 导入</strong>：从网页地址抓取内容</li>
-            <li><strong>段落管理</strong>：查看和编辑文档分块</li>
-            <li><strong>命中测试</strong>：测试检索效果，优化参数</li>
-            <li><strong>QA 问答</strong>：基于知识库的智能问答</li>
+            <li><strong>{t("help.sections.knowledge.features.createTitle")}</strong>：{t("help.sections.knowledge.features.createDesc")}</li>
+            <li><strong>{t("help.sections.knowledge.features.uploadTitle")}</strong>：{t("help.sections.knowledge.features.uploadDesc")}</li>
+            <li><strong>{t("help.sections.knowledge.features.urlTitle")}</strong>：{t("help.sections.knowledge.features.urlDesc")}</li>
+            <li><strong>{t("help.sections.knowledge.features.segmentTitle")}</strong>：{t("help.sections.knowledge.features.segmentDesc")}</li>
+            <li><strong>{t("help.sections.knowledge.features.hitTitle")}</strong>：{t("help.sections.knowledge.features.hitDesc")}</li>
+            <li><strong>{t("help.sections.knowledge.features.qaTitle")}</strong>：{t("help.sections.knowledge.features.qaDesc")}</li>
           </ul>
-          <Title level={5} style={{ marginTop: 12 }}>检索模式：</Title>
+          <Title level={5} style={{ marginTop: 12 }}>{t("help.sections.knowledge.modesTitle")}</Title>
           <Space wrap style={{ marginTop: 8 }}>
-            <Tag>向量检索</Tag>
-            <Tag>关键词检索</Tag>
-            <Tag>混合检索</Tag>
+            <Tag>{t("help.sections.knowledge.modes.vector")}</Tag>
+            <Tag>{t("help.sections.knowledge.modes.keyword")}</Tag>
+            <Tag>{t("help.sections.knowledge.modes.hybrid")}</Tag>
             <Tag>BM25</Tag>
-            <Tag>重排序</Tag>
+            <Tag>{t("help.sections.knowledge.modes.rerank")}</Tag>
           </Space>
         </div>
       ),
@@ -104,20 +106,20 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       label: (
         <Space>
           <ThunderboltOutlined style={{ color: colors.primary[600] }} />
-          <span>智能对话</span>
+          <span>{t("help.sections.playground.title")}</span>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            与 AI 服务进行交互式对话，测试模型效果。
+            {t("help.sections.playground.description")}
           </Paragraph>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li><strong>多轮对话</strong>：支持上下文记忆的连续对话</li>
-            <li><strong>流式输出</strong>：实时显示 AI 响应内容</li>
-            <li><strong>会话管理</strong>：保存和恢复历史对话</li>
-            <li><strong>工具调用</strong>：查看 Agent 的工具调用过程</li>
-            <li><strong>多模态</strong>：支持文本、图片等多种输入</li>
+            <li><strong>{t("help.sections.playground.bullets.multiTurnTitle")}</strong>：{t("help.sections.playground.bullets.multiTurnDesc")}</li>
+            <li><strong>{t("help.sections.playground.bullets.streamingTitle")}</strong>：{t("help.sections.playground.bullets.streamingDesc")}</li>
+            <li><strong>{t("help.sections.playground.bullets.sessionsTitle")}</strong>：{t("help.sections.playground.bullets.sessionsDesc")}</li>
+            <li><strong>{t("help.sections.playground.bullets.toolsTitle")}</strong>：{t("help.sections.playground.bullets.toolsDesc")}</li>
+            <li><strong>{t("help.sections.playground.bullets.multimodalTitle")}</strong>：{t("help.sections.playground.bullets.multimodalDesc")}</li>
           </ul>
         </div>
       ),
@@ -127,18 +129,18 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       label: (
         <Space>
           <UnorderedListOutlined style={{ color: colors.primary[400] }} />
-          <span>任务管理</span>
+          <span>{t("help.sections.tasks.title")}</span>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            追踪和管理异步任务的执行状态。
+            {t("help.sections.tasks.description")}
           </Paragraph>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li>查询任务执行状态</li>
-            <li>获取任务执行结果</li>
-            <li>支持长时间运行的异步任务</li>
+            <li>{t("help.sections.tasks.bullets.queryStatus")}</li>
+            <li>{t("help.sections.tasks.bullets.results")}</li>
+            <li>{t("help.sections.tasks.bullets.longRunning")}</li>
           </ul>
         </div>
       ),
@@ -148,18 +150,18 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       label: (
         <Space>
           <SettingOutlined style={{ color: colors.neutral[500] }} />
-          <span>系统设置</span>
+          <span>{t("help.sections.settings.title")}</span>
         </Space>
       ),
       children: (
         <div>
           <Paragraph>
-            配置系统级参数和高级选项。
+            {t("help.sections.settings.description")}
           </Paragraph>
           <ul style={{ paddingLeft: 20, margin: "8px 0" }}>
-            <li>LLM 模型配置</li>
-            <li>嵌入模型设置</li>
-            <li>系统参数调整</li>
+            <li>{t("help.sections.settings.bullets.llm")}</li>
+            <li>{t("help.sections.settings.bullets.embedding")}</li>
+            <li>{t("help.sections.settings.bullets.system")}</li>
           </ul>
         </div>
       ),
@@ -171,7 +173,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       title={
         <Space>
           <BookOutlined style={{ color: colors.primary[500] }} />
-          <span>帮助文档</span>
+          <span>{t("help.title")}</span>
         </Space>
       }
       open={open}
@@ -192,11 +194,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
         <Space align="start">
           <RocketOutlined style={{ fontSize: 32, color: colors.primary[500], marginTop: 4 }} />
           <div>
-            <Title level={4} style={{ margin: 0 }}>AI Platform</Title>
-            <Text type="secondary">统一的 AI 服务管理平台</Text>
+            <Title level={4} style={{ margin: 0 }}>{t("help.platformName")}</Title>
+            <Text type="secondary">{t("help.description")}</Text>
             <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
-              AI Platform 是一个企业级的 AI 服务管理平台，提供统一的服务注册、
-              智能路由、知识库管理和对话测试能力。帮助您快速构建和部署 AI 应用。
+              {t("help.intro")}
             </Paragraph>
           </div>
         </Space>
@@ -206,7 +207,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       <div style={{ marginBottom: 20 }}>
         <Title level={5}>
           <BulbOutlined style={{ marginRight: 8, color: colors.primary[500] }} />
-          快速开始
+          {t("help.quickStart.title")}
         </Title>
         <div style={{
           display: "grid",
@@ -219,10 +220,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
             borderRadius: 8,
             border: `1px solid ${colors.neutral[200]}`,
           }}>
-            <Text strong>1. 注册服务</Text>
+            <Text strong>{t("help.quickStart.steps.register.title")}</Text>
             <br />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              在服务管理中添加您的 AI 服务
+              {t("help.quickStart.steps.register.desc")}
             </Text>
           </div>
           <div style={{
@@ -231,10 +232,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
             borderRadius: 8,
             border: `1px solid ${colors.neutral[200]}`,
           }}>
-            <Text strong>2. 创建知识库</Text>
+            <Text strong>{t("help.quickStart.steps.knowledge.title")}</Text>
             <br />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              上传文档构建 AI 知识体系
+              {t("help.quickStart.steps.knowledge.desc")}
             </Text>
           </div>
           <div style={{
@@ -243,10 +244,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
             borderRadius: 8,
             border: `1px solid ${colors.neutral[200]}`,
           }}>
-            <Text strong>3. 测试对话</Text>
+            <Text strong>{t("help.quickStart.steps.chat.title")}</Text>
             <br />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              在智能对话中测试 AI 效果
+              {t("help.quickStart.steps.chat.desc")}
             </Text>
           </div>
           <div style={{
@@ -255,10 +256,10 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
             borderRadius: 8,
             border: `1px solid ${colors.neutral[200]}`,
           }}>
-            <Text strong>4. 集成 API</Text>
+            <Text strong>{t("help.quickStart.steps.integrate.title")}</Text>
             <br />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              通过 API 将 AI 能力集成到应用
+              {t("help.quickStart.steps.integrate.desc")}
             </Text>
           </div>
         </div>
@@ -269,7 +270,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
       {/* 功能模块 */}
       <Title level={5}>
         <ApiOutlined style={{ marginRight: 8, color: colors.primary[500] }} />
-        功能模块
+        {t("help.sectionsTitle")}
       </Title>
       <Collapse
         items={features}
@@ -287,7 +288,7 @@ export function HelpModal({ open, onClose }: HelpModalProps) {
         textAlign: "center",
       }}>
         <Text type="secondary">
-          如需技术支持，请联系系统管理员或查阅 API 文档
+          {t("help.support")}
         </Text>
       </div>
     </Modal>

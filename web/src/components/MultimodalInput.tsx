@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -41,6 +42,7 @@ export function MultimodalInput({
   disabled?: boolean;
   includeFiles?: boolean;
 }) {
+  const { t } = useTranslation();
   const [text, setText] = useState("");
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -191,7 +193,7 @@ export function MultimodalInput({
         const fileRefs = successfulUploads
           .map((f) => f.response!.file_path)
           .join(", ");
-        messageText += `\n\n[Attached files: ${fileRefs}]`;
+        messageText += `\n\n[${t("assistant.attachments.notice", { files: fileRefs })}]`;
         uploadedPaths.push(...successfulUploads.map((f) => f.response!.file_path));
       }
 
@@ -203,7 +205,7 @@ export function MultimodalInput({
         .join(", ");
       inputs.push({
         type: "text",
-        data: `Please analyze these uploaded files: ${fileRefs}`,
+        data: t("assistant.attachments.analyze", { files: fileRefs }),
       });
       uploadedPaths.push(...successfulUploads.map((f) => f.response!.file_path));
     }
@@ -276,7 +278,7 @@ export function MultimodalInput({
                 <span className="truncate max-w-[120px]">{f.file.name}</span>
                 <span className="text-[10px] opacity-70">
                   {f.status === "compressing"
-                    ? "压缩中..."
+                    ? t("assistant.upload.compressing")
                     : f.status === "uploading" && f.progress !== undefined
                       ? `${f.progress}%`
                       : formatFileSize(f.file.size)}
@@ -312,7 +314,7 @@ export function MultimodalInput({
       {/* Error message */}
       {hasFailedUploads && (
         <div className="px-4 py-2 text-xs text-red-500 dark:text-red-400">
-          Some files failed to upload. Please try again.
+          {t("assistant.upload.failedNotice")}
         </div>
       )}
 
@@ -340,7 +342,7 @@ export function MultimodalInput({
             type="button"
             disabled={disabled || isUploading || files.length >= 5}
             onClick={() => fileRef.current?.click()}
-            aria-label="Add attachment"
+            aria-label={t("common.addAttachment")}
             className={cn(
               "h-10 w-10 shrink-0 rounded-xl transition-colors",
               files.length > 0
@@ -355,7 +357,7 @@ export function MultimodalInput({
         {/* Text Input */}
         <Textarea
           placeholder={
-            files.length > 0 ? "Add a message about the files..." : "输入消息... (Shift+Enter 换行)"
+            files.length > 0 ? t("assistant.attachments.placeholder") : t("assistant.inputPlaceholder")
           }
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -377,7 +379,7 @@ export function MultimodalInput({
           type="button"
           disabled={!canSend}
           onClick={handleSend}
-          aria-label="Send"
+          aria-label={t("common.send")}
           className={cn(
             "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
             canSend

@@ -19,6 +19,7 @@ class HTTPConnector(BaseConnector):
     - Optimized timeout settings for streaming
     - Explicit pool limits for better resource management
     - Connection pre-warming for critical paths
+    - Context manager support for proper resource cleanup
     """
 
     # Default connection pool settings (optimized for high concurrency)
@@ -77,6 +78,14 @@ class HTTPConnector(BaseConnector):
         # Track if connections have been warmed up
         self._warmed_up = False
 
+    async def __aenter__(self) -> HTTPConnector:
+        """异步上下文管理器入口"""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """异步上下文管理器出口，确保资源释放"""
+        await self.close()
+
     async def warm_up_connections(self, count: int = 5) -> None:
         """
         Pre-warm connection pool by establishing connections.
@@ -109,7 +118,7 @@ class HTTPConnector(BaseConnector):
             merged_headers = dict(self._client.headers)
             merged_headers.update(extra_headers)
             kwargs["headers"] = merged_headers
-        
+
         response = await self._client.request(method, url, **kwargs)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "")
@@ -120,7 +129,7 @@ class HTTPConnector(BaseConnector):
     async def health_check(self, headers: dict = None) -> bool:
         """
         健康检查。
-        
+
         Args:
             headers: 可选的认证头部，用于需要认证的服务
         """
@@ -128,14 +137,14 @@ class HTTPConnector(BaseConnector):
         endpoint = config.get("health_endpoint", "/health")
         # 对于需要认证的服务，可以配置 health_skip_auth 跳过健康检查的认证
         skip_auth = config.get("health_skip_auth", False)
-        
+
         try:
             request_headers = None
             if headers and not skip_auth:
                 # 合并客户端默认头部和传入的认证头部
                 request_headers = dict(self._client.headers)
                 request_headers.update(headers)
-            
+
             response = await self._client.get(endpoint, headers=request_headers)
             # 403 表示认证问题，但服务本身是健康的
             return response.status_code < 500
@@ -143,4 +152,6 @@ class HTTPConnector(BaseConnector):
             return False
 
     async def close(self) -> None:
-        await self._client.aclose()
+        """关闭 HTTP client，释放连接池资源"""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()

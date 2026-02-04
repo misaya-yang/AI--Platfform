@@ -17,6 +17,7 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { api } from "@/lib/api";
+import { useTranslation } from "react-i18next";
 
 interface SecurityBreakdownResponse {
   items: Array<{
@@ -66,6 +67,7 @@ async function getSecurityTimeseries(params: {
 }
 
 export function SecurityEventsPanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, granularity, lastRefresh } = useDashboardContext();
   const [timeRange, setTimeRange] = useState<"today" | "week">("today");
@@ -124,7 +126,7 @@ export function SecurityEventsPanel() {
 
   return (
     <PanelWrapper
-      title="安全事件"
+      title={t("dashboard.security.title")}
       onRefresh={refetch}
       loading={breakdownQuery.isLoading}
       extra={
@@ -134,8 +136,8 @@ export function SecurityEventsPanel() {
           size="small"
           style={{ width: 80 }}
           options={[
-            { value: "today", label: "今日" },
-            { value: "week", label: "本周" },
+            { value: "today", label: t("dashboard.security.range.today") },
+            { value: "week", label: t("dashboard.security.range.week") },
           ]}
         />
       }
@@ -152,7 +154,7 @@ export function SecurityEventsPanel() {
             }}
           >
             <div style={{ fontSize: 24, fontWeight: 700, color: "#ef4444" }}>{authFailures}</div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>认证失败</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.authFailed")}</div>
           </div>
         </Col>
         <Col span={8}>
@@ -165,7 +167,7 @@ export function SecurityEventsPanel() {
             }}
           >
             <div style={{ fontSize: 24, fontWeight: 700, color: "#f59e0b" }}>{rateLimitHits}</div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>限流触发</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.rateLimited")}</div>
           </div>
         </Col>
         <Col span={8}>
@@ -180,7 +182,7 @@ export function SecurityEventsPanel() {
             <div style={{ fontSize: 24, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
               {authFailures + rateLimitHits}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>总计</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.total")}</div>
           </div>
         </Col>
       </Row>
@@ -198,15 +200,15 @@ export function SecurityEventsPanel() {
           <Tooltip
             labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
           />
-          <Bar dataKey="auth_failed" name="认证失败" fill="#ef4444" stackId="a" />
-          <Bar dataKey="rate_limited" name="限流" fill="#f59e0b" stackId="a" />
+          <Bar dataKey="auth_failed" name={t("dashboard.security.authFailed")} fill="#ef4444" stackId="a" />
+          <Bar dataKey="rate_limited" name={t("dashboard.security.rateLimitedShort")} fill="#f59e0b" stackId="a" />
         </BarChart>
       </SafeResponsiveChart>
 
       {/* Top users */}
       <div>
         <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-          TOP 触发用户
+          {t("dashboard.security.topUsers")}
         </div>
         {topUsers.map((user, index) => (
           <div
@@ -224,10 +226,10 @@ export function SecurityEventsPanel() {
             </span>
             <div style={{ display: "flex", gap: 12 }}>
               {user.authFailed > 0 && (
-                <span style={{ fontSize: 11, color: "#ef4444" }}>{user.authFailed}次认证失败</span>
+                <span style={{ fontSize: 11, color: "#ef4444" }}>{t("dashboard.security.authFailedCount", { count: user.authFailed })}</span>
               )}
               {user.rateLimited > 0 && (
-                <span style={{ fontSize: 11, color: "#f59e0b" }}>{user.rateLimited}次限流</span>
+                <span style={{ fontSize: 11, color: "#f59e0b" }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
               )}
             </div>
           </div>

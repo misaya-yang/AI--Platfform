@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
+import { useTranslation } from "react-i18next";
 import {
   ArrowLeftOutlined,
   UserOutlined,
@@ -37,35 +38,36 @@ import {
 import type { UserResponse, RoleResponse, PermissionResponse } from "@/api/users";
 import { colors } from "@/theme/themeConfig";
 
-// Department options
-const departmentOptions = [
-  { value: "cs", label: "客服部 (CS)", color: "#10b981" },
-  { value: "sales", label: "销售部 (Sales)", color: "#f59e0b" },
-  { value: "tech", label: "技术部 (Tech)", color: "#3b82f6" },
-  { value: "admin", label: "管理部 (Admin)", color: "#8b5cf6" },
+const buildDepartmentOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
+  { value: "cs", label: t("user.departments.cs"), color: "#10b981" },
+  { value: "sales", label: t("user.departments.sales"), color: "#f59e0b" },
+  { value: "tech", label: t("user.departments.tech"), color: "#3b82f6" },
+  { value: "admin", label: t("user.departments.admin"), color: "#8b5cf6" },
 ];
 
-// Status options
-const statusOptions = [
-  { value: "active", label: "启用", color: "#10b981" },
-  { value: "disabled", label: "禁用", color: "#ef4444" },
+const buildStatusOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
+  { value: "active", label: t("users.status.active"), color: "#10b981" },
+  { value: "disabled", label: t("users.status.disabled"), color: "#ef4444" },
 ];
 
-// Permission category icons and colors
-const categoryMeta: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
-  console: { icon: "🖥️", color: "#3b82f6", label: "控制台" },
-  conversation: { icon: "💬", color: "#10b981", label: "对话" },
-  knowledge: { icon: "📚", color: "#f59e0b", label: "知识库" },
-  user: { icon: "👤", color: "#8b5cf6", label: "用户管理" },
-  role: { icon: "🔐", color: "#ec4899", label: "角色管理" },
-  admin: { icon: "⚙️", color: "#ef4444", label: "系统管理" },
-};
+const buildCategoryMeta = (t: (key: string, options?: Record<string, unknown>) => string) => ({
+  console: { icon: "🖥️", color: "#3b82f6", label: t("users.permissions.categories.console") },
+  conversation: { icon: "💬", color: "#10b981", label: t("users.permissions.categories.conversation") },
+  knowledge: { icon: "📚", color: "#f59e0b", label: t("users.permissions.categories.knowledge") },
+  user: { icon: "👤", color: "#8b5cf6", label: t("users.permissions.categories.user") },
+  role: { icon: "🔐", color: "#ec4899", label: t("users.permissions.categories.role") },
+  admin: { icon: "⚙️", color: "#ef4444", label: t("users.permissions.categories.admin") },
+});
 
 export function UserEditPage() {
+  const { t, i18n } = useTranslation();
   const { userId } = useParams<{ userId: string }>();
   const navigate = useNavigate();
   const { hasPermission } = useAuthStore();
   const { darkMode } = useAppStore();
+  const departmentOptions = useMemo(() => buildDepartmentOptions(t), [t, i18n.language]);
+  const statusOptions = useMemo(() => buildStatusOptions(t), [t, i18n.language]);
+  const categoryMeta = useMemo(() => buildCategoryMeta(t), [t, i18n.language]);
 
   // Data states
   const [user, setUser] = useState<UserResponse | null>(null);
@@ -116,7 +118,7 @@ export function UserEditPage() {
         setFormExtraPermissions(userData.extra_permissions || []);
       } catch (err) {
         console.error("Failed to load user:", err);
-        setError("无法加载用户信息");
+        setError(t("users.edit.loadFailed"));
       } finally {
         setIsLoading(false);
       }
@@ -151,9 +153,9 @@ export function UserEditPage() {
   // Get permissions from selected roles
   const rolePermissions = useMemo(() => {
     const perms = new Set<string>();
-    formRoles.forEach((roleName) => {
-      const role = roles.find((r) => r.role_name === roleName);
-      if (role) {
+    const selectedRoles = new Set(formRoles);
+    roles.forEach((role) => {
+      if (selectedRoles.has(role.role_name)) {
         role.permissions.forEach((p) => perms.add(p));
       }
     });
@@ -185,14 +187,14 @@ export function UserEditPage() {
         roles: formRoles,
         extra_permissions: formExtraPermissions,
       });
-      message.success("用户信息已保存");
+      message.success(t("users.edit.saved"));
       // Reload user data
       const userData = await getUser(userId);
       setUser(userData);
       setHasChanges(false);
     } catch (err: unknown) {
       const axiosError = err as { response?: { data?: { detail?: string } } };
-      message.error(axiosError.response?.data?.detail || "保存失败");
+      message.error(axiosError.response?.data?.detail || t("users.edit.saveFailed"));
     } finally {
       setIsSaving(false);
     }
@@ -210,9 +212,9 @@ export function UserEditPage() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
         <ExclamationCircleOutlined style={{ fontSize: 48, color: '#ff4d4f' }} />
-        <p className="text-lg text-muted-foreground">{error || "用户不存在"}</p>
+        <p className="text-lg text-muted-foreground">{error || t("users.edit.notFound")}</p>
         <Button variant="outline" onClick={() => navigate("/users")}>
-          返回用户列表
+          {t("users.edit.backToList")}
         </Button>
       </div>
     );
@@ -230,10 +232,10 @@ export function UserEditPage() {
           className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeftOutlined />
-          <span>用户管理</span>
+          <span>{t("users.title")}</span>
         </Link>
         <span className="text-muted-foreground">/</span>
-        <span className="text-foreground font-medium">编辑用户</span>
+        <span className="text-foreground font-medium">{t("users.editUser")}</span>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
@@ -275,7 +277,7 @@ export function UserEditPage() {
               }}>
                 <MailOutlined style={{ color: colors.primary[500] }} />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">邮箱</p>
+                  <p className="text-xs text-muted-foreground">{t("users.fields.email")}</p>
                   <p className="text-sm font-medium truncate">{user.email}</p>
                 </div>
               </div>
@@ -285,8 +287,8 @@ export function UserEditPage() {
               }}>
                 <TeamOutlined style={{ color: dept?.color || colors.neutral[500] }} />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">部门</p>
-                  <p className="text-sm font-medium">{dept?.label || "未分配"}</p>
+                  <p className="text-xs text-muted-foreground">{t("users.fields.department")}</p>
+                  <p className="text-sm font-medium">{dept?.label || t("common.notSet")}</p>
                 </div>
               </div>
 
@@ -295,7 +297,7 @@ export function UserEditPage() {
               }}>
                 <SafetyCertificateOutlined style={{ color: statusOpt?.color }} />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">状态</p>
+                  <p className="text-xs text-muted-foreground">{t("users.fields.status")}</p>
                   <Badge
                     variant={user.status === "active" ? "default" : "destructive"}
                     className="mt-1"
@@ -310,7 +312,7 @@ export function UserEditPage() {
               }}>
                 <KeyOutlined style={{ color: "#a855f7" }} />
                 <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">角色</p>
+                  <p className="text-xs text-muted-foreground">{t("users.fields.roles")}</p>
                   <div className="flex flex-wrap gap-1 mt-1">
                     {user.roles.map((role) => (
                       <Badge key={role} variant="secondary" className="text-xs">
@@ -326,8 +328,8 @@ export function UserEditPage() {
             <div className="mt-6 pt-4 border-t text-xs text-muted-foreground space-y-1" style={{
               borderColor: darkMode ? colors.neutral[700] : colors.neutral[200],
             }}>
-              <p>创建时间: {user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</p>
-              <p>最后登录: {user.last_login_at ? new Date(user.last_login_at).toLocaleString() : "从未登录"}</p>
+              <p>{t("users.fields.createdAt")}: {user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</p>
+              <p>{t("users.fields.lastLogin")}: {user.last_login_at ? new Date(user.last_login_at).toLocaleString() : t("common.never")}</p>
             </div>
           </motion.div>
         </div>
@@ -352,27 +354,27 @@ export function UserEditPage() {
                 <UserOutlined style={{ fontSize: 18, color: colors.primary[500] }} />
               </div>
               <div>
-                <h3 className="font-semibold">基本信息</h3>
-                <p className="text-xs text-muted-foreground">编辑用户的基本资料</p>
+                <h3 className="font-semibold">{t("users.edit.basicInfo.title")}</h3>
+                <p className="text-xs text-muted-foreground">{t("users.edit.basicInfo.desc")}</p>
               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>显示名称</Label>
+                <Label>{t("users.fields.displayName")}</Label>
                 <Input
                   value={formDisplayName}
                   onChange={(e) => setFormDisplayName(e.target.value)}
-                  placeholder="请输入显示名称"
+                  placeholder={t("users.edit.displayNamePlaceholder")}
                   disabled={!canEdit}
                 />
               </div>
 
               <div className="space-y-2">
-                <Label>部门</Label>
+                <Label>{t("users.fields.department")}</Label>
                 <Select value={formDepartment} onValueChange={setFormDepartment} disabled={!canEdit}>
                   <SelectTrigger>
-                    <SelectValue placeholder="选择部门" />
+                    <SelectValue placeholder={t("users.edit.departmentPlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
                     {departmentOptions.map((dept) => (
@@ -385,7 +387,7 @@ export function UserEditPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>账户状态</Label>
+                <Label>{t("users.fields.status")}</Label>
                 <Select value={formStatus} onValueChange={setFormStatus} disabled={!canEdit}>
                   <SelectTrigger>
                     <SelectValue />
@@ -420,8 +422,8 @@ export function UserEditPage() {
                 <SafetyCertificateOutlined style={{ fontSize: 18, color: "#a855f7" }} />
               </div>
               <div>
-                <h3 className="font-semibold">角色分配</h3>
-                <p className="text-xs text-muted-foreground">选择用户的角色，角色决定基础权限</p>
+                <h3 className="font-semibold">{t("users.edit.roles.title")}</h3>
+                <p className="text-xs text-muted-foreground">{t("users.edit.roles.desc")}</p>
               </div>
             </div>
 
@@ -465,14 +467,14 @@ export function UserEditPage() {
                           <div className="flex items-center gap-2">
                             <span className="font-medium">{role.role_name}</span>
                             {role.is_system && (
-                              <Badge variant="outline" className="text-xs">系统</Badge>
+                              <Badge variant="outline" className="text-xs">{t("users.edit.roles.system")}</Badge>
                             )}
                           </div>
                           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                            {role.description || "无描述"}
+                            {role.description || t("users.edit.roles.noDescription")}
                           </p>
                           <p className="text-xs text-muted-foreground mt-2">
-                            {role.permissions.length} 个权限
+                            {t("users.edit.roles.permissionCount", { count: role.permissions.length })}
                           </p>
                         </div>
                       </div>
@@ -481,7 +483,7 @@ export function UserEditPage() {
                 })}
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">无权限查看角色列表</p>
+              <p className="text-sm text-muted-foreground">{t("users.edit.roles.noAccess")}</p>
             )}
           </motion.div>
 
@@ -503,8 +505,8 @@ export function UserEditPage() {
                 <KeyOutlined style={{ fontSize: 18, color: "#06b6d4" }} />
               </div>
               <div>
-                <h3 className="font-semibold">额外权限</h3>
-                <p className="text-xs text-muted-foreground">直接分配给用户的独立权限（角色权限之外）</p>
+                <h3 className="font-semibold">{t("users.edit.extraPermissions.title")}</h3>
+                <p className="text-xs text-muted-foreground">{t("users.edit.extraPermissions.desc")}</p>
               </div>
             </div>
 
@@ -512,7 +514,7 @@ export function UserEditPage() {
               background: darkMode ? "rgba(59, 130, 246, 0.1)" : "rgba(59, 130, 246, 0.05)",
               color: colors.primary[darkMode ? 400 : 600],
             }}>
-              <strong>提示：</strong> 角色已包含的权限显示为灰色。额外权限用于授予角色之外的特殊权限。
+              <strong>{t("users.edit.extraPermissions.tipLabel")}:</strong> {t("users.edit.extraPermissions.tipText")}
             </div>
 
             {canViewRoles ? (
@@ -538,7 +540,7 @@ export function UserEditPage() {
                           <span className="text-lg">{meta.icon}</span>
                           <span className="font-medium">{meta.label}</span>
                           <span className="text-xs text-muted-foreground">
-                            ({perms.length} 个权限)
+                            ({t("users.edit.extraPermissions.categoryCount", { count: perms.length })})
                           </span>
                           {selectedInCategory > 0 && (
                             <Badge variant="default" className="text-xs">
@@ -574,9 +576,9 @@ export function UserEditPage() {
                                     key={perm.permission_code}
                                     title={
                                       <div>
-                                        <p><strong>代码:</strong> {perm.permission_code}</p>
-                                        {perm.description && <p><strong>描述:</strong> {perm.description}</p>}
-                                        {fromRole && <p className="text-yellow-400 mt-1">已通过角色获得此权限</p>}
+                                        <p><strong>{t("common.code")}:</strong> {perm.permission_code}</p>
+                                        {perm.description && <p><strong>{t("common.description")}:</strong> {perm.description}</p>}
+                                        {fromRole && <p className="text-yellow-400 mt-1">{t("users.edit.extraPermissions.fromRole")}</p>}
                                       </div>
                                     }
                                   >
@@ -613,7 +615,7 @@ export function UserEditPage() {
                                       </div>
                                       {fromRole && (
                                         <Badge variant="outline" className="text-xs shrink-0">
-                                          角色
+                                          {t("users.edit.extraPermissions.roleBadge")}
                                         </Badge>
                                       )}
                                     </div>
@@ -629,7 +631,7 @@ export function UserEditPage() {
                 })}
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">无权限查看权限列表</p>
+              <p className="text-sm text-muted-foreground">{t("users.edit.extraPermissions.noAccess")}</p>
             )}
           </motion.div>
         </div>
@@ -661,7 +663,7 @@ export function UserEditPage() {
             >
               <div className="flex items-center gap-2 text-sm">
                 <ExclamationCircleOutlined style={{ color: "#f97316" }} />
-                <span>您有未保存的更改</span>
+                <span>{t("users.edit.unsavedChanges")}</span>
               </div>
               <div className="flex items-center gap-3">
                 <Button
@@ -676,7 +678,7 @@ export function UserEditPage() {
                     }
                   }}
                 >
-                  重置
+                  {t("common.reset")}
                 </Button>
                 <Button
                   onClick={handleSave}
@@ -689,12 +691,12 @@ export function UserEditPage() {
                   {isSaving ? (
                     <>
                       <LoadingOutlined className="mr-2" />
-                      保存中...
+                      {t("common.saving")}
                     </>
                   ) : (
                     <>
                       <CheckOutlined className="mr-2" />
-                      保存更改
+                      {t("users.edit.saveChanges")}
                     </>
                   )}
                 </Button>

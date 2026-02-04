@@ -30,19 +30,21 @@ interface ConnectionCardProps {
   onEdit?: () => void;
 }
 
-function formatRelativeTime(dateStr: string | null): string {
+type TFunction = (key: string, options?: Record<string, unknown>) => string;
+
+function formatRelativeTime(dateStr: string | null, t: TFunction): string {
   if (!dateStr) return "-";
   const date = new Date(dateStr);
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
 
-  if (diffMins < 1) return "刚刚";
-  if (diffMins < 60) return `${diffMins}分钟前`;
+  if (diffMins < 1) return t("common.time.justNow");
+  if (diffMins < 60) return t("common.time.minutesAgo", { count: diffMins });
   const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}小时前`;
+  if (diffHours < 24) return t("common.time.hoursAgo", { count: diffHours });
   const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}天前`;
+  return t("common.time.daysAgo", { count: diffDays });
 }
 
 export function ConnectionCard({
@@ -139,7 +141,7 @@ export function ConnectionCard({
           <div className="flex items-center justify-between">
             <span>{t("tasks.confluence.lastSync")}:</span>
             <span className="font-medium text-foreground">
-              {formatRelativeTime(lastSyncAt)}
+              {formatRelativeTime(lastSyncAt, t)}
             </span>
           </div>
         </div>

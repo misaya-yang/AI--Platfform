@@ -7,6 +7,7 @@
 import { motion } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import type { SuggestedPrompt } from "../types";
+import { useTranslation } from "react-i18next";
 
 interface PromptCardProps {
   prompt: SuggestedPrompt;
@@ -14,6 +15,7 @@ interface PromptCardProps {
 }
 
 export function PromptCard({ prompt, onClick }: PromptCardProps) {
+  const { t } = useTranslation();
   return (
     <motion.button
       whileHover={{ scale: 1.02, y: -2 }}
@@ -26,14 +28,14 @@ export function PromptCard({ prompt, onClick }: PromptCardProps) {
           {prompt.icon}
         </div>
         <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400">
-          {prompt.category}
+          {t(prompt.categoryKey)}
         </Badge>
       </div>
       <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
-        {prompt.title}
+        {t(prompt.titleKey)}
       </span>
       <span className="text-xs text-slate-500 dark:text-slate-400 line-clamp-1">
-        "{prompt.prompt}..."
+        "{t(prompt.promptKey)}..."
       </span>
     </motion.button>
   );
@@ -45,6 +47,7 @@ interface PromptSuggestionsProps {
 }
 
 export function PromptSuggestions({ prompts, onPromptClick }: PromptSuggestionsProps) {
+  const { t } = useTranslation();
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
       {prompts.map((prompt, idx) => (
@@ -56,7 +59,7 @@ export function PromptSuggestions({ prompts, onPromptClick }: PromptSuggestionsP
         >
           <PromptCard
             prompt={prompt}
-            onClick={() => onPromptClick(prompt.prompt)}
+            onClick={() => onPromptClick(t(prompt.promptKey))}
           />
         </motion.div>
       ))}

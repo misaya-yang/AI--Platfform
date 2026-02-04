@@ -260,20 +260,20 @@ export function BindingTable({ bindings, isLoading }: BindingTableProps) {
                         className="text-primary hover:text-primary/80 font-medium transition-colors"
                         onClick={() => setManagingBinding(binding)}
                       >
-                        详情
+                        {t("common.details")}
                       </button>
 
                       {isSyncing ? (
                         <span className="flex items-center gap-1 text-muted-foreground cursor-not-allowed">
                           <Loader2 className="h-3 w-3 animate-spin" />
-                          同步中
+                          {t("tasks.confluence.bindingStatus.syncing")}
                         </span>
                       ) : (
                         <button
                           className="text-primary hover:text-primary/80 font-medium transition-colors"
                           onClick={() => handleSync(binding.binding_id)}
                         >
-                          更新
+                          {t("common.refresh")}
                         </button>
                       )}
 
@@ -281,7 +281,7 @@ export function BindingTable({ bindings, isLoading }: BindingTableProps) {
                         className="text-primary hover:text-primary/80 font-medium transition-colors"
                         onClick={() => handleEdit(binding)}
                       >
-                        配置
+                        {t("common.configure")}
                       </button>
                     </div>
                   </TableCell>

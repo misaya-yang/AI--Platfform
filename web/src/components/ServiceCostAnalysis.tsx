@@ -68,10 +68,10 @@ function getServiceConfig(serviceName: string) {
 // 获取服务显示名称
 function getServiceDisplayName(serviceName: string, t: ReturnType<typeof useTranslation>["t"]): string {
   const name = serviceName?.toLowerCase() || "";
-  if (name.includes("assistant")) return t("cost.service.assistant", { defaultValue: "AI 助手" });
-  if (name.includes("langgraph") || name.includes("agent")) return t("cost.service.agent", { defaultValue: "Agent 服务" });
-  if (name.includes("proxy")) return t("cost.service.proxy", { defaultValue: "代理服务" });
-  return serviceName || t("cost.service.unknown", { defaultValue: "未知服务" });
+  if (name.includes("assistant")) return t("cost.service.assistant");
+  if (name.includes("langgraph") || name.includes("agent")) return t("cost.service.agent");
+  if (name.includes("proxy")) return t("cost.service.proxy");
+  return serviceName || t("cost.service.unknown");
 }
 
 // 服务卡片组件
@@ -129,7 +129,7 @@ function ServiceCard({ service }: ServiceCardProps) {
               {displayName}
             </div>
             <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>
-              {service.requests.toLocaleString()} {t("cost.requests", "次请求")}
+              {service.requests.toLocaleString()} {t("cost.requests")}
             </div>
           </div>
         </div>
@@ -138,7 +138,7 @@ function ServiceCard({ service }: ServiceCardProps) {
         <Row gutter={[16, 16]}>
           <Col span={12}>
             <Statistic
-              title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalCost", "总成本")}</span>}
+              title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalCost")}</span>}
               value={service.cost_usd}
               precision={4}
               prefix={<DollarOutlined style={{ color: config.color }} />}
@@ -147,7 +147,7 @@ function ServiceCard({ service }: ServiceCardProps) {
           </Col>
           <Col span={12}>
             <Statistic
-              title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalTokens", "Token 用量")}</span>}
+              title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalTokens")}</span>}
               value={service.total_tokens}
               formatter={(v) => formatNumber(v as number)}
               styles={{ content: { fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" } }}
@@ -159,15 +159,15 @@ function ServiceCard({ service }: ServiceCardProps) {
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
             <span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>
-              {t("cost.inputTokens", "输入")}: {formatNumber(service.input_tokens)}
+              {t("cost.inputTokens")}: {formatNumber(service.input_tokens)}
             </span>
             <span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>
-              {t("cost.outputTokens", "输出")}: {formatNumber(service.output_tokens)}
+              {t("cost.outputTokens")}: {formatNumber(service.output_tokens)}
             </span>
           </div>
 
           {/* 成本占比进度条 */}
-          <Tooltip title={`${service.percentage.toFixed(1)}% ${t("cost.ofTotal", "占总成本")}`}>
+          <Tooltip title={`${service.percentage.toFixed(1)}% ${t("cost.ofTotal")}`}>
             <Progress
               percent={service.percentage}
               strokeColor={config.gradient}
@@ -177,7 +177,7 @@ function ServiceCard({ service }: ServiceCardProps) {
             />
           </Tooltip>
           <div style={{ textAlign: "right", fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8", marginTop: 4 }}>
-            {service.percentage.toFixed(1)}% {t("cost.ofTotal", "占总成本")}
+            {service.percentage.toFixed(1)}% {t("cost.ofTotal")}
           </div>
         </div>
       </div>
@@ -200,7 +200,7 @@ function EmptyState({ darkMode, statusLabel }: { darkMode: boolean; statusLabel?
         image={Empty.PRESENTED_IMAGE_SIMPLE}
         description={
           <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
-            {statusLabel || t("cost.noData", "暂无用量数据")}
+            {statusLabel || t("cost.noData")}
           </span>
         }
       />
@@ -281,10 +281,10 @@ export function ServiceCostAnalysis({
               color: darkMode ? "#f1f5f9" : "#1e293b",
             }}
           >
-            {t("cost.title", "服务成本分析")}
+            {t("cost.title")}
           </h2>
           <p style={{ fontSize: 13, color: darkMode ? "#94a3b8" : "#64748b", margin: "4px 0 0 0" }}>
-            {t("cost.subtitle", "按服务类型独立统计用量和成本")}
+            {t("cost.subtitle")}
           </p>
         </div>
 
@@ -304,7 +304,7 @@ export function ServiceCostAnalysis({
               {typeof freshness === "number" ? ` · ${freshness}m` : ""}
             </span>
           )}
-          <Tooltip title={t("common.refresh", "刷新")}>
+          <Tooltip title={t("common.refresh")}>
             <div
               onClick={() => refetch()}
               style={{
@@ -340,7 +340,7 @@ export function ServiceCostAnalysis({
           <Row gutter={[24, 16]}>
             <Col xs={12} sm={6}>
               <Statistic
-                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalRequests", "总请求数")}</span>}
+                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalRequests")}</span>}
                 value={summary.total_requests}
                 prefix={<ApiOutlined style={{ color: "#3b82f6" }} />}
                 styles={{ content: { color: darkMode ? "#f1f5f9" : "#1e293b" } }}
@@ -348,7 +348,7 @@ export function ServiceCostAnalysis({
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
-                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalCostAll", "总成本")}</span>}
+                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalCostAll")}</span>}
                 value={summary.total_cost_usd}
                 precision={4}
                 prefix={<DollarOutlined style={{ color: "#10b981" }} />}
@@ -357,7 +357,7 @@ export function ServiceCostAnalysis({
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
-                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalTokensAll", "总 Token")}</span>}
+                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.totalTokensAll")}</span>}
                 value={summary.total_tokens}
                 formatter={(v) => formatNumber(v as number)}
                 prefix={<ThunderboltOutlined style={{ color: "#f59e0b" }} />}
@@ -366,7 +366,7 @@ export function ServiceCostAnalysis({
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
-                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.successRate", "成功率")}</span>}
+                title={<span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>{t("cost.successRate")}</span>}
                 value={summary.success_rate}
                 precision={1}
                 suffix="%"

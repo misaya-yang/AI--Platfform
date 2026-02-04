@@ -1534,7 +1534,7 @@ export function PlaygroundPage() {
       // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
       if (err instanceof Error && err.name === 'AbortError') return;
 
-      const message = err instanceof Error ? err.message : "鍙戠敓閿欒";
+      const message = err instanceof Error ? err.message : t("common.error");
       setMessages((m) => {
         const next = [...m];
         if (next[assistantIndex]) {

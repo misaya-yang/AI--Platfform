@@ -17,6 +17,7 @@ import {
 import dayjs from "dayjs";
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageBreakdown } from "@/api/usage";
@@ -26,6 +27,7 @@ import type { SourceFilter, RefreshInterval } from "../types";
 const { RangePicker } = DatePicker;
 
 export function DashboardHeader() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const {
@@ -92,21 +94,21 @@ export function DashboardHeader() {
 
   // Build service options
   const serviceOptions = [
-    { label: "全部服务", value: "all" },
+    { label: t("dashboard.filters.allServices"), value: "all" },
     ...(serviceBreakdown?.items || []).map((item) => ({
-      label: item.service || "unknown",
-      value: item.service || "unknown",
+      label: item.service || t("common.unknown"),
+      value: item.service || t("common.unknown"),
     })),
   ];
 
   // Build user options
   const userOptions = [
-    { label: "全部用户", value: "all" },
+    { label: t("dashboard.filters.allUsers"), value: "all" },
     ...(userBreakdown?.items || []).map((item) => ({
       label: item.user?.startsWith("anon:")
-        ? `匿名-${item.user.slice(-6)}`
-        : item.user || "unknown",
-      value: item.user || "unknown",
+        ? t("dashboard.filters.anonymousUser", { id: item.user.slice(-6) })
+        : item.user || t("common.unknown"),
+      value: item.user || t("common.unknown"),
     })),
   ];
 
@@ -121,16 +123,16 @@ export function DashboardHeader() {
   };
 
   const sourceOptions: { label: string; value: SourceFilter }[] = [
-    { label: "全部来源", value: "all" },
-    { label: "内部调用", value: "internal" },
-    { label: "外部API", value: "external" },
+    { label: t("dashboard.filters.allSources"), value: "all" },
+    { label: t("dashboard.filters.internal"), value: "internal" },
+    { label: t("dashboard.filters.external"), value: "external" },
   ];
 
   const refreshOptions: { label: string; value: RefreshInterval }[] = [
-    { label: "手动刷新", value: 0 },
-    { label: "30秒", value: 30 },
-    { label: "1分钟", value: 60 },
-    { label: "5分钟", value: 300 },
+    { label: t("dashboard.refresh.manual"), value: 0 },
+    { label: t("dashboard.refresh.seconds", { count: 30 }), value: 30 },
+    { label: t("dashboard.refresh.minutes", { count: 1 }), value: 60 },
+    { label: t("dashboard.refresh.minutes", { count: 5 }), value: 300 },
   ];
 
   // Check if any filter is active
@@ -162,7 +164,7 @@ export function DashboardHeader() {
               letterSpacing: "-0.03em",
             }}
           >
-            监控仪表盘
+            {t("metrics.title")}
           </h1>
           <div
             style={{
@@ -187,13 +189,13 @@ export function DashboardHeader() {
                 boxShadow: `0 0 8px ${colors.accent}`,
               }} 
             />
-            上次更新: {dayjs(lastRefresh).format("HH:mm:ss")}
+            {t("dashboard.refresh.lastUpdated", { time: dayjs(lastRefresh).format("HH:mm:ss") })}
           </div>
         </div>
 
         {/* Action buttons */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Tooltip title="立即刷新">
+          <Tooltip title={t("dashboard.refresh.now")}>
             <button
               onClick={triggerRefresh}
               style={{
@@ -214,7 +216,7 @@ export function DashboardHeader() {
             </button>
           </Tooltip>
 
-          <Tooltip title={isFullscreen ? "退出全屏" : "全屏模式"}>
+          <Tooltip title={isFullscreen ? t("dashboard.fullscreen.exit") : t("dashboard.fullscreen.enter")}>
             <button
               onClick={handleFullscreen}
               style={{
@@ -277,7 +279,7 @@ export function DashboardHeader() {
               }}
             >
               <FilterOutlined />
-              <span>筛选条件</span>
+              <span>{t("dashboard.filters.title")}</span>
               {hasActiveFilters && (
                 <Badge
                   count={activeFilterCount}
@@ -326,7 +328,7 @@ export function DashboardHeader() {
                       color: "#10B981",
                     }}
                   >
-                    {userId.startsWith("anon:") ? `匿名-${userId.slice(-6)}` : userId}
+                    {userId.startsWith("anon:") ? t("dashboard.filters.anonymousUser", { id: userId.slice(-6) }) : userId}
                   </span>
                 )}
                 {source !== "all" && (
@@ -339,7 +341,7 @@ export function DashboardHeader() {
                       color: "#F59E0B",
                     }}
                   >
-                    {source === "internal" ? "内部" : "外部"}
+                    {source === "internal" ? t("dashboard.filters.internalShort") : t("dashboard.filters.externalShort")}
                   </span>
                 )}
               </div>
@@ -349,7 +351,7 @@ export function DashboardHeader() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* Reset filters button */}
             {hasActiveFilters && (
-              <Tooltip title="重置筛选">
+              <Tooltip title={t("dashboard.filters.reset")}>
                 <Button
                   type="text"
                   size="small"
@@ -360,7 +362,7 @@ export function DashboardHeader() {
                   }}
                   style={{ color: colors.textMuted }}
                 >
-                  重置
+                  {t("common.reset")}
                 </Button>
               </Tooltip>
             )}
@@ -371,7 +373,7 @@ export function DashboardHeader() {
               onClick={(e) => e.stopPropagation()}
             >
               <span style={{ fontSize: 12, fontWeight: 500, color: colors.textSecondary }}>
-                自动刷新
+                {t("dashboard.refresh.auto")}
               </span>
               <Select
                 value={refreshInterval}
@@ -436,7 +438,7 @@ export function DashboardHeader() {
                 }}
               >
                 <AppstoreOutlined />
-                <span>数据筛选</span>
+                <span>{t("dashboard.filters.dataFilters")}</span>
               </div>
 
               {/* Service Filter */}
@@ -446,7 +448,7 @@ export function DashboardHeader() {
                 options={serviceOptions}
                 style={{ minWidth: 140 }}
                 suffixIcon={<AppstoreOutlined />}
-                placeholder="选择服务"
+                placeholder={t("dashboard.filters.selectService")}
                 popupMatchSelectWidth={false}
                 variant="filled"
               />
@@ -458,7 +460,7 @@ export function DashboardHeader() {
                 options={userOptions}
                 style={{ minWidth: 140 }}
                 suffixIcon={<UserOutlined />}
-                placeholder="选择用户"
+                placeholder={t("dashboard.filters.selectUser")}
                 popupMatchSelectWidth={false}
                 variant="filled"
               />
@@ -469,7 +471,7 @@ export function DashboardHeader() {
                 onChange={(v) => setSource(v as SourceFilter)}
                 options={sourceOptions}
                 style={{ minWidth: 110 }}
-                placeholder="来源"
+                placeholder={t("dashboard.filters.selectSource")}
                 popupMatchSelectWidth={false}
                 variant="filled"
               />
@@ -498,7 +500,7 @@ export function DashboardHeader() {
                 }}
               >
                 <CalendarOutlined />
-                <span>时间范围</span>
+                <span>{t("dashboard.filters.timeRange")}</span>
               </div>
 
               {/* Date Range */}
@@ -522,8 +524,8 @@ export function DashboardHeader() {
                 value={granularity}
                 onChange={setGranularity}
                 options={[
-                  { value: "day", label: "天" },
-                  { value: "hour", label: "时" },
+                  { value: "day", label: t("dashboard.granularity.day") },
+                  { value: "hour", label: t("dashboard.granularity.hour") },
                 ]}
                 style={{ width: 70 }}
                 variant="filled"

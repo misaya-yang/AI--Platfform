@@ -13,6 +13,9 @@ from typing import NamedTuple, Optional
 
 class ProcessingMode(str, Enum):
     """Document processing mode enumeration."""
+
+    AUTO = "auto"
+    """Automatic detection: choose the best processing mode based on document analysis."""
     
     TEXT_ONLY = "text_only"
     """Traditional text processing: OCR extraction -> chunking -> text embedding.
@@ -49,6 +52,16 @@ class ProcessingModeConfig(NamedTuple):
 
 # Default configurations for each mode
 MODE_CONFIGS: dict[ProcessingMode, ProcessingModeConfig] = {
+    ProcessingMode.AUTO: ProcessingModeConfig(
+        mode=ProcessingMode.AUTO,
+        display_name="Auto",
+        description="Automatic detection and processing",
+        embedding_model="text-embedding-v3",
+        batch_size=50,
+        max_concurrent=5,
+        timeout_seconds=60.0,
+        supports_progress=False,
+    ),
     ProcessingMode.TEXT_ONLY: ProcessingModeConfig(
         mode=ProcessingMode.TEXT_ONLY,
         display_name="Pure Text",

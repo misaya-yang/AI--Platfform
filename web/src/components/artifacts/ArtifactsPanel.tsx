@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
 import type { ExecutionStatusType } from "./ExecutionStatus";
 import { copyToClipboard } from "@/lib/clipboard";
+import { useTranslation } from "react-i18next";
 
 // ============================================================================
 // Types
@@ -284,6 +285,7 @@ function ImageCard({
   item: OutputFile | Artifact;
   onDownload: () => void;
 }) {
+  const { t } = useTranslation();
   // Determine image source - could be base64 (OutputFile) or URL (Artifact)
   const isOutputFile = "content_base64" in item;
   const imageSrc = isOutputFile
@@ -325,7 +327,7 @@ function ImageCard({
           <button
             onClick={handleOpenInNewTab}
             className="p-2 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
-            title="在新标签页打开"
+            title={t("common.openInNewTab")}
           >
             <Eye className="h-4 w-4" />
           </button>

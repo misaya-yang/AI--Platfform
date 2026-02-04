@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union
 
-from ...config.settings import settings
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,11 +68,11 @@ class StreamingDocumentLoader:
     Suitable for 300MB+ PDF files that would otherwise cause OOM.
     """
     
-    # Configuration from settings
-    LARGE_FILE_THRESHOLD = settings.knowledge.large_file_threshold
-    DEFAULT_BATCH_SIZE = settings.knowledge.streaming_batch_size
-    MIN_BATCH_SIZE = settings.knowledge.streaming_min_batch_size
-    MAX_BATCH_SIZE = settings.knowledge.streaming_max_batch_size
+    # Default configuration (mirrors KnowledgeSettings defaults)
+    LARGE_FILE_THRESHOLD = 50 * 1024 * 1024  # 50MB
+    DEFAULT_BATCH_SIZE = 20
+    MIN_BATCH_SIZE = 5
+    MAX_BATCH_SIZE = 50
     
     # Timeout for page processing operations (seconds)
     PAGE_PROCESSING_TIMEOUT = 30.0
@@ -83,6 +82,7 @@ class StreamingDocumentLoader:
         self,
         batch_size: int = DEFAULT_BATCH_SIZE,
         extract_images: bool = True,
+        extract_images_if_no_text: bool = False,
         max_image_size: int = 1024,  # Max dimension for extracted images
         storage_service: Optional[Any] = None,  # For S3/OSS loading
     ):
@@ -97,6 +97,7 @@ class StreamingDocumentLoader:
         """
         self.batch_size = max(self.MIN_BATCH_SIZE, min(batch_size, self.MAX_BATCH_SIZE))
         self.extract_images = extract_images
+        self.extract_images_if_no_text = extract_images_if_no_text
         self.max_image_size = max_image_size
         self.storage_service = storage_service
         self._fitz = None
@@ -105,13 +106,17 @@ class StreamingDocumentLoader:
         """Lazy load PyMuPDF."""
         if self._fitz is None:
             try:
-                import fitz
+                import pymupdf as fitz
                 self._fitz = fitz
             except ImportError:
-                raise ImportError(
-                    "PyMuPDF (fitz) is required for streaming document loading. "
-                    "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
-                )
+                try:
+                    import fitz  # type: ignore
+                    self._fitz = fitz
+                except ImportError as exc:
+                    raise ImportError(
+                        "PyMuPDF is required for streaming document loading. "
+                        "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
+                    ) from exc
         return self._fitz
     
     async def get_page_count(self, source: Union[bytes, str]) -> int:
@@ -279,9 +284,10 @@ class StreamingDocumentLoader:
         # Extract text
         text = page.get_text("text")
         
-        # Extract images if enabled
+        # Extract images if enabled (or if needed for OCR when text is empty)
         images = []
-        if self.extract_images:
+        should_extract_images = self.extract_images or (self.extract_images_if_no_text and not text.strip())
+        if should_extract_images:
             try:
                 images = self._sync_extract_page_images(doc, page, page_idx)
             except Exception as e:

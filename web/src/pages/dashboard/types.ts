@@ -192,11 +192,11 @@ export const DEFAULT_LAYOUTS: LayoutItem[] = [
 
 // Default panel configs
 export const DEFAULT_PANELS: PanelConfig[] = [
-  { id: "service-health", title: "服务健康状态", type: "service-health", visible: true },
-  { id: "performance", title: "性能监控", type: "performance", visible: true },
-  { id: "token-usage", title: "Token 用量", type: "token-usage", visible: true },
-  { id: "cost-analysis", title: "成本分析", type: "cost-analysis", visible: true },
-  { id: "user-quota", title: "用户配额", type: "user-quota", visible: true },
-  { id: "security-events", title: "安全事件", type: "security-events", visible: true },
-  { id: "request-trace", title: "请求追踪", type: "request-trace", visible: true },
+  { id: "service-health", title: "Service Health", type: "service-health", visible: true },
+  { id: "performance", title: "Performance", type: "performance", visible: true },
+  { id: "token-usage", title: "Token Usage", type: "token-usage", visible: true },
+  { id: "cost-analysis", title: "Cost Analysis", type: "cost-analysis", visible: true },
+  { id: "user-quota", title: "User Quota", type: "user-quota", visible: true },
+  { id: "security-events", title: "Security Events", type: "security-events", visible: true },
+  { id: "request-trace", title: "Request Trace", type: "request-trace", visible: true },
 ];

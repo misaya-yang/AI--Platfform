@@ -5,6 +5,7 @@
  */
 
 import { api } from "@/lib/api";
+import i18n from "@/i18n";
 
 // =============================================================================
 // Types
@@ -133,9 +134,9 @@ export async function toggleModel(
  */
 export function getAccessLevelDisplayName(level: ModelAccessLevel): string {
   const names: Record<ModelAccessLevel, string> = {
-    public: "公开",
-    premium: "高级",
-    admin: "管理员",
+    public: i18n.t("models.access.public"),
+    premium: i18n.t("models.access.premium"),
+    admin: i18n.t("models.access.admin"),
   };
   return names[level] || level;
 }
@@ -166,7 +167,7 @@ export function formatPrice(price: number | string | null | undefined): string {
   // Handle NaN or invalid values
   if (isNaN(numPrice)) return "-";
 
-  if (numPrice === 0) return "免费";
+  if (numPrice === 0) return i18n.t("models.price.free");
   if (numPrice < 0.001) return `$${numPrice.toFixed(6)}`;
   if (numPrice < 0.01) return `$${numPrice.toFixed(5)}`;
   return `$${numPrice.toFixed(4)}`;

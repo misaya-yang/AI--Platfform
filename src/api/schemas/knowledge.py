@@ -541,6 +541,14 @@ class ChunkingConfigSchema(BaseModel):
     mode: str = "automatic"
     chunk_size: int = 2000       # ~400-500 tokens, matches ChunkingConfig default
     chunk_overlap: int = 300     # 15% overlap, matches ChunkingConfig default
+
+    # Token-based (preferred for production)
+    use_token_count: bool = True
+    token_limit: Optional[int] = None
+    min_chunk_tokens: Optional[int] = None
+    max_chunk_tokens: Optional[int] = None
+    parent_token_limit: Optional[int] = None
+    child_token_limit: Optional[int] = None
     
     # Separator mode
     separator: str = "\n"

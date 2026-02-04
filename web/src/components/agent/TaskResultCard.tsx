@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { copyToClipboard } from "@/lib/clipboard";
+import { useTranslation } from "react-i18next";
 
 // =============================================================================
 // Types
@@ -103,6 +104,7 @@ interface CodeBlockCardProps {
 }
 
 function CodeBlockCard({ data, className }: CodeBlockCardProps) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
@@ -201,13 +203,13 @@ function CodeBlockCard({ data, className }: CodeBlockCardProps) {
               ) : (
                 <Play className="h-3.5 w-3.5" />
               )}
-              {isRunning ? "运行中..." : "运行"}
+              {isRunning ? t("common.running") : t("common.run")}
             </button>
           )}
           <button
             onClick={handleCopy}
             className="p-1.5 rounded-lg hover:bg-slate-200/80 dark:hover:bg-slate-700/50 transition-colors"
-            title="复制代码"
+            title={t("common.copy")}
           >
             {copied ? (
               <Check className="h-4 w-4 text-emerald-500" />
@@ -241,7 +243,7 @@ function CodeBlockCard({ data, className }: CodeBlockCardProps) {
               <div className="flex items-center gap-2 mb-2">
                 <Terminal className="h-3.5 w-3.5 text-slate-400" />
                 <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wide">
-                  输出
+                  {t("common.output")}
                 </span>
                 {runSuccess !== null && (
                   <span
@@ -252,7 +254,7 @@ function CodeBlockCard({ data, className }: CodeBlockCardProps) {
                         : "bg-red-500/20 text-red-400"
                     )}
                   >
-                    {runSuccess ? "成功" : "失败"}
+                    {runSuccess ? t("common.success") : t("common.failed")}
                   </span>
                 )}
               </div>
@@ -277,6 +279,7 @@ interface ImageCardProps {
 }
 
 function ImageCard({ data, className }: ImageCardProps) {
+  const { t } = useTranslation();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -313,14 +316,14 @@ function ImageCard({ data, className }: ImageCardProps) {
           <div className="flex items-center gap-2">
             <Icon className="h-4 w-4 text-slate-500" />
             <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-              {data.title || (isChart ? "图表" : "图片")}
+              {data.title || (isChart ? t("common.chart") : t("common.image"))}
             </span>
           </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setIsModalOpen(true)}
               className="p-1.5 rounded-lg hover:bg-slate-200/80 dark:hover:bg-slate-700/50 transition-colors"
-              title="全屏预览"
+              title={t("common.fullscreenPreview")}
             >
               <Maximize2 className="h-4 w-4 text-slate-500" />
             </button>
@@ -328,7 +331,7 @@ function ImageCard({ data, className }: ImageCardProps) {
               <button
                 onClick={handleDownload}
                 className="p-1.5 rounded-lg hover:bg-slate-200/80 dark:hover:bg-slate-700/50 transition-colors"
-                title="下载"
+                title={t("common.download")}
               >
                 <Download className="h-4 w-4 text-slate-500" />
               </button>
@@ -390,7 +393,7 @@ function ImageCard({ data, className }: ImageCardProps) {
                   className="absolute bottom-4 right-4 flex items-center gap-2 px-4 py-2 rounded-lg bg-white/90 hover:bg-white text-slate-700 font-medium text-sm transition-colors"
                 >
                   <Download className="h-4 w-4" />
-                  下载
+                  {t("common.download")}
                 </button>
               )}
             </motion.div>
@@ -484,6 +487,7 @@ interface TableCardProps {
 }
 
 function TableCard({ data, className }: TableCardProps) {
+  const { t } = useTranslation();
   const tableRef = useRef<HTMLDivElement>(null);
 
   const handleDownload = useCallback(() => {
@@ -491,7 +495,7 @@ function TableCard({ data, className }: TableCardProps) {
 
     const link = document.createElement("a");
     link.href = data.downloadUrl;
-    link.download = data.title || "table.csv";
+    link.download = data.title || t("common.tableFile");
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -515,10 +519,10 @@ function TableCard({ data, className }: TableCardProps) {
         <div className="flex items-center gap-2">
           <Table className="h-4 w-4 text-slate-500" />
           <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-            {data.title || "数据表"}
+            {data.title || t("common.table")}
           </span>
           <span className="text-[10px] text-slate-500 dark:text-slate-400">
-            ({data.rows.length} 行)
+            ({t("common.rows", { count: data.rows.length })})
           </span>
         </div>
         {data.downloadUrl && (
@@ -527,7 +531,7 @@ function TableCard({ data, className }: TableCardProps) {
             className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
           >
             <Download className="h-3.5 w-3.5" />
-            导出
+            {t("common.export")}
           </button>
         )}
       </div>
@@ -580,6 +584,7 @@ interface FileCardProps {
 }
 
 function FileCard({ data, className }: FileCardProps) {
+  const { t } = useTranslation();
   const handleDownload = useCallback(() => {
     const link = document.createElement("a");
     link.href = data.downloadUrl;
@@ -649,7 +654,7 @@ function FileCard({ data, className }: FileCardProps) {
             target="_blank"
             rel="noopener noreferrer"
             className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="预览"
+            title={t("common.preview")}
           >
             <ExternalLink className="h-4 w-4 text-slate-500" />
           </a>
@@ -659,7 +664,7 @@ function FileCard({ data, className }: FileCardProps) {
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors text-xs font-medium"
         >
           <Download className="h-3.5 w-3.5" />
-          下载
+          {t("common.download")}
         </button>
       </div>
     </motion.div>

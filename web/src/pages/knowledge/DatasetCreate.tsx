@@ -89,10 +89,20 @@ const CHUNKING_MODES: Array<{ id: ChunkingMode; nameKey: string; descKey: string
 ];
 
 const EMBEDDING_MODELS = [
+  // Gemini
   { provider: "gemini", model: "gemini-embedding-001", nameKey: "knowledge.create.embeddingGemini001", dimension: 1024 },
+
+  // DashScope
   { provider: "dashscope", model: "text-embedding-v4", nameKey: "knowledge.create.embeddingDashscopeV4", dimension: 1024 },
   { provider: "dashscope", model: "text-embedding-v3", nameKey: "knowledge.create.embeddingDashscopeV3", dimension: 1024 },
   { provider: "dashscope", model: "text-embedding-v2", nameKey: "knowledge.create.embeddingDashscopeV2", dimension: 1536 },
+
+  // SiliconFlow
+  { provider: "siliconflow", model: "BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3", dimension: 8192 },
+  { provider: "siliconflow", model: "Pro/BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3Pro", dimension: 8192 },
+  { provider: "siliconflow", model: "BAAI/bge-large-zh-v1.5", nameKey: "knowledge.create.embeddingBgeLargeZh15", dimension: 1024 },
+  { provider: "siliconflow", model: "BAAI/bge-large-en-v1.5", nameKey: "knowledge.create.embeddingBgeLargeEn15", dimension: 1024 },
+  { provider: "siliconflow", model: "netease-youdao/bce-embedding-base_v1", nameKey: "knowledge.create.embeddingBceBase", dimension: 512 },
 ];
 
 const RERANK_MODELS = [

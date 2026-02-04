@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
 import "katex/dist/katex.min.css";
 import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -72,6 +73,7 @@ function DocumentHeader({
   copied: boolean;
   hasContent: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
       {/* Title with icon */}
@@ -90,7 +92,7 @@ function DocumentHeader({
             {title}
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            文档
+            {t("assistant.document")}
           </p>
         </div>
         {hasContent && (
@@ -132,7 +134,7 @@ function DocumentHeader({
           >
             <a href={downloadUrl} download>
               <Download className="h-3.5 w-3.5" />
-              <span className="text-xs">下载</span>
+              <span className="text-xs">{t("common.download")}</span>
             </a>
           </Button>
         )}
@@ -148,14 +150,14 @@ function DocumentHeader({
               <DropdownMenuItem asChild>
                 <a href={downloadUrl} download className="flex items-center gap-2">
                   <Download className="h-4 w-4" />
-                  下载文档
+                  {t("assistant.downloadDocument")}
                 </a>
               </DropdownMenuItem>
             )}
             {hasContent && (
               <DropdownMenuItem onClick={onCopy}>
                 <Copy className="h-4 w-4 mr-2" />
-                复制内容
+                {t("common.copy")}
               </DropdownMenuItem>
             )}
             {downloadUrl && (
@@ -167,7 +169,7 @@ function DocumentHeader({
                   className="flex items-center gap-2"
                 >
                   <ExternalLink className="h-4 w-4" />
-                  新窗口打开
+                  {t("common.openInNewTab")}
                 </a>
               </DropdownMenuItem>
             )}

@@ -16,6 +16,7 @@ import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary } from "@/api/usage";
 import { LAYOUT, getColors, gridStyles } from "../styles";
+import { useTranslation } from "react-i18next";
 
 function formatNumber(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -34,6 +35,7 @@ interface TrendProps {
 }
 
 function Trend({ value, isPositiveGood = true }: TrendProps) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const isUp = value > 0;
@@ -54,7 +56,7 @@ function Trend({ value, isPositiveGood = true }: TrendProps) {
     >
       {isUp ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
       <span>{Math.abs(value)}%</span>
-      <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>较上期</span>
+      <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.vsPrevious")}</span>
     </div>
   );
 }
@@ -208,6 +210,7 @@ function KPICard({
 }
 
 export function KPICards() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const { dateRange, serviceId, userId, lastRefresh } = useDashboardContext();
@@ -226,7 +229,7 @@ export function KPICards() {
 
   const kpiData = [
     {
-      title: "总请求数",
+      title: t("metrics.totalRequests"),
       value: formatNumber(data?.total_requests || 0),
       icon: <ApiOutlined />,
       iconColor: colors.accent,
@@ -234,7 +237,7 @@ export function KPICards() {
       trend: 12.5,
     },
     {
-      title: "总成本",
+      title: t("analytics.totalCost"),
       value: formatCurrency(data?.total_cost_usd || 0),
       icon: <DollarOutlined />,
       iconColor: colors.success,
@@ -243,7 +246,7 @@ export function KPICards() {
       isPositiveGood: false,
     },
     {
-      title: "平均延迟",
+      title: t("metrics.avgLatency"),
       value: Math.round(data?.avg_latency_ms || 0),
       suffix: "ms",
       icon: <ThunderboltOutlined />,
@@ -253,7 +256,7 @@ export function KPICards() {
       isPositiveGood: false,
     },
     {
-      title: "成功率",
+      title: t("metrics.successRate"),
       value: (data?.success_rate || 0).toFixed(1),
       suffix: "%",
       icon: <CheckCircleOutlined />,
@@ -262,7 +265,7 @@ export function KPICards() {
       trend: 0.2,
     },
     {
-      title: "Token 总量",
+      title: t("metrics.totalTokens"),
       value: formatNumber(data?.total_tokens || 0),
       icon: <DatabaseOutlined />,
       iconColor: colors.purple,

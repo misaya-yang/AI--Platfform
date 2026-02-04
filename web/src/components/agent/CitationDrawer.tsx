@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RAGCitation, RAGEvaluation } from "@/pages/assistant/types";
+import { useTranslation } from "react-i18next";
 
 // =============================================================================
 // Types
@@ -91,6 +92,7 @@ export function CitationBadge({
   onClick,
   className,
 }: CitationBadgeProps) {
+  const { t } = useTranslation();
   const getStatusColor = () => {
     switch (citation.status) {
       case "used":
@@ -123,7 +125,7 @@ export function CitationBadge({
         getStatusColor(),
         className
       )}
-      title={`${citation.source_title || citation.dataset_name} - ${Math.round(citation.relevance_score * 100)}% 相关`}
+      title={`${citation.source_title || citation.dataset_name} - ${t("assistant.relevanceScore", { percent: Math.round(citation.relevance_score * 100) })}`}
     >
       {index}
     </button>
@@ -227,6 +229,7 @@ interface CitationDetailCardProps {
 }
 
 function CitationDetailCard({ citation, index, isSelected, onSelect }: CitationDetailCardProps) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -253,11 +256,11 @@ function CitationDetailCard({ citation, index, isSelected, onSelect }: CitationD
   const getStatusLabel = () => {
     switch (citation.status) {
       case "used":
-        return "已引用";
+        return t("assistant.citationUsed");
       case "implicit":
-        return "已使用";
+        return t("assistant.citationImplicit");
       default:
-        return "已检索";
+        return t("assistant.citationUnused");
     }
   };
 
@@ -371,16 +374,16 @@ function CitationDetailCard({ citation, index, isSelected, onSelect }: CitationD
                     <div className="flex items-center gap-2 mb-2">
                       <FileText className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                       <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400 uppercase tracking-wide">
-                        引用文本
+                        {t("assistant.citedTextLabel")}
                       </span>
                     </div>
                     <p className="leading-relaxed">{citation.cited_text}</p>
                   </div>
-                  <button
-                    onClick={handleCopy}
-                    className="absolute top-2 right-2 p-1.5 rounded-md bg-white/80 dark:bg-slate-800/80 hover:bg-white dark:hover:bg-slate-700 transition-colors"
-                    title="复制引用"
-                  >
+                    <button
+                      onClick={handleCopy}
+                      className="absolute top-2 right-2 p-1.5 rounded-md bg-white/80 dark:bg-slate-800/80 hover:bg-white dark:hover:bg-slate-700 transition-colors"
+                      title={t("common.copy")}
+                    >
                     {copied ? (
                       <Check className="h-3.5 w-3.5 text-emerald-500" />
                     ) : (
@@ -396,7 +399,7 @@ function CitationDetailCard({ citation, index, isSelected, onSelect }: CitationD
                   <div className="flex items-center gap-2 mb-2">
                     <BookOpen className="h-3.5 w-3.5 text-slate-500" />
                     <span className="text-[10px] font-medium text-slate-500 uppercase tracking-wide">
-                      上下文预览
+                      {t("assistant.contextPreview")}
                     </span>
                   </div>
                   {citation.context_preview.length > 300
@@ -428,6 +431,7 @@ interface QualitySummaryProps {
 }
 
 function QualitySummary({ evaluation, citationCount }: QualitySummaryProps) {
+  const { t } = useTranslation();
   const getQualityColor = (score: number) => {
     if (score >= 80) return "text-emerald-600 dark:text-emerald-400";
     if (score >= 60) return "text-amber-600 dark:text-amber-400";
@@ -435,9 +439,9 @@ function QualitySummary({ evaluation, citationCount }: QualitySummaryProps) {
   };
 
   const getQualityLabel = (score: number) => {
-    if (score >= 80) return "优质";
-    if (score >= 60) return "良好";
-    return "一般";
+    if (score >= 80) return t("assistant.ragQualityHigh");
+    if (score >= 60) return t("assistant.ragQualityMedium");
+    return t("assistant.ragQualityLow");
   };
 
   return (
@@ -446,15 +450,15 @@ function QualitySummary({ evaluation, citationCount }: QualitySummaryProps) {
         <BookOpen className="h-4 w-4 text-slate-500" />
         <div>
           <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-            {citationCount} 个来源
+            {t("assistant.citationsTitle", { count: citationCount })}
           </span>
           <span className="text-xs text-slate-500 dark:text-slate-400 ml-2">
-            ({evaluation.chunks_used}/{evaluation.chunks_retrieved} 已使用)
+            {t("assistant.ragChunksUsed", { used: evaluation.chunks_used, total: evaluation.chunks_retrieved })}
           </span>
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <span className="text-xs text-slate-500 dark:text-slate-400">响应质量</span>
+        <span className="text-xs text-slate-500 dark:text-slate-400">{t("assistant.ragQuality")}</span>
         <span
           className={cn(
             "text-sm font-semibold",
@@ -482,6 +486,7 @@ export function CitationDrawer({
   position = "right",
   className,
 }: CitationDrawerProps) {
+  const { t } = useTranslation();
   const [internalSelectedIndex, setInternalSelectedIndex] = useState<number | undefined>(selectedIndex);
 
   // Sync with external selected index
@@ -547,7 +552,7 @@ export function CitationDrawer({
               <div className="flex items-center gap-2">
                 <BookOpen className="h-5 w-5 text-slate-600 dark:text-slate-400" />
                 <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200">
-                  引用来源
+                  {t("assistant.citationsHeader")}
                 </h3>
               </div>
               <button
@@ -578,7 +583,7 @@ export function CitationDrawer({
               {citations.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-slate-500 dark:text-slate-400">
                   <BookOpen className="h-12 w-12 mb-3 opacity-30" />
-                  <p className="text-sm">暂无引用来源</p>
+                  <p className="text-sm">{t("assistant.noCitations")}</p>
                 </div>
               ) : (
                 citations.map((citation, index) => (

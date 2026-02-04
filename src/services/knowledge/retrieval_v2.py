@@ -4,19 +4,82 @@ Retrieval V2 - Clean, explainable retrieval pipeline
 This module implements a clear retrieval flow:
 1. Dense (Vector) Retrieval - returns similarity scores [0, 1]
 2. BM25 (Keyword) Retrieval - returns BM25 scores (normalized to [0, 1])
-3. Fusion - combines scores using weighted average
+3. Fusion - combines scores using RRF (Reciprocal Rank Fusion) or weighted average
 4. MMR Diversification (optional)
 5. Rerank (optional)
 
 All scores are tracked at each stage for explainability.
+
+Best Practices (2025):
+- RRF is preferred over weighted fusion for hybrid search stability
+- Language-adaptive weights improve multilingual retrieval
+- Arabic queries benefit from higher BM25 weight due to embedding limitations
 """
 
 from __future__ import annotations
 
+import re
 import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import Counter
+
+
+# =============================================================================
+# Language Detection for Adaptive Weights
+# =============================================================================
+
+# Arabic Unicode ranges
+_ARABIC_PATTERN = re.compile(r'[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]')
+
+
+def detect_query_language(query: str) -> str:
+    """
+    Detect primary language of query for weight adjustment.
+    
+    Returns:
+        "ar" for Arabic, "en" for English/other
+    """
+    if not query:
+        return "en"
+    
+    sample = query[:500]
+    arabic_chars = len(_ARABIC_PATTERN.findall(sample))
+    total = max(len(sample), 1)
+    
+    if arabic_chars / total > 0.25:
+        return "ar"
+    return "en"
+
+
+def get_language_adaptive_weights(
+    query: str,
+    base_dense_weight: float = 0.6,
+    base_bm25_weight: float = 0.4,
+) -> Tuple[float, float]:
+    """
+    Get adaptive weights based on query language.
+    
+    Rationale:
+    - Arabic: Higher BM25 weight (0.5/0.5) because:
+      - Embedding models perform worse on Arabic morphology
+      - Exact keyword matching helps with agglutinative words
+    - English: Higher Dense weight (0.7/0.3) because:
+      - Semantic embeddings work well for English
+      - Dense retrieval captures synonyms and paraphrases
+    - Mixed: Balanced weights (0.6/0.4)
+    
+    Returns:
+        (dense_weight, bm25_weight) tuple
+    """
+    lang = detect_query_language(query)
+    
+    if lang == "ar":
+        # Arabic: boost BM25 for morphological matching
+        return 0.5, 0.5
+    else:
+        # English/other: default semantic-first
+        return base_dense_weight, base_bm25_weight
 
 
 @dataclass
@@ -310,24 +373,44 @@ def compute_text_match(query: str, text: str) -> Tuple[bool, int, float]:
 
 
 class RetrievalPipeline:
-    """Clean retrieval pipeline with stage tracking."""
+    """Clean retrieval pipeline with stage tracking and language-adaptive weights."""
     
     def __init__(
         self,
         mode: str = "hybrid",  # "dense", "bm25", "hybrid"
-        fusion_method: str = "weighted",  # "weighted", "rrf"
-        dense_weight: float = 0.5,
-        bm25_weight: float = 0.5,
+        fusion_method: str = "rrf",  # "weighted", "rrf" - RRF is now default
+        dense_weight: float = 0.6,
+        bm25_weight: float = 0.4,
         rrf_k: int = 60,
+        query: Optional[str] = None,  # For language-adaptive weights
+        use_adaptive_weights: bool = True,  # Enable language-based weight adjustment
     ):
         self.mode = mode
         self.fusion_method = fusion_method
-        self.dense_weight = dense_weight
-        self.bm25_weight = bm25_weight
         self.rrf_k = rrf_k
+        self.use_adaptive_weights = use_adaptive_weights
+        self.query = query
+        self.query_language: Optional[str] = None
+        
+        # Apply language-adaptive weights if query is provided
+        if use_adaptive_weights and query:
+            self.query_language = detect_query_language(query)
+            self.dense_weight, self.bm25_weight = get_language_adaptive_weights(
+                query, dense_weight, bm25_weight
+            )
+        else:
+            self.dense_weight = dense_weight
+            self.bm25_weight = bm25_weight
         
         self.candidates: Dict[str, RetrievalCandidate] = {}
         self.pipeline_log: List[str] = []
+    
+    def set_query(self, query: str) -> None:
+        """Set query and update adaptive weights."""
+        self.query = query
+        if self.use_adaptive_weights:
+            self.query_language = detect_query_language(query)
+            self.dense_weight, self.bm25_weight = get_language_adaptive_weights(query)
     
     def log(self, message: str) -> None:
         """Add to pipeline log."""
@@ -459,17 +542,27 @@ class RetrievalPipeline:
             c.term_ratio = ratio
     
     def get_ranked_results(self, top_k: int = 10) -> List[RetrievalCandidate]:
-        """Get results sorted by fusion score."""
+        """Get results sorted by fusion score with deterministic tie-breaking.
+        
+        Deterministic ordering ensures consistent results for the same query,
+        which is important for:
+        - Testing and debugging
+        - User experience (same query = same results)
+        - Caching effectiveness
+        """
         candidates = list(self.candidates.values())
         
         # Set final score to fusion score
         for c in candidates:
             c.final_score = c.fusion_score if c.fusion_score is not None else 0.0
         
-        # Sort by final score (descending)
-        candidates.sort(key=lambda c: c.final_score, reverse=True)
+        # Sort by final score (descending), with segment_id as tie-breaker
+        # Using segment_id ensures deterministic ordering when scores are equal
+        candidates.sort(key=lambda c: (-c.final_score, c.segment_id))
         
         self.log(f"Ranked {len(candidates)} candidates, returning top {top_k}")
+        if self.query_language:
+            self.log(f"Query language: {self.query_language}, weights: dense={self.dense_weight:.2f}, bm25={self.bm25_weight:.2f}")
         
         return candidates[:top_k]
     
@@ -612,6 +705,8 @@ class RetrievalPipeline:
             "dense_weight": self.dense_weight,
             "bm25_weight": self.bm25_weight,
             "rrf_k": self.rrf_k if self.fusion_method == "rrf" else None,
+            "query_language": self.query_language,
+            "adaptive_weights_enabled": self.use_adaptive_weights,
             "log": self.pipeline_log,
             "total_candidates": len(self.candidates),
         }

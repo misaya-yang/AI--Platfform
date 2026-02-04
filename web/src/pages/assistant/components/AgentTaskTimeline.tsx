@@ -31,6 +31,7 @@ import {
 import { cn } from "@/lib/utils";
 import { SlideOutlinePreview } from "./SlideOutlinePreview";
 import type { SlideOutline } from "../types";
+import { useTranslation } from "react-i18next";
 
 // =============================================================================
 // Types
@@ -318,6 +319,7 @@ function TaskTimelineItem({ task, isLast }: { task: AgentTask; isLast: boolean }
 // =============================================================================
 
 function ThinkingIndicator({ message }: { message?: string }) {
+  const { t } = useTranslation();
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
@@ -330,7 +332,7 @@ function ThinkingIndicator({ message }: { message?: string }) {
       </div>
       <div className="flex items-center gap-2">
         <span className="text-sm text-violet-700 dark:text-violet-300 font-medium">
-          {message || "思考中"}
+          {message || t("assistant.thinking")}
         </span>
         <div className="flex gap-1">
           {[0, 1, 2].map((i) => (
@@ -365,6 +367,7 @@ export function AgentTaskTimeline({
   thinkingMessage,
   className,
 }: AgentTaskTimelineProps) {
+  const { t } = useTranslation();
   // Defensive check for tasks array
   const safeTasks = Array.isArray(tasks) ? tasks : [];
 
@@ -388,12 +391,12 @@ export function AgentTaskTimeline({
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-amber-500" />
             <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
-              {goal || "任务执行"}
+              {goal || t("assistant.taskGoalFallback")}
             </span>
           </div>
           {totalCount > 0 && (
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              {completedCount}/{totalCount} 已完成
+              {t("assistant.taskCompleted", { completed: completedCount, total: totalCount })}
             </span>
           )}
         </div>

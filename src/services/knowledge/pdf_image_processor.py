@@ -160,7 +160,10 @@ class PDFImageProcessor:
             PDFExtractionResult with text and images
         """
         try:
-            import fitz  # PyMuPDF
+            try:
+                import pymupdf as fitz  # type: ignore
+            except ImportError:
+                import fitz  # type: ignore
         except ImportError:
             logger.warning("PyMuPDF not installed, falling back to text-only extraction")
             return self._fallback_text_only(content)
@@ -227,7 +230,10 @@ class PDFImageProcessor:
         seen_hashes: set,
     ) -> List[ExtractedImage]:
         """Extract images from a single PDF page."""
-        import fitz
+        try:
+            import pymupdf as fitz  # type: ignore
+        except ImportError:
+            import fitz  # type: ignore
 
         images: List[ExtractedImage] = []
 

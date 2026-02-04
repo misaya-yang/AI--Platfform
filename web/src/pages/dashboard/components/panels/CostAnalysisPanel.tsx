@@ -19,6 +19,7 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary, getUsageBreakdown, getUsageTimeSeries } from "@/api/usage";
+import { useTranslation } from "react-i18next";
 
 function formatCost(value: number): string {
   if (value >= 1) return `$${value.toFixed(2)}`;
@@ -26,6 +27,7 @@ function formatCost(value: number): string {
 }
 
 export function CostAnalysisPanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
 
@@ -106,7 +108,7 @@ export function CostAnalysisPanel() {
   };
 
   const pieData = (breakdownQuery.data?.items || []).map((item) => ({
-    name: item.service || "Unknown",
+    name: item.service || t("common.unknown"),
     value: item.cost_usd || 0,
   }));
 
@@ -120,7 +122,7 @@ export function CostAnalysisPanel() {
 
   return (
     <PanelWrapper
-      title="成本分析"
+      title={t("dashboard.cost.title")}
       onRefresh={refetch}
       loading={todayQuery.isLoading}
     >
@@ -138,7 +140,7 @@ export function CostAnalysisPanel() {
             <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
               {formatCost(todayQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>今日</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.today")}</div>
           </div>
         </Col>
         <Col span={8}>
@@ -153,7 +155,7 @@ export function CostAnalysisPanel() {
             <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
               {formatCost(weekQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>本周</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.week")}</div>
           </div>
         </Col>
         <Col span={8}>
@@ -168,7 +170,7 @@ export function CostAnalysisPanel() {
             <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
               {formatCost(monthQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>本月</div>
+            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.month")}</div>
           </div>
         </Col>
       </Row>
@@ -177,7 +179,7 @@ export function CostAnalysisPanel() {
       <Row gutter={16}>
         <Col span={10}>
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-            服务分布
+            {t("dashboard.cost.serviceBreakdown")}
           </div>
           <SafeResponsiveChart height={120} minWidth={80} minHeight={80}>
             <PieChart>
@@ -219,7 +221,7 @@ export function CostAnalysisPanel() {
         </Col>
         <Col span={14}>
           <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
-            成本趋势
+            {t("dashboard.cost.trend")}
           </div>
           <SafeResponsiveChart height={150} minWidth={100} minHeight={100}>
             <AreaChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
@@ -231,7 +233,7 @@ export function CostAnalysisPanel() {
               />
               <YAxis tick={{ fontSize: 10 }} width={35} />
               <Tooltip
-                formatter={(value) => [formatCost(Number(value || 0)), "成本"]}
+                formatter={(value) => [formatCost(Number(value || 0)), t("analytics.cost")]}
                 labelFormatter={(label: string) => dayjs(label).format("YYYY-MM-DD")}
               />
               <Area

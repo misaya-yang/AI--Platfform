@@ -337,7 +337,13 @@ class Container:
         from .services.task.task_manager import TaskManager
         storage = self._providers["task_storage"].get_sync()
         queue = self._providers["task_queue"].get_sync()
-        return TaskManager(storage, queue)
+        return TaskManager(
+            storage=storage,
+            queue=queue,
+            callback_timeout=30.0,
+            callback_retries=3,
+            callback_retry_delay=1.0,
+        )
     
     def _create_task_worker(self):
         """创建任务工作者"""
@@ -631,6 +637,11 @@ class Container:
             return
         
         logger.info("正在关闭容器...")
+        
+        # 关闭任务管理器（释放 HTTP client 连接）
+        task_manager = self._providers.get("task_manager")
+        if task_manager and task_manager._instance:
+            await task_manager._instance.close()
         
         # 停止任务工作者
         task_worker = self._providers.get("task_worker")

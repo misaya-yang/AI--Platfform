@@ -82,7 +82,8 @@ async def get_dataset(
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        return await svc.require_dataset_access(user, dataset_id, required="viewer")
+        dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+        return svc.sanitize_dataset_for_response(dataset)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1579,13 +1580,47 @@ async def update_dataset_config(
                 },
             }
         
+        # Build dataset updates
+        dataset_updates: Dict[str, Any] = {"index_config": index_config}
+        
+        # Handle embedding config updates if provided
+        # Note: embedding changes require dimension check to avoid breaking existing vectors
+        embedding_provider = getattr(payload, 'embedding_provider', None)
+        embedding_model = getattr(payload, 'embedding_model', None)
+        embedding_dimension = getattr(payload, 'embedding_dimension', None)
+        
+        # Validate embedding dimension changes don't break existing vectors
+        current_dimension = dataset.get("embedding_dimension")
+        if embedding_dimension is not None and embedding_dimension != current_dimension:
+            # Check if dataset has existing segments
+            stats = await svc.get_dataset_statistics(user, dataset_id)
+            segment_count = stats.get("segment_count", 0)
+            if segment_count > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot change embedding dimension when {segment_count} segments exist. "
+                           "Please create a new dataset or delete all existing documents first."
+                )
+        
+        if embedding_provider is not None:
+            dataset_updates["embedding_provider"] = embedding_provider
+        if embedding_model is not None:
+            dataset_updates["embedding_model"] = embedding_model
+        if embedding_dimension is not None:
+            dataset_updates["embedding_dimension"] = embedding_dimension
+        
         # Save updated config
-        updated = await svc.update_dataset(user, dataset_id, {"index_config": index_config})
+        updated = await svc.update_dataset(user, dataset_id, dataset_updates)
         
         return {
             "status": "success",
             "dataset_id": dataset_id,
             "index_config": updated.get("index_config"),
+            "embedding": {
+                "provider": updated.get("embedding_provider"),
+                "model": updated.get("embedding_model"),
+                "dimension": updated.get("embedding_dimension"),
+            },
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -1660,6 +1695,8 @@ async def preview_chunks(
             flat_chunks,
             min_size=config.min_chunk_size,
             max_size=config.max_chunk_size,
+            min_tokens=config.min_chunk_tokens if config.use_token_count else None,
+            max_tokens=config.max_chunk_tokens if config.use_token_count else None,
         )
 
         # Format response

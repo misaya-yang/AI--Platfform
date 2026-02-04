@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -164,7 +164,11 @@ class KnowledgeQdrantSettings(BaseModel):
     url: str = "http://localhost:6333"
     api_key: Optional[str] = None
     prefer_grpc: bool = False
-    timeout_seconds: float = 30.0
+    # Increased timeout for large document processing
+    # 7MB+ PDFs with hundreds of chunks need more time
+    timeout_seconds: float = 120.0
+    max_retries: int = 5
+    retry_base_delay: float = 2.0  # Increased base delay for better recovery
 
 
 class KnowledgeProviderSettings(BaseModel):
@@ -181,12 +185,28 @@ class KnowledgeGeminiSettings(BaseModel):
     timeout_seconds: float = 30.0
 
 
+class KnowledgeSiliconFlowSettings(BaseModel):
+    """SiliconFlow Embedding API 配置
+
+    支持模型：
+    - BAAI/bge-m3: 1024 dimensions
+    - Pro/BAAI/bge-m3: 1024 dimensions
+    - BAAI/bge-large-zh-v1.5: 1024 dimensions
+    - BAAI/bge-large-en-v1.5: 1024 dimensions
+    - netease-youdao/bce-embedding-base_v1: 512 dimensions
+    """
+    api_key: str = ""
+    base_url: str = "https://api.siliconflow.cn/v1"
+    timeout_seconds: float = 30.0
+
+
 class KnowledgeSettings(BaseModel):
     enabled: bool = True
     worker_concurrency: int = 2
     qdrant: KnowledgeQdrantSettings = Field(default_factory=KnowledgeQdrantSettings)
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     gemini: KnowledgeGeminiSettings = Field(default_factory=KnowledgeGeminiSettings)
+    siliconflow: KnowledgeSiliconFlowSettings = Field(default_factory=KnowledgeSiliconFlowSettings)
     
     # =============================================
     # Text Embedding Configuration (for text-only datasets)
@@ -204,7 +224,7 @@ class KnowledgeSettings(BaseModel):
     # =============================================
     multimodal_embedding_provider: str = "dashscope"
     multimodal_embedding_model: str = "tongyi-embedding-vision-plus"
-    multimodal_embedding_dimension: int = 1024
+    multimodal_embedding_dimension: int = 1024  # Unified to 1024 as required
     multimodal_embedding_max_concurrent: int = 5
     
     # =============================================
@@ -223,6 +243,18 @@ class KnowledgeSettings(BaseModel):
     
     # Scanned PDF: min embeddable images to use image-only (no text extraction)
     scanned_min_images_for_image_only: int = 5
+
+    # OCR fallback for scanned/low-text PDFs
+    ocr_enabled: bool = True
+    ocr_languages: str = "eng+ara"
+    ocr_render_dpi: int = 200
+    pdf_min_text_chars_for_ocr: int = 200
+    ocr_tesseract_timeout_seconds: int = 60
+    # Moderate OCR parallelism to speed up scanned PDFs without overloading the machine
+    ocr_page_concurrency: int = 3
+
+    # Image segments use a separate position range to avoid conflicts with text segments
+    image_position_offset: int = 1_000_000
     
     # =============================================
     # Large File & Streaming Processing
@@ -266,6 +298,43 @@ class KnowledgeSettings(BaseModel):
     hierarchical_l1_top_k: int = 5   # Documents to consider at L1 (summary level)
     hierarchical_l2_top_k: int = 10  # Sections to consider at L2 (section level)
     hierarchical_l3_top_k: int = 5   # Final results at L3 (paragraph level)
+
+    @field_validator("ocr_languages")
+    @classmethod
+    def validate_ocr_languages(cls, v: str) -> str:
+        """Validate OCR languages against whitelist.
+        
+        Supports single languages (e.g., "eng", "ara") and combinations (e.g., "eng+ara").
+        """
+        # Single language whitelist
+        ALLOWED_SINGLE_LANGS = frozenset({
+            "eng", "ara", "chi_sim", "chi_tra", "fra", "deu", "spa", "rus",
+            "jpn", "kor", "por", "ita", "nld", "tur", "vie", "tha",
+        })
+        # Pre-defined combinations
+        ALLOWED_COMBINATIONS = frozenset({
+            "eng+ara", "ara+eng", "chi_sim+eng", "jpn+eng", "kor+eng",
+        })
+        
+        if not v:
+            return "eng+ara"
+        
+        # Check pre-defined combinations first
+        if v in ALLOWED_COMBINATIONS:
+            return v
+        
+        # Check single language
+        if v in ALLOWED_SINGLE_LANGS:
+            return v
+        
+        # Validate custom combinations (e.g., "eng+fra")
+        if "+" in v:
+            parts = v.split("+")
+            if all(p.strip() in ALLOWED_SINGLE_LANGS for p in parts):
+                return v
+            raise ValueError(f"Invalid OCR language combination: {v}. Use format like 'eng+ara'.")
+        
+        raise ValueError(f"Invalid OCR language: {v}. Use single language code or combination like 'eng+ara'.")
 
 
 class ConfluenceSettings(BaseModel):

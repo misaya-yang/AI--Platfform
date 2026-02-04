@@ -6,10 +6,12 @@ import { useState, useCallback } from "react";
 import { PanelWrapper } from "../PanelWrapper";
 import { useAppStore } from "@/store/useAppStore";
 import { getColors } from "../../styles";
+import { useTranslation } from "react-i18next";
 
 // Mock trace data - will be replaced with real API data
 interface TraceSpan {
   name: string;
+  nameKey?: string;
   duration_ms: number;
   status: "success" | "error" | "pending";
   start_offset_ms: number;
@@ -35,12 +37,12 @@ const mockTraces: Record<string, TraceData> = {
     model: "gpt-4",
     service: "chat-service",
     spans: [
-      { name: "认证验证", duration_ms: 15, status: "success", start_offset_ms: 0 },
-      { name: "速率限制检查", duration_ms: 8, status: "success", start_offset_ms: 15 },
-      { name: "请求转换", duration_ms: 12, status: "success", start_offset_ms: 23 },
-      { name: "上游请求", duration_ms: 1180, status: "success", start_offset_ms: 35 },
-      { name: "响应处理", duration_ms: 25, status: "success", start_offset_ms: 1215 },
-      { name: "日志记录", duration_ms: 10, status: "success", start_offset_ms: 1240 },
+      { name: "Auth validation", nameKey: "dashboard.requestTrace.spans.auth", duration_ms: 15, status: "success", start_offset_ms: 0 },
+      { name: "Rate limit check", nameKey: "dashboard.requestTrace.spans.rateLimit", duration_ms: 8, status: "success", start_offset_ms: 15 },
+      { name: "Request transform", nameKey: "dashboard.requestTrace.spans.transform", duration_ms: 12, status: "success", start_offset_ms: 23 },
+      { name: "Upstream request", nameKey: "dashboard.requestTrace.spans.upstream", duration_ms: 1180, status: "success", start_offset_ms: 35 },
+      { name: "Response handling", nameKey: "dashboard.requestTrace.spans.response", duration_ms: 25, status: "success", start_offset_ms: 1215 },
+      { name: "Logging", nameKey: "dashboard.requestTrace.spans.logging", duration_ms: 10, status: "success", start_offset_ms: 1240 },
     ],
   },
   "req-demo-002": {
@@ -51,10 +53,10 @@ const mockTraces: Record<string, TraceData> = {
     model: "claude-3",
     service: "assistant-service",
     spans: [
-      { name: "认证验证", duration_ms: 12, status: "success", start_offset_ms: 0 },
-      { name: "速率限制检查", duration_ms: 5, status: "success", start_offset_ms: 12 },
-      { name: "请求转换", duration_ms: 10, status: "success", start_offset_ms: 17 },
-      { name: "上游请求", duration_ms: 400, status: "error", start_offset_ms: 27 },
+      { name: "Auth validation", nameKey: "dashboard.requestTrace.spans.auth", duration_ms: 12, status: "success", start_offset_ms: 0 },
+      { name: "Rate limit check", nameKey: "dashboard.requestTrace.spans.rateLimit", duration_ms: 5, status: "success", start_offset_ms: 12 },
+      { name: "Request transform", nameKey: "dashboard.requestTrace.spans.transform", duration_ms: 10, status: "success", start_offset_ms: 17 },
+      { name: "Upstream request", nameKey: "dashboard.requestTrace.spans.upstream", duration_ms: 400, status: "error", start_offset_ms: 27 },
     ],
   },
 };
@@ -65,6 +67,7 @@ function formatDuration(ms: number): string {
 }
 
 function TraceTimeline({ trace }: { trace: TraceData }) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const maxDuration = trace.total_duration_ms;
@@ -94,7 +97,7 @@ function TraceTimeline({ trace }: { trace: TraceData }) {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <Tag color={trace.status === "success" ? "success" : "error"}>
-            {trace.status === "success" ? "成功" : "失败"}
+            {trace.status === "success" ? t("dashboard.requestTrace.status.success") : t("dashboard.requestTrace.status.error")}
           </Tag>
           <Tag>{trace.model}</Tag>
           <Tag color="blue">{trace.service}</Tag>
@@ -122,11 +125,12 @@ function TraceTimeline({ trace }: { trace: TraceData }) {
               : span.status === "error"
               ? "rgba(239, 68, 68, 0.7)"
               : "rgba(245, 158, 11, 0.7)";
+          const spanName = span.nameKey ? t(span.nameKey) : span.name;
 
           return (
             <div
               key={index}
-              title={`${span.name}: ${formatDuration(span.duration_ms)}`}
+              title={`${spanName}: ${formatDuration(span.duration_ms)}`}
               style={{
                 position: "absolute",
                 left: `${left}%`,
@@ -163,7 +167,7 @@ function TraceTimeline({ trace }: { trace: TraceData }) {
               ) : (
                 <ClockCircleOutlined style={{ color: "#f59e0b", fontSize: 14 }} />
               )}
-              <span style={{ fontSize: 12, color: colors.textPrimary }}>{span.name}</span>
+              <span style={{ fontSize: 12, color: colors.textPrimary }}>{spanName}</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <span style={{ fontSize: 11, color: colors.textMuted }}>
@@ -198,7 +202,7 @@ function TraceTimeline({ trace }: { trace: TraceData }) {
           alignItems: "center",
         }}
       >
-        <span style={{ fontSize: 12, color: colors.textSecondary }}>总耗时</span>
+        <span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.requestTrace.totalDuration")}</span>
         <span style={{ fontSize: 14, fontWeight: 700, color: "#3b82f6" }}>
           {formatDuration(trace.total_duration_ms)}
         </span>
@@ -208,6 +212,7 @@ function TraceTimeline({ trace }: { trace: TraceData }) {
 }
 
 export function RequestTracePanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
   const [searchId, setSearchId] = useState("");
@@ -229,7 +234,7 @@ export function RequestTracePanel() {
         setError(null);
       } else {
         setTrace(null);
-        setError("未找到该请求ID的追踪记录");
+        setError(t("dashboard.requestTrace.notFound"));
       }
       setLoading(false);
     }, 500);
@@ -242,11 +247,11 @@ export function RequestTracePanel() {
   };
 
   return (
-    <PanelWrapper title="请求追踪">
+    <PanelWrapper title={t("dashboard.requestTrace.title")}>
       {/* Search bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <Input
-          placeholder="输入 Request ID 搜索..."
+          placeholder={t("dashboard.requestTrace.searchPlaceholder")}
           prefix={<SearchOutlined style={{ color: colors.textMuted }} />}
           value={searchId}
           onChange={(e) => setSearchId(e.target.value)}
@@ -254,11 +259,11 @@ export function RequestTracePanel() {
           style={{ flex: 1 }}
         />
         <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch} loading={loading}>
-          搜索
+          {t("common.search")}
         </Button>
         {(trace || error) && (
           <Button icon={<ReloadOutlined />} onClick={handleReset}>
-            重置
+            {t("common.reset")}
           </Button>
         )}
       </div>
@@ -276,14 +281,14 @@ export function RequestTracePanel() {
             color: "#8b5cf6",
           }}
         >
-          演示模式：尝试搜索 "req-demo-001" 或 "req-demo-002" 查看示例追踪数据
+          {t("dashboard.requestTrace.demoHint")}
         </div>
       )}
 
       {/* Content */}
       {loading ? (
         <div style={{ textAlign: "center", padding: 40 }}>
-          <Spin tip="正在查询追踪记录..." />
+          <Spin tip={t("dashboard.requestTrace.loading")} />
         </div>
       ) : trace ? (
         <TraceTimeline trace={trace} />
@@ -299,8 +304,8 @@ export function RequestTracePanel() {
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={
             <div style={{ color: colors.textMuted }}>
-              <p>输入 Request ID 查看请求链路追踪</p>
-              <p style={{ fontSize: 12, marginTop: 4 }}>支持查看完整请求调用链和各阶段耗时分解</p>
+              <p>{t("dashboard.requestTrace.emptyTitle")}</p>
+              <p style={{ fontSize: 12, marginTop: 4 }}>{t("dashboard.requestTrace.emptyDesc")}</p>
             </div>
           }
         />

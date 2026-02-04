@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useReducer } from "react";
+import i18n from "@/i18n";
 import type {
   TimelineState,
   TimelineStep,
@@ -392,7 +393,7 @@ function timelineReducer(
       const newStep: TimelineStep = {
         id: `search-${Date.now()}`,
         type: "search",
-        name: `搜索: ${(query as string).slice(0, 30)}...`,
+        name: i18n.t("agent.status.searchQuery", { query: (query as string).slice(0, 30) }),
         status: "running",
         startTime: toMs(timestamp),
         message: query as string,
@@ -415,7 +416,7 @@ function timelineReducer(
         steps: updateStepStatus(state.steps, stepId, {
           status: "completed",
           endTime: toMs(timestamp),
-          message: `找到 ${result_count} 条结果`,
+          message: i18n.t("agent.status.searchResults", { count: result_count }),
         }),
       };
     }
@@ -425,7 +426,7 @@ function timelineReducer(
       const newStep: TimelineStep = {
         id: `code-${Date.now()}`,
         type: "code_execution",
-        name: `执行 ${language || "Python"} 代码`,
+        name: i18n.t("agent.status.codeExecution", { language: language || "Python" }),
         status: "running",
         startTime: toMs(timestamp),
         metadata: { language },
@@ -457,7 +458,7 @@ function timelineReducer(
       const newStep: TimelineStep = {
         id: `img-${Date.now()}`,
         type: "image_generation",
-        name: "生成图片",
+        name: i18n.t("agent.status.generateImage"),
         status: "running",
         startTime: toMs(timestamp),
         message: (prompt as string)?.slice(0, 50),
@@ -477,7 +478,7 @@ function timelineReducer(
       const artifact: TimelineArtifact = {
         id: `img-artifact-${Date.now()}`,
         type: "image",
-        name: (prompt as string)?.slice(0, 20) || "Generated Image",
+        name: (prompt as string)?.slice(0, 20) || i18n.t("agent.artifact.generatedImage"),
         url: url as string,
       };
 
@@ -499,7 +500,7 @@ function timelineReducer(
       const newStep: TimelineStep = {
         id: `doc-${Date.now()}`,
         type: "document_generation",
-        name: `生成 ${(doc_type as string)?.toUpperCase()} 文档`,
+        name: i18n.t("agent.status.generateDocument", { type: (doc_type as string)?.toUpperCase() }),
         status: "running",
         startTime: toMs(timestamp),
         message: title as string,
@@ -519,7 +520,7 @@ function timelineReducer(
       const artifact: TimelineArtifact = {
         id: (file_id as string) || `doc-artifact-${Date.now()}`,
         type: "document",
-        name: (title as string) || "Document",
+        name: (title as string) || i18n.t("agent.artifact.document"),
         url: url as string,
         mimeType: (doc_type as string) === "docx"
           ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -547,7 +548,10 @@ function timelineReducer(
       return {
         ...state,
         steps: updateStepStatus(state.steps, stepId, {
-          message: `大纲: ${title || '未知'} (${(sections as string[])?.length || 0} 章节)`,
+          message: i18n.t("agent.status.outlineReady", {
+            title: title || i18n.t("agent.status.unknown"),
+            count: (sections as string[])?.length || 0,
+          }),
           metadata: {
             ...(state.steps.find((s) => s.id === stepId)?.metadata || {}),
             outline: { title, sections },

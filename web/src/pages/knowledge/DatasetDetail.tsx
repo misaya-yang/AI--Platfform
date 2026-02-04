@@ -134,10 +134,10 @@ const QA_SYSTEM_PROMPT_KEYS = {
 import { copyToClipboard } from "@/lib/clipboard";
 
 const EMBEDDING_MODELS = [
-  { provider: "gemini", model: "gemini-embedding-001", name: "Gemini Embedding 001", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v4", name: "通义向量 v4", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v3", name: "通义向量 v3", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v2", name: "通义向量 v2", dimension: 1536 },
+  { provider: "gemini", model: "gemini-embedding-001", nameKey: "knowledge.detail.embeddingGemini001", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v4", nameKey: "knowledge.detail.embeddingDashscopeV4", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v3", nameKey: "knowledge.detail.embeddingDashscopeV3", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v2", nameKey: "knowledge.detail.embeddingDashscopeV2", dimension: 1536 },
 ];
 
 export function KnowledgeDatasetDetailPage() {
@@ -846,8 +846,8 @@ export function KnowledgeDatasetDetailPage() {
     try {
       await reindexDocument(datasetId, doc.document_id);
       toast.success(
-        t("knowledge.detail.reindexSuccess") || "重建索引成功",
-        t("knowledge.detail.reindexSuccessDesc") || `文档"${doc.title}"已加入处理队列`
+        t("knowledge.detail.reindexSuccess"),
+        t("knowledge.detail.reindexSuccessDesc", { title: doc.title })
       );
       await qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] });
       // 触发一次刷新
@@ -2918,7 +2918,7 @@ export function KnowledgeDatasetDetailPage() {
                               <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary flex-shrink-0">
                                 {m.provider === "gemini" ? "G" : "A"}
                               </span>
-                              <span>{m.name}</span>
+                              <span>{t(m.nameKey)}</span>
                               <span className="text-muted-foreground text-xs">({t("knowledge.detail.dimension", { dim: m.dimension })})</span>
                             </div>
                           </SelectItem>
@@ -4086,39 +4086,29 @@ for chunk in results.get("chunks", []):
                   <div className="p-4 bg-muted/40 rounded-lg">
                     <Label className="text-sm font-medium mb-2 block">{t("knowledge.detail.embeddingModelSelect")}</Label>
                     <p className="text-xs text-muted-foreground mb-3">{t("knowledge.detail.embeddingModelSelectHint")}</p>
-                    <Select value={uploadEmbeddingModel} onValueChange={setUploadEmbeddingModel}>
+                  <Select value={uploadEmbeddingModel} onValueChange={setUploadEmbeddingModel}>
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="dashscope:text-embedding-v4">
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
-                            <span>通义向量 v4</span>
-                            <span className="text-xs text-muted-foreground">(1024维)</span>
-                          </div>
-                        </SelectItem>
-                        <SelectItem value="dashscope:text-embedding-v3">
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
-                            <span>通义向量 v3</span>
-                            <span className="text-xs text-muted-foreground">(1024维)</span>
-                          </div>
-                        </SelectItem>
-                        <SelectItem value="dashscope:text-embedding-v2">
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded bg-orange-100 text-orange-600 flex items-center justify-center text-xs font-bold">A</span>
-                            <span>通义向量 v2</span>
-                            <span className="text-xs text-muted-foreground">(1536维)</span>
-                          </div>
-                        </SelectItem>
-                        <SelectItem value="gemini:gemini-embedding-001">
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded bg-blue-100 text-blue-600 flex items-center justify-center text-xs font-bold">G</span>
-                            <span>Gemini Embedding 001</span>
-                            <span className="text-xs text-muted-foreground">(1024维)</span>
-                          </div>
-                        </SelectItem>
+                        {EMBEDDING_MODELS.map((model) => {
+                          const isGemini = model.provider === "gemini";
+                          const badgeClass = isGemini ? "bg-blue-100 text-blue-600" : "bg-orange-100 text-orange-600";
+                          const badgeLabel = isGemini ? "G" : "A";
+                          return (
+                            <SelectItem key={`${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>
+                              <div className="flex items-center gap-2">
+                                <span className={`w-5 h-5 rounded ${badgeClass} flex items-center justify-center text-xs font-bold`}>
+                                  {badgeLabel}
+                                </span>
+                                <span>{t(model.nameKey)}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  ({t("knowledge.detail.dimension", { dim: model.dimension })})
+                                </span>
+                              </div>
+                            </SelectItem>
+                          );
+                        })}
                       </SelectContent>
                     </Select>
                   </div>
@@ -4132,7 +4122,9 @@ for chunk in results.get("chunks", []):
                 </div>
                 <div className="text-sm">
                   <span className="font-medium">{dataset?.embedding_model || "text-embedding-v4"}</span>
-                  <span className="text-muted-foreground ml-2">{t("knowledge.detail.dimension", { dim: dataset?.embedding_dimension || 1024 })}</span>
+                  <span className="text-muted-foreground ml-2">
+                    {t("knowledge.detail.dimension", { dim: dataset?.embedding_dimension || 1024 })}
+                  </span>
                 </div>
               </div>
             </div>

@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from qdrant_client.http import models as qmodels
 
-from ...config.settings import settings
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
@@ -83,11 +82,13 @@ class HierarchicalIndexer:
     - L3: Paragraph chunks for precise retrieval
     """
     
-    # Default chunk sizes from configuration (in characters, ~4 chars per token)
-    L2_CHUNK_SIZE = settings.knowledge.hierarchical_l2_chunk_size
-    L2_CHUNK_OVERLAP = settings.knowledge.hierarchical_l2_chunk_overlap
-    L3_CHUNK_SIZE = settings.knowledge.hierarchical_l3_chunk_size
-    L3_CHUNK_OVERLAP = settings.knowledge.hierarchical_l3_chunk_overlap
+    # Default chunk sizes (token-targeted; char size derived at ~4 chars/token)
+    DEFAULT_L2_TOKEN_LIMIT = 1500
+    DEFAULT_L3_TOKEN_LIMIT = 400
+    DEFAULT_L2_CHUNK_SIZE = DEFAULT_L2_TOKEN_LIMIT * 4
+    DEFAULT_L2_CHUNK_OVERLAP = 50
+    DEFAULT_L3_CHUNK_SIZE = DEFAULT_L3_TOKEN_LIMIT * 4
+    DEFAULT_L3_CHUNK_OVERLAP = 50
     L2_POSITION_OFFSET = 1_000_000
     
     # Collection name patterns
@@ -101,6 +102,7 @@ class HierarchicalIndexer:
         embedder: Any,
         summary_generator: Optional[Any] = None,
         levels: List[int] = None,
+        knowledge_settings: Optional[Any] = None,
     ):
         """
         Initialize the hierarchical indexer.
@@ -117,6 +119,11 @@ class HierarchicalIndexer:
         self.embedder = embedder
         self.summary_generator = summary_generator
         self.levels = levels or [1, 2, 3]
+        ks = knowledge_settings or {}
+        self.l2_chunk_size = getattr(ks, "hierarchical_l2_chunk_size", self.DEFAULT_L2_CHUNK_SIZE)
+        self.l2_chunk_overlap = getattr(ks, "hierarchical_l2_chunk_overlap", self.DEFAULT_L2_CHUNK_OVERLAP)
+        self.l3_chunk_size = getattr(ks, "hierarchical_l3_chunk_size", self.DEFAULT_L3_CHUNK_SIZE)
+        self.l3_chunk_overlap = getattr(ks, "hierarchical_l3_chunk_overlap", self.DEFAULT_L3_CHUNK_OVERLAP)
     
     async def index_document(
         self,
@@ -200,45 +207,63 @@ class HierarchicalIndexer:
         """Create L2 section and L3 paragraph chunks with parent links."""
         from .chunking import create_chunker, ChunkingConfig, ChunkingMode
 
-        # Base hierarchical config with default values
+        # Base hierarchical config with default values (token-targeted)
+        default_child_tokens = self.DEFAULT_L3_TOKEN_LIMIT
+        default_parent_tokens = self.DEFAULT_L2_TOKEN_LIMIT
         config = ChunkingConfig(
             mode=ChunkingMode.HIERARCHICAL,
-            parent_chunk_size=self.L2_CHUNK_SIZE,
-            parent_overlap=self.L2_CHUNK_OVERLAP,
-            child_chunk_size=self.L3_CHUNK_SIZE,
-            child_overlap=self.L3_CHUNK_OVERLAP,
-            parent_mode="section",
+            parent_chunk_size=max(self.l2_chunk_size, default_parent_tokens * 4),
+            parent_overlap=self.l2_chunk_overlap,
+            child_chunk_size=max(self.l3_chunk_size, default_child_tokens * 4),
+            child_overlap=self.l3_chunk_overlap,
+            parent_mode="fixed",
+            use_token_count=True,
+            token_limit=default_child_tokens,
+            parent_token_limit=default_parent_tokens,
+            child_token_limit=default_child_tokens,
         )
 
         # Merge with user-provided chunking config if available
         if chunking_config:
-            # Use user-provided chunk_size as child_chunk_size if available
-            child_size = getattr(chunking_config, 'child_chunk_size', None) or \
-                         getattr(chunking_config, 'chunk_size', None) or \
-                         self.L3_CHUNK_SIZE
-            
-            child_overlap = getattr(chunking_config, 'child_overlap', None) or \
-                           getattr(chunking_config, 'chunk_overlap', None) or \
-                           self.L3_CHUNK_OVERLAP
-            
-            # Parent size is typically 4x child size for hierarchical retrieval
-            parent_size = getattr(chunking_config, 'parent_chunk_size', None) or \
-                         (child_size * 4)
-            parent_overlap = getattr(chunking_config, 'parent_overlap', None) or \
-                            (child_overlap * 2)
-            
+            child_token_limit = getattr(chunking_config, "child_token_limit", None) or getattr(
+                chunking_config, "token_limit", None
+            ) or default_child_tokens
+            parent_token_limit = getattr(chunking_config, "parent_token_limit", None) or max(
+                int(child_token_limit) * 4, 900
+            )
+            child_size = getattr(chunking_config, "child_chunk_size", None) or max(
+                int(child_token_limit) * 4, default_child_tokens * 4
+            )
+            parent_size = getattr(chunking_config, "parent_chunk_size", None) or max(
+                int(parent_token_limit) * 4, default_parent_tokens * 4
+            )
+            child_overlap = getattr(chunking_config, "child_overlap", None) or getattr(
+                chunking_config, "chunk_overlap", None
+            ) or self.l3_chunk_overlap
+            parent_overlap = getattr(chunking_config, "parent_overlap", None) or child_overlap
+
             config = ChunkingConfig(
                 mode=ChunkingMode.HIERARCHICAL,
                 parent_chunk_size=parent_size,
                 parent_overlap=parent_overlap,
                 child_chunk_size=child_size,
                 child_overlap=child_overlap,
-                parent_mode="section",
+                parent_mode=str(getattr(chunking_config, "parent_mode", None) or "fixed"),
+                use_token_count=bool(getattr(chunking_config, "use_token_count", True)),
+                token_limit=int(getattr(chunking_config, "token_limit", None) or child_token_limit),
+                min_chunk_tokens=getattr(chunking_config, "min_chunk_tokens", None),
+                max_chunk_tokens=getattr(chunking_config, "max_chunk_tokens", None),
+                parent_token_limit=parent_token_limit,
+                child_token_limit=child_token_limit,
+                separators=getattr(chunking_config, "separators", None)
+                or ["\n\n\n", "\n\n", "\n", "。", ".", "！", "!", "？", "?", " "],
             )
-            
+
             logger.info(
-                f"Hierarchical chunking with user config: "
-                f"child_size={child_size}, parent_size={parent_size}"
+                f"[HierarchicalIndexer] Using user chunking config for {document_id}: "
+                f"child_token_limit={child_token_limit}, parent_token_limit={parent_token_limit}, "
+                f"child_size={child_size}, parent_size={parent_size}, "
+                f"child_overlap={child_overlap}, parent_overlap={parent_overlap}"
             )
 
         chunker = create_chunker(config)
@@ -295,6 +320,7 @@ class HierarchicalIndexer:
                             "chunk_index": l3_position,
                             "token_count": child.token_count,
                             "content_type": "text",
+                            "parent_segment_id": segment_id,
                         },
                     )
                 )
@@ -351,7 +377,7 @@ class HierarchicalIndexer:
 
         collection = await self._ensure_collection(
             dataset_id=dataset_id,
-            vector_size=vector_dim,
+            dimension=vector_dim,
             collection_name=base_collection,
         )
         
@@ -456,7 +482,7 @@ class HierarchicalIndexer:
 
         collection = await self._ensure_collection(
             dataset_id=dataset_id,
-            vector_size=vector_dim,
+            dimension=vector_dim,
             collection_name=f"{base_collection}{self.SECTION_COLLECTION_SUFFIX}",
         )
         
@@ -544,7 +570,7 @@ class HierarchicalIndexer:
         """Index L1 document summary with transactional consistency."""
         collection = await self._ensure_collection(
             dataset_id=dataset_id,
-            vector_size=vector_dim,
+            dimension=vector_dim,
             collection_name=f"{base_collection}{self.SUMMARY_COLLECTION_SUFFIX}",
         )
         
@@ -656,19 +682,19 @@ class HierarchicalIndexer:
     async def _ensure_collection(
         self,
         dataset_id: str,
-        vector_size: int,
+        dimension: int,
         collection_name: Optional[str] = None,
     ) -> str:
         """Ensure Qdrant collection exists."""
         try:
             return await self.vector_store.ensure_collection(
                 dataset_id=dataset_id,
-                dimension=vector_size,
+                dimension=dimension,
                 collection_name=collection_name,
             )
         except Exception as e:
             logger.warning(f"Failed to ensure collection {collection_name}: {e}")
-            return collection_name or f"kb_{dataset_id}_{vector_size}"
+            return collection_name or f"kb_{dataset_id}_{dimension}"
 
     async def _resolve_base_collection(self, dataset_id: str, vector_dim: int) -> str:
         """Resolve base collection name for dataset."""

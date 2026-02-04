@@ -29,6 +29,31 @@ class VectorSearchHit:
     vector: Optional[List[float]] = None
 
 
+class VectorStoreConfig:
+    """Configuration for VectorStore with adaptive batch sizes."""
+    # Adaptive batch sizes based on document size
+    SMALL_BATCH_THRESHOLD = 50     # chunks <= 50
+    MEDIUM_BATCH_THRESHOLD = 200   # chunks <= 200
+    LARGE_BATCH_THRESHOLD = 500    # chunks <= 500
+    
+    BATCH_SIZE_SMALL = 32
+    BATCH_SIZE_MEDIUM = 16
+    BATCH_SIZE_LARGE = 8
+    BATCH_SIZE_XLARGE = 4
+    
+    @classmethod
+    def get_batch_size(cls, total_chunks: int) -> int:
+        """Get optimal batch size based on total chunks."""
+        if total_chunks <= cls.SMALL_BATCH_THRESHOLD:
+            return cls.BATCH_SIZE_SMALL
+        elif total_chunks <= cls.MEDIUM_BATCH_THRESHOLD:
+            return cls.BATCH_SIZE_MEDIUM
+        elif total_chunks <= cls.LARGE_BATCH_THRESHOLD:
+            return cls.BATCH_SIZE_LARGE
+        else:
+            return cls.BATCH_SIZE_XLARGE
+
+
 def _sanitize_collection_name(name: str) -> str:
     # Qdrant allows letters/digits/_/-; keep it stable and readable.
     name = name.strip()
@@ -44,6 +69,8 @@ class VectorStore:
         api_key: Optional[str] = None,
         timeout_seconds: float = 30.0,
         prefer_grpc: bool = False,
+        max_retries: int = 3,
+        retry_base_delay: float = 0.5,
     ):
         if not HAS_QDRANT:
             raise VectorStoreError(
@@ -53,6 +80,8 @@ class VectorStore:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.prefer_grpc = prefer_grpc
+        self.max_retries = max(1, int(max_retries or 1))
+        self.retry_base_delay = float(retry_base_delay or 0.5)
         self._client = AsyncQdrantClient(
             url=url,
             api_key=api_key,
@@ -60,15 +89,30 @@ class VectorStore:
             timeout=timeout_seconds,
         )
 
-    async def _call(self, coro):
-        try:
-            return await asyncio.wait_for(coro, timeout=float(self.timeout_seconds))
-        except asyncio.TimeoutError as exc:
-            raise VectorStoreError(
-                f"Qdrant request timed out after {self.timeout_seconds}s (url={self.url})"
-            ) from exc
-        except Exception as exc:
-            raise VectorStoreError(f"Qdrant request failed (url={self.url}): {exc}") from exc
+    async def _call(self, coro_or_factory):
+        is_factory = callable(coro_or_factory)
+        retries = self.max_retries if is_factory else 1
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                coro = coro_or_factory() if is_factory else coro_or_factory
+                return await asyncio.wait_for(coro, timeout=float(self.timeout_seconds))
+            except asyncio.TimeoutError as exc:
+                last_exc = exc
+                if attempt >= retries - 1:
+                    raise VectorStoreError(
+                        f"Qdrant request timed out after {self.timeout_seconds}s (url={self.url})"
+                    ) from exc
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= retries - 1:
+                    raise VectorStoreError(f"Qdrant request failed (url={self.url}): {exc}") from exc
+
+            # Exponential backoff before retry
+            delay = self.retry_base_delay * (2 ** attempt)
+            await asyncio.sleep(delay)
+
+        raise VectorStoreError(f"Qdrant request failed (url={self.url}): {last_exc}") from last_exc
 
     async def close(self) -> None:
         await self._client.close()
@@ -82,7 +126,7 @@ class VectorStore:
     async def delete_collection(self, collection_name: str) -> None:
         if not collection_name:
             return
-        await self._call(self._client.delete_collection(collection_name=collection_name))
+        await self._call(lambda: self._client.delete_collection(collection_name=collection_name))
 
     async def ensure_collection(
         self,
@@ -98,7 +142,7 @@ class VectorStore:
         desired = self.make_collection_name(dataset_id=dataset_id, dimension=dimension, collection_name=collection_name)
 
         try:
-            info = await self._call(self._client.get_collection(desired))
+            info = await self._call(lambda: self._client.get_collection(desired))
             current_size = int(info.config.params.vectors.size)  # type: ignore[attr-defined]
             if current_size == int(dimension):
                 return desired
@@ -118,7 +162,7 @@ class VectorStore:
             dist = qmodels.Distance.EUCLID
 
         await self._call(
-            self._client.create_collection(
+            lambda: self._client.create_collection(
                 collection_name=actual,
                 vectors_config=qmodels.VectorParams(size=int(dimension), distance=dist),
             )
@@ -128,7 +172,7 @@ class VectorStore:
         for field_name in ("document_id", "segment_id"):
             try:
                 await self._call(
-                    self._client.create_payload_index(
+                    lambda: self._client.create_payload_index(
                         collection_name=actual,
                         field_name=field_name,
                         field_schema=qmodels.PayloadSchemaType.KEYWORD,
@@ -144,14 +188,14 @@ class VectorStore:
     ) -> None:
         if not points:
             return
-        await self._call(self._client.upsert(collection_name=collection_name, points=list(points)))
+        await self._call(lambda: self._client.upsert(collection_name=collection_name, points=list(points)))
 
     async def delete_points(self, collection_name: str, point_ids: Sequence[str]) -> None:
         ids = [pid for pid in point_ids if pid]
         if not ids:
             return
         await self._call(
-            self._client.delete(
+            lambda: self._client.delete(
                 collection_name=collection_name,
                 points_selector=qmodels.PointIdsList(points=list(ids)),
             )
@@ -205,7 +249,7 @@ class VectorStore:
 
         # qdrant-client >= 1.11 uses `query_points` as the unified entry point.
         resp = await self._call(
-            self._client.query_points(
+            lambda: self._client.query_points(
                 collection_name=collection_name,
                 query=query_vector,
                 limit=int(top_k),
@@ -244,7 +288,7 @@ class VectorStore:
             return {}
 
         records = await self._call(
-            self._client.retrieve(
+            lambda: self._client.retrieve(
                 collection_name=collection_name,
                 ids=list(ids),
                 with_payload=False,

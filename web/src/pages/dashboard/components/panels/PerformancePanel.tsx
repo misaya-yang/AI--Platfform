@@ -17,10 +17,12 @@ import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageTimeSeries } from "@/api/usage";
+import { useTranslation } from "react-i18next";
 
 type LatencyMetric = "p50" | "p95" | "p99" | "avg";
 
 export function PerformancePanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, granularity, lastRefresh } = useDashboardContext();
   const [selectedMetric, setSelectedMetric] = useState<LatencyMetric>("p95");
@@ -48,7 +50,7 @@ export function PerformancePanel() {
   const gridColor = darkMode ? "#334155" : "#e2e8f0";
 
   const metricOptions = [
-    { value: "avg", label: "平均延迟" },
+    { value: "avg", label: t("metrics.avgLatency") },
     { value: "p50", label: "P50" },
     { value: "p95", label: "P95" },
     { value: "p99", label: "P99" },
@@ -56,7 +58,7 @@ export function PerformancePanel() {
 
   return (
     <PanelWrapper
-      title="性能监控"
+      title={t("dashboard.performance.title")}
       onRefresh={refetch}
       loading={isLoading}
       extra={
@@ -97,7 +99,7 @@ export function PerformancePanel() {
         </Col>
         <Col span={6}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>平均</span>}
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.performance.avg")}</span>}
             value={latestData?.avgLatency || 0}
             suffix="ms"
             styles={{ content: { fontSize: 16, color: "#3b82f6" } }}

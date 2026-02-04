@@ -4,56 +4,44 @@
  * Grok-inspired personality styles that modify the assistant's response behavior.
  * Each style adds a system prompt prefix to guide the model's responses.
  */
+import i18n from "@/i18n";
 
 export interface AssistantStyle {
   id: string;
-  name: string;
-  nameZh: string;
-  description: string;
-  descriptionZh: string;
-  systemPrompt: string | null;
+  nameKey: string;
+  descriptionKey: string;
+  systemPromptKey?: string;
 }
 
 export const ASSISTANT_STYLES: AssistantStyle[] = [
   {
     id: "custom",
-    name: "Custom",
-    nameZh: "自定义",
-    description: "Responds to you as you please.",
-    descriptionZh: "根据您的喜好回应。",
-    systemPrompt: null,
+    nameKey: "assistant.styles.custom.name",
+    descriptionKey: "assistant.styles.custom.desc",
   },
   {
     id: "concise",
-    name: "Concise",
-    nameZh: "简洁模式",
-    description: "Provides short and direct responses.",
-    descriptionZh: "提供简短直接的回应。",
-    systemPrompt: "提供简短直接的回应，避免冗余。保持简洁明了，直击要点。",
+    nameKey: "assistant.styles.concise.name",
+    descriptionKey: "assistant.styles.concise.desc",
+    systemPromptKey: "assistant.styles.concise.prompt",
   },
   {
     id: "formal",
-    name: "Formal",
-    nameZh: "正式模式",
-    description: "Uses formal language to respond.",
-    descriptionZh: "使用正式语气回答。",
-    systemPrompt: "使用正式语气回答，保持专业严谨。避免口语化表达，措辞得体。",
+    nameKey: "assistant.styles.formal.name",
+    descriptionKey: "assistant.styles.formal.desc",
+    systemPromptKey: "assistant.styles.formal.prompt",
   },
   {
     id: "socratic",
-    name: "Socratic",
-    nameZh: "苏格拉底模式",
-    description: "Responds in a guided learning style.",
-    descriptionZh: "以引导学习的方式回答。",
-    systemPrompt: "以引导学习的方式回答，通过提问引导用户思考，而不是直接给出答案。帮助用户自己发现答案。",
+    nameKey: "assistant.styles.socratic.name",
+    descriptionKey: "assistant.styles.socratic.desc",
+    systemPromptKey: "assistant.styles.socratic.prompt",
   },
   {
     id: "comprehensive",
-    name: "Comprehensive",
-    nameZh: "详尽模式",
-    description: "Responds with thorough explanations.",
-    descriptionZh: "提供详尽的解释。",
-    systemPrompt: "提供详尽的解释和全面的分析。包含相关背景知识、多角度分析和具体示例。",
+    nameKey: "assistant.styles.comprehensive.name",
+    descriptionKey: "assistant.styles.comprehensive.desc",
+    systemPromptKey: "assistant.styles.comprehensive.prompt",
   },
 ];
 
@@ -71,5 +59,6 @@ export function getStyleById(id: string): AssistantStyle | undefined {
  */
 export function getStyleSystemPrompt(styleId: string): string | null {
   const style = getStyleById(styleId);
-  return style?.systemPrompt ?? null;
+  if (!style?.systemPromptKey) return null;
+  return i18n.t(style.systemPromptKey);
 }

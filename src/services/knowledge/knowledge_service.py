@@ -20,11 +20,31 @@ from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 from ...persistence.database import DatabaseStorage
-from .chunking import ChunkingConfig, process_document, flatten_chunks, merge_small_chunks, ContentType, AssociatedImage
+from .chunking import (
+    ChunkingConfig,
+    ChunkingMode,
+    process_document,
+    flatten_chunks,
+    merge_small_chunks,
+    enforce_token_limits,
+    ContentType,
+    AssociatedImage,
+)
 from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, get_cached_embedder, DashScopeMultimodalEmbedding
 from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
 from .ingestion import DocumentImageExtractor, ExtractedImage as IngestionExtractedImage
-from .retrieval import bm25_scores, cosine_similarity, mmr_select, reciprocal_rank_fusion, tokenize, compute_text_match_score
+from .retrieval import (
+    bm25_scores, 
+    cosine_similarity, 
+    mmr_select, 
+    reciprocal_rank_fusion, 
+    tokenize, 
+    compute_text_match_score,
+    ScoreNormalization,
+    normalize_hybrid_scores,
+    compute_language_weights,
+    detect_language,
+)
 from .utils import normalize_text, split_into_segments
 from .vector_store import VectorStore
 from .structured_document_parser import (
@@ -41,6 +61,7 @@ if TYPE_CHECKING:
     from ..storage.image_storage import ImageStorageService
     from .worker import KnowledgeWorker
     from .vlm_service import DashScopeVLMService
+    from .embedding import UnifiedMultimodalEmbedding
 
 # Global VLM semaphore for rate limiting across all concurrent document processing
 # This prevents overwhelming the VLM API when multiple documents are processed simultaneously
@@ -159,6 +180,8 @@ class KnowledgeService:
             api_key=settings.knowledge.qdrant.api_key,
             timeout_seconds=settings.knowledge.qdrant.timeout_seconds,
             prefer_grpc=settings.knowledge.qdrant.prefer_grpc,
+            max_retries=getattr(settings.knowledge.qdrant, "max_retries", 3),
+            retry_base_delay=getattr(settings.knowledge.qdrant, "retry_base_delay", 0.5),
         )
         
         # Update retrieval service with vector store
@@ -370,16 +393,9 @@ class KnowledgeService:
 
         # Resolve API key from dataset config or gateway settings
         ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
-        api_key = ec.get("api_key") or ""
-
-        # Try DashScope API key from various sources
+        api_key = str(ec.get("api_key") or "").strip()
         if not api_key:
-            api_key = getattr(self.settings.knowledge.dashscope, "api_key", "") or ""
-        if not api_key:
-            api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("ALIYUN_KEY") or ""
-
-        if not api_key:
-            raise ValidationFailedError("API key required for multimodal embedding")
+            raise ValidationFailedError("Multimodal embedding api_key is required in dataset embedding_config")
 
         # Use model from dataset or fall back to settings
         model = dataset.get("embedding_model") or self.settings.knowledge.multimodal_embedding_model
@@ -397,67 +413,55 @@ class KnowledgeService:
         dataset: Dict[str, Any],
         embedding_config: Optional[Dict[str, Any]] = None,
     ) -> "BaseEmbedding":
-        """Create embedder for text-only datasets using high-speed provider.
-
-        Uses settings.knowledge.text_embedding_* configuration.
-        Defaults to Gemini for faster embedding (100 items/batch, 5M TPM).
-        """
+        """Create embedder for text-only datasets using dataset-level config."""
         from .embedding import GeminiEmbedding, DashScopeEmbedding, create_embedding, EmbeddingConfig
 
         ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
-        
-        # Check if dataset has explicit provider override
-        dataset_provider = str(dataset.get("embedding_provider") or "").lower()
-        dataset_model = str(dataset.get("embedding_model") or "")
-        
-        # Use dataset-specific config if explicitly set, otherwise use settings defaults
-        if dataset_provider and dataset_provider not in {"", "auto", "default"}:
-            # Dataset has explicit provider - use it
-            provider = dataset_provider
-            model = dataset_model
-        else:
-            # Use settings defaults for text embedding (Gemini for speed)
-            provider = self.settings.knowledge.text_embedding_provider
-            model = self.settings.knowledge.text_embedding_model
-        
+        provider = str(dataset.get("embedding_provider") or "").lower() or "local"
+        model = str(dataset.get("embedding_model") or "")
+        dimension = int(dataset.get("embedding_dimension") or 0) or None
+
         # Resolve configuration based on provider
         if provider in {"gemini", "google"}:
-            api_key = ec.get("api_key") or ""
+            api_key = str(ec.get("api_key") or "").strip()
             if not api_key:
-                api_key = (
-                    self.settings.knowledge.gemini.api_key
-                    or os.getenv("GEMINI_API_KEY")
-                    or os.getenv("GOOGLE_API_KEY")
-                    or ""
-                )
-            if not api_key:
-                raise ValidationFailedError("Gemini api_key is required for text embedding")
+                raise ValidationFailedError("Gemini api_key is required in dataset embedding_config")
             
             return GeminiEmbedding(
                 api_key=api_key,
                 model=model or "gemini-embedding-001",
-                dimension=self.settings.knowledge.text_embedding_dimension,
-                base_url=ec.get("base_url") or self.settings.knowledge.gemini.base_url,
+                dimension=dimension or self.settings.knowledge.text_embedding_dimension,
+                base_url=ec.get("base_url") or None,
                 timeout_seconds=30.0,
             )
         elif provider in {"dashscope", "aliyun"}:
-            api_key = ec.get("api_key") or ""
+            api_key = str(ec.get("api_key") or "").strip()
             if not api_key:
-                api_key = (
-                    getattr(self.settings.knowledge.dashscope, "api_key", None)
-                    or os.getenv("DASHSCOPE_API_KEY")
-                    or os.getenv("ALIYUN_KEY")
-                    or ""
-                )
-            if not api_key:
-                raise ValidationFailedError("DashScope api_key is required for text embedding")
+                raise ValidationFailedError("DashScope api_key is required in dataset embedding_config")
             
             return DashScopeEmbedding(
                 model=model or "text-embedding-v3",
                 api_key=api_key,
-                dimension=self.settings.knowledge.text_embedding_dimension,
+                dimension=dimension or self.settings.knowledge.text_embedding_dimension,
                 base_url=ec.get("base_url"),
             )
+        elif provider in {"siliconflow", "silicon", "sf"}:
+            api_key = str(ec.get("api_key") or "").strip()
+            if not api_key:
+                raise ValidationFailedError("SiliconFlow api_key is required in dataset embedding_config")
+
+            base_url = ec.get("base_url") or None
+            if base_url and base_url.rstrip("/").endswith("/v1"):
+                base_url = base_url.rstrip("/") + "/embeddings"
+
+            econf = EmbeddingConfig(
+                provider="siliconflow",
+                model=model or "BAAI/bge-m3",
+                api_key=api_key,
+                base_url=base_url,
+                timeout_seconds=float(ec.get("timeout_seconds") or 30.0),
+            )
+            return create_embedding(econf, dimension=dimension)
         else:
             # Fall back to local hash embedding
             econf = EmbeddingConfig(
@@ -505,6 +509,8 @@ class KnowledgeService:
                     "source_document": doc_name,
                     "source_document_id": document_id,
                     "source_dataset_id": dataset_id,
+                    "chunk_index": i,
+                    "paragraph_index": i,
                     "structured_chunk_type": chunk_type,
                     "page_number": sc.get("page_number", 0),
                     "section_title": sc.get("section_title"),
@@ -523,6 +529,168 @@ class KnowledgeService:
             flat_chunks.append(chunk)
         
         return flat_chunks
+
+    def _normalize_structured_chunks(
+        self,
+        chunks: List["Chunk"],
+        config: ChunkingConfig,
+    ) -> List["Chunk"]:
+        """Normalize structured chunks to enforce token limits and merge tiny fragments."""
+        if not chunks:
+            return chunks
+
+        from .chunking import FixedSizeChunker, ChunkingMode, Chunk, count_tokens
+
+        splitter = FixedSizeChunker(config)
+        normalized: List[Chunk] = []
+        separator = "\n\n"
+        substantive_pattern = re.compile(r"[\w\u0600-\u06ff]", re.UNICODE)
+
+        pending_text = ""
+        pending_meta: Dict[str, Any] = {}
+        pending_images = []
+        pending_base: Optional[Chunk] = None
+
+        def emit_chunk(
+            text: str,
+            base_chunk: Chunk,
+            metadata: Dict[str, Any],
+            images: List[Any],
+        ) -> None:
+            if not text.strip():
+                return
+            # Drop punctuation-only fragments that add noise to retrieval
+            if not substantive_pattern.search(text):
+                return
+
+            # Split only if chunk exceeds limits in fixed-size mode
+            token_limit = config.token_limit if config.use_token_count else None
+            if (
+                config.mode == ChunkingMode.FIXED_SIZE
+                and config.use_token_count
+                and token_limit
+                and count_tokens(text) > token_limit
+            ):
+                sub_chunks = splitter.chunk(text)
+                for sc in sub_chunks:
+                    sc.metadata = {**metadata, **(sc.metadata or {})}
+                    sc.metadata.setdefault("structured_parent_id", base_chunk.hash_id)
+                    sc.associated_images = images + sc.associated_images
+                    normalized.append(sc)
+                return
+            if (
+                config.mode == ChunkingMode.FIXED_SIZE
+                and (not config.use_token_count)
+                and len(text) > config.max_chunk_size
+            ):
+                sub_chunks = splitter.chunk(text)
+                for sc in sub_chunks:
+                    sc.metadata = {**metadata, **(sc.metadata or {})}
+                    sc.metadata.setdefault("structured_parent_id", base_chunk.hash_id)
+                    sc.associated_images = images + sc.associated_images
+                    normalized.append(sc)
+                return
+
+            normalized.append(
+                Chunk(
+                    text=text,
+                    index=base_chunk.index,
+                    metadata=metadata,
+                    parent_id=base_chunk.parent_id,
+                    content_type=ContentType.TEXT,
+                    associated_images=images,
+                )
+            )
+
+        for c in chunks:
+            # Preserve non-text or mixed content as-is to keep image context intact
+            if c.content_type != ContentType.TEXT:
+                if pending_text:
+                    emit_chunk(
+                        pending_text,
+                        pending_base or c,
+                        pending_meta,
+                        pending_images,
+                    )
+                    pending_text = ""
+                    pending_meta = {}
+                    pending_images = []
+                    pending_base = None
+                normalized.append(c)
+                continue
+
+            text = c.text.strip()
+            if not text:
+                continue
+
+            text_tokens = count_tokens(text)
+            min_tokens = (
+                config.min_chunk_tokens
+                if config.use_token_count and config.mode == ChunkingMode.FIXED_SIZE
+                else None
+            )
+            is_too_small = (len(text) < config.min_chunk_size) or (
+                min_tokens is not None and text_tokens < min_tokens
+            )
+
+            if is_too_small:
+                pending_text = f"{pending_text}{separator}{text}" if pending_text else text
+                pending_meta = {**pending_meta, **(c.metadata or {})}
+                pending_images.extend(c.associated_images)
+                pending_base = pending_base or c
+
+                if (c.metadata or {}).get("structured_chunk_type") == "heading":
+                    pending_meta.setdefault("section_title", text)
+                continue
+
+            combined_text = text
+            combined_meta = dict(c.metadata or {})
+            combined_images = list(c.associated_images)
+            base_chunk = c
+
+            if pending_text:
+                combined_text = f"{pending_text}{separator}{text}"
+                combined_meta = {**pending_meta, **(c.metadata or {})}
+                combined_images = pending_images + list(c.associated_images)
+                pending_text = ""
+                pending_meta = {}
+                pending_images = []
+                pending_base = None
+
+            emit_chunk(combined_text, base_chunk, combined_meta, combined_images)
+
+        if pending_text:
+            if normalized and normalized[-1].content_type == ContentType.TEXT:
+                last = normalized.pop()
+                combined_text = f"{last.text}{separator}{pending_text}"
+                combined_meta = {**(last.metadata or {}), **pending_meta}
+                combined_images = list(last.associated_images) + pending_images
+                emit_chunk(combined_text, last, combined_meta, combined_images)
+            else:
+                emit_chunk(
+                    pending_text,
+                    pending_base or Chunk(text=pending_text),
+                    pending_meta,
+                    pending_images,
+                )
+
+        # Merge tiny fragments for non-Islamic, non-fixed mode
+        if config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE):
+            normalized = merge_small_chunks(
+                normalized,
+                min_size=config.min_chunk_size,
+                max_size=config.max_chunk_size,
+                min_tokens=None,
+                max_tokens=None,
+            )
+
+        # Re-index after normalization
+        for i, c in enumerate(normalized):
+            c.index = i
+            c.metadata["chunk_index"] = i
+            c.metadata["paragraph_index"] = i
+
+        return normalized
 
     def _resolve_fusion_config(
         self,
@@ -618,12 +786,6 @@ class KnowledgeService:
         if user.tier == "admin" or "admin" in (user.roles or []):
             return "owner"
 
-        visibility = str(dataset.get("visibility") or "private").lower()
-        if visibility == "public":
-            return "viewer"
-        if visibility == "tenant" and dataset.get("tenant_id") and dataset.get("tenant_id") == user.tenant_id:
-            return "viewer"
-
         created_by = str(dataset.get("created_by") or "")
         if created_by and created_by == user.user_id:
             return "owner"
@@ -639,7 +801,18 @@ class KnowledgeService:
             if _permission_rank(p) > _permission_rank(best):
                 best = p
 
-        return best
+        # If explicit permission is found, return it
+        if best:
+            return best
+
+        # Visibility fallback (viewer)
+        visibility = str(dataset.get("visibility") or "private").lower()
+        if visibility == "public":
+            return "viewer"
+        if visibility == "tenant" and dataset.get("tenant_id") and dataset.get("tenant_id") == user.tenant_id:
+            return "viewer"
+
+        return None
 
     async def require_dataset_access(
         self, user: UserContext, dataset_id: str, required: str = "viewer"
@@ -651,6 +824,29 @@ class KnowledgeService:
                 f"Missing dataset permission: {required} (current={perm or 'none'})"
             )
         return dataset
+
+    def _redact_dataset_secrets(self, dataset: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove sensitive fields before returning dataset configs to clients."""
+        ds = dict(dataset or {})
+        embedding_config = _ensure_dict(ds.get("embedding_config"))
+        if "api_key" in embedding_config:
+            embedding_config["api_key"] = "*****"
+        ds["embedding_config"] = embedding_config
+
+        index_config = _ensure_dict(ds.get("index_config"))
+        retrieval = _ensure_dict(index_config.get("retrieval"))
+        rerank = _ensure_dict(retrieval.get("rerank"))
+        if "api_key" in rerank:
+            rerank["api_key"] = "*****"
+        if rerank:
+            retrieval["rerank"] = rerank
+            index_config["retrieval"] = retrieval
+        ds["index_config"] = index_config
+        return ds
+
+    def sanitize_dataset_for_response(self, dataset: Dict[str, Any]) -> Dict[str, Any]:
+        """Public wrapper to redact sensitive config fields for API responses."""
+        return self._redact_dataset_secrets(dataset)
 
     # ========================= Dataset =========================
 
@@ -693,7 +889,7 @@ class KnowledgeService:
                         "hit_count": 0,
                     }
 
-        return visible
+        return [self._redact_dataset_secrets(ds) for ds in visible]
 
 
     async def preview_chunking(
@@ -811,7 +1007,7 @@ class KnowledgeService:
 
         await self.db.save_dataset(dataset)
         await self.db.grant_dataset_permission(dataset_id, "user", user.user_id, "owner")
-        return await self._get_dataset_or_404(dataset_id)
+        return self._redact_dataset_secrets(await self._get_dataset_or_404(dataset_id))
 
     async def update_dataset(self, user: UserContext, dataset_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
@@ -878,7 +1074,7 @@ class KnowledgeService:
                     await embedder.close()
 
         await self.db.save_dataset(updated)
-        return await self._get_dataset_or_404(dataset_id)
+        return self._redact_dataset_secrets(await self._get_dataset_or_404(dataset_id))
 
     async def delete_dataset(self, user: UserContext, dataset_id: str) -> bool:
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
@@ -952,7 +1148,7 @@ class KnowledgeService:
         content_bytes: bytes,
         mime_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        processing_mode: str = "text_only",  # text_only | scanned | multimodal
+        processing_mode: str = "text_only",  # auto | text_only | scanned | multimodal
     ) -> Dict[str, Any]:
         """
         Create a document from file upload.
@@ -964,7 +1160,7 @@ class KnowledgeService:
             content_bytes: File content bytes
             mime_type: MIME type
             metadata: Optional metadata
-            processing_mode: Processing mode - text_only, scanned, or multimodal
+            processing_mode: Processing mode - auto, text_only, scanned, or multimodal
         """
         from .processing_mode import ProcessingMode, parse_processing_mode
 
@@ -998,11 +1194,13 @@ class KnowledgeService:
         await self.db.save_document(initial_doc)
 
         # ============================================================
-        # FAST PATH: For 'scanned' mode, skip extraction and upload directly
+        # FAST PATH: For 'scanned' or 'auto' mode, skip extraction and upload directly
         # Processing will be done by VisionPDFProcessor in the worker
         # ============================================================
-        if mode == ProcessingMode.SCANNED:
-            logger.info(f"[Upload] Scanned mode: saving file directly, processing deferred to worker")
+        if mode in {ProcessingMode.SCANNED, ProcessingMode.AUTO}:
+            logger.info(
+                f"[Upload] {mode.value} mode: saving file directly, processing deferred to worker"
+            )
             
             # Save original file to storage
             if self.image_storage_service:
@@ -1117,16 +1315,22 @@ class KnowledgeService:
                 embedding_model = index_config.get("embedding_model") or self.settings.knowledge.default_embedding_model
                 
                 # Determine vector dimension
-                vector_dim = 1024  # Default for multimodal
+                # Default 1024 for unified dimension
+                vector_dim = 1024
                 if hasattr(self.multimodal_embedding, 'dimension'):
                     vector_dim = self.multimodal_embedding.dimension
+
+                image_position_offset = int(
+                    getattr(self.settings.knowledge, "image_position_offset", 1_000_000)
+                )
                 
                 collection = f"kb_{dataset_id}_{vector_dim}"
                 
                 # Ensure collection exists
                 await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=vector_dim,
                     collection_name=collection,
-                    vector_size=vector_dim,
                 )
                 
                 logger.info(f"[Upload] Starting in-memory embedding for {len(extracted_images)} images...")
@@ -1139,7 +1343,7 @@ class KnowledgeService:
                     document_id=doc_id,
                     images=extracted_images,
                     collection=collection,
-                    base_position=0,
+                    base_position=image_position_offset,
                 )
                 
                 if embed_count > 0:
@@ -1556,14 +1760,19 @@ class KnowledgeService:
             await self.db.update_document_status(document_id, status="parsing", progress=10)
 
             raw_text = str(doc.get("content") or "")
+            min_chars = getattr(self.settings.knowledge, "pdf_min_text_chars_for_ocr", 200)
 
-            # Re-extract from original file only when content is empty and we did not already
-            # run the full extraction pipeline at upload (ocr_processed). Skip re-extraction
-            # when upload already ran full extraction to avoid duplicate processing.
+            # Re-extract from original file when content is empty. If upload already ran
+            # extraction (ocr_processed), we still retry here because empty content
+            # indicates extraction/OCR likely failed.
             doc_meta = doc.get("metadata") or {}
             original_key = doc_meta.get("original_file_key")
             doc_already_processed = doc_meta.get("ocr_processed", False)
-            if original_key and self.image_storage_service and not raw_text.strip() and not doc_already_processed:
+            if original_key and self.image_storage_service and len(raw_text.strip()) < min_chars:
+                if doc_already_processed:
+                    logger.info(
+                        "Document content below OCR threshold despite ocr_processed=true; re-extracting from original file"
+                    )
                 try:
                     logger.info(f"Downloading original file for re-extraction: {original_key}")
                     original_bytes = await self.image_storage_service.download_original_file(
@@ -1572,7 +1781,8 @@ class KnowledgeService:
                     original_filename = doc_meta.get("original_filename", "")
                     original_mime = doc_meta.get("original_mime_type", "")
 
-                    # Re-run full extraction pipeline (multimodal, no OCR)
+                    # Re-run full extraction pipeline (multimodal may skip OCR)
+                    used_multimodal = False
                     if self.multimodal_embedding and self.image_storage_service:
                         extraction_result = await self.document_image_extractor.extract(
                             filename=original_filename,
@@ -1580,6 +1790,7 @@ class KnowledgeService:
                         )
                         re_text = extraction_result.text
                         re_extracted_images = extraction_result.embeddable_images
+                        used_multimodal = True
                         name_lower = original_filename.lower()
                         if name_lower.endswith(".pdf") or "pdf" in (original_mime or "").lower():
                             min_images = getattr(
@@ -1591,6 +1802,89 @@ class KnowledgeService:
                                     f"Re-extraction: Scanned PDF with {embeddable_count} images, "
                                     f"using multimodal embeddings only"
                                 )
+                        # Persist extracted images for downstream multimodal embedding
+                        if re_extracted_images and not doc_meta.get("extracted_images"):
+                            try:
+                                tenant_id = str(dataset.get("tenant_id") or "default")
+                                stored_image_metadata: List[Dict[str, Any]] = []
+
+                                async def upload_single_image(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                                    try:
+                                        page_number = (
+                                            getattr(img, "page_number", None) or
+                                            img.metadata.get("page_number") if hasattr(img, "metadata") else None
+                                        )
+                                        attachment_id = f"reindex_{img.image_id}"
+                                        storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
+                                        storage_url = await self.image_storage_service.upload_image(
+                                            tenant_id=tenant_id,
+                                            document_id=document_id,
+                                            attachment_id=attachment_id,
+                                            filename=storage_filename,
+                                            content=img.content,
+                                            content_type=img.mime_type,
+                                            metadata={
+                                                "width": str(img.width),
+                                                "height": str(img.height),
+                                                "source_location": img.source_location,
+                                                "page_number": str(page_number) if page_number else str(idx),
+                                            },
+                                        )
+                                        actual_storage_key = self.image_storage_service._generate_key(
+                                            tenant_id, document_id, attachment_id, storage_filename
+                                        )
+                                        return {
+                                            "image_id": img.image_id,
+                                            "storage_url": storage_url,
+                                            "storage_key": actual_storage_key,
+                                            "mime_type": img.mime_type,
+                                            "width": img.width,
+                                            "height": img.height,
+                                            "page_number": page_number,
+                                            "size_bytes": img.size_bytes,
+                                            "context_text": img.context_text[:200] if img.context_text else "",
+                                            "source_location": img.source_location,
+                                        }
+                                    except Exception as store_err:
+                                        logger.warning(f"Failed to persist image {img.image_id}: {store_err}")
+                                        return {
+                                            "image_id": img.image_id,
+                                            "storage_url": None,
+                                            "mime_type": img.mime_type,
+                                            "width": img.width,
+                                            "height": img.height,
+                                            "page_number": None,
+                                            "size_bytes": img.size_bytes,
+                                            "context_text": img.context_text[:200] if img.context_text else "",
+                                            "error": str(store_err),
+                                        }
+
+                                upload_semaphore = asyncio.Semaphore(5)
+
+                                async def upload_with_semaphore(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                                    async with upload_semaphore:
+                                        return await upload_single_image(idx, img)
+
+                                upload_tasks = [upload_with_semaphore(i, img) for i, img in enumerate(re_extracted_images)]
+                                upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+                                for result in upload_results:
+                                    if isinstance(result, Exception):
+                                        logger.warning(f"Image upload failed: {result}")
+                                        continue
+                                    stored_image_metadata.append(result)
+
+                                if stored_image_metadata:
+                                    doc_meta["extracted_images"] = stored_image_metadata
+                                    doc_meta["image_count"] = len(stored_image_metadata)
+                                    await self.db.update_document_fields(
+                                        document_id, {"metadata": doc_meta}
+                                    )
+                                    doc["metadata"] = doc_meta
+                                    logger.info(
+                                        f"[Reindex] Persisted {len(stored_image_metadata)} images for multimodal embedding"
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed to persist re-extracted images: {e}")
                     else:
                         re_text, _ = await asyncio.to_thread(
                             self._extract_text_from_bytes,
@@ -1598,6 +1892,18 @@ class KnowledgeService:
                             original_filename,
                             original_mime,
                         )
+
+                    # If multimodal extraction produced too little text for PDFs, run OCR fallback
+                    min_chars = getattr(self.settings.knowledge, "pdf_min_text_chars_for_ocr", 200)
+                    if (
+                        used_multimodal
+                        and len((re_text or "").strip()) < min_chars
+                        and (original_filename.lower().endswith(".pdf") or "pdf" in (original_mime or "").lower())
+                        and getattr(self.settings.knowledge, "ocr_enabled", True)
+                    ):
+                        ocr_text = await asyncio.to_thread(self._ocr_pdf_bytes, original_bytes)
+                        if ocr_text and ocr_text.strip():
+                            re_text = ocr_text
 
                     if re_text and len(re_text.strip()) > len(raw_text.strip()):
                         raw_text = re_text
@@ -1629,8 +1935,18 @@ class KnowledgeService:
             )
             
             doc_name = str(doc.get("name") or doc.get("title") or document_id)
+
+            index_config = _ensure_dict(dataset.get("index_config"))
+            chunking_config_dict = _ensure_dict(index_config.get("chunking"))
+            logger.info(f"Chunking config for document {document_id}: {chunking_config_dict}")
+            chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
+            logger.info(
+                f"Parsed chunking config: mode={chunking_config.mode.value}, "
+                f"chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}"
+            )
             
-            if use_structured_chunks:
+            # Fixed-size mode always uses strict fixed chunking (ignore structured parsing)
+            if use_structured_chunks and chunking_config.mode != ChunkingMode.FIXED_SIZE:
                 # Use structured parsing results for intelligent chunking
                 logger.info(f"Using structured parsing results for document {document_id}")
                 flat_chunks = self._convert_structured_chunks(
@@ -1639,17 +1955,20 @@ class KnowledgeService:
                     doc_name,
                     dataset_id
                 )
-                logger.info(f"Created {len(flat_chunks)} chunks from structured parsing")
+                # Enforce token limits and merge tiny fragments for structured chunks
+                flat_chunks = self._normalize_structured_chunks(flat_chunks, chunking_config)
+                # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
+                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                    flat_chunks = merge_small_chunks(
+                        flat_chunks,
+                        min_size=chunking_config.min_chunk_size,
+                        max_size=chunking_config.max_chunk_size,
+                        min_tokens=None,
+                        max_tokens=None,
+                    )
+                logger.info(f"Created {len(flat_chunks)} chunks from structured parsing (normalized)")
             else:
                 # Standard chunking flow
-                index_config = _ensure_dict(dataset.get("index_config"))
-                chunking_config_dict = _ensure_dict(index_config.get("chunking"))
-                
-                logger.info(f"Chunking config for document {document_id}: {chunking_config_dict}")
-                
-                chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
-                logger.info(f"Parsed chunking config: mode={chunking_config.mode.value}, chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}")
-                
                 # Use the new configurable chunking module
                 chunk_objects = process_document(text, chunking_config, document_id)
                 logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
@@ -1658,14 +1977,40 @@ class KnowledgeService:
                 flat_chunks = flatten_chunks(chunk_objects)
 
                 # Merge undersized chunks AFTER flattening (must operate on leaf chunks)
-                flat_chunks = merge_small_chunks(
-                    flat_chunks,
-                    min_size=chunking_config.min_chunk_size,
-                    max_size=chunking_config.max_chunk_size,
-                )
+                # For Quran/Islamic mode, preserve verse-level chunks (traceability > size).
+                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                    flat_chunks = merge_small_chunks(
+                        flat_chunks,
+                        min_size=chunking_config.min_chunk_size,
+                        max_size=chunking_config.max_chunk_size,
+                        min_tokens=None,
+                        max_tokens=None,
+                    )
+
+                # Enforce strict token limits only for fixed-size mode (exact token_limit)
+                if chunking_config.mode == ChunkingMode.FIXED_SIZE and chunking_config.use_token_count:
+                    token_limit = int(chunking_config.token_limit or 0)
+                    if token_limit > 0:
+                        flat_chunks = enforce_token_limits(
+                            flat_chunks,
+                            token_limit,
+                            min_tokens=None,
+                        )
+                # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
+                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                    flat_chunks = merge_small_chunks(
+                        flat_chunks,
+                        min_size=chunking_config.min_chunk_size,
+                        max_size=chunking_config.max_chunk_size,
+                        min_tokens=None,
+                        max_tokens=None,
+                    )
 
                 # Inject source traceability metadata into every chunk
-                for c in flat_chunks:
+                for i, c in enumerate(flat_chunks):
+                    c.index = i
+                    c.metadata["chunk_index"] = i
+                    c.metadata["paragraph_index"] = i
                     c.metadata["source_document"] = doc_name
                     c.metadata["source_document_id"] = document_id
                     c.metadata["source_dataset_id"] = dataset_id
@@ -1688,8 +2033,20 @@ class KnowledgeService:
                         **(doc.get("metadata") or {}),
                     }
                     for c in flat_chunks:
-                        islamic_meta = metadata_extractor.extract(c.text, doc_meta_for_islamic)
-                        c.metadata.update(islamic_meta)
+                        per_chunk_meta = {
+                            **doc_meta_for_islamic,
+                            "paragraph_index": c.metadata.get("paragraph_index", c.index),
+                            "chunk_index": c.metadata.get("chunk_index", c.index),
+                            "section_title": c.metadata.get("section_title"),
+                            "page_number": c.metadata.get("page_number"),
+                        }
+                        islamic_meta = metadata_extractor.extract(c.text, per_chunk_meta)
+                        # Preserve existing Islamic metadata from specialized chunkers
+                        for key, value in islamic_meta.items():
+                            existing = c.metadata.get(key)
+                            if existing:
+                                continue
+                            c.metadata[key] = value
                     logger.info(f"Islamic metadata extracted for {len(flat_chunks)} chunks")
                 except Exception as meta_err:
                     logger.warning(f"Islamic metadata extraction failed (non-fatal): {meta_err}")
@@ -1762,6 +2119,7 @@ class KnowledgeService:
 
             # Find excess old segments (positions beyond new chunk count)
             max_new_pos = len(chunks) - 1
+            max_existing_pos = max(existing_hashes.keys(), default=-1)
             excess_segments = []
             for pos, seg_info in existing_hashes.items():
                 if pos > max_new_pos:
@@ -1791,10 +2149,10 @@ class KnowledgeService:
                     embed_timeout = 90.0  # Longer timeout for multimodal
                     embedding_provider_used = "dashscope_multimodal"
                 else:
-                    # Use high-speed text embedder (Gemini by default)
+                    # Use dataset-configured text embedder
                     embedder = self._get_text_embedder(dataset, embedding_config)
                     embed_timeout = 60.0
-                    embedding_provider_used = self.settings.knowledge.text_embedding_provider
+                    embedding_provider_used = str(dataset.get("embedding_provider") or getattr(embedder, "provider", "local"))
                     logger.info(
                         f"Using {embedding_provider_used} text embedding for dataset {dataset_id} "
                         f"(batch_size={self.settings.knowledge.text_embedding_batch_size})"
@@ -1965,10 +2323,38 @@ class KnowledgeService:
                         )
                         logger.debug(f"Batch {batch_idx+1}/{len(batches)} embedded ({embedded}/{total} chunks)")
 
-                    # Upsert new/changed vectors and segments
-                    await self.vector_store.upsert(collection_name=collection, points=points)
-                    await self.db.insert_segments(segment_rows)
-                    logger.info(f"Upserted {len(segment_rows)} segments for document {document_id}")
+                    # Upsert new/changed vectors and segments with adaptive batching
+                    # Use smaller batches for large documents to avoid Qdrant timeout
+                    from .vector_store import VectorStoreConfig
+                    qdrant_batch_size = VectorStoreConfig.get_batch_size(len(points))
+                    
+                    total_points = len(points)
+                    upserted_count = 0
+                    
+                    for q_start in range(0, total_points, qdrant_batch_size):
+                        q_batch = points[q_start:q_start + qdrant_batch_size]
+                        batch_segment_rows = segment_rows[q_start:q_start + qdrant_batch_size]
+                        
+                        try:
+                            await self.vector_store.upsert(collection_name=collection, points=q_batch)
+                            await self.db.insert_segments(batch_segment_rows)
+                            upserted_count += len(q_batch)
+                            logger.debug(
+                                f"Upserted sub-batch {q_start//qdrant_batch_size + 1}/"
+                                f"{(total_points + qdrant_batch_size - 1)//qdrant_batch_size} "
+                                f"({upserted_count}/{total_points} points)"
+                            )
+                        except Exception as upsert_err:
+                            logger.error(
+                                f"Failed to upsert sub-batch {q_start//qdrant_batch_size + 1}: {upsert_err}"
+                            )
+                            # Don't fail entire document, continue with other batches
+                            # Failed segments will be missing but document will be partially usable
+                    
+                    if upserted_count > 0:
+                        logger.info(f"Upserted {upserted_count}/{len(segment_rows)} segments for document {document_id}")
+                    else:
+                        raise RuntimeError(f"Failed to upsert any segments for document {document_id}")
                 else:
                     logger.info(f"All segments unchanged for document {document_id}, no embedding needed")
 
@@ -2023,13 +2409,17 @@ class KnowledgeService:
                         # Dataset is configured for multimodal - use the unified embedder
                         multimodal_embedder = embedder
                         logger.info(f"Using dataset's multimodal embedder for {len(image_metadata_list)} images")
-                    elif self.multimodal_embedding and self.image_storage_service and image_metadata_list:
-                        # FALLBACK: Dataset uses text-only, but system has multimodal capability
-                        # Process images with system-level multimodal embedding (separate vector space)
+                    elif (
+                        self.multimodal_embedding
+                        and self.image_storage_service
+                        and image_metadata_list
+                        and doc_metadata.get("processing_mode") in {"multimodal", "scanned"}
+                    ):
+                        # Only process images for explicit multimodal/scanned modes.
                         multimodal_embedder = self.multimodal_embedding
                         logger.info(
-                            f"FALLBACK: Using system-level multimodal embedding for {len(image_metadata_list)} images "
-                            f"(dataset configured with text-only provider '{embedding_provider_used}')"
+                            f"Multimodal processing enabled for {len(image_metadata_list)} images "
+                            f"(processing_mode={doc_metadata.get('processing_mode')})"
                         )
                     
                     if multimodal_embedder and self.image_storage_service and image_metadata_list:
@@ -2037,13 +2427,41 @@ class KnowledgeService:
                             document_id, status="embedding_images", progress=85
                         )
                         try:
+                            image_collection = collection
+                            mm_dim = getattr(multimodal_embedder, "dimension", None)
+                            if mm_dim and int(mm_dim) != int(dim):
+                                image_collection = await self.vector_store.ensure_collection(
+                                    dataset_id=dataset_id,
+                                    dimension=int(mm_dim),
+                                )
+
+                            # Clean up existing image segments/vectors before re-embedding
+                            try:
+                                existing_image_segments = await self.db.get_image_segments_by_document(document_id)
+                                if existing_image_segments:
+                                    vector_ids = [
+                                        seg.get("vector_id")
+                                        for seg in existing_image_segments
+                                        if seg.get("vector_id")
+                                    ]
+                                    if vector_ids:
+                                        await self.vector_store.delete_points(image_collection, vector_ids)
+                                    await self.db.delete_image_segments_by_document(document_id)
+                            except Exception as cleanup_err:
+                                logger.warning(
+                                    f"Failed to cleanup existing image segments for document {document_id}: {cleanup_err}"
+                                )
+
+                            max_text_pos = max(max_new_pos, max_existing_pos)
+                            image_base_position = max_text_pos + 1
+
                             image_count = await self._process_document_images_with_embedder(
                                 embedder=multimodal_embedder,
                                 dataset_id=dataset_id,
                                 document_id=document_id,
                                 image_metadata_list=image_metadata_list,
-                                collection=collection,
-                                base_position=len(segment_rows),
+                                collection=image_collection,
+                                base_position=image_base_position,
                                 tenant_id=str(dataset.get("tenant_id") or "default"),
                             )
                             logger.info(
@@ -2297,6 +2715,7 @@ class KnowledgeService:
                         "height": img_meta.get("height"),
                         "page_number": img_meta.get("page_number"),
                         "source_location": img_meta.get("source_location"),
+                        "source_position": idx,
                     },
                 })
                 processed += 1
@@ -2489,6 +2908,7 @@ class KnowledgeService:
                         "height": img.height,
                         "page_number": page_number,
                         "source_location": img.source_location,
+                        "source_position": idx,
                     },
                 })
                 
@@ -2631,6 +3051,7 @@ class KnowledgeService:
                         "width": img.width,
                         "height": img.height,
                         "page_number": img.page_number,
+                        "source_position": idx,
                     },
                 })
 
@@ -2723,6 +3144,19 @@ class KnowledgeService:
         index_config = _ensure_dict(dataset.get("index_config"))
         retrieval_defaults = _ensure_dict(index_config.get("retrieval"))
 
+        # Enforce dataset-level retrieval config (ignore request overrides) if enabled.
+        retrieval_enforce = bool(
+            retrieval_defaults.get("enforce_config")
+            or retrieval_defaults.get("locked")
+            or retrieval_defaults.get("lock")
+        )
+        if retrieval_enforce:
+            mode = dense_weight = bm25_weight = fusion_method = rrf_k = rrf_weights = alpha = None
+            score_threshold = vector_top_k = keyword_top_k = candidate_top_k = keyword_candidate_k = fusion = None
+            rerank = rerank_model = rerank_top_n = None
+            mmr = mmr_lambda = mmr_threshold = None
+            multi_query = authority_sort = None
+
         # Mode: dense, bm25, or hybrid
         effective_mode = str(mode or retrieval_defaults.get("mode") or "hybrid").lower()
         # Normalize mode names
@@ -2789,6 +3223,7 @@ class KnowledgeService:
 
         # Rerank params (bool or dict in index_config)
         rerank_cfg = retrieval_defaults.get("rerank")
+        rerank_api_key = None
         if isinstance(rerank_cfg, dict):
             rerank_enabled = bool(rerank_cfg.get("enabled", False)) if rerank is None else bool(rerank)
             effective_rerank_model = str(rerank_model or rerank_cfg.get("model") or "gte-rerank")
@@ -2797,6 +3232,7 @@ class KnowledgeService:
                 if rerank_top_n is not None
                 else (int(rerank_cfg["top_n"]) if rerank_cfg.get("top_n") is not None else None)
             )
+            rerank_api_key = rerank_cfg.get("api_key") or None
         else:
             # Rerank defaults to OFF unless explicitly configured
             rerank_enabled = bool(rerank_cfg) if rerank is None else bool(rerank)
@@ -2820,8 +3256,7 @@ class KnowledgeService:
             effective_mmr_lambda = float(mmr_lambda if mmr_lambda is not None else 0.5)
             effective_mmr_threshold = float(mmr_threshold) if mmr_threshold is not None else None
 
-        # Score threshold - filter out low-relevance results
-        # NOTE: This threshold only applies to dense retrieval
+        # Score threshold - filter out low-relevance results (applied after fusion)
         effective_score_threshold = float(
             score_threshold if score_threshold is not None 
             else retrieval_defaults.get("score_threshold") or 0.0
@@ -2840,35 +3275,6 @@ class KnowledgeService:
         # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
         is_multimodal = self._is_multimodal_dataset(dataset)
 
-        # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
-        need_query_vector = effective_mode in {"dense", "hybrid"} or (mmr_enabled and not rerank_enabled)
-
-        qvec: Optional[List[float]] = None
-        if need_query_vector:
-            embedder: Optional[BaseEmbedding] = None
-            # Use cached embedder to reduce first-call latency (connection reuse)
-            if is_multimodal:
-                # Use UnifiedMultimodalEmbedding for cross-modal retrieval
-                logger.debug(
-                    f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
-                )
-                embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
-            else:
-                econf = self._resolve_embedding_config(
-                    provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
-                )
-                # Use cached embedder for better performance (connection reuse)
-                embedder = await get_cached_embedder(econf, dimension=dim)
-
-            qvec = await embedder.embed_query(q)
-            # Ensure collection exists and matches dimension (when we need vector ops).
-            collection = await self.vector_store.ensure_collection(
-                dataset_id=dataset_id,
-                dimension=embedder.dimension,
-                collection_name=collection or None,
-            )
-            # Note: Don't close cached embedder - it's reused across requests
-
         # --- PRE_RETRIEVAL Hook: Islamic multi-query expansion ---
         # Resolve Islamic enhancement config from dataset index_config
         islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
@@ -2876,6 +3282,14 @@ class KnowledgeService:
         islamic_citation = bool(islamic_cfg.get("citation_format", False))
         islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(authority_sort)
         islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
+        if not islamic_multi_query and multi_query is None:
+            try:
+                from .multi_query import ISLAMIC_SYNONYMS
+                q_lower = q.lower()
+                if any(term in q_lower for term in ISLAMIC_SYNONYMS.keys()):
+                    islamic_multi_query = True
+            except Exception:
+                pass
 
         queries_to_run: List[str] = [q]
         meta_islamic_queries: Optional[List[str]] = None
@@ -2891,19 +3305,31 @@ class KnowledgeService:
 
         # --- Parallel Dense + BM25 retrieval for better latency ---
         import asyncio
+        query_lang = detect_language(q)
 
-        async def _dense_search() -> tuple[list, int]:
-            """Dense (vector) retrieval task."""
+        dense_queries: List[str] = []
+        bm25_queries: List[str] = []
+        if effective_mode in {"dense", "hybrid"}:
+            dense_queries = queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+        if effective_mode in {"bm25", "hybrid"}:
+            bm25_queries = queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+
+        # Precompute query vectors for dense queries (BM25 runs in parallel)
+        query_vectors: Dict[str, List[float]] = {}
+
+        async def _dense_search(query_text: str) -> tuple[list, int]:
+            """Dense (vector) retrieval task for a single query."""
             if effective_mode not in {"dense", "hybrid"}:
                 return [], 0
-            if not qvec:
-                raise ValidationFailedError("dense retrieval requires query embedding")
-            if not collection:
-                raise ValidationFailedError("dataset collection_name is missing")
+            qvec_local = query_vectors.get(query_text)
+            if not qvec_local:
+                if effective_mode == "dense":
+                    raise ValidationFailedError("dense retrieval requires query embedding")
+                return [], 0
             try:
                 raw_hits = await self.vector_store.search(
                     collection_name=collection,
-                    query_vector=qvec,
+                    query_vector=qvec_local,
                     top_k=vector_k,
                     document_id=document_id,
                     source_type=source_type_filter,
@@ -2917,9 +3343,12 @@ class KnowledgeService:
                     text = str(payload.get("text") or "").strip()
                     if not text:
                         continue
-                    if effective_score_threshold > 0.0 and h.score < effective_score_threshold:
-                        continue
-                    filtered.append(h)
+                    score = float(getattr(h, "score", 0.0))
+                    filtered.append({
+                        "payload": payload,
+                        "score": score,
+                        "point_id": getattr(h, "point_id", None),
+                    })
                 return filtered, raw_count
             except Exception as vec_err:
                 logger.warning(f"Dense search failed: {vec_err}")
@@ -2927,16 +3356,18 @@ class KnowledgeService:
                     raise ValidationFailedError(f"Dense search failed: {vec_err}")
                 return [], 0
 
-        async def _bm25_search() -> tuple[list, int]:
-            """BM25 (keyword) retrieval task."""
+        async def _bm25_search(query_text: str) -> tuple[list, int]:
+            """BM25 (keyword) retrieval task for a single query."""
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
-            query_tokens = tokenize(q)
-            terms = list(dict.fromkeys(query_tokens))[:12]
+            q_lang = detect_language(query_text)
+            query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
+            max_terms = 20 if q_lang in ("ar", "mixed") else 12
+            terms = list(dict.fromkeys(query_tokens))[:max_terms]
             if not terms:
-                terms = [q.strip()]
-            if q.strip().lower() not in [t.lower() for t in terms]:
-                terms.append(q.strip().lower())
+                terms = [query_text.strip()]
+            if query_text.strip().lower() not in [t.lower() for t in terms]:
+                terms.append(query_text.strip().lower())
 
             rows = await self.db.search_segments_like_any(
                 dataset_id=dataset_id,
@@ -2962,6 +3393,10 @@ class KnowledgeService:
                 seg_metadata = _ensure_dict(row.get("metadata"))
                 if row.get("content_type"):
                     seg_metadata["content_type"] = row.get("content_type")
+                if row.get("parent_segment_id"):
+                    seg_metadata["parent_segment_id"] = row.get("parent_segment_id")
+                if row.get("level") is not None:
+                    seg_metadata["level"] = row.get("level")
                 if row.get("image_url"):
                     seg_metadata["image_url"] = row.get("image_url")
                 if row.get("vlm_description"):
@@ -2978,68 +3413,121 @@ class KnowledgeService:
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
             return hits[:keyword_k], raw_count
 
-        # Execute Dense and BM25 in parallel
-        (dense_hits, dense_hits_raw_count), (bm25_hits, bm25_hits_raw_count) = await asyncio.gather(
-            _dense_search(),
-            _bm25_search(),
-        )
-
-        # --- PRE_RETRIEVAL Hook: run BM25 for expanded queries and merge ---
-        if islamic_multi_query and len(queries_to_run) > 1 and effective_mode in {"bm25", "hybrid"}:
-            expanded_queries = queries_to_run[1:]  # Skip original (already searched)
-
-            async def _bm25_expanded(eq: str) -> list:
-                """BM25 search for a single expanded query."""
-                eq_tokens = tokenize(eq)
-                terms = list(dict.fromkeys(eq_tokens))[:12]
-                if not terms:
-                    terms = [eq.strip()]
-                if eq.strip().lower() not in [t.lower() for t in terms]:
-                    terms.append(eq.strip().lower())
-                rows = await self.db.search_segments_like_any(
-                    dataset_id=dataset_id, terms=terms,
-                    document_id=document_id,
-                    source_type=source_type_filter,
-                    language=language_filter,
-                    limit=keyword_pool_k,
-                )
-                valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
-                doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
-                scores = bm25_scores(eq_tokens, doc_tokens)
-                hits = []
-                for row, score in zip(valid_rows, scores):
-                    seg_id = str(row.get("segment_id") or "")
-                    text = str(row.get("text") or "").strip()
-                    if not seg_id or not text or score <= 0.0:
+        def _merge_dense_results(results: List[tuple[list, int]]) -> tuple[list, int, Dict[str, int]]:
+            total_raw = 0
+            merged: Dict[str, Dict[str, Any]] = {}
+            hit_counts: Dict[str, int] = {}
+            for hits, raw_count in results:
+                total_raw += raw_count
+                for h in hits:
+                    payload = dict(h.get("payload") or {})
+                    seg_id = str(payload.get("segment_id") or h.get("point_id") or "")
+                    if not seg_id:
                         continue
-                    seg_metadata = _ensure_dict(row.get("metadata"))
-                    hits.append({
-                        "segment_id": seg_id,
-                        "document_id": str(row.get("document_id") or ""),
-                        "text": text,
-                        "metadata": seg_metadata,
-                        "bm25_score": float(score),
-                    })
-                hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-                return hits[:keyword_k]
+                    score = float(h.get("score") or 0.0)
+                    hit_counts[seg_id] = hit_counts.get(seg_id, 0) + 1
+                    if seg_id not in merged or score > merged[seg_id]["score"]:
+                        merged[seg_id] = {
+                            "payload": payload,
+                            "score": score,
+                            "point_id": h.get("point_id"),
+                        }
 
-            expanded_results = await asyncio.gather(
-                *[_bm25_expanded(eq) for eq in expanded_queries]
+            for seg_id, count in hit_counts.items():
+                if count > 1 and seg_id in merged:
+                    bonus = min(0.3, (count - 1) * 0.1)
+                    merged[seg_id]["score"] = merged[seg_id]["score"] * (1 + bonus)
+                    merged[seg_id]["_multi_query_hits"] = count
+
+            dense_merge_k = min(max(vector_k, vector_k * max(len(dense_queries), 1)), candidate_k)
+            dense_hits = list(merged.values())
+            dense_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+            return dense_hits[:dense_merge_k], total_raw, hit_counts
+
+        def _merge_bm25_results(results: List[tuple[list, int]]) -> tuple[list, int, Dict[str, int]]:
+            total_raw = 0
+            merged: Dict[str, Dict[str, Any]] = {}
+            hit_counts: Dict[str, int] = {}
+            for hits, raw_count in results:
+                total_raw += raw_count
+                for h in hits:
+                    seg_id = str(h.get("segment_id") or "")
+                    if not seg_id:
+                        continue
+                    score = float(h.get("bm25_score") or 0.0)
+                    hit_counts[seg_id] = hit_counts.get(seg_id, 0) + 1
+                    if seg_id not in merged or score > float(merged[seg_id].get("bm25_score") or 0.0):
+                        merged[seg_id] = h
+
+            for seg_id, count in hit_counts.items():
+                if count > 1 and seg_id in merged:
+                    bonus = min(0.3, (count - 1) * 0.1)
+                    merged[seg_id]["bm25_score"] = float(merged[seg_id]["bm25_score"]) * (1 + bonus)
+                    merged[seg_id]["_multi_query_hits"] = count
+
+            bm25_merge_k = min(max(keyword_k, keyword_k * max(len(bm25_queries), 1)), candidate_k)
+            bm25_hits = list(merged.values())
+            bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+            return bm25_hits[:bm25_merge_k], total_raw, hit_counts
+
+        async def _run_dense_multi() -> tuple[list, int, Dict[str, int]]:
+            if not dense_queries:
+                return [], 0, {}
+            results = await asyncio.gather(*[_dense_search(dq) for dq in dense_queries])
+            return _merge_dense_results(results)
+
+        async def _run_bm25_multi() -> tuple[list, int, Dict[str, int]]:
+            if not bm25_queries:
+                return [], 0, {}
+            results = await asyncio.gather(*[_bm25_search(bq) for bq in bm25_queries])
+            return _merge_bm25_results(results)
+
+        # Kick off BM25 first (no embeddings needed) while we prepare dense vectors
+        bm25_task = asyncio.create_task(_run_bm25_multi()) if bm25_queries else None
+
+        # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
+        need_query_vector = effective_mode in {"dense", "hybrid"} or (mmr_enabled and not rerank_enabled)
+
+        qvec: Optional[List[float]] = None
+        embedder: Optional[BaseEmbedding] = None
+        if need_query_vector and dense_queries:
+            # Use cached embedder to reduce first-call latency (connection reuse)
+            if is_multimodal:
+                # Use UnifiedMultimodalEmbedding for cross-modal retrieval
+                logger.debug(
+                    f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
+                )
+                embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+            else:
+                econf = self._resolve_embedding_config(
+                    provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
+                )
+                # Use cached embedder for better performance (connection reuse)
+                embedder = await get_cached_embedder(econf, dimension=dim)
+
+            # Reuse original query vector when available
+            qvec = await embedder.embed_query(q)
+            query_vectors[q] = qvec
+
+            # Ensure collection exists and matches dimension (when we need vector ops).
+            collection = await self.vector_store.ensure_collection(
+                dataset_id=dataset_id,
+                dimension=embedder.dimension,
+                collection_name=collection or None,
             )
-            # Merge expanded BM25 hits — keep highest score per segment
-            seen_ids = {str(h.get("segment_id") or "") for h in bm25_hits}
-            expanded_added = 0
-            for exp_hits in expanded_results:
-                for h in exp_hits:
-                    sid = str(h.get("segment_id") or "")
-                    if sid not in seen_ids:
-                        bm25_hits.append(h)
-                        seen_ids.add(sid)
-                        expanded_added += 1
-            if expanded_added > 0:
-                bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-                bm25_hits_raw_count += expanded_added
-                logger.info(f"Islamic multi-query added {expanded_added} BM25 hits from {len(expanded_queries)} expanded queries")
+            # Note: Don't close cached embedder - it's reused across requests
+
+            missing = [dq for dq in dense_queries if dq not in query_vectors]
+            if missing:
+                vecs = await asyncio.gather(*[embedder.embed_query(dq) for dq in missing])
+                query_vectors.update(dict(zip(missing, vecs)))
+
+        # Execute dense (after vectors) and await BM25 concurrently
+        dense_hits, dense_hits_raw_count, dense_query_hits = await _run_dense_multi()
+        if bm25_task is not None:
+            bm25_hits, bm25_hits_raw_count, bm25_query_hits = await bm25_task
+        else:
+            bm25_hits, bm25_hits_raw_count, bm25_query_hits = [], 0, {}
 
         # --- Merge candidates with clear score tracking ---
         candidates: Dict[str, Dict[str, Any]] = {}
@@ -3103,8 +3591,10 @@ class KnowledgeService:
 
         # Add dense hits
         for h in dense_hits:
-            payload = dict(h.payload or {})
-            seg_id = str(payload.get("segment_id") or h.point_id)
+            payload = dict(h.get("payload") or {})
+            seg_id = str(payload.get("segment_id") or h.get("point_id") or "")
+            if not seg_id:
+                continue
             doc_id = str(payload.get("document_id") or "")
             text = str(payload.get("text") or "")
             upsert_candidate(
@@ -3113,7 +3603,7 @@ class KnowledgeService:
                 text,
                 payload,
                 source="dense",
-                dense_score=float(h.score),
+                dense_score=float(h.get("score") or 0.0),
             )
             dense_ranked_ids.append(seg_id)
 
@@ -3130,29 +3620,57 @@ class KnowledgeService:
             )
             bm25_ranked_ids.append(seg_id)
 
-        # --- Stage 2: Normalize scores to [0, 1] ---
-        dense_scores = [float(c.get("_dense_score") or 0) for c in candidates.values() if c.get("_dense_score") is not None]
-        bm25_scores_list = [float(c.get("_bm25_score") or 0) for c in candidates.values() if c.get("_bm25_score") is not None]
+        # Attach multi-query hit counts for cross-language traceability
+        if islamic_multi_query and (dense_query_hits or bm25_query_hits):
+            merged_hits: Dict[str, int] = {}
+            for sid, count in (dense_query_hits or {}).items():
+                merged_hits[sid] = max(merged_hits.get(sid, 0), count)
+            for sid, count in (bm25_query_hits or {}).items():
+                merged_hits[sid] = max(merged_hits.get(sid, 0), count)
+
+            for sid, count in merged_hits.items():
+                if count <= 1 or sid not in candidates:
+                    continue
+                meta = _ensure_dict(candidates[sid].get("metadata"))
+                meta["cross_language_hits"] = count
+                meta["query_language"] = query_lang
+                candidates[sid]["metadata"] = meta
+
+        # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
+        # Build score dicts for normalization
+        dense_scores_dict = {
+            cid: float(c.get("_dense_score") or 0)
+            for cid, c in candidates.items()
+            if c.get("_dense_score") is not None
+        }
+        bm25_scores_dict = {
+            cid: float(c.get("_bm25_score") or 0)
+            for cid, c in candidates.items()
+            if c.get("_bm25_score") is not None
+        }
         
-        dense_max = max(dense_scores) if dense_scores else 1.0
-        dense_min = min(dense_scores) if dense_scores else 0.0
-        bm25_max = max(bm25_scores_list) if bm25_scores_list else 1.0
-        bm25_min = min(bm25_scores_list) if bm25_scores_list else 0.0
+        # Use robust normalization (clips outliers at 5th/95th percentile)
+        # This is more stable than min-max for hybrid search
+        dense_norm_dict = ScoreNormalization.robust_normalize(dense_scores_dict)
+        bm25_norm_dict = ScoreNormalization.robust_normalize(bm25_scores_dict)
         
+        # Detect query language for weight adjustment
+        lang_dense_weight, lang_bm25_weight = compute_language_weights(
+            q, default_dense_weight=effective_dense_weight, default_bm25_weight=effective_bm25_weight
+        )
+        
+        # Apply normalized scores to candidates
+        # Apply adaptive weights for multilingual queries (if enabled)
+        adaptive_weights = bool(retrieval_defaults.get("adaptive_weights", True))
+        if effective_mode == "hybrid" and adaptive_weights:
+            effective_dense_weight = lang_dense_weight
+            effective_bm25_weight = lang_bm25_weight
+
         for cid, cand in candidates.items():
-            # Normalize dense score
-            if cand.get("_dense_score") is not None:
-                if dense_max - dense_min > 1e-9:
-                    cand["_dense_score_norm"] = (cand["_dense_score"] - dense_min) / (dense_max - dense_min)
-                else:
-                    cand["_dense_score_norm"] = 1.0
-            
-            # Normalize BM25 score
-            if cand.get("_bm25_score") is not None:
-                if bm25_max - bm25_min > 1e-9:
-                    cand["_bm25_score_norm"] = (cand["_bm25_score"] - bm25_min) / (bm25_max - bm25_min)
-                else:
-                    cand["_bm25_score_norm"] = 1.0
+            if cid in dense_norm_dict:
+                cand["_dense_score_norm"] = dense_norm_dict[cid]
+            if cid in bm25_norm_dict:
+                cand["_bm25_score_norm"] = bm25_norm_dict[cid]
 
         # --- Compute text match info (for display only, not scoring) ---
         for cid, cand in candidates.items():
@@ -3164,6 +3682,23 @@ class KnowledgeService:
             cand["_term_ratio"] = match_info.get("term_ratio", 0.0)
         
         # --- Stage 3: Fusion (combine dense and BM25 scores) ---
+        rrf_scores = None
+        rrf_max = 1.0
+        if effective_mode == "hybrid" and effective_fusion_method == "rrf":
+            rrf_scores = reciprocal_rank_fusion(
+                {"dense": dense_ranked_ids, "bm25": bm25_ranked_ids},
+                k=rrf_k_value,
+                weights={"dense": effective_dense_weight, "bm25": effective_bm25_weight},
+            )
+            rrf_max = max(rrf_scores.values()) if rrf_scores else 1.0
+
+        weighted_dense_weight = None
+        weighted_bm25_weight = None
+        if effective_mode == "hybrid" and effective_fusion_method != "rrf":
+            total_w = effective_dense_weight + effective_bm25_weight
+            weighted_dense_weight = effective_dense_weight / total_w if total_w > 0 else 0.5
+            weighted_bm25_weight = effective_bm25_weight / total_w if total_w > 0 else 0.5
+
         for cid, cand in candidates.items():
             dense_norm = cand.get("_dense_score_norm")
             bm25_norm = cand.get("_bm25_score_norm")
@@ -3180,24 +3715,15 @@ class KnowledgeService:
                 # Hybrid mode: fuse scores
                 if effective_fusion_method == "rrf":
                     # RRF fusion
-                    fused = reciprocal_rank_fusion(
-                        {"dense": dense_ranked_ids, "bm25": bm25_ranked_ids},
-                        k=rrf_k_value,
-                        weights={"dense": effective_dense_weight, "bm25": effective_bm25_weight},
-                    )
-                    rrf_max = max(fused.values()) if fused else 1.0
-                    rrf_score = float(fused.get(cid, 0.0)) / (rrf_max or 1.0)
+                    rrf_score = float((rrf_scores or {}).get(cid, 0.0)) / (rrf_max or 1.0)
                     cand["_rrf_score"] = rrf_score
                     cand["_fusion_score"] = rrf_score
                 else:
                     # Weighted average fusion
                     d_val = dense_norm if dense_norm is not None else 0.0
                     b_val = bm25_norm if bm25_norm is not None else 0.0
-                    
-                    # Normalize weights
-                    total_w = effective_dense_weight + effective_bm25_weight
-                    d_weight = effective_dense_weight / total_w if total_w > 0 else 0.5
-                    b_weight = effective_bm25_weight / total_w if total_w > 0 else 0.5
+                    d_weight = weighted_dense_weight if weighted_dense_weight is not None else 0.5
+                    b_weight = weighted_bm25_weight if weighted_bm25_weight is not None else 0.5
                     
                     # If only one source, penalize the missing score
                     sources = cand.get("_sources", set())
@@ -3220,6 +3746,7 @@ class KnowledgeService:
             "mode": effective_mode,
             "top_k": int(top_k),
             "document_id": document_id,
+            "enforce_config": retrieval_enforce,
             # Retrieval counts (for backward compatibility with frontend)
             "vector_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
             "keyword_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
@@ -3255,13 +3782,21 @@ class KnowledgeService:
         
         # Log pipeline stages with details
         if effective_mode in {"dense", "hybrid"}:
-            filtered_msg = f" (filtered {dense_hits_raw_count - len(dense_hits)} by threshold)" if effective_score_threshold > 0 and dense_hits_raw_count > len(dense_hits) else ""
-            meta["pipeline_stages"].append(f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results{filtered_msg}")
+            meta["pipeline_stages"].append(f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results")
         if effective_mode in {"bm25", "hybrid"}:
             meta["pipeline_stages"].append(f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results")
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
         if effective_mode == "hybrid":
             meta["pipeline_stages"].append(f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}")
+
+        # Prefetch vectors for MMR in parallel with rerank to reduce latency
+        mmr_vectors_task = None
+        if mmr_enabled and ranked and collection:
+            ids_for_mmr = [str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")]
+            if ids_for_mmr:
+                mmr_vectors_task = asyncio.create_task(
+                    self.vector_store.retrieve_vectors(collection_name=collection, point_ids=ids_for_mmr)
+                )
 
         # --- Stage 4: Optional rerank (Async DashScope cross-encoder) ---
         if rerank_enabled and ranked:
@@ -3269,14 +3804,17 @@ class KnowledgeService:
                 from .text_reranker import get_text_reranker
 
                 api_key = (
-                    getattr(self.settings.knowledge.dashscope, "api_key", None)
+                    rerank_api_key
+                    or getattr(self.settings.knowledge.dashscope, "api_key", None)
                     or os.getenv("DASHSCOPE_API_KEY")
                     or os.getenv("Aliyun_KEY")
                     or os.getenv("ALIYUN_KEY")
-                    or "sk-e320c076a3f741f6a5097afaece92022"
                 )
                 if not api_key:
                     raise ValidationFailedError("DashScope api_key is required for rerank")
+
+                if effective_rerank_top_n is None:
+                    effective_rerank_top_n = min(len(ranked), max(top_k * 3, 20))
 
                 # Use async reranker with connection pooling and caching
                 reranker = get_text_reranker(api_key=api_key, model=effective_rerank_model)
@@ -3307,13 +3845,22 @@ class KnowledgeService:
 
         # --- Stage 5: Optional MMR diversification ---
         final: List[Dict[str, Any]] = ranked
+        if mmr_enabled and ranked and len(ranked) <= top_k:
+            meta["mmr_skipped"] = "candidate_count<=top_k"
+            mmr_enabled = False
         if mmr_enabled and ranked:
             if not collection:
                 meta["mmr_error"] = "dataset collection_name is missing"
             else:
                 try:
                     ids = [str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")]
-                    vectors = await self.vector_store.retrieve_vectors(collection_name=collection, point_ids=ids)
+                    if mmr_vectors_task is not None:
+                        vectors = await mmr_vectors_task
+                    else:
+                        vectors = await self.vector_store.retrieve_vectors(
+                            collection_name=collection,
+                            point_ids=ids,
+                        )
 
                     relevance: Dict[str, float] = {}
                     for c in ranked:
@@ -3421,6 +3968,19 @@ class KnowledgeService:
                 logger.warning(f"Islamic POST_RANKING hook failed: {islamic_err}")
                 meta["islamic_enhancement_error"] = str(islamic_err)
 
+        # Normalize final scores for display (keep raw for debugging)
+        if final_sorted:
+            raw_score_map = {
+                str(c.get("segment_id") or idx): float(c.get("_final_score") or 0.0)
+                for idx, c in enumerate(final_sorted)
+            }
+            norm_map = ScoreNormalization.robust_normalize(raw_score_map)
+            for idx, c in enumerate(final_sorted):
+                key = str(c.get("segment_id") or idx)
+                raw_score = float(c.get("_final_score") or 0.0)
+                c["_final_score_raw"] = raw_score
+                c["_final_score_norm"] = float(norm_map.get(key, 0.0))
+
         # Add Islamic multi-query metadata if applicable
         if meta_islamic_queries:
             meta["islamic_multi_query"] = True
@@ -3505,7 +4065,9 @@ class KnowledgeService:
             payload["_rank"] = rank
 
             # Final score for display
-            score = float(c.get("_final_score") or 0.0)
+            score = float(c.get("_final_score_norm") or 0.0)
+            payload["_final_score_raw"] = round(float(c.get("_final_score_raw") or 0.0), 6)
+            payload["_final_score"] = round(score, 6)
 
             # Extract multimodal fields from payload/metadata
             content_type = payload.get("content_type", "text")
@@ -4475,11 +5037,31 @@ class KnowledgeService:
                 logger.error(f"pypdf parsing failed: {exc}")
                 traceback.print_exc()
 
-        if not text:
+        # OCR fallback for scanned/low-text PDFs
+        min_chars = getattr(self.settings.knowledge, "pdf_min_text_chars_for_ocr", 200)
+        ocr_enabled = getattr(self.settings.knowledge, "ocr_enabled", True)
+        if ocr_enabled and (not text or len(text.strip()) < min_chars):
+            ocr_text = self._ocr_pdf_bytes(content)
+            if ocr_text and len(ocr_text.strip()) >= min_chars:
+                text = ocr_text
+
+        if not text or not text.strip():
             raise ValidationFailedError("Failed to extract any text from PDF")
 
         text = self._sanitize_text_for_db(normalize_text(text))
         return self._clean_pdf_content(text)
+
+    def _ocr_pdf_bytes(self, content: bytes) -> str:
+        """OCR a PDF using PyMuPDF rendering + Tesseract CLI.
+        
+        Uses shared OCR utilities from ocr_utils module.
+        """
+        from .ocr_utils import OCRCConfig, ocr_pdf_bytes as _ocr_pdf
+        
+        config = OCRCConfig.from_settings(self.settings.knowledge)
+        max_workers = int(getattr(self.settings.knowledge, "ocr_page_concurrency", 2) or 1)
+        
+        return _ocr_pdf(content, config=config, max_workers=max_workers)
     
     def _extract_pdf_with_pdfplumber(self, pdf_stream) -> str:
         """Extract PDF content using pdfplumber with table detection."""
@@ -4815,38 +5397,15 @@ class KnowledgeService:
             )
         if provider_key in {"gemini", "google"}:
             if not api_key:
-                api_key = (
-                    self.settings.knowledge.gemini.api_key
-                    or os.getenv("GEMINI_API_KEY")
-                    or os.getenv("GOOGLE_API_KEY")
-                    or ""
-                )
-            if not api_key:
-                raise ValidationFailedError("Gemini api_key is required")
-            if not base_url:
-                base_url = (
-                    self.settings.knowledge.gemini.base_url
-                    or os.getenv("GEMINI_BASE_URL")
-                    or None
-                )
+                raise ValidationFailedError("Gemini api_key is required in dataset embedding_config")
         elif provider_key in {"dashscope", "aliyun"}:
             if not api_key:
-                api_key = (
-                    getattr(self.settings.knowledge.dashscope, "api_key", None)
-                    or os.getenv("DASHSCOPE_API_KEY")
-                    or os.getenv("Aliyun_KEY")
-                    or os.getenv("ALIYUN_KEY")
-                )
+                raise ValidationFailedError("DashScope api_key is required in dataset embedding_config")
+        elif provider_key in {"siliconflow", "silicon", "sf"}:
             if not api_key:
-                raise ValidationFailedError("DashScope api_key is required")
-
-            # DashScopeEmbedding uses the official DashScope SDK.
+                raise ValidationFailedError("SiliconFlow api_key is required in dataset embedding_config")
             if not base_url:
-                base_url = (
-                    getattr(self.settings.knowledge.dashscope, "base_url", None)
-                    or os.getenv("DASHSCOPE_BASE_URL")
-                    or None
-                )
+                base_url = "https://api.siliconflow.cn/v1/embeddings"
         else:
             raise ValidationFailedError(f"Unsupported embedding provider: {provider}")
 
@@ -5332,12 +5891,15 @@ class KnowledgeService:
 
             image_position = int(img_seg.get("position", 0) or 0)
             image_page = img_metadata.get("page") or img_metadata.get("page_number")
-            if context_index is not None and context_index in placeholder_map:
-                mapped_seg = placeholder_map[context_index]
-                image_position = int(mapped_seg.get("position", image_position) or image_position)
-                if image_page is None:
-                    mapped_meta = _ensure_dict(mapped_seg.get("metadata"))
-                    image_page = mapped_meta.get("page") or mapped_meta.get("page_number")
+            if context_index is not None:
+                if context_index in placeholder_map:
+                    mapped_seg = placeholder_map[context_index]
+                    image_position = int(mapped_seg.get("position", image_position) or image_position)
+                    if image_page is None:
+                        mapped_meta = _ensure_dict(mapped_seg.get("metadata"))
+                        image_page = mapped_meta.get("page") or mapped_meta.get("page_number")
+                else:
+                    image_position = int(context_index)
 
             context_text = str(img_metadata.get("context_text") or "")
             context_norm = _normalize_for_match(context_text)

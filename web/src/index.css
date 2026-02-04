@@ -85,6 +85,16 @@
     font-variation-settings: "opsz" 32;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    background-image:
+      radial-gradient(1200px circle at 0% -10%, hsl(var(--primary) / 0.08), transparent 55%),
+      radial-gradient(900px circle at 100% 0%, hsl(199 80% 60% / 0.06), transparent 55%);
+    background-attachment: fixed;
+  }
+
+  .dark body {
+    background-image:
+      radial-gradient(1000px circle at 0% -20%, hsl(var(--primary) / 0.18), transparent 60%),
+      radial-gradient(800px circle at 100% 0%, hsl(210 40% 30% / 0.35), transparent 65%);
   }
 
   /* 选中文本样式 */
@@ -135,6 +145,20 @@
 
 .ant-card {
   transition: all var(--transition-normal) ease !important;
+  box-shadow: 0 1px 2px hsl(222 40% 15% / 0.06);
+}
+
+.dark .ant-card {
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.35);
+}
+
+.ant-card:hover {
+  box-shadow: 0 10px 30px hsl(222 40% 15% / 0.12);
+  transform: translateY(-1px);
+}
+
+.dark .ant-card:hover {
+  box-shadow: 0 12px 34px hsl(0 0% 0% / 0.45);
 }
 
 .ant-input,

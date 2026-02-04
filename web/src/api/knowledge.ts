@@ -306,7 +306,10 @@ export async function updateDatasetConfig(
   datasetId: string,
   config: {
     chunking_config?: Partial<ChunkingConfig>;
-    retrieval_config?: Partial<RetrievalConfig>
+    retrieval_config?: Partial<RetrievalConfig>;
+    embedding_provider?: string;
+    embedding_model?: string;
+    embedding_dimension?: number;
   }
 ) {
   const { data } = await api.put(`/api/v1/knowledge/${datasetId}/config`, config);

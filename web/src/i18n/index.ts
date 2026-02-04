@@ -33,8 +33,8 @@ export default i18n;
 
 // 支持的语言列表
 export const languages = [
-  { code: "zh-CN", name: "简体中文", flag: "🇨🇳" },
-  { code: "en-US", name: "English", flag: "🇺🇸" },
+  { code: "zh-CN", nameKey: "language.zhCN", nativeName: "简体中文", flag: "🇨🇳" },
+  { code: "en-US", nameKey: "language.enUS", nativeName: "English", flag: "🇺🇸" },
 ] as const;
 
 export type LanguageCode = (typeof languages)[number]["code"];

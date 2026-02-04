@@ -159,9 +159,9 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
         <div className="flex items-center gap-3">
           <Database className="h-5 w-5 text-muted-foreground" />
           <div>
-            <h3 className="font-semibold text-muted-foreground">更多数据源</h3>
+            <h3 className="font-semibold text-muted-foreground">{t("knowledge.sync.moreSources")}</h3>
             <p className="text-sm text-muted-foreground">
-              Notion、Google Drive 等数据源即将支持
+              {t("knowledge.sync.moreSourcesHint")}
             </p>
           </div>
         </div>

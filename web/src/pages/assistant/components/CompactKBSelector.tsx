@@ -68,7 +68,7 @@ export function CompactKBSelector({
                 : "text-slate-600 dark:text-slate-300"
             )}
           >
-            {t("assistant.kb", "知识库")}
+            {t("assistant.kb")}
           </span>
           {hasSelection && (
             <Badge className="h-4 min-w-4 px-1 text-[10px] bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 border-0">
@@ -83,7 +83,7 @@ export function CompactKBSelector({
         className="w-[260px] max-h-[300px] overflow-y-auto rounded-xl"
       >
         <DropdownMenuLabel className="text-xs text-slate-500">
-          {t("assistant.selectKB", "选择知识库")}
+          {t("assistant.selectKB")}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {datasets.map((dataset) => (

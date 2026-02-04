@@ -8,6 +8,7 @@ import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageBreakdown } from "@/api/usage";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 function formatTokens(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -16,6 +17,7 @@ function formatTokens(num: number): string {
 }
 
 export function UserQuotaPanel() {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, serviceId, lastRefresh } = useDashboardContext();
   const [sortBy, setSortBy] = useState<"usage" | "cost">("usage");
@@ -49,7 +51,7 @@ export function UserQuotaPanel() {
     }
 
     return {
-      user: item.user || "unknown",
+      user: item.user || t("common.unknown"),
       dailyUsed,
       dailyLimit,
       dailyPercent,
@@ -71,14 +73,14 @@ export function UserQuotaPanel() {
   // Format user display name
   const formatUserName = (user: string) => {
     if (user.startsWith("anon:")) {
-      return `匿名-${user.slice(-6)}`;
+      return t("dashboard.filters.anonymousUser", { id: user.slice(-6) });
     }
     return user;
   };
 
   const columns = [
     {
-      title: "用户",
+      title: t("common.user"),
       dataIndex: "user",
       key: "user",
       width: 100,
@@ -90,7 +92,7 @@ export function UserQuotaPanel() {
       ),
     },
     {
-      title: "Token 用量",
+      title: t("metrics.totalTokens"),
       key: "daily",
       width: 130,
       render: (_: unknown, record: (typeof users)[0]) => (
@@ -108,7 +110,7 @@ export function UserQuotaPanel() {
       ),
     },
     {
-      title: "成本",
+      title: t("analytics.cost"),
       dataIndex: "cost",
       key: "cost",
       width: 80,
@@ -119,15 +121,15 @@ export function UserQuotaPanel() {
       ),
     },
     {
-      title: "状态",
+      title: t("common.status"),
       dataIndex: "status",
       key: "status",
       width: 70,
       render: (status: string) => {
         const config = {
-          normal: { color: "success", text: "正常" },
-          warning: { color: "warning", text: "警告" },
-          exceeded: { color: "error", text: "超额" },
+          normal: { color: "success", text: t("dashboard.userQuota.status.normal") },
+          warning: { color: "warning", text: t("dashboard.userQuota.status.warning") },
+          exceeded: { color: "error", text: t("dashboard.userQuota.status.exceeded") },
         }[status] || { color: "default", text: status };
         return <Tag color={config.color}>{config.text}</Tag>;
       },
@@ -136,7 +138,7 @@ export function UserQuotaPanel() {
 
   return (
     <PanelWrapper
-      title="用户配额"
+      title={t("dashboard.userQuota.title")}
       onRefresh={refetch}
       loading={isLoading}
       extra={
@@ -146,8 +148,8 @@ export function UserQuotaPanel() {
           size="small"
           style={{ width: 90 }}
           options={[
-            { value: "usage", label: "按用量" },
-            { value: "cost", label: "按成本" },
+            { value: "usage", label: t("dashboard.userQuota.sort.usage") },
+            { value: "cost", label: t("dashboard.userQuota.sort.cost") },
           ]}
         />
       }
@@ -187,8 +189,8 @@ export function UserQuotaPanel() {
                   }}
                 >
                   {users.filter((u) => u.status === "exceeded").length > 0
-                    ? `${users.filter((u) => u.status === "exceeded").length} 个用户已超出配额限制`
-                    : `${warningCount} 个用户接近配额限制`}
+                    ? t("dashboard.userQuota.alert.exceeded", { count: users.filter((u) => u.status === "exceeded").length })
+                    : t("dashboard.userQuota.alert.warning", { count: warningCount })}
                 </div>
                 <div
                   style={{
@@ -197,13 +199,13 @@ export function UserQuotaPanel() {
                     marginTop: 2,
                   }}
                 >
-                  超额用户的后续请求可能会被限制
+                  {t("dashboard.userQuota.alert.hint")}
                 </div>
               </div>
             </div>
-            <Tooltip title="配额扩容申请功能即将上线">
+            <Tooltip title={t("dashboard.userQuota.alert.upgradeHint")}>
               <Button size="small" type="text" icon={<ExpandOutlined />}>
-                扩容
+                {t("dashboard.userQuota.alert.upgradeAction")}
               </Button>
             </Tooltip>
           </div>

@@ -14,7 +14,15 @@ from ...config.settings import Settings
 from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
-from .chunking import ChunkingConfig, process_document, flatten_chunks, merge_small_chunks, Chunk
+from .chunking import (
+    ChunkingMode,
+    ChunkingConfig,
+    process_document,
+    flatten_chunks,
+    enforce_token_limits,
+    Chunk,
+)
+from .section_extractor import SectionExtractor
 from .embedding import create_embedding, BaseEmbedding, get_cached_embedder
 from .vector_store import VectorStore
 
@@ -190,7 +198,22 @@ class IngestionService:
         
         Returns list of (text, token_count, content_hash, metadata) tuples.
         """
-        config = config or ChunkingConfig()
+        # CRITICAL FIX: Load chunking config from dataset if not provided
+        if config is None:
+            config = await self._load_chunking_config(dataset_id)
+        
+        # VALIDATION LOG: Log actual config values being used for chunking
+        min_tokens_log = config.min_chunk_tokens if config.mode == ChunkingMode.FIXED_SIZE else None
+        max_tokens_log = config.max_chunk_tokens if config.mode == ChunkingMode.FIXED_SIZE else None
+        logger.info(
+            f"[IngestionService._create_chunks] Dataset={dataset_id}, Document={document_id}, "
+            f"Mode={config.mode}, "
+            f"TokenLimit={config.token_limit}, "
+            f"UseTokenCount={config.use_token_count}, "
+            f"MinTokens={min_tokens_log}, MaxTokens={max_tokens_log}, "
+            f"ParentTokenLimit={config.parent_token_limit}, ChildTokenLimit={config.child_token_limit}, "
+            f"ParentSize={config.parent_chunk_size}, ChildSize={config.child_chunk_size}"
+        )
         
         # Process document
         chunk_objects = process_document(text, config, document_id)
@@ -199,15 +222,25 @@ class IngestionService:
         # Flatten hierarchical chunks
         flat_chunks = flatten_chunks(chunk_objects)
         
-        # Merge undersized chunks
-        flat_chunks = merge_small_chunks(
-            flat_chunks,
-            min_size=config.min_chunk_size,
-            max_size=config.max_chunk_size,
-        )
+        # Apply strict sizing only for fixed-size mode; other modes follow their own logic
+        if config.mode == ChunkingMode.FIXED_SIZE and config.use_token_count:
+            token_limit = int(config.token_limit or 0)
+            if token_limit > 0:
+                flat_chunks = enforce_token_limits(
+                    flat_chunks,
+                    token_limit,
+                    min_tokens=None,
+                )
+        
+        # Apply strict section traceability if enabled
+        if config.strict_section_traceability:
+            flat_chunks = self._apply_section_traceability(text, flat_chunks, doc_name)
         
         # Add source metadata
-        for c in flat_chunks:
+        for i, c in enumerate(flat_chunks):
+            c.index = i
+            c.metadata["chunk_index"] = i
+            c.metadata["paragraph_index"] = i
             c.metadata["source_document"] = doc_name
             c.metadata["source_document_id"] = document_id
             c.metadata["source_dataset_id"] = dataset_id
@@ -219,6 +252,145 @@ class IngestionService:
             chunks.append((c.text, c.token_count, content_hash, c.metadata))
         
         return chunks
+
+    def _apply_section_traceability(
+        self,
+        text: str,
+        chunks: List[Chunk],
+        doc_name: str,
+    ) -> List[Chunk]:
+        """Apply strict section traceability to chunks.
+        
+        Ensures every chunk has a section_title and includes it in citations.
+        """
+        extractor = SectionExtractor()
+        
+        # Get section metadata for all chunks
+        section_metadata_list = extractor.assign_section_to_chunks(text, chunks)
+        
+        # Apply section metadata to chunks
+        for i, (chunk, section_metadata) in enumerate(zip(chunks, section_metadata_list)):
+            # Ensure section_title exists
+            if not section_metadata.get('section_title'):
+                # Force section title if missing
+                forced = extractor.force_section_title(
+                    [chunk],
+                    document_title=doc_name,
+                    default_section="Main Content"
+                )
+                if forced:
+                    section_metadata.update(forced[0])
+            
+            # Update chunk metadata
+            chunk.metadata.update(section_metadata)
+            
+            # Build section-aware citation if not already present
+            if not chunk.metadata.get('citation_text'):
+                from .section_extractor import get_section_aware_citation
+                citation = get_section_aware_citation(
+                    chunk.metadata,
+                    document_name=doc_name,
+                    position=i
+                )
+                chunk.metadata['citation_text'] = citation
+        
+        return chunks
+
+    async def _load_chunking_config(self, dataset_id: str) -> ChunkingConfig:
+        """Load chunking config from dataset with proper fallback."""
+        try:
+            dataset = await self.db.get_dataset(dataset_id)
+            if dataset:
+                index_config = dataset.get("index_config") or {}
+                if isinstance(index_config, str):
+                    try:
+                        index_config = json.loads(index_config)
+                    except json.JSONDecodeError:
+                        index_config = {}
+                chunking_dict = index_config.get("chunking") if isinstance(index_config, dict) else {}
+                if chunking_dict:
+                    logger.info(f"[Chunking] Loaded config from dataset {dataset_id}: {chunking_dict}")
+                    return ChunkingConfig.from_dict(chunking_dict)
+        except Exception as e:
+            logger.warning(f"[Chunking] Failed to load config for {dataset_id}: {e}")
+        
+        # Fallback to default
+        logger.info(f"[Chunking] Using default config for dataset {dataset_id}")
+        return ChunkingConfig()
+
+    def _validate_chunk_sizes(self, chunks: List[Chunk], config: ChunkingConfig) -> List[Chunk]:
+        """Validate and enforce strict token limits on chunks.
+        
+        This is a safety pass that splits any chunks exceeding max_tokens.
+        """
+        if not config.use_token_count:
+            return chunks
+        max_tokens = config.max_chunk_tokens if config.max_chunk_tokens is not None else None
+        if max_tokens is None:
+            return chunks
+        
+        validated = []
+        for chunk in chunks:
+            chunk_tokens = chunk.token_count
+            
+            if chunk_tokens > max_tokens:
+                # Split oversized chunk
+                logger.warning(
+                    f"[Chunking] Chunk {chunk.index} exceeds limit: "
+                    f"{chunk_tokens} > {max_tokens}, splitting..."
+                )
+                split_chunks = self._split_chunk_strict(chunk, max_tokens)
+                validated.extend(split_chunks)
+            elif config.min_chunk_tokens is not None and chunk_tokens < config.min_chunk_tokens:
+                # Mark as small for potential merging
+                chunk.metadata["_too_small"] = True
+                validated.append(chunk)
+            else:
+                validated.append(chunk)
+        
+        return validated
+
+    def _split_chunk_strict(self, chunk: Chunk, max_tokens: int) -> List[Chunk]:
+        """Split a chunk strictly by token count."""
+        words = chunk.text.split()
+        if not words:
+            return [chunk]
+        
+        token_counter = get_token_counter()
+        result = []
+        current_words = []
+        current_tokens = 0
+        index = 0
+        
+        for word in words:
+            word_tokens = token_counter.count_tokens(word + " ")
+            if current_tokens + word_tokens > max_tokens and current_words:
+                # Create chunk from current buffer
+                text = " ".join(current_words)
+                result.append(Chunk(
+                    text=text,
+                    index=chunk.index + index,
+                    metadata={**chunk.metadata, "_split_from": chunk.hash_id},
+                    parent_id=chunk.parent_id,
+                ))
+                index += 1
+                current_words = [word]
+                current_tokens = word_tokens
+            else:
+                current_words.append(word)
+                current_tokens += word_tokens
+        
+        # Don't forget remaining words
+        if current_words:
+            text = " ".join(current_words)
+            result.append(Chunk(
+                text=text,
+                index=chunk.index + index,
+                metadata={**chunk.metadata, "_split_from": chunk.hash_id},
+                parent_id=chunk.parent_id,
+            ))
+        
+        return result if result else [chunk]
 
     # ========================================================================
     # Embedding and Storage
@@ -243,14 +415,26 @@ class IngestionService:
         if embedder._dimension is None:
             await embedder.embed_query("test")
         
-        dim = embedder._dimension or 1024
+        dim = embedder._dimension or 1024  # fallback dimension for unknown embedders
         await self.vector_store.ensure_collection(
             dataset_id=dataset_id,
             dimension=dim,
         )
         
-        # Process in batches
-        batch_size = 32
+        # Process in smaller batches to avoid Qdrant timeout
+        # For large documents, use smaller batch size to prevent timeout
+        total_chunks = len(chunks)
+        # Adaptive batch size: smaller batches for large document counts
+        if total_chunks > 200:
+            batch_size = 16
+        elif total_chunks > 100:
+            batch_size = 24
+        else:
+            batch_size = 32
+            
+        # Further reduce batch size for Qdrant upsert to avoid timeout
+        qdrant_batch_size = 16
+        
         total_inserted = 0
         
         for i in range(0, len(chunks), batch_size):
@@ -258,7 +442,19 @@ class IngestionService:
             
             # Generate embeddings
             texts = [c[0] for c in batch]
-            embeddings = await embedder.embed_documents(texts)
+            try:
+                embeddings = await embedder.embed_documents(texts)
+            except Exception as embed_err:
+                logger.error(f"Embedding failed for batch {i//batch_size + 1}: {embed_err}")
+                # Mark document as partially failed
+                await self.db.update_document_status(
+                    document_id,
+                    status="partially_failed",
+                    progress=50 + int((total_inserted / len(chunks)) * 40),
+                    error=f"Embedding failed for batch {i//batch_size + 1}: {str(embed_err)[:200]}",
+                )
+                # Continue with next batch instead of failing entire document
+                continue
             
             # Prepare segments for DB
             segments = []
@@ -275,23 +471,40 @@ class IngestionService:
                     "metadata": meta,
                 })
             
-            # Insert to DB
-            await self.db.insert_segments(segments)
+            # Insert to DB first (more reliable)
+            try:
+                await self.db.insert_segments(segments)
+            except Exception as db_err:
+                logger.error(f"Database insert failed for batch {i//batch_size + 1}: {db_err}")
+                # Continue - segments can be re-inserted on retry
             
-            # Insert to vector store
+            # Insert to vector store in smaller sub-batches
             points = []
             for j, seg in enumerate(segments):
-                points.append({
-                    "id": seg["segment_id"],
-                    "vector": embeddings[j],
-                    "payload": {
-                        "document_id": document_id,
-                        "dataset_id": dataset_id,
-                        "text": seg["content"][:1000],  # Truncate for payload
-                    },
-                })
+                if j < len(embeddings):  # Safety check
+                    points.append({
+                        "id": seg["segment_id"],
+                        "vector": embeddings[j],
+                        "payload": {
+                            "document_id": document_id,
+                            "dataset_id": dataset_id,
+                            "text": seg["text"][:500],  # Truncate for payload
+                        },
+                    })
             
-            await self.vector_store.upsert(dataset_id, points)
+            # Upsert in smaller sub-batches to avoid Qdrant timeout
+            for q_start in range(0, len(points), qdrant_batch_size):
+                q_batch = points[q_start:q_start + qdrant_batch_size]
+                try:
+                    await self.vector_store.upsert(dataset_id, q_batch)
+                except Exception as qdrant_err:
+                    logger.error(
+                        f"Qdrant upsert failed for sub-batch {q_start//qdrant_batch_size + 1} "
+                        f"in batch {i//batch_size + 1}: {qdrant_err}"
+                    )
+                    # Continue with other batches - failed segments can be recovered
+                    # by reindexing the document later
+            
             total_inserted += len(batch)
             
             # Update progress

@@ -104,7 +104,7 @@ export function QuickActionsMenu({
               >
                 <ImagePlus className="h-5 w-5 text-slate-500 dark:text-slate-400" />
                 <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
-                  {t("assistant.addPhotosFiles", "添加照片和文件")}
+                  {t("assistant.addPhotosFiles")}
                 </span>
               </button>
 
@@ -118,7 +118,7 @@ export function QuickActionsMenu({
               >
                 <Palette className="h-5 w-5 text-violet-500" />
                 <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
-                  {t("assistant.generateImage", "生成图片")}
+                  {t("assistant.generateImage")}
                 </span>
               </button>
 
@@ -135,7 +135,7 @@ export function QuickActionsMenu({
                       : "text-slate-500 dark:text-slate-400"
                   )} />
                   <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
-                    {t("assistant.companyKB", "公司知识库")}
+                    {t("assistant.companyKB")}
                   </span>
                   {selectedKBCount > 0 ? (
                     <Badge className="bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 text-[10px] px-1.5 py-0">
@@ -163,7 +163,7 @@ export function QuickActionsMenu({
                       : "text-slate-500 dark:text-slate-400"
                   )} />
                   <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
-                    {t("assistant.webSearchMenu", "网页搜索")}
+                    {t("assistant.webSearchMenu")}
                   </span>
                   {webSearchEnabled && (
                     <Badge className="bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 text-[10px] px-1.5 py-0">
@@ -189,7 +189,7 @@ export function QuickActionsMenu({
               >
                 <ChevronLeft className="h-4 w-4 text-slate-400" />
                 <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                  {t("assistant.selectKB", "选择知识库")}
+                  {t("assistant.selectKB")}
                 </span>
               </button>
 

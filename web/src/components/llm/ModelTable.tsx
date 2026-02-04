@@ -59,7 +59,7 @@ export function ModelTable({
   if (models.length === 0) {
     return (
       <div className="text-center py-12 text-muted-foreground">
-        {t("models.empty", "暂无模型数据")}
+        {t("models.empty")}
       </div>
     );
   }
@@ -69,15 +69,15 @@ export function ModelTable({
       <Table>
         <TableHeader>
           <TableRow className="border-b border-border hover:bg-transparent">
-            <TableHead className="w-[200px] text-muted-foreground font-medium">{t("models.table.model", "模型")}</TableHead>
-            <TableHead className="text-muted-foreground font-medium">{t("models.table.provider", "厂商")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.context", "上下文")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.outputLimit", "输出限制")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.price", "价格")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.capabilities", "功能")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.accessLevel", "权限")}</TableHead>
-            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.status", "状态")}</TableHead>
-            <TableHead className="text-right text-muted-foreground font-medium">{t("models.table.actions", "操作")}</TableHead>
+            <TableHead className="w-[200px] text-muted-foreground font-medium">{t("models.table.model")}</TableHead>
+            <TableHead className="text-muted-foreground font-medium">{t("models.table.provider")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.context")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.outputLimit")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.price")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.capabilities")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.accessLevel")}</TableHead>
+            <TableHead className="text-center text-muted-foreground font-medium">{t("models.table.status")}</TableHead>
+            <TableHead className="text-right text-muted-foreground font-medium">{t("models.table.actions")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -120,13 +120,13 @@ export function ModelTable({
                   {model.supports_vision && (
                     <Badge variant="outline" className="text-[10px] px-1.5 border-purple-200 bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-800 font-semibold shadow-sm">
                       <Eye className="h-3 w-3 mr-1" />
-                      {t("models.capabilities.vision", "Vision")}
+                      {t("models.capabilities.vision")}
                     </Badge>
                   )}
                   {model.supports_tools && (
                     <Badge variant="outline" className="text-[10px] px-1.5 border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 font-semibold shadow-sm">
                       <Wrench className="h-3 w-3 mr-1" />
-                      {t("models.capabilities.tools", "Tools")}
+                      {t("models.capabilities.tools")}
                     </Badge>
                   )}
                 </div>
@@ -164,7 +164,7 @@ export function ModelTable({
                     onClick={() => onEdit?.(model)}
                   >
                     <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                    {t("common.configure", "配置")}
+                    {t("common.configure")}
                   </Button>
                   <Button
                     variant="ghost"

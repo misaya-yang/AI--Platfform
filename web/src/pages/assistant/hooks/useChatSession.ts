@@ -110,7 +110,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 };
 
 export function useChatSession() {
-  useTranslation();
+  const { t } = useTranslation();
 
   // 使用全局状态存储的 AI助手 专用会话 ID（与 Playground 完全分离）
   const {
@@ -923,10 +923,10 @@ export function useChatSession() {
               if (!prev) {
                 // Create working memory with outline task
                 return {
-                  goal: `生成${outlineData.format.toUpperCase()}文档`,
+                  goal: t("assistant.outline.goal", { format: outlineData.format.toUpperCase() }),
                   tasks: [{
                     id: `outline-${Date.now()}`,
-                    description: `创建幻灯片大纲: ${outlineData.outline.title}`,
+                    description: t("assistant.outline.taskCreate", { title: outlineData.outline.title }),
                     status: "completed",
                     icon: outlineData.format === "pptx" ? "ppt" : "doc",
                     slideOutline: outlineData.outline,
@@ -952,7 +952,7 @@ export function useChatSession() {
                 ...prev,
                 tasks: [...prev.tasks, {
                   id: `outline-${Date.now()}`,
-                  description: `幻灯片大纲: ${outlineData.outline.title}`,
+                  description: t("assistant.outline.taskSummary", { title: outlineData.outline.title }),
                   status: "completed",
                   icon: outlineData.format === "pptx" ? "ppt" : "doc",
                   slideOutline: outlineData.outline,

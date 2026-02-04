@@ -19,6 +19,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from .islamic_metadata import get_authority_order, IslamicMetadataExtractor
+from .section_extractor import get_section_aware_citation
 
 
 def _parse_metadata(segment: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,17 +63,27 @@ class CitationFormatter:
         """Format a single citation from segment data.
 
         Uses pre-computed citation_text if available, otherwise generates from metadata.
+        Ensures section/chapter information is included when available.
         
         Returns:
             Formatted citation string, or None if citation cannot be generated.
         """
         # Use pre-computed citation if available and non-empty
         citation = segment.get("citation_text")
-        if citation and str(citation).strip():
-            return str(citation).strip()
-
-        # Generate from metadata
         metadata = _parse_metadata(segment)
+        
+        # Check if citation needs section information
+        has_section_in_citation = citation and (
+            "Section:" in str(citation) or 
+            "section" in str(citation).lower() or
+            metadata.get("section_title") in str(citation) if metadata.get("section_title") else False
+        )
+        
+        if citation and str(citation).strip() and has_section_in_citation:
+            # Citation already has section info
+            return str(citation).strip()
+        
+        # Generate from metadata
         source_type_str = _get_source_type(segment, metadata)
         source_ref = _parse_json_field(
             segment.get("source_reference")
@@ -86,7 +97,29 @@ class CitationFormatter:
         except ValueError:
             source_type = IslamicSourceType.UNKNOWN
 
-        result = self._extractor.format_citation(source_type, source_ref)
+        doc_meta = {
+            "title": metadata.get("source_document") or metadata.get("document_title") or metadata.get("title"),
+            "name": metadata.get("source_document") or metadata.get("document_title") or metadata.get("name"),
+            "section_title": metadata.get("section_title"),
+            "paragraph_index": metadata.get("paragraph_index"),
+            "chunk_index": metadata.get("chunk_index"),
+            "position": metadata.get("position"),
+        }
+
+        result = self._extractor.format_citation(source_type, source_ref, doc_meta=doc_meta)
+        
+        # Add section info if available but not in citation
+        section_title = metadata.get("section_title")
+        if section_title and result and section_title not in result:
+            # Check for existing citation that needs section
+            if citation and str(citation).strip():
+                result = f"{citation} — Section: {section_title}"
+            else:
+                result = f"{result} — Section: {section_title}"
+        elif citation and str(citation).strip():
+            # Use existing citation if no section to add
+            result = str(citation).strip()
+        
         # Return None for empty/whitespace-only results
         if result and str(result).strip():
             return str(result).strip()

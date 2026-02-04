@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -11,6 +13,8 @@ from ...models.request import UnifiedRequest
 from ...models.response import UnifiedResponse
 from ...models.task import Task, TaskStatus
 from .task_queue import TaskQueue
+
+logger = logging.getLogger(__name__)
 
 
 class TaskStorage:
@@ -42,9 +46,44 @@ class MemoryTaskStorage(TaskStorage):
 
 
 class TaskManager:
-    def __init__(self, storage: TaskStorage, queue: TaskQueue):
+    """
+    任务管理器，支持异步任务处理和回调。
+
+    特性：
+    - 回调重试机制（指数退避）
+    - 连接复用和超时配置
+    - 回调失败日志记录
+    """
+
+    def __init__(
+        self,
+        storage: TaskStorage,
+        queue: TaskQueue,
+        callback_timeout: float = 30.0,
+        callback_retries: int = 3,
+        callback_retry_delay: float = 1.0,
+    ):
         self.storage = storage
         self.queue = queue
+        self.callback_timeout = callback_timeout
+        self.callback_retries = callback_retries
+        self.callback_retry_delay = callback_retry_delay
+        # 共享 HTTP client 以复用连接
+        self._callback_client: Optional[httpx.AsyncClient] = None
+        # 保护 HTTP client 创建的锁
+        self._client_lock = asyncio.Lock()
+
+    async def _get_callback_client(self) -> httpx.AsyncClient:
+        """获取或创建共享的 HTTP client"""
+        if self._callback_client is None or self._callback_client.is_closed:
+            async with self._client_lock:
+                # 双重检查锁定模式，避免多个协程同时创建 client
+                if self._callback_client is None or self._callback_client.is_closed:
+                    self._callback_client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(self.callback_timeout),
+                        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                    )
+        return self._callback_client
 
     async def create_task(
         self,
@@ -104,13 +143,59 @@ class TaskManager:
         raise TaskNotFoundError(task_id)
 
     async def _send_callback(self, task: Task) -> None:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                task.callback_url,
-                json={
-                    "task_id": task.task_id,
-                    "status": task.status.value,
-                    "result": task.result,
-                    "error": task.error,
-                },
-            )
+        """发送回调，带重试机制"""
+        client = await self._get_callback_client()
+        if client.is_closed:
+            logger.warning(f"Cannot send callback for task {task.task_id}: client is closed")
+            return
+        payload = {
+            "task_id": task.task_id,
+            "status": task.status.value,
+            "result": task.result,
+            "error": task.error,
+        }
+
+        last_error = None
+        for attempt in range(self.callback_retries):
+            try:
+                response = await client.post(task.callback_url, json=payload)
+                response.raise_for_status()
+                logger.info(
+                    f"Callback sent successfully for task {task.task_id} "
+                    f"to {task.callback_url} (attempt {attempt + 1})"
+                )
+                return
+            except httpx.TimeoutException as e:
+                last_error = e
+                logger.warning(
+                    f"Callback timeout for task {task.task_id} "
+                    f"(attempt {attempt + 1}/{self.callback_retries})"
+                )
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.warning(
+                    f"Callback failed for task {task.task_id} with status {e.response.status_code} "
+                    f"(attempt {attempt + 1}/{self.callback_retries})"
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Callback error for task {task.task_id}: {e} "
+                    f"(attempt {attempt + 1}/{self.callback_retries})"
+                )
+
+            # 指数退避重试
+            if attempt < self.callback_retries - 1:
+                delay = self.callback_retry_delay * (2 ** attempt)
+                await asyncio.sleep(delay)
+
+        # 所有重试都失败
+        logger.error(
+            f"Callback failed for task {task.task_id} after {self.callback_retries} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    async def close(self) -> None:
+        """关闭资源"""
+        if self._callback_client and not self._callback_client.is_closed:
+            await self._callback_client.aclose()

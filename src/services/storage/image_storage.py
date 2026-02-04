@@ -470,6 +470,14 @@ class S3StorageBackend(BaseStorageBackend):
         try:
             logger.debug(f"[S3] Streaming download key={pkey} to {target}")
             response = await client.get_object(Bucket=self.bucket, Key=pkey)
+
+            async def _read_chunk(stream, size: int) -> bytes:
+                if hasattr(stream, "content") and hasattr(stream.content, "read"):
+                    return await stream.content.read(size)
+                try:
+                    return await stream.read(size)
+                except TypeError:
+                    return await stream.read()
             
             # Use aiofiles for non-blocking file I/O
             try:
@@ -477,7 +485,7 @@ class S3StorageBackend(BaseStorageBackend):
                 async with response["Body"] as stream:
                     async with aiofiles.open(target, "wb") as handle:
                         while True:
-                            chunk = await stream.read(1024 * 1024)
+                            chunk = await _read_chunk(stream, 1024 * 1024)
                             if not chunk:
                                 break
                             await handle.write(chunk)
@@ -486,7 +494,7 @@ class S3StorageBackend(BaseStorageBackend):
                 async with response["Body"] as stream:
                     with open(target, "wb") as handle:
                         while True:
-                            chunk = await stream.read(1024 * 1024)
+                            chunk = await _read_chunk(stream, 1024 * 1024)
                             if not chunk:
                                 break
                             handle.write(chunk)

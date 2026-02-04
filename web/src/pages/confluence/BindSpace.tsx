@@ -894,9 +894,9 @@ export default function BindSpacePage() {
                         <ImageIcon className="h-5 w-5 text-violet-500" />
                       </div>
                       <div className="space-y-0.5">
-                        <Label className="text-sm font-medium">同步图片</Label>
+                        <Label className="text-sm font-medium">{t("confluence.bind.syncImages")}</Label>
                         <p className="text-xs text-muted-foreground">
-                          提取页面中的图片并生成多模态向量索引
+                          {t("confluence.bind.syncImagesDesc")}
                         </p>
                       </div>
                     </div>
@@ -908,7 +908,7 @@ export default function BindSpacePage() {
                   {syncImages && (
                     <div className="mt-4 pt-4 border-t border-violet-500/20 flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label className="text-xs font-medium text-muted-foreground">最大图片大小</Label>
+                        <Label className="text-xs font-medium text-muted-foreground">{t("confluence.bind.maxImageSize")}</Label>
                       </div>
                       <Select
                         value={String(imageMaxSizeBytes)}
@@ -919,7 +919,7 @@ export default function BindSpacePage() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="1048576">1 MB</SelectItem>
-                          <SelectItem value="3145728">3 MB (推荐)</SelectItem>
+                          <SelectItem value="3145728">3 MB ({t("common.recommended")})</SelectItem>
                           <SelectItem value="5242880">5 MB</SelectItem>
                         </SelectContent>
                       </Select>

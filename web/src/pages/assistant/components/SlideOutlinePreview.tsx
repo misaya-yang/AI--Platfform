@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SlideOutline, SlideOutlineItem } from "../types";
+import { useTranslation } from "react-i18next";
 
 // =============================================================================
 // Props
@@ -63,6 +64,7 @@ export function SlideOutlinePreview({
   isGenerating = false,
   className,
 }: SlideOutlinePreviewProps) {
+  const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(true);
 
   return (
@@ -86,10 +88,10 @@ export function SlideOutlinePreview({
           {/* Title and info */}
           <div className="text-left">
             <h4 className="font-medium text-slate-900 dark:text-slate-100">
-              幻灯片大纲
+              {t("assistant.slideOutline.title")}
             </h4>
             <p className="text-sm text-slate-500 dark:text-slate-400">
-              {outline.title} · {outline.totalSlides} 页
+              {t("assistant.slideOutline.subtitle", { title: outline.title, count: outline.totalSlides })}
             </p>
           </div>
         </div>
@@ -98,11 +100,11 @@ export function SlideOutlinePreview({
         <div className="flex items-center gap-2">
           {isGenerating && (
             <span className="text-xs text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 px-2 py-1 rounded">
-              生成中...
+              {t("assistant.generating")}
             </span>
           )}
           <span className="text-sm text-slate-500 dark:text-slate-400">
-            {isExpanded ? "折叠" : "展开"}
+            {isExpanded ? t("common.collapse") : t("common.expand")}
           </span>
           {isExpanded ? (
             <ChevronUp className="h-5 w-5 text-slate-400" />
@@ -156,7 +158,7 @@ export function SlideOutlinePreview({
                   {/* Bullet count badge */}
                   {slide.bulletCount && slide.bulletCount > 0 && (
                     <span className="text-xs text-slate-400 dark:text-slate-500 bg-slate-200 dark:bg-slate-700 px-1.5 py-0.5 rounded">
-                      {slide.bulletCount} 点
+                      {t("assistant.slideOutline.points", { count: slide.bulletCount })}
                     </span>
                   )}
                 </motion.div>

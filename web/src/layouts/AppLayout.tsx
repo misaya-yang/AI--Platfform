@@ -110,7 +110,7 @@ export function AppLayout() {
   // 语言子菜单
   const languageMenuItems: MenuProps['items'] = languages.map(lang => ({
     key: lang.code,
-    label: `${lang.flag} ${lang.name}`,
+    label: `${lang.flag} ${t(lang.nameKey, lang.nativeName)}`,
     onClick: () => handleLanguageChange(lang.code),
   }));
 

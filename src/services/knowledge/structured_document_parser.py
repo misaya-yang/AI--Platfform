@@ -153,7 +153,10 @@ class StructuredDocumentParser:
         5. Optional: VLM description for key images
         """
         try:
-            import fitz  # PyMuPDF
+            try:
+                import pymupdf as fitz  # type: ignore
+            except ImportError:
+                import fitz  # type: ignore
         except ImportError:
             raise RuntimeError("PyMuPDF required for PDF parsing")
         

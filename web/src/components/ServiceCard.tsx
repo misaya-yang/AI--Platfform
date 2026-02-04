@@ -48,19 +48,6 @@ function ServiceIcon({ serviceType }: { serviceType: ServiceType }) {
   }
 }
 
-// 服务类型中文标签
-const serviceTypeLabels: Record<string, string> = {
-  assistant: "AI 助手",
-  langgraph: "LangGraph",
-  proxy: "代理",
-  conversational: "对话",
-  generative: "生成",
-  processing: "处理",
-  embedding: "嵌入",
-  classification: "分类",
-  custom: "自定义",
-};
-
 export function ServiceCard({
   service,
   health,
@@ -76,6 +63,17 @@ export function ServiceCard({
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
   const isVirtual = service.metadata?.is_virtual === true;
+  const serviceTypeLabels: Record<string, string> = {
+    assistant: t("services.types.assistant"),
+    langgraph: t("services.types.langgraph"),
+    proxy: t("services.types.proxy"),
+    conversational: t("services.types.conversational"),
+    generative: t("services.types.generative"),
+    processing: t("services.types.processing"),
+    embedding: t("services.types.embedding"),
+    classification: t("services.types.classification"),
+    custom: t("services.types.custom"),
+  };
   const serviceTypeLabel = serviceTypeLabels[service.service_type] || service.service_type;
 
   return (
@@ -139,7 +137,7 @@ export function ServiceCard({
                     e.stopPropagation();
                     setConfigOpen(true);
                   }}
-                  title="Config"
+                  title={t("common.configure")}
                 >
                   <Settings className="h-4 w-4" />
                 </Button>

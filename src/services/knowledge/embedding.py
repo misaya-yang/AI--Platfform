@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import re
 from abc import ABC, abstractmethod
@@ -9,6 +10,39 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 import httpx
+
+
+# =============================================================================
+# Sensitive Data Filtering for Logging
+# =============================================================================
+class SensitiveDataFilter(logging.Filter):
+    """Filter that redacts sensitive information like API keys from log records."""
+    
+    # Patterns to redact
+    _PATTERNS = [
+        (re.compile(r'Bearer\s+[a-zA-Z0-9_-]+'), 'Bearer ***'),
+        (re.compile(r'api_key[=:]\s*[a-zA-Z0-9_-]+'), 'api_key=***'),
+        (re.compile(r'key[=:]\s*[a-zA-Z0-9_-]+'), 'key=***'),
+    ]
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Redact sensitive data from log message."""
+        if isinstance(record.msg, str):
+            record.msg = self._redact(record.msg)
+        if record.args:
+            record.args = tuple(self._redact(str(arg)) for arg in record.args)
+        return True
+    
+    def _redact(self, text: str) -> str:
+        """Apply all redaction patterns."""
+        for pattern, replacement in self._PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
+
+# Apply sensitive data filter to embedding logger
+logger = logging.getLogger(__name__)
+logger.addFilter(SensitiveDataFilter())
 
 
 # =============================================================================
@@ -245,6 +279,7 @@ class GeminiEmbedding(BaseEmbedding):
     ) -> List[List[float]]:
         """Embed a batch of texts with retry logic."""
         import logging
+        import re
         logger = logging.getLogger(__name__)
 
         last_error: Optional[Exception] = None
@@ -272,7 +307,15 @@ class GeminiEmbedding(BaseEmbedding):
 
             # Exponential backoff
             if attempt < self.MAX_RETRIES - 1:
+                import random
                 delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+
+                # Respect server-provided retry delay if present (e.g., 429 quota errors)
+                retry_match = re.search(r'"retryDelay"\s*:\s*"(\d+)s"', str(last_error or ""))
+                if retry_match:
+                    delay = max(delay, float(retry_match.group(1)))
+
+                delay = delay + random.uniform(0.0, min(0.3, delay))
                 await asyncio.sleep(delay)
 
         raise last_error or EmbeddingError(
@@ -373,9 +416,9 @@ class DashScopeEmbedding(BaseEmbedding):
     # Use 10 for safety across models to avoid InvalidParameter errors.
 
     # Retry configuration
-    MAX_RETRIES = 3
+    MAX_RETRIES = 5
     RETRY_BASE_DELAY = 0.5  # seconds (reduced from 1.0)
-    REQUEST_TIMEOUT = 45  # seconds for HTTP request (reduced from 60)
+    REQUEST_TIMEOUT = 60  # seconds for HTTP request
     MAX_BATCH_SIZE = 10  # DashScope safe batch limit
 
     def __init__(
@@ -573,7 +616,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
     MODEL_DIMENSIONS: Dict[str, int] = {
         "multimodal-embedding-v1": 1024,
         "multimodal-embedding-one-peace": 1536,
-        "tongyi-embedding-vision-plus": 1024,
+        "tongyi-embedding-vision-plus": 1024,  # Unified to 1024
         "qwen2.5-vl-embedding": 1024,  # Latest Qwen VL embedding model
     }
 
@@ -958,6 +1001,197 @@ def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
 
 
 # =============================================================================
+# SiliconFlow Embedding
+# =============================================================================
+class SiliconFlowEmbedding(BaseEmbedding):
+    """SiliconFlow embedding adapter.
+
+    Uses SiliconFlow API for text embedding with OpenAI-compatible interface.
+
+    API Reference: https://docs.siliconflow.cn/docs/embeddings
+
+    Features:
+    - OpenAI-compatible API
+    - Support for BGE and other models
+    - Configurable HTTP timeout
+    - Batch embedding support
+
+    Models:
+    - BAAI/bge-m3: 1024 dimensions
+    - Pro/BAAI/bge-m3: 1024 dimensions
+    - BAAI/bge-large-zh-v1.5: 1024 dimensions
+    - BAAI/bge-large-en-v1.5: 1024 dimensions
+    - netease-youdao/bce-embedding-base_v1: 512 dimensions
+    """
+
+    MODEL_DIMENSIONS: Dict[str, int] = {
+        "BAAI/bge-m3": 1024,
+        "Pro/BAAI/bge-m3": 1024,
+        "BAAI/bge-large-zh-v1.5": 1024,
+        "BAAI/bge-large-en-v1.5": 1024,
+        "netease-youdao/bce-embedding-base_v1": 512,
+    }
+
+    # API endpoint (embeddings endpoint)
+    SILICONFLOW_API_URL = "https://api.siliconflow.cn/v1/embeddings"
+
+    # API limits
+    MAX_BATCH_SIZE = 100
+    MAX_RETRIES = 3
+    RETRY_BASE_DELAY = 1.0
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "BAAI/bge-large-zh-v1.5",
+        dimension: Optional[int] = None,
+        base_url: Optional[str] = None,
+        timeout_seconds: float = 30.0,
+    ):
+        """Initialize SiliconFlow Embedding.
+
+        Args:
+            api_key: SiliconFlow API key
+            model: Model name (default: BAAI/bge-large-zh-v1.5)
+            dimension: Output dimension (auto-detected from model if not provided)
+            base_url: Optional API base URL override
+            timeout_seconds: Request timeout
+        """
+        dim = dimension or self.MODEL_DIMENSIONS.get(model) or 1024
+        super().__init__(provider="siliconflow", model=model, dimension=dim)
+
+        if not api_key:
+            raise EmbeddingError("SiliconFlow API key is required")
+
+        self.api_key = api_key
+        self.base_url = base_url or self.SILICONFLOW_API_URL
+        self.timeout_seconds = timeout_seconds
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds, connect=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
+
+    async def embed_texts(
+        self,
+        texts: List[str],
+        text_type: Optional[str] = None,
+    ) -> List[List[float]]:
+        """Embed texts using SiliconFlow API.
+
+        Args:
+            texts: List of text strings to embed
+            text_type: Not used by SiliconFlow (kept for interface compatibility)
+
+        Returns:
+            List of embedding vectors
+        """
+        if not texts:
+            return []
+
+        # Process in batches
+        all_vectors: List[List[float]] = []
+
+        for i in range(0, len(texts), self.MAX_BATCH_SIZE):
+            batch = texts[i:i + self.MAX_BATCH_SIZE]
+            batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
+
+            vectors = await self._embed_batch_with_retry(batch, batch_info)
+            all_vectors.extend(vectors)
+
+        return all_vectors
+
+    async def _embed_batch_with_retry(
+        self,
+        texts: List[str],
+        batch_info: str,
+    ) -> List[List[float]]:
+        """Embed a batch of texts with retry logic."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                return await self._embed_batch(texts)
+
+            except EmbeddingError as e:
+                if "429" in str(e) or "500" in str(e) or "503" in str(e):
+                    last_error = e
+                    logger.warning(
+                        f"SiliconFlow embedding retryable error ({batch_info}) "
+                        f"attempt {attempt + 1}/{self.MAX_RETRIES}: {e}"
+                    )
+                else:
+                    raise
+
+            except Exception as exc:
+                last_error = EmbeddingError(f"SiliconFlow embedding error ({batch_info}): {exc}")
+                logger.warning(
+                    f"SiliconFlow embedding error ({batch_info}) "
+                    f"attempt {attempt + 1}/{self.MAX_RETRIES}: {exc}"
+                )
+
+            # Exponential backoff
+            if attempt < self.MAX_RETRIES - 1:
+                import random
+                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+                delay = delay + random.uniform(0.0, min(0.3, delay))
+                await asyncio.sleep(delay)
+
+        raise last_error or EmbeddingError(
+            f"SiliconFlow embedding failed after {self.MAX_RETRIES} attempts ({batch_info})"
+        )
+
+    async def _embed_batch(
+        self,
+        texts: List[str],
+    ) -> List[List[float]]:
+        """Call SiliconFlow embeddings API for a batch of texts."""
+        payload = {
+            "model": self.model,
+            "input": texts,
+        }
+
+        response = await self._client.post(
+            self.base_url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        if response.status_code >= 400:
+            raise EmbeddingError(
+                f"SiliconFlow API error: {response.status_code} - {response.text}"
+            )
+
+        data = response.json()
+
+        # Parse response
+        embeddings = data.get("data", [])
+        if not embeddings:
+            raise EmbeddingError("SiliconFlow API returned no embeddings")
+
+        vectors: List[List[float]] = []
+        for emb in embeddings:
+            values = emb.get("embedding", [])
+            if not values:
+                raise EmbeddingError("SiliconFlow embedding missing values")
+            vectors.append(values)
+
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
+
+        return vectors
+
+
+# =============================================================================
 # Embedder Cache - Singleton per config to reuse HTTP connections
 # =============================================================================
 _embedder_cache: Dict[str, BaseEmbedding] = {}
@@ -1059,10 +1293,18 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
             base_url=config.base_url,
             timeout_seconds=config.timeout_seconds,
         )
+    if provider in {"siliconflow", "silicon", "sf"}:
+        return SiliconFlowEmbedding(
+            api_key=config.api_key or "",
+            model=config.model or "BAAI/bge-large-zh-v1.5",
+            dimension=dimension,
+            base_url=config.base_url,
+            timeout_seconds=config.timeout_seconds,
+        )
     if provider in {"openai"}:
         raise EmbeddingError(
             "OpenAI embedding provider has been removed. "
-            "Please update your dataset to use 'gemini' or 'dashscope'."
+            "Please update your dataset to use 'gemini', 'dashscope', or 'siliconflow'."
         )
     raise EmbeddingError(f"Unsupported embedding provider: {config.provider}")
 
@@ -1136,7 +1378,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
     DEFAULT_MODEL = "tongyi-embedding-vision-plus"
 
     MODEL_DIMENSIONS: Dict[str, int] = {
-        "tongyi-embedding-vision-plus": 1024,
+        "tongyi-embedding-vision-plus": 1024,  # Unified to 1024
         "multimodal-embedding-v1": 1024,
         "qwen2.5-vl-embedding": 1024,
     }

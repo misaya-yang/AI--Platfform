@@ -1,5 +1,6 @@
 import axios, { AxiosError } from "axios";
 import { toast } from "@/hooks/use-toast";
+import i18n from "@/i18n";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || "";
 const AUTH_STORAGE_KEY = "agent-gateway-auth";
@@ -96,8 +97,8 @@ api.interceptors.response.use(
           : errorData?.error?.retry_after || 60;
 
         toast.warning(
-          "请求过于频繁",
-          `请等待 ${retrySeconds} 秒后重试 (${dimension})`
+          i18n.t("errors.rateLimitTitle"),
+          i18n.t("errors.rateLimitDesc", { seconds: retrySeconds, dimension })
         );
       }
 
@@ -109,4 +110,3 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
-

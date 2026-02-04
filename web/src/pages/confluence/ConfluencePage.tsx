@@ -261,7 +261,7 @@ function BindingCard({
                 {statusLabels[binding.status]}
               </Badge>
               <span className="text-xs text-muted-foreground">
-                {binding.synced_page_count}/{binding.total_page_count} {t("confluence.pages")}
+                {binding.synced_page_count}/{binding.total_page_count} {t("confluence.pagesLabel")}
               </span>
             </div>
           </div>

@@ -438,9 +438,9 @@ export interface UploadedFile {
 
 export interface SuggestedPrompt {
   icon: React.ReactNode;
-  title: string;
-  prompt: string;
-  category: string;
+  titleKey: string;
+  promptKey: string;
+  categoryKey: string;
 }
 
 export interface SessionSummary {

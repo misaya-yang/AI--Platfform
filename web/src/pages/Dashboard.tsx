@@ -38,8 +38,8 @@ export function DashboardPage() {
             value={granularity}
             onChange={(value) => setGranularity(value)}
             options={[
-              { value: "day", label: t("dashboard.granularity.day", "按天") },
-              { value: "hour", label: t("dashboard.granularity.hour", "按小时") },
+              { value: "day", label: t("dashboard.granularity.day") },
+              { value: "hour", label: t("dashboard.granularity.hour") },
             ]}
             style={{ width: 120 }}
           />
@@ -48,7 +48,7 @@ export function DashboardPage() {
 
       {/* 服务入口 */}
       <div>
-        <h3 className="text-base font-medium mb-3">{t("dashboard.serviceEndpoints", "服务入口")}</h3>
+        <h3 className="text-base font-medium mb-3">{t("dashboard.serviceEndpoints")}</h3>
         {servicesQuery.isLoading ? (
           <div className="text-sm text-muted-foreground">{t("dashboard.loadingServices")}</div>
         ) : (
