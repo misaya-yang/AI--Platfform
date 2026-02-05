@@ -192,7 +192,7 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
   return (
     <div
       className={cn(
-        "relative w-full rounded-xl border",
+        "relative w-full max-w-full rounded-xl border min-w-0",
         "bg-gradient-to-br backdrop-blur-sm",
         "transition-all duration-300",
         "animate-in fade-in-0 duration-200",
@@ -212,7 +212,7 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={cn(
-          "flex w-full items-center gap-3 px-4 py-3 text-left",
+          "flex w-full items-center gap-3 px-4 py-3 text-left min-w-0 overflow-hidden",
           "transition-colors duration-200",
           "hover:bg-white/5 dark:hover:bg-white/5"
         )}
@@ -276,9 +276,9 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
                           : t("playground.toolCall.argumentsPartial", "Arguments (streaming...)")}
                       </span>
                     </div>
-                    <div className="relative min-w-0 overflow-hidden">
+                    <div className="relative min-w-0 overflow-hidden max-w-full">
                       <pre className={cn(
-                        "max-h-48 overflow-auto rounded-lg p-3",
+                        "max-h-48 max-w-full overflow-x-auto overflow-y-auto rounded-lg p-3",
                         "bg-black/10 dark:bg-black/30",
                         "text-xs font-mono text-foreground/90",
                         "border border-white/5",
@@ -311,7 +311,7 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
                     </span>
                   </div>
                   <pre className={cn(
-                    "max-h-48 overflow-auto rounded-lg p-3",
+                    "max-h-48 max-w-full overflow-x-auto overflow-y-auto rounded-lg p-3",
                     "bg-emerald-500/5 dark:bg-emerald-500/10",
                     "text-xs font-mono text-foreground/90",
                     "border border-emerald-500/20",

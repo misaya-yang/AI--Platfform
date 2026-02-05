@@ -280,7 +280,7 @@ const ChatMessageItem = memo(
 
         {/* Content Container */}
         <div className={cn(
-          "flex flex-col gap-1.5",
+          "flex flex-col gap-1.5 min-w-0",
           isUser ? "max-w-[85%] items-end" : "max-w-[85%] min-w-[300px] sm:min-w-[400px] items-start"
         )}>
           {/* Name Label */}
@@ -294,7 +294,7 @@ const ChatMessageItem = memo(
           {/* Message Bubble */}
           <div
             className={cn(
-              "relative text-sm min-w-0 transition-all duration-200",
+              "relative text-sm min-w-0 max-w-full transition-all duration-200",
               isUser
                 ? [
                     // User message - modern gradient with glass effect

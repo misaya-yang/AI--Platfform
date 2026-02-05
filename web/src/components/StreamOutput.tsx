@@ -307,10 +307,15 @@ function filterToolJsonOutput(text: string): string {
   // Pattern 3: JSON array of slides [ { "type": ... } ]
   const slidesArrayPattern = /\[\s*\{\s*"(?:type|title|bullets)"[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]/gi;
 
+  // Pattern 4: Tool/router JSON blobs leaking into the answer
+  const toolMetaJsonPattern = /^\s*\{\s*"(?:relevance|tool_name|confidence|guidance|citations|queries|results_count|query_language|cross_language_enabled)"[\s\S]*?\}\s*(?:\n|$)/i;
+
   let filtered = text
     .replace(jsonCodeBlockPattern, '')
     .replace(rawJsonPattern, '')
-    .replace(slidesArrayPattern, '');
+    .replace(slidesArrayPattern, '')
+    .replace(toolMetaJsonPattern, '')
+    .replace(/^(CONFIDENCE|GUIDANCE):.*$/gim, '');
 
   // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
@@ -347,7 +352,7 @@ export const StreamOutput = memo(function StreamOutput({
   if (!text) return null;
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2">
+    <div className="prose prose-sm max-w-none dark:prose-invert break-words prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-code:whitespace-pre-wrap prose-code:break-words">
       {blocks.map((block, index) => (
         <MemoizedMarkdownBlock
           key={`${id}-block-${index}`}
