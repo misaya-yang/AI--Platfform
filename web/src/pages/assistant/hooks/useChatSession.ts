@@ -273,9 +273,12 @@ export function useChatSession() {
       ]);
 
       // Restore messages
+      console.log("[DEBUG] Session history loaded:", history.length, "messages");
+      console.log("[DEBUG] History roles:", history.map(m => m.role));
       const chatMessages = history.map((msg, index) => 
         restoreMessageMetadata(msg, index, sessionId)
       );
+      console.log("[DEBUG] Restored messages:", chatMessages.length, chatMessages.map(m => ({ id: m.id, role: m.role, content: m.content?.slice(0, 50) })));
       setMessages(chatMessages);
       setActiveSessionId(sessionId);
 

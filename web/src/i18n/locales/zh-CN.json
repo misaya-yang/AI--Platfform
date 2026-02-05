@@ -1667,6 +1667,7 @@
     "thinking": {
       "analyzing": "分析问题中...",
       "thinking": "思考中...",
+      "searching": "搜索知识库中...",
       "planning": "规划步骤...",
       "preparing": "准备回应..."
     },
@@ -2227,6 +2228,9 @@
     "searchingFor": "搜索\"{{query}}\"",
     "datasetsCount": "{{count}} 个数据集",
     "toolCalls": "工具调用",
+    "toolCallsCompleted": "已完成 {{count}} 项工具调用",
+    "toolCallsRunning": "执行中 ({{count}} 项)",
+    "processingTools": "正在处理...",
     "toolStatus": {
       "completed": "已完成",
       "running": "执行中",

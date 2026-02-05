@@ -1666,6 +1666,7 @@
     "thinking": {
       "analyzing": "Analyzing...",
       "thinking": "Thinking...",
+      "searching": "Searching knowledge base...",
       "planning": "Planning...",
       "preparing": "Preparing response..."
     },
@@ -2226,6 +2227,9 @@
     "searchingFor": "for \"{{query}}\"",
     "datasetsCount": "{{count}} datasets",
     "toolCalls": "Tool Calls",
+    "toolCallsCompleted": "{{count}} tool calls completed",
+    "toolCallsRunning": "Running tools ({{count}})",
+    "processingTools": "Processing...",
     "toolStatus": {
       "completed": "Completed",
       "running": "Running",

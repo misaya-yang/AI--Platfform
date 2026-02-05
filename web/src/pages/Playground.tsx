@@ -442,9 +442,9 @@ export function PlaygroundPage() {
   const activeService = services.find((s) => s.service_id === serviceId);
   const uiPreferences = (activeService?.metadata?.ui_preferences || {}) as ServiceUiPreferences;
   const toolCallsMode = uiPreferences.tool_calls_mode ?? "full";
-  const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? false;
+  const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? true;  // Default to expanded
   const showTimeline = !uiPreferences.hide_timeline;
-  const showThinkingIndicator = !uiPreferences.hide_thinking;
+  const showThinkingIndicator = true;  // Always show thinking indicator
   const effectiveShowToolCalls = showToolCalls && toolCallsMode !== "hidden";
 
   // AG-UI Timeline state management
@@ -1243,6 +1243,15 @@ export function PlaygroundPage() {
                       if (!msg || typeof msg !== "object") continue;
                       const message = msg as Record<string, unknown>;
 
+                      // Extract usage_metadata from LangGraph updates messages
+                      const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
+                      if (usageMeta) {
+                        const normalized = normalizeUsage(usageMeta);
+                        if (normalized) {
+                          usageStats = normalized;
+                        }
+                      }
+
                       // Extract tool calls
                       const toolUpdates = extractToolCallUpdates(message);
                       for (const update of toolUpdates) {
@@ -1282,16 +1291,28 @@ export function PlaygroundPage() {
                         });
                       }
 
-                      // Extract content (but only from final updates, not partial)
-                      const msgType = (message.type as string) || "";
-                      const role = (message.role as string) || "";
-                      const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
-                      if (!isToolMessage) {
+                      // Extract content from AI messages
+                      const msgType = ((message.type as string) || "").toLowerCase();
+                      const role = ((message.role as string) || "").toLowerCase();
+                      const isToolMessage = msgType === "tool" || msgType === "toolmessage" || role === "tool";
+                      
+                      // Check if this is an AI message (various formats)
+                      const isAIMessage = !isToolMessage && (
+                        msgType.includes("ai") || 
+                        role === "assistant" ||
+                        (message.content && !msgType && !role)
+                      );
+                      
+                      if (isAIMessage) {
                         const content = normalizeContentDelta(message);
-                        if (content) {
-                          // For updates events, content is typically final - use full replace
-                          // Reset accumulator and set full content
-                          if (content.length > lastCumulativeContent.length) {
+                        if (content && content.length > 0) {
+                          // Simple strategy: always use the longest/most complete content
+                          // LangGraph sends cumulative content, so later content should be longer
+                          
+                          if (content === lastCumulativeContent) {
+                            // Exact duplicate - skip
+                          } else if (content.startsWith(lastCumulativeContent) && lastCumulativeContent.length > 0) {
+                            // Content grew at the end - extract delta
                             const delta = content.slice(lastCumulativeContent.length);
                             lastCumulativeContent = content;
                             if (delta) {
@@ -1303,10 +1324,94 @@ export function PlaygroundPage() {
                                 content: { type: "text", data: delta },
                               });
                             }
+                          } else if (lastCumulativeContent.startsWith(content)) {
+                            // New content is prefix of old - skip (old is more complete)
+                          } else if (content.length >= lastCumulativeContent.length) {
+                            // New content is different but longer/equal - use it (likely middleware output)
+                            // Replace accumulated content with new content
+                            lastCumulativeContent = content;
+                            acc = "";
+                            processStreamChunk({
+                              request_id: "",
+                              chunk_index: 0,
+                              is_final: false,
+                              event_type: "text_delta",
+                              content: { type: "text", data: content },
+                            });
                           }
+                          // If new content is shorter and different, skip (keep the longer one)
                         }
                       }
                     }
+                  }
+                }
+              }
+              continue;
+            }
+
+            // Handle messages/complete - final message content (especially for forced/middleware responses)
+            if (eventName === "messages/complete") {
+              // messages/complete sends data as an array of messages
+              const messages = Array.isArray(eventData) ? eventData : [];
+              for (const msg of messages) {
+                if (!msg || typeof msg !== "object") continue;
+                const message = msg as Record<string, unknown>;
+                const msgType = ((message.type as string) || "").toLowerCase();
+                const role = ((message.role as string) || "").toLowerCase();
+                const isToolMessage = msgType === "tool" || msgType === "toolmessage" || role === "tool";
+                
+                // Extract usage_metadata from LangGraph messages
+                const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
+                if (usageMeta) {
+                  const normalized = normalizeUsage(usageMeta);
+                  if (normalized) {
+                    usageStats = normalized;
+                  }
+                }
+                
+                // Accept AI messages with various type formats (ai, AIMessage, aimessage, etc.)
+                // Also accept messages with assistant role or messages without explicit type/role
+                const isAIMessage = !isToolMessage && (
+                  msgType.includes("ai") || 
+                  role === "assistant" ||
+                  (!msgType && !role && message.content)
+                );
+                
+                if (isAIMessage) {
+                  const content = normalizeContentDelta(message);
+                  if (content && content.length > 0) {
+                    // messages/complete - simple strategy: use if longer or first content
+                    
+                    if (content === acc || content === lastCumulativeContent) {
+                      // Exact duplicate - skip
+                    } else if (content.startsWith(acc) && acc.length > 0) {
+                      // Extension of acc - extract delta
+                      const delta = content.slice(acc.length);
+                      if (delta) {
+                        lastCumulativeContent = content;
+                        processStreamChunk({
+                          request_id: "",
+                          chunk_index: 0,
+                          is_final: true,
+                          event_type: "text_delta",
+                          content: { type: "text", data: delta },
+                        });
+                      }
+                    } else if (acc.startsWith(content)) {
+                      // acc already has this content - skip
+                    } else if (content.length >= acc.length) {
+                      // New content is longer/equal - use it as replacement
+                      lastCumulativeContent = content;
+                      acc = "";
+                      processStreamChunk({
+                        request_id: "",
+                        chunk_index: 0,
+                        is_final: true,
+                        event_type: "text_delta",
+                        content: { type: "text", data: content },
+                      });
+                    }
+                    // If shorter and different, skip
                   }
                 }
               }
@@ -1319,9 +1424,18 @@ export function PlaygroundPage() {
                 continue;
               }
               const message = payload.message;
-              const msgType = (message.type as string) || "";
-              const role = (message.role as string) || "";
-              const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
+              const msgType = ((message.type as string) || "").toLowerCase();
+              const role = ((message.role as string) || "").toLowerCase();
+              const isToolMessage = msgType === "tool" || msgType === "toolmessage" || role === "tool";
+
+              // Extract usage_metadata from LangGraph messages/partial
+              const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
+              if (usageMeta) {
+                const normalized = normalizeUsage(usageMeta);
+                if (normalized) {
+                  usageStats = normalized;
+                }
+              }
 
               const toolUpdates = extractToolCallUpdates(message);
               for (const update of toolUpdates) {
@@ -1362,33 +1476,41 @@ export function PlaygroundPage() {
               }
 
               if (!isToolMessage) {
-                // LangGraph messages/partial returns cumulative content, not incremental delta
-                // We need to extract only the NEW portion by comparing with previous content
+                // LangGraph messages/partial returns cumulative content
+                // Use simple strategy: track longest content, extract deltas
                 const cumulativeContent = normalizeContentDelta(message);
-                if (cumulativeContent) {
-                  // Calculate actual delta: new content that wasn't in lastCumulativeContent
-                  let actualDelta = "";
-                  if (cumulativeContent.startsWith(lastCumulativeContent)) {
-                    // Content grew at the end - extract only new part
-                    actualDelta = cumulativeContent.slice(lastCumulativeContent.length);
-                  } else if (lastCumulativeContent === "") {
-                    // First content chunk
-                    actualDelta = cumulativeContent;
-                  } else {
-                    // Content changed in unexpected way - use full content as fallback
-                    actualDelta = cumulativeContent;
-                  }
-                  lastCumulativeContent = cumulativeContent;
-
-                  if (actualDelta) {
+                if (cumulativeContent && cumulativeContent.length > 0) {
+                  
+                  if (cumulativeContent === lastCumulativeContent) {
+                    // Exact duplicate - skip
+                  } else if (cumulativeContent.startsWith(lastCumulativeContent) && lastCumulativeContent.length > 0) {
+                    // Content grew - extract delta
+                    const actualDelta = cumulativeContent.slice(lastCumulativeContent.length);
+                    lastCumulativeContent = cumulativeContent;
+                    if (actualDelta) {
+                      processStreamChunk({
+                        request_id: "",
+                        chunk_index: 0,
+                        is_final: false,
+                        event_type: "text_delta",
+                        content: { type: "text", data: actualDelta },
+                      });
+                    }
+                  } else if (lastCumulativeContent.startsWith(cumulativeContent)) {
+                    // New content is prefix of old - skip (old is more complete)
+                  } else if (cumulativeContent.length >= lastCumulativeContent.length) {
+                    // New content is different but longer/equal - use it
+                    lastCumulativeContent = cumulativeContent;
+                    acc = "";
                     processStreamChunk({
                       request_id: "",
                       chunk_index: 0,
                       is_final: false,
                       event_type: "text_delta",
-                      content: { type: "text", data: actualDelta },
+                      content: { type: "text", data: cumulativeContent },
                     });
                   }
+                  // If shorter and different, skip
                 }
               }
             }
@@ -1445,7 +1567,12 @@ export function PlaygroundPage() {
         },
       });
 
-      if (!streamed) {
+      // Fallback: If streaming didn't capture text content (acc is empty),
+      // but we had tool calls, try to get the final response via wait endpoint.
+      // This handles cases where LangGraph doesn't stream the final text after tool calls.
+      const needsFallback = !acc && (toolCallsMap.size > 0 || !streamed);
+      
+      if (needsFallback) {
         try {
           if (useTransparentProxy) {
             const waitPath = threadId

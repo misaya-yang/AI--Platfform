@@ -3,7 +3,6 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { marked } from "marked";
 import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
@@ -28,14 +27,8 @@ interface StreamOutputProps {
   text: string;
   /** Whether content is still streaming */
   isStreaming?: boolean;
-  /** Unique ID for keying memoized blocks */
+  /** Unique ID for keying memoized blocks (reserved for future use) */
   id?: string;
-}
-
-interface ParsedBlocks {
-  blocks: string[];
-  /** Global definitions (link references, footnotes) to prepend to each block */
-  definitions: string;
 }
 
 /**
@@ -220,82 +213,9 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 /**
- * Parse markdown into discrete blocks using marked lexer.
- * Extracts global definitions (link references, footnotes) and preserves them
- * so they can be injected into each block for proper rendering.
- */
-function parseMarkdownIntoBlocks(markdown: string): ParsedBlocks {
-  if (!markdown) return { blocks: [], definitions: "" };
-
-  try {
-    const tokens = marked.lexer(markdown);
-    const definitions: string[] = [];
-    const blocks: string[] = [];
-
-    for (const token of tokens) {
-      // Collect global definitions (link references, footnotes)
-      if (token.type === "def" || token.type === "footnote") {
-        definitions.push(token.raw);
-      } else if (token.raw && token.raw.trim()) {
-        blocks.push(token.raw);
-      }
-    }
-
-    return {
-      blocks,
-      definitions: definitions.join("\n"),
-    };
-  } catch {
-    // Fallback: render as single block to preserve structure
-    // Don't split - it would break code blocks, lists, etc.
-    return {
-      blocks: [markdown],
-      definitions: "",
-    };
-  }
-}
-
-/**
- * Memoized individual markdown block.
- * Once rendered, won't re-render unless content actually changes.
- */
-const MemoizedMarkdownBlock = memo(
-  function MemoizedMarkdownBlock({ content, definitions }: { content: string; definitions: string }) {
-    // Prepend definitions to each block so references resolve correctly
-    const fullContent = definitions ? `${definitions}\n\n${content}` : content;
-    return (
-      <ReactMarkdown
-        remarkPlugins={[
-          remarkGfm,
-          // Configure remark-math to be more lenient with spacing
-          [remarkMath, { singleDollarTextMath: true }],
-        ]}
-        rehypePlugins={[
-          // Configure rehype-katex for better error handling
-          // output: 'htmlAndMathml' includes <annotation> with original LaTeX for copy support
-          [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
-        ]}
-        // Allow data: URLs for base64 images (filtered by default for security)
-        urlTransform={allowDataUrlTransform}
-        components={{
-          // Custom image renderer with base64 support
-          img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
-          // Custom link renderer for download/external links
-          a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
-        }}
-      >
-        {fullContent}
-      </ReactMarkdown>
-    );
-  },
-  (prev, next) => prev.content === next.content && prev.definitions === next.definitions
-);
-
-/**
- * Filter out JSON tool arguments that models might accidentally output to chat.
- * This happens when models output JSON before calling a tool (e.g., PPTX slides array).
- *
- * Pattern: Detects code blocks containing JSON with "slides", "title", "bullets" etc.
+ * Filter out JSON tool arguments and internal prompts that models might accidentally output to chat.
+ * This happens when models output JSON before calling a tool or when internal
+ * classification/routing results leak into the response.
  */
 function filterToolJsonOutput(text: string): string {
   // Pattern 1: Code block with JSON tool arguments (```json ... ```)
@@ -307,15 +227,59 @@ function filterToolJsonOutput(text: string): string {
   // Pattern 3: JSON array of slides [ { "type": ... } ]
   const slidesArrayPattern = /\[\s*\{\s*"(?:type|title|bullets)"[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]/gi;
 
-  // Pattern 4: Tool/router JSON blobs leaking into the answer
-  const toolMetaJsonPattern = /^\s*\{\s*"(?:relevance|tool_name|confidence|guidance|citations|queries|results_count|query_language|cross_language_enabled)"[\s\S]*?\}\s*(?:\n|$)/i;
+  // Pattern 4: Classification/routing JSON blobs leaking ANYWHERE
+  // Matches: {"relevance":"offtopic","topic":"xxx"...}? with optional trailing ?
+  // Uses non-greedy matching to capture the JSON object
+  const classificationJsonPattern = /\{"(?:relevance|topic)":[^}]*(?:"(?:relevance|topic|sensitive|ambiguous|political|interfaith_attack|interpretation)":[^,}]*,?\s*)*\}\??/gi;
+
+  // Pattern 5: Tool metadata JSON at start
+  const toolMetaJsonPattern = /^\s*\{\s*"(?:tool_name|confidence|guidance|citations|queries|results_count|query_language|cross_language_enabled)"[\s\S]*?\}\s*(?:\n|$)/i;
+
+  // Pattern 6: Router result JSON (router: xxx) or text before it
+  const routerResultPattern = /\brouter:\s*\w+\s*(?:\n|$)/gi;
+
+  // Pattern 7: Any standalone JSON object with known internal keys
+  const internalJsonPattern = /\{[^{}]*"(?:relevance|tool_name|confidence)":\s*"[^"]*"[^{}]*\}\s*\??/gi;
+
+  // Pattern 8: Internal prompt phrases that shouldn't be shown to users (with optional trailing content)
+  // Be careful not to filter too aggressively - only filter specific internal prompts
+  // NOTE: Do NOT filter "Let me" or "I'll" as these are common in normal responses
+  const internalPromptsPattern = /(?:Here(?:'s| is) the JSON(?: requested)?|JSON output|Tool output|Generating response|Processing request)[:\s\n]*(?:```[\s\S]*?(?:```|$))?/gi;
+
+  // Pattern 9: Empty code blocks (``` followed by ``` with only whitespace)
+  const emptyCodeBlockPattern = /```(?:\w*)\s*\n?\s*```/gi;
+
+  // Pattern 10: Code blocks with only JSON objects (tool arguments leaked as code)
+  const jsonOnlyCodeBlockPattern = /```(?:json)?\s*\n\s*\{[\s\S]*?\}\s*\n```/gi;
+
+  // Pattern 11: Incomplete/unclosed code blocks at the start (e.g., "Here is...\n```" without closing)
+  // This handles the case where LLM outputs code block start but content continues normally
+  const unclosedCodeBlockPattern = /^[^`]*```(?!\s*\n[\s\S]*?```)(?=\s*\n)/gm;
+  
+  // Pattern 12: Leading text with unclosed code fence (handles streaming partial output)
+  // Only match specific internal prompt patterns, not general text
+  const leadingUnclosedFencePattern = /^(?:Here(?:'s| is) the JSON[^`]*)\n?```\s*$/gm;
+
+  // Pattern 13: Standalone unclosed code fences (just ``` at start or end)
+  const standaloneCodeFence = /^```\s*$/gm;
 
   let filtered = text
     .replace(jsonCodeBlockPattern, '')
     .replace(rawJsonPattern, '')
     .replace(slidesArrayPattern, '')
+    .replace(classificationJsonPattern, '')
+    .replace(internalJsonPattern, '')
     .replace(toolMetaJsonPattern, '')
-    .replace(/^(CONFIDENCE|GUIDANCE):.*$/gim, '');
+    .replace(routerResultPattern, '')
+    .replace(internalPromptsPattern, '')
+    .replace(emptyCodeBlockPattern, '')
+    .replace(jsonOnlyCodeBlockPattern, '')
+    .replace(unclosedCodeBlockPattern, '')
+    .replace(leadingUnclosedFencePattern, '')
+    .replace(standaloneCodeFence, '')
+    .replace(/^(CONFIDENCE|GUIDANCE):.*$/gim, '')
+    // Only remove specific "Here is the JSON" phrases, not general "Here is" which may be valid content
+    .replace(/^Here(?:'s| is) the JSON[^\n]*\n?/gim, '');
 
   // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
@@ -338,7 +302,7 @@ function filterToolJsonOutput(text: string): string {
 export const StreamOutput = memo(function StreamOutput({
   text,
   isStreaming = false,
-  id = "msg"
+  id: _id = "msg"  // Reserved for future use (e.g., accessibility)
 }: StreamOutputProps) {
   // Enable LaTeX copy support - copies original LaTeX source when selecting formulas
   useLatexCopy();
@@ -346,20 +310,26 @@ export const StreamOutput = memo(function StreamOutput({
   // Filter out accidental JSON tool output before parsing
   const filteredText = useMemo(() => filterToolJsonOutput(text), [text]);
 
-  // Parse markdown into blocks for memoization, preserving global definitions
-  const { blocks, definitions } = useMemo(() => parseMarkdownIntoBlocks(filteredText), [filteredText]);
-
   if (!text) return null;
 
   return (
-    <div className="prose prose-sm max-w-none dark:prose-invert break-words prose-p:my-2 prose-headings:my-3 prose-ul:my-2 prose-ol:my-2 prose-li:my-0.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-code:whitespace-pre-wrap prose-code:break-words">
-      {blocks.map((block, index) => (
-        <MemoizedMarkdownBlock
-          key={`${id}-block-${index}`}
-          content={block}
-          definitions={definitions}
-        />
-      ))}
+    <div className="prose prose-lg max-w-none dark:prose-invert break-words prose-p:my-3 prose-p:leading-[1.8] prose-headings:my-4 prose-headings:font-semibold prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-pre:my-3 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[15px] prose-p:text-[17px] prose-li:text-[17px] prose-headings:tracking-tight">
+      <ReactMarkdown
+        remarkPlugins={[
+          remarkGfm,
+          [remarkMath, { singleDollarTextMath: true }],
+        ]}
+        rehypePlugins={[
+          [rehypeKatex, { throwOnError: false, strict: false, output: "htmlAndMathml" }],
+        ]}
+        urlTransform={allowDataUrlTransform}
+        components={{
+          img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
+          a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
+        }}
+      >
+        {filteredText}
+      </ReactMarkdown>
       {/* Streaming cursor with thinking animation */}
       {isStreaming && (
         <span className="inline-flex items-center gap-1 ml-1 align-text-bottom">

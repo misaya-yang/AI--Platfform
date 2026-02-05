@@ -15,11 +15,14 @@ export default {
     extend: {
       fontFamily: {
         sans: [
+          "Inter",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "\"Segoe UI\"",
           "\"PingFang SC\"",
           "\"Microsoft YaHei\"",
           "\"Noto Sans SC\"",
           "\"HarmonyOS Sans\"",
-          "\"Segoe UI\"",
           "system-ui",
           "sans-serif",
         ],

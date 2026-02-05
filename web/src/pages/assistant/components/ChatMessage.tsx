@@ -418,81 +418,78 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
   return (
     <motion.div
       key={tc.id || idx}
-      initial={{ opacity: 0, x: -10 }}
+      initial={{ opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: idx * 0.1 }}
-      className="group relative overflow-hidden rounded-xl bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 border border-violet-500/10 dark:border-violet-400/10 hover:border-violet-500/30 transition-all duration-200"
+      transition={{ delay: idx * 0.05 }}
+      className="group relative overflow-hidden rounded-lg bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-700/50 hover:border-slate-300 dark:hover:border-slate-600 transition-all duration-150"
     >
-      {/* Glow effect on hover */}
-      <div className="absolute inset-0 bg-gradient-to-r from-violet-500/0 via-purple-500/5 to-fuchsia-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-
-      {/* Clickable header */}
+      {/* Clickable header - compact */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="relative w-full flex items-start gap-3 p-3 text-left"
+        className="relative w-full flex items-center gap-2.5 px-3 py-2 text-left"
       >
-        {/* Tool icon */}
-        <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 border border-violet-500/20">
-          <div className="text-violet-500 dark:text-violet-400">
+        {/* Tool icon - smaller */}
+        <div className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-md bg-slate-200/80 dark:bg-slate-700/60">
+          <div className="text-slate-500 dark:text-slate-400 scale-75">
             {getToolIcon(tc.name)}
           </div>
         </div>
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          {/* Tool name */}
-          <div className="flex items-center justify-between gap-2">
-            <code className="text-sm font-mono font-medium text-slate-700 dark:text-slate-200">
+          {/* Tool name and status on same line */}
+          <div className="flex items-center gap-2">
+            <code className="text-[12px] font-mono font-medium text-slate-700 dark:text-slate-200 truncate">
               {tc.name}
             </code>
-            {/* Status badge */}
+            {/* Status badge - inline, compact */}
             <span className={cn(
-              "flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+              "flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium border flex-shrink-0",
               statusConfig.color
             )}>
-              <span className={cn("h-1.5 w-1.5 rounded-full", statusConfig.dot)} />
+              <span className={cn("h-1 w-1 rounded-full", statusConfig.dot)} />
               {statusConfig.label}
             </span>
           </div>
 
-          {/* Arguments preview (collapsed) */}
+          {/* Arguments preview (collapsed) - single line */}
           {!isExpanded && tc.arguments && Object.keys(tc.arguments).length > 0 && (
-            <pre className="mt-1.5 text-[11px] font-mono text-slate-500 dark:text-slate-400 truncate">
-              {JSON.stringify(tc.arguments).length > 60
-                ? JSON.stringify(tc.arguments).slice(0, 60) + "..."
+            <pre className="mt-0.5 text-[10px] font-mono text-slate-400 dark:text-slate-500 truncate">
+              {JSON.stringify(tc.arguments).length > 50
+                ? JSON.stringify(tc.arguments).slice(0, 50) + "..."
                 : JSON.stringify(tc.arguments)}
             </pre>
           )}
         </div>
 
-        {/* Expand indicator */}
+        {/* Expand indicator - smaller */}
         <motion.div
           animate={{ rotate: isExpanded ? 90 : 0 }}
-          transition={{ duration: 0.2 }}
-          className="flex-shrink-0 mt-1"
+          transition={{ duration: 0.15 }}
+          className="flex-shrink-0"
         >
-          <ChevronRight className="h-4 w-4 text-slate-300 dark:text-slate-600 group-hover:text-violet-400 transition-colors" />
+          <ChevronRight className="h-3.5 w-3.5 text-slate-300 dark:text-slate-600" />
         </motion.div>
       </button>
 
-      {/* Expandable content */}
+      {/* Expandable content - more compact */}
       <AnimatePresence>
         {isExpanded && hasExpandableContent && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.15 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-3 pt-0 ml-11">
+            <div className="px-3 pb-2.5 pt-0 ml-8">
               {/* Full arguments */}
               {tc.arguments && Object.keys(tc.arguments).length > 0 && (
-                <div className="space-y-2">
-                  <div className="text-[10px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                <div className="space-y-1">
+                  <div className="text-[9px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                     {t("assistant.toolArguments")}
                   </div>
-                  <pre className="text-[11px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/50 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                  <pre className="text-[10px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/50 rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all max-h-32">
                     {JSON.stringify(tc.arguments, null, 2)}
                   </pre>
                 </div>
@@ -505,26 +502,105 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
   );
 }
 
-/** Premium Tool Calls Display - Manus style */
-function ToolCallsDisplay({ toolCalls }: { toolCalls: ChatMessageType["toolCalls"] }) {
+/** GPT-style Tool Calls Display - Default expanded */
+function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: ChatMessageType["toolCalls"], isStreaming?: boolean }) {
   const { t } = useTranslation();
+  // Default to expanded so users can see tool calls immediately
+  const [isExpanded, setIsExpanded] = useState(true);
 
   if (!toolCalls || toolCalls.length === 0) return null;
 
-  return (
-    <div className="mb-4 space-y-2">
-      {/* Section header */}
-      <div className="flex items-center gap-2 text-xs font-medium text-violet-500 dark:text-violet-400">
-        <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
-        {t("assistant.toolCalls")}
-      </div>
+  const allCompleted = toolCalls.every(tc => tc.status === "completed");
+  const runningCount = toolCalls.filter(tc => tc.status === "running").length;
+  const pendingCount = toolCalls.filter(tc => tc.status === "pending").length;
+  const isProcessing = isStreaming && !allCompleted;
 
-      {/* Tool call cards */}
-      <div className="space-y-2">
-        {toolCalls.map((tc, idx) => (
-          <ToolCallCard key={tc.id || idx} tc={tc} idx={idx} />
-        ))}
-      </div>
+  return (
+    <div className="mb-2.5">
+      {/* Thinking indicator when processing - prominent display */}
+      {isProcessing && (
+        <motion.div
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex items-center gap-3 py-3 px-4 mb-2 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
+        >
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
+            <div className="flex gap-1">
+              {[0, 1, 2].map((i) => (
+                <motion.div
+                  key={i}
+                  className="w-2 h-2 rounded-full bg-violet-500"
+                  animate={{ 
+                    scale: [1, 1.4, 1],
+                    opacity: [0.5, 1, 0.5] 
+                  }}
+                  transition={{ 
+                    duration: 1.2, 
+                    repeat: Infinity, 
+                    delay: i * 0.15,
+                    ease: "easeInOut"
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+          <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
+            {t("assistant.thinking")}
+          </span>
+        </motion.div>
+      )}
+
+      {/* Header with status - always visible, compact */}
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className={cn(
+          "flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all duration-150 w-full text-left",
+          "bg-slate-100/60 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800/60",
+          "border border-slate-200/50 dark:border-slate-700/50"
+        )}
+      >
+        {/* Status icon - smaller */}
+        {allCompleted ? (
+          <CheckCircle2 className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+        ) : (
+          <Loader2 className="h-4 w-4 text-violet-500 animate-spin flex-shrink-0" />
+        )}
+
+        {/* Label - smaller */}
+        <span className="text-xs font-medium text-slate-600 dark:text-slate-300 flex-1">
+          {allCompleted 
+            ? t("assistant.toolCallsCompleted", "{{count}} tool calls completed", { count: toolCalls.length })
+            : t("assistant.toolCallsRunning", "Running tools ({{count}})", { count: runningCount || pendingCount || toolCalls.length })
+          }
+        </span>
+
+        {/* Expand chevron - smaller */}
+        <motion.div
+          animate={{ rotate: isExpanded ? 180 : 0 }}
+          transition={{ duration: 0.15 }}
+        >
+          <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+        </motion.div>
+      </button>
+
+      {/* Tool list - default expanded, compact spacing */}
+      <AnimatePresence initial={false}>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="overflow-hidden"
+          >
+            <div className="pt-2 space-y-1.5">
+              {toolCalls.map((tc, idx) => (
+                <ToolCallCard key={tc.id || idx} tc={tc} idx={idx} />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -589,6 +665,9 @@ function ImageGeneratingPlaceholder({ prompt }: { prompt?: string }) {
 export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
+  const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
+  // Show thinking when streaming but no content yet (regardless of tool calls)
+  const isThinking = message.isStreaming && !message.content;
 
   return (
     <motion.div
@@ -596,7 +675,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: "easeOut" }}
       className={cn(
-        "flex w-full gap-3",
+        "flex w-full gap-4",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
@@ -606,138 +685,137 @@ export function ChatMessage({ message }: ChatMessageProps) {
         animate={{ scale: 1 }}
         transition={{ delay: 0.05, type: "spring", stiffness: 300, damping: 20 }}
         className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-transform hover:scale-105",
+          "flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-transform hover:scale-105",
           isUser
             ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/20"
-            : "bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-700 dark:to-slate-800 text-slate-600 dark:text-slate-300"
+            : "bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-500/20"
         )}
       >
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </motion.div>
 
-      {/* Content */}
+      {/* Content - GPT style: no wrapper for assistant */}
       <div
         className={cn(
-          "flex flex-col min-w-0",
-          isUser
-            ? "max-w-[calc(100%-48px)] items-end"
-            : "max-w-full lg:max-w-[90%] items-start flex-1"
+          "flex flex-col min-w-0 flex-1",
+          isUser ? "items-end" : "items-start"
         )}
       >
-        <div
-          className={cn(
-            "relative text-sm",
-            isUser
-              ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15"
-              : "w-full"
-          )}
-        >
-          {/* Attachments for user messages */}
-          {isUser && <AttachmentsDisplay attachments={message.attachments} />}
-
-          {/* Search status display for assistant (GPT-like "Searching..." indicator) */}
-          {!isUser && message.searchStatus && message.searchStatus.length > 0 && (
-            <SearchStatusDisplay searchStatus={message.searchStatus} />
-          )}
-
-          {/* Web search results for assistant */}
-          {!isUser && message.webSearchResults && message.webSearchResults.length > 0 && (
-            <WebSearchDisplay results={message.webSearchResults} />
-          )}
-
-          {/* Context display for assistant messages */}
-          {!isUser && message.contexts && message.contexts.length > 0 && (
-            <ContextDisplay contexts={message.contexts} />
-          )}
-
-          {/* Tool calls display for assistant messages - Manus style */}
-          {!isUser && message.toolCalls && message.toolCalls.length > 0 && (
-            <ToolCallsDisplay toolCalls={message.toolCalls} />
-          )}
-
-          {/* Message content */}
-          {isUser ? (
-            <div className="whitespace-pre-wrap leading-relaxed">
+        {/* User message with bubble */}
+        {isUser ? (
+          <div className="max-w-[85%] bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15">
+            <AttachmentsDisplay attachments={message.attachments} />
+            <div className="whitespace-pre-wrap leading-relaxed text-sm">
               {message.content}
             </div>
-          ) : (
-            <div className="text-slate-700 dark:text-slate-200">
-              {/* GPT-style image generation placeholder */}
-              {message.isGeneratingImage ? (
-                <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
-              ) : message.isStreaming ? (
-                <>
-                  {/* Streaming content */}
-                  {message.content && (
-                    <StreamOutput
-                      text={message.content}
-                      isStreaming={true}
-                      id={`msg-${message.id}`}
-                    />
-                  )}
-                  {/* Manus-style thinking indicator */}
-                  {message.agentPhase ? (
-                    <AgentPhaseDisplay phase={message.agentPhase} />
-                  ) : !message.content && (
-                    <div className="flex items-center gap-2 py-1">
-                      <div className="flex gap-1">
-                        {[0, 1, 2].map((i) => (
-                          <motion.div
-                            key={i}
-                            className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500"
-                            animate={{ opacity: [0.3, 1, 0.3] }}
-                            transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }}
-                          />
-                        ))}
-                      </div>
-                      <span className="text-sm text-slate-500 dark:text-slate-400">
-                        {t("assistant.thinking")}
-                      </span>
-                    </div>
-                  )}
-                </>
-              ) : message.content ? (
+          </div>
+        ) : (
+          /* Assistant message - GPT style without wrapper */
+          <div className="w-full space-y-3">
+            {/* Thinking indicator - shown when streaming starts but no content yet */}
+            {isThinking && !hasToolCalls && (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
+              >
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
+                  <div className="flex gap-1">
+                    {[0, 1, 2].map((i) => (
+                      <motion.div
+                        key={i}
+                        className="w-2 h-2 rounded-full bg-violet-500"
+                        animate={{ 
+                          scale: [1, 1.4, 1],
+                          opacity: [0.5, 1, 0.5] 
+                        }}
+                        transition={{ 
+                          duration: 1.2, 
+                          repeat: Infinity, 
+                          delay: i * 0.15,
+                          ease: "easeInOut"
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
+                  {t("assistant.thinking")}
+                </span>
+              </motion.div>
+            )}
+
+            {/* Tool calls display - always show when there are tool calls */}
+            {hasToolCalls && (
+              <ToolCallsDisplay toolCalls={message.toolCalls} isStreaming={!!message.isStreaming} />
+            )}
+
+            {/* Search status display */}
+            {message.searchStatus && message.searchStatus.length > 0 && (
+              <SearchStatusDisplay searchStatus={message.searchStatus} />
+            )}
+
+            {/* Web search results */}
+            {message.webSearchResults && message.webSearchResults.length > 0 && (
+              <WebSearchDisplay results={message.webSearchResults} />
+            )}
+
+            {/* Context display */}
+            {message.contexts && message.contexts.length > 0 && (
+              <ContextDisplay contexts={message.contexts} />
+            )}
+
+            {/* Message content - directly rendered without wrapper */}
+            {message.isGeneratingImage ? (
+              <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
+            ) : message.content ? (
+              <div className="text-slate-800 dark:text-slate-100 text-[15px] leading-relaxed">
                 <StreamOutput
                   text={message.content}
-                  isStreaming={false}
+                  isStreaming={!!message.isStreaming}
                   id={`msg-${message.id}`}
                 />
-              ) : (
-                <span className="text-slate-400 italic">
-                  {t("assistant.emptyResponse", "(No response)")}
-                </span>
-              )}
-            </div>
-          )}
+              </div>
+            ) : !isThinking && !hasToolCalls && !message.isStreaming && (
+              <span className="text-slate-400 italic text-sm">
+                {t("assistant.emptyResponse", "(No response)")}
+              </span>
+            )}
 
-          {/* Phase 3: Citation display for assistant messages */}
-          {!isUser && !message.isStreaming && message.ragCitations && message.ragCitations.length > 0 && (
-            <CitationDisplay
-              citations={message.ragCitations}
-              evaluation={message.ragEvaluation}
-            />
-          )}
+            {/* Agent phase display */}
+            {message.isStreaming && message.agentPhase && (
+              <AgentPhaseDisplay phase={message.agentPhase} />
+            )}
 
-          {/* Generated artifacts (documents, images) - Manus style */}
-          {!isUser && !message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
-            <div className="mt-4 space-y-3">
-              {message.generatedArtifacts.map((artifact) => (
-                <DocumentPreview
-                  key={artifact.id}
-                  title={artifact.title || artifact.filename || "Document"}
-                  content={artifact.content || ""}
-                  format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
-                  downloadUrl={artifact.url}
-                  defaultExpanded={false}
-                  maxHeight={300}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+            {/* Citation display */}
+            {!message.isStreaming && message.ragCitations && message.ragCitations.length > 0 && (
+              <CitationDisplay
+                citations={message.ragCitations}
+                evaluation={message.ragEvaluation}
+              />
+            )}
 
-        {/* Stats for assistant messages */}
-        {!isUser && !message.isStreaming && <StatsBadge message={message} />}
+            {/* Generated artifacts */}
+            {!message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
+              <div className="mt-4 space-y-3">
+                {message.generatedArtifacts.map((artifact) => (
+                  <DocumentPreview
+                    key={artifact.id}
+                    title={artifact.title || artifact.filename || "Document"}
+                    content={artifact.content || ""}
+                    format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
+                    downloadUrl={artifact.url}
+                    defaultExpanded={false}
+                    maxHeight={300}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Stats */}
+            {!message.isStreaming && <StatsBadge message={message} />}
+          </div>
+        )}
       </div>
     </motion.div>
   );

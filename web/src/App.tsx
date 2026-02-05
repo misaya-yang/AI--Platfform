@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { ConfigProvider, App as AntApp, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import enUS from 'antd/locale/en_US';
@@ -11,6 +12,15 @@ export default function App() {
   const { darkMode } = useAppStore();
   const { i18n } = useTranslation();
   const currentTheme = darkMode ? darkTheme : lightTheme;
+
+  // Sync Tailwind dark mode class with app state
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [darkMode]);
 
   // Select Ant Design locale based on current i18n language
   const antdLocale = i18n.language === 'en-US' ? enUS : zhCN;

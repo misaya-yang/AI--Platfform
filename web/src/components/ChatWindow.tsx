@@ -260,9 +260,26 @@ const ChatMessageItem = memo(
       const [isTimelineExpanded, setIsTimelineExpanded] = useState(
         message.timeline?.status === "running"
       );
-      const [toolCallsExpanded, setToolCallsExpanded] = useState(toolCallsDefaultOpen);
+      // Tool calls - ALWAYS default to expanded for better UX
+      const [toolCallsExpanded, setToolCallsExpanded] = useState(true);
+      // Show tool calls list: either in full mode OR when expanded (regardless of toolCallsMode)
       const shouldShowToolCallsList = canShowToolCalls && (toolCallsMode === "full" || toolCallsExpanded);
       const shouldShowToolCallsSummary = canShowToolCalls && toolCallsMode === "collapsed" && !toolCallsExpanded;
+      
+      // Check if any tool is still running
+      const hasRunningToolCalls = message.toolCalls?.some(tc => tc.toolCall.status === "running") ?? false;
+      // Content that will likely be filtered out (internal prompts, JSON blobs)
+      // Be conservative - only match specific internal patterns, not general phrases
+      const contentLikelyFiltered = message.content && message.content.length < 50 && (
+        message.content.trim().startsWith("Here is the JSON") ||
+        message.content.trim().startsWith("Here's the JSON") ||
+        (message.content.trim().startsWith("{") && message.content.trim().endsWith("}")) ||
+        message.content.trim() === "```"
+      );
+      // Show thinking when: streaming with no content, OR streaming with running tool calls,
+      // OR streaming with content that will likely be filtered out
+      const shouldShowThinking = showThinkingIndicator && !isUser && message.isStreaming && 
+        (!message.content || hasRunningToolCalls || contentLikelyFiltered);
 
       return (
         <motion.div
@@ -281,7 +298,7 @@ const ChatMessageItem = memo(
         {/* Content Container */}
         <div className={cn(
           "flex flex-col gap-1.5 min-w-0",
-          isUser ? "max-w-[85%] items-end" : "max-w-[85%] min-w-[300px] sm:min-w-[400px] items-start"
+          isUser ? "w-fit max-w-[70%] items-end" : "w-full max-w-[85%] min-w-[280px] sm:min-w-[360px] items-start"
         )}>
           {/* Name Label */}
           <span className={cn(
@@ -294,27 +311,33 @@ const ChatMessageItem = memo(
           {/* Message Bubble */}
           <div
             className={cn(
-              "relative text-sm min-w-0 max-w-full transition-all duration-200",
+              "relative min-w-0 transition-all duration-200",
               isUser
                 ? [
-                    // User message - modern gradient with glass effect
-                    "px-5 py-3.5",
+                    // User message - compact, elegant gradient
+                    "px-4 py-2.5",
                     "bg-gradient-to-br from-emerald-500 via-emerald-500 to-teal-600",
-                    "text-white",
-                    "rounded-2xl rounded-tr-md",
-                    "shadow-lg shadow-emerald-500/20",
+                    "text-white text-[15px] leading-relaxed",
+                    "rounded-2xl rounded-tr-sm",
+                    "shadow-md shadow-emerald-500/20",
                   ]
                 : [
-                    // Assistant message - clean, minimal design
+                    // Assistant message - refined, spacious
+                    "w-full",
                     "px-5 py-4",
-                    "bg-white dark:bg-zinc-900/90",
-                    "text-slate-700 dark:text-zinc-200",
-                    "rounded-2xl rounded-tl-md",
-                    "border border-slate-200/80 dark:border-zinc-800",
-                    "shadow-xl shadow-slate-200/50 dark:shadow-black/20",
+                    "bg-white dark:bg-zinc-900/95",
+                    "text-slate-800 dark:text-zinc-100 text-[15px] leading-[1.7]",
+                    "rounded-2xl rounded-tl-sm",
+                    "border border-slate-200/60 dark:border-zinc-800/80",
+                    "shadow-xl shadow-slate-200/40 dark:shadow-black/25",
                   ]
             )}
           >
+            {/* AI Thinking Indicator - show when streaming with no content OR with running tool calls */}
+            {shouldShowThinking && (
+              <ThinkingIndicator />
+            )}
+
             {/* AG-UI Timeline Section */}
             {hasTimeline && message.timeline && (
               <TimelineSection
@@ -326,40 +349,41 @@ const ChatMessageItem = memo(
 
             {/* Tool Calls Section (legacy, shown when no timeline) */}
             {shouldShowToolCallsSummary && !hasTimeline && (
-              <div className="mb-4 w-full min-w-0">
+              <div className="mb-5 w-full min-w-0">
                 <button
                   type="button"
                   onClick={() => setToolCallsExpanded(true)}
                   className={cn(
-                    "flex w-full items-center justify-between rounded-lg border border-purple-200/60",
-                    "bg-purple-50/60 px-3 py-2 text-xs font-medium text-purple-700",
-                    "transition-colors hover:bg-purple-100/70 dark:border-purple-900/60",
-                    "dark:bg-purple-950/40 dark:text-purple-200 dark:hover:bg-purple-900/30"
+                    "flex w-full items-center justify-between rounded-xl border",
+                    "bg-violet-500/8 dark:bg-violet-500/10 px-4 py-3",
+                    "text-[13px] font-medium text-violet-700 dark:text-violet-300",
+                    "border-violet-500/20 dark:border-violet-400/20",
+                    "transition-colors hover:bg-violet-500/12 dark:hover:bg-violet-500/15"
                   )}
                 >
                   <span>{t("playground.toolCallsCollapsed", "Tool calls")} ({toolCallsCount})</span>
-                  <span className="text-[10px] uppercase tracking-wide">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider opacity-70">
                     {t("playground.expand", "Expand")}
                   </span>
                 </button>
               </div>
             )}
             {!isUser && shouldShowToolCallsList && !hasTimeline && (
-              <div className="mb-4 space-y-2 w-full min-w-0">
-                <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">
-                  <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
+              <div className="mb-5 space-y-3 w-full min-w-0">
+                <div className="flex items-center gap-2.5 text-[12px] font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-400">
+                  <span className="h-2 w-2 rounded-full bg-gradient-to-br from-violet-500 to-purple-600" />
                   {t("playground.toolCalls", "Tool Calls")}
                   {toolCallsMode === "collapsed" && (
                     <button
                       type="button"
                       onClick={() => setToolCallsExpanded(false)}
-                      className="ml-auto text-[10px] font-medium uppercase tracking-wide text-purple-500 hover:text-purple-600 dark:text-purple-300 dark:hover:text-purple-200"
+                      className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-violet-500 hover:text-violet-600 dark:text-violet-400 dark:hover:text-violet-300 transition-colors"
                     >
                       {t("playground.collapse", "Collapse")}
                     </button>
                   )}
                 </div>
-                <div className="space-y-2 w-full">
+                <div className="space-y-3 w-full">
                   {message.toolCalls?.map((tc, idx) => (
                     <ToolCallBlock
                       key={tc.toolCall.tool_call_id || idx}
@@ -376,8 +400,8 @@ const ChatMessageItem = memo(
             {/* Message Content */}
             {message.content ? (
               <div className={cn(
-                "leading-relaxed",
-                isUser ? "text-white" : "text-slate-700 dark:text-zinc-200"
+                "leading-[1.75]",
+                isUser ? "text-white text-[15px]" : "text-slate-800 dark:text-zinc-100 text-[15px]"
               )}>
                 {isUser ? (
                   <div className="whitespace-pre-wrap">{message.content}</div>
@@ -390,11 +414,6 @@ const ChatMessageItem = memo(
                 )}
               </div>
             ) : null}
-
-            {/* AI Thinking / Loading Indicator - Manus-style */}
-            {showThinkingIndicator && !message.content && !canShowToolCalls && !hasTimeline && !isUser && (
-              <ThinkingIndicator />
-            )}
 
             {/* Artifacts Section */}
             {hasArtifacts && message.artifacts && (
@@ -429,7 +448,7 @@ export function ChatWindow({
   messages,
   showToolCalls = true,
   toolCallsMode = "full",
-  toolCallsDefaultOpen = false,
+  toolCallsDefaultOpen = true,  // Default to expanded for better UX
   showTimeline = true,
   showThinkingIndicator = true,
 }: ChatWindowProps) {

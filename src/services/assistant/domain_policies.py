@@ -25,14 +25,21 @@ class ImamPolicyConfig:
         "please consult with a qualified Islamic scholar."
     )
     decline_out_of_scope: str = (
-        "The current knowledge base does not contain sufficient information to answer this question. "
-        "Please consult a qualified Islamic scholar or a trusted Islamic centre for guidance."
+        "I don't have sufficient information in my current knowledge base to provide "
+        "a reliable answer to this question. I recommend consulting with a qualified "
+        "Islamic scholar or visiting your local Islamic Centre for guidance on this matter."
+    )
+    decline_off_topic: str = (
+        "I am designed to answer questions about Islamic knowledge. For other topics, "
+        "please consult appropriate resources. Is there anything about Islam I can help you with?"
     )
     decline_forbidden: str = (
         "This question falls outside the permitted scope for this assistant. "
         "Please ask a question about Islamic knowledge covered in the provided materials."
     )
-    min_text_match: float = 0.18
+    # Confidence thresholds for Retrieval-First approach
+    min_semantic_score: float = 0.35  # Minimum vector similarity score
+    min_text_match: float = 0.15  # Minimum text match score (lowered from 0.18)
 
 
 class ImamPolicy:
@@ -73,10 +80,17 @@ class ImamPolicy:
     def scenario_rules(self) -> str:
         """Generate compact scenario rules for the system prompt."""
         rules = [
+            # Retrieval-First approach
+            "ALWAYS base your answers on the retrieved knowledge base content.",
+            "If retrieved content is relevant, answer the question using that content.",
+            "If retrieved content does not answer the question, politely explain that "
+            "this topic is not covered in the current knowledge base.",
+            # Source constraints
             "Only use the provided knowledge base content; do not add external knowledge.",
-            "If the context is insufficient, decline with a clear reason.",
             "Use formal, objective, third-person language and avoid personal opinions.",
+            # Forbidden content
             "Avoid interfaith comparisons/criticism and political content.",
+            # Citations
             "Provide citations after each paragraph and a sources list at the end.",
             f"End with the fixed closing phrase: \"{self.config.closing_phrase}\"",
         ]
@@ -121,32 +135,81 @@ class ImamPolicy:
         query: str,
         contexts: Iterable[Dict[str, Any]],
     ) -> Optional[PolicyDecision]:
-        if not contexts:
+        """
+        Retrieval-First confidence gating.
+
+        Instead of using keyword matching to decide relevance, we let the knowledge
+        base speak: if retrieval returns confident results, we answer; otherwise
+        we politely decline. This follows Imam.md Section II Point 6:
+
+        "If a question falls outside the knowledge base, the AI Imam should
+        transparently inform the user that this specific topic is not covered
+        in its current knowledge base"
+
+        The confidence check uses both:
+        - Semantic score (vector similarity) - captures meaning
+        - Text match score - captures exact term overlap
+        """
+        # Convert to list to allow multiple iterations
+        contexts_list = list(contexts)
+
+        # No contexts = KB search returned nothing
+        if not contexts_list:
             return PolicyDecision(
                 action="decline",
                 response=self._build_decline(self.config.decline_out_of_scope),
                 reason="no_context",
             )
 
-        if self._is_islamic_query(query):
-            return None
+        # Extract all chunks and their scores
+        all_chunks = [
+            chunk
+            for ctx in contexts_list
+            for chunk in ctx.get("chunks", [])
+        ]
 
-        max_match = max(
+        if not all_chunks:
+            return PolicyDecision(
+                action="decline",
+                response=self._build_decline(self.config.decline_out_of_scope),
+                reason="empty_chunks",
+            )
+
+        # Calculate max semantic score (from vector search)
+        max_semantic = max(
+            (float(chunk.get("score") or 0.0) for chunk in all_chunks),
+            default=0.0,
+        )
+
+        # Calculate max text match score
+        max_text_match = max(
             (
                 float((chunk.get("metadata") or {}).get("_text_match_score") or 0.0)
-                for ctx in contexts
-                for chunk in ctx.get("chunks", [])
+                for chunk in all_chunks
             ),
             default=0.0,
         )
 
-        if max_match < self.config.min_text_match:
-            return PolicyDecision(
-                action="decline",
-                response=self._build_decline(self.config.decline_out_of_scope),
-                reason="low_text_match",
-            )
-        return None
+        # Retrieval-First confidence check:
+        # HIGH confidence (either score is strong) → allow
+        # LOW confidence (both scores are weak) → decline
+        #
+        # This replaces keyword-based routing with confidence-based gating.
+        # A query like "What is bismillah?" will pass if the KB returns
+        # relevant content with good scores, even without keyword matching.
+
+        if max_semantic >= self.config.min_semantic_score:
+            return None  # Allow - good semantic match
+
+        if max_text_match >= self.config.min_text_match:
+            return None  # Allow - good text match
+
+        # Low confidence - KB didn't find strong matches
+        return PolicyDecision(
+            action="decline",
+            response=self._build_decline(self.config.decline_out_of_scope),
+            reason="low_confidence",
+        )
 
     def validate_answer(self, answer: str) -> List[str]:
         issues: List[str] = []
