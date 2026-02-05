@@ -69,6 +69,7 @@ HADITH_PATTERNS = [
         r'(?:Bukhari|Muslim|Abu\s*Dawud|Tirmidhi|Nasa.?i|Ibn\s*Majah|Ahmad|Malik)',
         re.IGNORECASE,
     ),
+    re.compile(r'Bulugh\s*(?:al-?)?Maram', re.IGNORECASE),
     # Numbered hadith marker
     re.compile(r'Hadith\s*(?:No\.?\s*)?#?\s*\d+', re.IGNORECASE),
 ]

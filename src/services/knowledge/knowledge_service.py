@@ -473,6 +473,27 @@ class KnowledgeService:
             )
             return create_embedding(econf)
 
+    @staticmethod
+    def _apply_islamic_dataset_defaults(dataset_name: str, index_config: Dict[str, Any]) -> Dict[str, Any]:
+        if not dataset_name:
+            return index_config
+        name_lower = dataset_name.lower()
+        retrieval = _ensure_dict(index_config.get("retrieval"))
+        islamic_cfg = _ensure_dict(retrieval.get("islamic"))
+        is_islamic = bool(islamic_cfg) or "imam" in name_lower or "islam" in name_lower
+        if not is_islamic:
+            return index_config
+
+        chunking = _ensure_dict(index_config.get("chunking"))
+        if not chunking.get("mode"):
+            chunking["mode"] = "islamic"
+        if chunking.get("strict_section_traceability") is None:
+            chunking["strict_section_traceability"] = True
+        index_config["chunking"] = chunking
+        if retrieval:
+            index_config["retrieval"] = retrieval
+        return index_config
+
     def _convert_structured_chunks(
         self,
         structured_chunks: List[Dict[str, Any]],
@@ -957,6 +978,7 @@ class KnowledgeService:
 
         embedding_config = _ensure_dict(data.get("embedding_config"))
         index_config = _ensure_dict(data.get("index_config"))
+        index_config = self._apply_islamic_dataset_defaults(str(data.get("name") or dataset_id), index_config)
 
         embedder: Optional[BaseEmbedding] = None
         dim: int = 0
@@ -1036,6 +1058,11 @@ class KnowledgeService:
 
         updated = dict(dataset)
         updated.update(filtered)
+        if "index_config" in filtered or "name" in filtered:
+            updated["index_config"] = self._apply_islamic_dataset_defaults(
+                str(updated.get("name") or dataset_id),
+                _ensure_dict(updated.get("index_config")),
+            )
 
         # If embedding settings changed, ensure a matching collection.
         embedding_keys = {"embedding_provider", "embedding_model", "embedding_dimension", "embedding_config"}
@@ -2032,6 +2059,20 @@ class KnowledgeService:
                         "name": doc_name,
                         **(doc.get("metadata") or {}),
                     }
+                    def _should_override_citation(existing_val: Any, new_val: Any) -> bool:
+                        if not new_val:
+                            return False
+                        if not existing_val:
+                            return True
+                        existing = str(existing_val).lower()
+                        if "paragraph" in existing or "section:" in existing:
+                            return True
+                        if existing.startswith("quran") and " - " not in existing and " - " in str(new_val):
+                            return True
+                        if existing.startswith("bulugh") and "hadith" not in existing and "hadith" in str(new_val).lower():
+                            return True
+                        return False
+
                     for c in flat_chunks:
                         per_chunk_meta = {
                             **doc_meta_for_islamic,
@@ -2044,6 +2085,19 @@ class KnowledgeService:
                         # Preserve existing Islamic metadata from specialized chunkers
                         for key, value in islamic_meta.items():
                             existing = c.metadata.get(key)
+                            if key == "source_reference" and isinstance(existing, dict) and isinstance(value, dict):
+                                merged = dict(existing)
+                                for k, v in value.items():
+                                    if k not in merged or not merged.get(k):
+                                        merged[k] = v
+                                c.metadata[key] = merged
+                                continue
+                            if key == "citation_text":
+                                if _should_override_citation(existing, value):
+                                    c.metadata[key] = value
+                                elif not existing and value:
+                                    c.metadata[key] = value
+                                continue
                             if existing:
                                 continue
                             c.metadata[key] = value
@@ -2282,6 +2336,25 @@ class KnowledgeService:
                             
                             display_text = seg_metadata.pop("original_text", chunk_text)
 
+                            payload_meta = {
+                                key: seg_metadata.get(key)
+                                for key in (
+                                    "source_type",
+                                    "citation_text",
+                                    "source_reference",
+                                    "section_title",
+                                    "section_full_path",
+                                    "page_number",
+                                    "chunk_index",
+                                    "paragraph_index",
+                                    "source_document",
+                                    "document_title",
+                                    "madhab",
+                                    "language",
+                                )
+                                if seg_metadata.get(key) is not None
+                            }
+
                             payload = {
                                 "dataset_id": dataset_id,
                                 "document_id": document_id,
@@ -2289,8 +2362,11 @@ class KnowledgeService:
                                 "position": pos,
                                 "text": chunk_text,
                                 "token_count": token_count,
-                                "source_type": seg_metadata.get("source_type", "unknown"),
-                                "language": seg_metadata.get("language", "en"),
+                                "source_type": payload_meta.get("source_type", "unknown"),
+                                "language": payload_meta.get("language", "en"),
+                                "metadata": payload_meta,
+                                "citation_text": payload_meta.get("citation_text"),
+                                "source_reference": payload_meta.get("source_reference"),
                             }
                             points.append(
                                 qmodels.PointStruct(
@@ -3944,6 +4020,44 @@ class KnowledgeService:
                 meta["source_type_filter"] = source_type_filter
             if language_filter:
                 meta["language_filter"] = language_filter
+
+        # Hydrate missing metadata (citation/source_reference) from DB for dense-only payloads
+        if final_sorted and (islamic_citation or islamic_authority_sort):
+            try:
+                missing_ids = []
+                for item in final_sorted:
+                    if item.get("citation_text") or item.get("source_reference"):
+                        continue
+                    seg_id = str(item.get("segment_id") or "")
+                    if seg_id:
+                        missing_ids.append(seg_id)
+
+                if missing_ids:
+                    seg_rows = await self.db.get_segments_by_ids(list(set(missing_ids)))
+                    seg_map = {str(seg.get("segment_id") or ""): seg for seg in seg_rows if seg}
+                    for item in final_sorted:
+                        if item.get("citation_text") or item.get("source_reference"):
+                            continue
+                        seg_id = str(item.get("segment_id") or "")
+                        if not seg_id:
+                            continue
+                        seg = seg_map.get(seg_id)
+                        if not seg:
+                            continue
+                        meta_from_db = _ensure_dict(seg.get("metadata"))
+                        merged = {**meta_from_db, **_ensure_dict(item.get("metadata"))}
+                        item["metadata"] = merged
+                        source_type = seg.get("source_type") or meta_from_db.get("source_type")
+                        citation_text = seg.get("citation_text") or meta_from_db.get("citation_text")
+                        source_reference = seg.get("source_reference") or meta_from_db.get("source_reference")
+                        if source_type and not item.get("source_type"):
+                            item["source_type"] = source_type
+                        if citation_text and not item.get("citation_text"):
+                            item["citation_text"] = citation_text
+                        if source_reference and not item.get("source_reference"):
+                            item["source_reference"] = source_reference
+            except Exception as hydrate_err:
+                logger.warning(f"Failed to hydrate segment metadata for citations: {hydrate_err}")
         
         # --- POST_RANKING Hook: Islamic citation formatting & authority sort ---
         if (islamic_citation or islamic_authority_sort) and final_sorted:
@@ -3954,8 +4068,9 @@ class KnowledgeService:
                 if islamic_citation:
                     # Enrich results with citation_text (does NOT re-sort)
                     for c in final_sorted:
-                        if not c.get("citation_text"):
-                            c["citation_text"] = formatter.format_citation(c)
+                        formatted = formatter.format_citation(c)
+                        if formatted:
+                            c["citation_text"] = formatted
                     meta["pipeline_stages"].append(f"Islamic citation formatting: {len(final_sorted)} results enriched")
 
                 if islamic_authority_sort:
@@ -4008,6 +4123,10 @@ class KnowledgeService:
                 payload["_sources"] = sources
             else:
                 payload["_sources"] = []
+
+            # Ensure source_type reflects post-processed classification
+            if c.get("source_type"):
+                payload["source_type"] = c.get("source_type")
 
             # Stage 1: Raw scores (keep both new and old field names for compatibility)
             dense_raw = c.get("_dense_score")

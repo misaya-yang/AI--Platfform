@@ -16,10 +16,10 @@ Citation formats:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from .islamic_metadata import get_authority_order, IslamicMetadataExtractor
-from .section_extractor import get_section_aware_citation
 
 
 def _parse_metadata(segment: Dict[str, Any]) -> Dict[str, Any]:
@@ -63,39 +63,48 @@ class CitationFormatter:
         """Format a single citation from segment data.
 
         Uses pre-computed citation_text if available, otherwise generates from metadata.
-        Ensures section/chapter information is included when available.
-        
-        Returns:
-            Formatted citation string, or None if citation cannot be generated.
+        Returns a canonical Imam.md-compatible citation string.
         """
-        # Use pre-computed citation if available and non-empty
-        citation = segment.get("citation_text")
         metadata = _parse_metadata(segment)
-        
-        # Check if citation needs section information
-        has_section_in_citation = citation and (
-            "Section:" in str(citation) or 
-            "section" in str(citation).lower() or
-            metadata.get("section_title") in str(citation) if metadata.get("section_title") else False
-        )
-        
-        if citation and str(citation).strip() and has_section_in_citation:
-            # Citation already has section info
-            return str(citation).strip()
-        
-        # Generate from metadata
-        source_type_str = _get_source_type(segment, metadata)
-        source_ref = _parse_json_field(
-            segment.get("source_reference")
-            or metadata.get("source_reference")
-            or {}
-        )
+        citation = segment.get("citation_text") or metadata.get("citation_text")
 
-        from .islamic_chunking import IslamicSourceType
-        try:
-            source_type = IslamicSourceType(source_type_str)
-        except ValueError:
-            source_type = IslamicSourceType.UNKNOWN
+        if citation and str(citation).strip():
+            normalized = str(citation).strip()
+            lower = normalized.lower()
+            looks_like_filename = lower.endswith(".pdf") or lower.endswith(".docx")
+            bulugh_book = "bulugh al-maram" in lower and "book" in lower
+            too_generic = lower in {"quran", "hadith", "tafseer", "fiqh"}
+            looks_like_hadith = any(
+                key in lower
+                for key in (
+                    "sahih",
+                    "sunan",
+                    "bulugh",
+                    "bukhari",
+                    "muslim",
+                    "tirmidhi",
+                    "nasai",
+                    "ibn majah",
+                    "abu dawud",
+                )
+            )
+            missing_hadith_label = looks_like_hadith and "hadith" not in lower and "book" not in lower
+            quran_missing_ref = "quran" in lower and not re.search(r"quran\s+\d+:\d+", lower)
+            fiqh_missing_school = (
+                "jurisprudence according to the four sunni schools" in lower
+                and not any(s in lower for s in ("hanafi", "maliki", "shafi", "hanbali"))
+            )
+            if (
+                "paragraph" not in lower
+                and "section:" not in lower
+                and not looks_like_filename
+                and not bulugh_book
+                and not too_generic
+                and not missing_hadith_label
+                and not quran_missing_ref
+                and not fiqh_missing_school
+            ):
+                return normalized
 
         doc_meta = {
             "title": metadata.get("source_document") or metadata.get("document_title") or metadata.get("title"),
@@ -106,18 +115,69 @@ class CitationFormatter:
             "position": metadata.get("position"),
         }
 
+        # Generate from metadata
+        source_type_str = _get_source_type(segment, metadata)
+        source_ref = _parse_json_field(
+            segment.get("source_reference")
+            or metadata.get("source_reference")
+            or {}
+        )
+
+        from .islamic_chunking import IslamicSourceType
+        if source_type_str in ("unknown", "general_islamic"):
+            detected = self._extractor.detect_source_type(
+                str(segment.get("text") or ""), doc_title=doc_meta.get("title")
+            )
+            source_type_str = detected.value
+        try:
+            source_type = IslamicSourceType(source_type_str)
+        except ValueError:
+            source_type = IslamicSourceType.UNKNOWN
+
+        # If we lack structured reference, try to re-extract from text + doc_meta
+        text_value = str(segment.get("text") or "").strip()
+        if text_value:
+            def _needs_reextract() -> bool:
+                if not source_ref or source_ref == {}:
+                    return True
+                if source_type == IslamicSourceType.QURAN:
+                    return not (
+                        source_ref.get("surah")
+                        or source_ref.get("sura")
+                        or source_ref.get("ayah_start")
+                        or source_ref.get("verse_start")
+                        or source_ref.get("ayah")
+                    )
+                if source_type == IslamicSourceType.HADITH:
+                    return not source_ref.get("hadith_number")
+                if source_type == IslamicSourceType.FIQH:
+                    return not source_ref.get("topic")
+                return False
+
+            if _needs_reextract():
+                regenerated = self._extractor.extract(text_value, doc_meta)
+                source_ref = _parse_json_field(regenerated.get("source_reference") or {})
+                if source_type_str in ("unknown", "general_islamic") and regenerated.get("source_type"):
+                    try:
+                        source_type = IslamicSourceType(regenerated["source_type"])
+                    except ValueError:
+                        source_type = IslamicSourceType.UNKNOWN
+
+        # Normalize Bulugh Al-Maram references (avoid "Book" in citation)
+        if isinstance(source_ref, dict):
+            if source_ref.get("collection") == "Bulugh Al-Maram" and not source_ref.get("hadith_number"):
+                if source_ref.get("book"):
+                    source_ref["hadith_number"] = source_ref.get("book")
+                source_ref.pop("book", None)
+
+        # Persist improved source_type for downstream authority sort
+        existing_type = str(segment.get("source_type") or "").lower()
+        if source_type != IslamicSourceType.UNKNOWN and existing_type in ("", "unknown", "general_islamic"):
+            segment["source_type"] = source_type.value
+
         result = self._extractor.format_citation(source_type, source_ref, doc_meta=doc_meta)
-        
-        # Add section info if available but not in citation
-        section_title = metadata.get("section_title")
-        if section_title and result and section_title not in result:
-            # Check for existing citation that needs section
-            if citation and str(citation).strip():
-                result = f"{citation} — Section: {section_title}"
-            else:
-                result = f"{result} — Section: {section_title}"
-        elif citation and str(citation).strip():
-            # Use existing citation if no section to add
+
+        if (not result or not str(result).strip()) and citation:
             result = str(citation).strip()
         
         # Return None for empty/whitespace-only results

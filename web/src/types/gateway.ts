@@ -132,6 +132,13 @@ export interface ServiceDefinition {
   service_config?: ServiceConfig;
 }
 
+export interface ServiceUiPreferences {
+  hide_thinking?: boolean;
+  hide_timeline?: boolean;
+  tool_calls_mode?: "collapsed" | "hidden" | "full";
+  tool_calls_default_open?: boolean;
+}
+
 export interface ServiceDetail extends ServiceDefinition {
   connector_type: string;
   connector_config: Record<string, unknown>;

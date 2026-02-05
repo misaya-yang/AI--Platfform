@@ -482,6 +482,25 @@ class IngestionService:
             points = []
             for j, seg in enumerate(segments):
                 if j < len(embeddings):  # Safety check
+                    meta = seg.get("metadata") or {}
+                    payload_meta = {
+                        key: meta.get(key)
+                        for key in (
+                            "source_type",
+                            "citation_text",
+                            "source_reference",
+                            "section_title",
+                            "section_full_path",
+                            "page_number",
+                            "chunk_index",
+                            "paragraph_index",
+                            "source_document",
+                            "document_title",
+                            "madhab",
+                            "language",
+                        )
+                        if meta.get(key) is not None
+                    }
                     points.append({
                         "id": seg["segment_id"],
                         "vector": embeddings[j],
@@ -489,6 +508,10 @@ class IngestionService:
                             "document_id": document_id,
                             "dataset_id": dataset_id,
                             "text": seg["text"][:500],  # Truncate for payload
+                            "metadata": payload_meta,
+                            "source_type": payload_meta.get("source_type"),
+                            "citation_text": payload_meta.get("citation_text"),
+                            "source_reference": payload_meta.get("source_reference"),
                         },
                     })
             

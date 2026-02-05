@@ -1858,6 +1858,20 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
+    async def get_segments_by_ids(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
+        """批量获取 Segment，避免 N+1 查询。"""
+        if not self._pool:
+            return []
+        ids = [sid for sid in (segment_ids or []) if sid]
+        if not ids:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM segments WHERE segment_id = ANY($1::text[])",
+                ids,
+            )
+            return [self._row_to_dict(row) for row in rows]
+
     async def update_segment(
         self,
         segment_id: str,

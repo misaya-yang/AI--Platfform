@@ -227,16 +227,32 @@ function Avatar({ isUser }: { isUser: boolean }) {
 interface ChatMessageItemProps {
   message: ChatMessage;
   showToolCalls: boolean;
+  toolCallsMode?: "full" | "collapsed" | "hidden";
+  toolCallsDefaultOpen?: boolean;
   showTimeline?: boolean;
+  showThinkingIndicator?: boolean;
   index: number;
 }
 
 const ChatMessageItem = memo(
   forwardRef<HTMLDivElement, ChatMessageItemProps>(
-    function ChatMessageItem({ message, showToolCalls, showTimeline = true, index }, ref) {
+    function ChatMessageItem(
+      {
+        message,
+        showToolCalls,
+        toolCallsMode = "full",
+        toolCallsDefaultOpen = false,
+        showTimeline = true,
+        showThinkingIndicator = true,
+        index,
+      },
+      ref
+    ) {
       const { t } = useTranslation();
       const isUser = message.role === "user";
-      const hasToolCalls = showToolCalls && !isUser && message.toolCalls && message.toolCalls.length > 0;
+      const toolCallsCount = message.toolCalls?.length ?? 0;
+      const hasToolCalls = toolCallsCount > 0;
+      const canShowToolCalls = showToolCalls && toolCallsMode !== "hidden" && !isUser && hasToolCalls;
       const hasTimeline = showTimeline && !isUser && message.timeline && message.timeline.steps.length > 0;
       const hasArtifacts = !isUser && message.artifacts && message.artifacts.length > 0;
 
@@ -244,6 +260,9 @@ const ChatMessageItem = memo(
       const [isTimelineExpanded, setIsTimelineExpanded] = useState(
         message.timeline?.status === "running"
       );
+      const [toolCallsExpanded, setToolCallsExpanded] = useState(toolCallsDefaultOpen);
+      const shouldShowToolCallsList = canShowToolCalls && (toolCallsMode === "full" || toolCallsExpanded);
+      const shouldShowToolCallsSummary = canShowToolCalls && toolCallsMode === "collapsed" && !toolCallsExpanded;
 
       return (
         <motion.div
@@ -306,11 +325,39 @@ const ChatMessageItem = memo(
             )}
 
             {/* Tool Calls Section (legacy, shown when no timeline) */}
-            {!isUser && hasToolCalls && !hasTimeline && (
+            {shouldShowToolCallsSummary && !hasTimeline && (
+              <div className="mb-4 w-full min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setToolCallsExpanded(true)}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-lg border border-purple-200/60",
+                    "bg-purple-50/60 px-3 py-2 text-xs font-medium text-purple-700",
+                    "transition-colors hover:bg-purple-100/70 dark:border-purple-900/60",
+                    "dark:bg-purple-950/40 dark:text-purple-200 dark:hover:bg-purple-900/30"
+                  )}
+                >
+                  <span>{t("playground.toolCallsCollapsed", "Tool calls")} ({toolCallsCount})</span>
+                  <span className="text-[10px] uppercase tracking-wide">
+                    {t("playground.expand", "Expand")}
+                  </span>
+                </button>
+              </div>
+            )}
+            {!isUser && shouldShowToolCallsList && !hasTimeline && (
               <div className="mb-4 space-y-2 w-full min-w-0">
                 <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">
                   <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
                   {t("playground.toolCalls", "Tool Calls")}
+                  {toolCallsMode === "collapsed" && (
+                    <button
+                      type="button"
+                      onClick={() => setToolCallsExpanded(false)}
+                      className="ml-auto text-[10px] font-medium uppercase tracking-wide text-purple-500 hover:text-purple-600 dark:text-purple-300 dark:hover:text-purple-200"
+                    >
+                      {t("playground.collapse", "Collapse")}
+                    </button>
+                  )}
                 </div>
                 <div className="space-y-2 w-full">
                   {message.toolCalls?.map((tc, idx) => (
@@ -345,7 +392,7 @@ const ChatMessageItem = memo(
             ) : null}
 
             {/* AI Thinking / Loading Indicator - Manus-style */}
-            {!message.content && !hasToolCalls && !hasTimeline && !isUser && (
+            {showThinkingIndicator && !message.content && !canShowToolCalls && !hasTimeline && !isUser && (
               <ThinkingIndicator />
             )}
 
@@ -371,14 +418,20 @@ ChatMessageItem.displayName = "ChatMessageItem";
 export interface ChatWindowProps {
   messages: ChatMessage[];
   showToolCalls?: boolean;
+  toolCallsMode?: "full" | "collapsed" | "hidden";
+  toolCallsDefaultOpen?: boolean;
   /** Show AG-UI timeline in assistant messages (default: true) */
   showTimeline?: boolean;
+  showThinkingIndicator?: boolean;
 }
 
 export function ChatWindow({
   messages,
   showToolCalls = true,
+  toolCallsMode = "full",
+  toolCallsDefaultOpen = false,
   showTimeline = true,
+  showThinkingIndicator = true,
 }: ChatWindowProps) {
   return (
     <div className="mx-auto w-full max-w-4xl space-y-8 px-4 py-10">
@@ -388,7 +441,10 @@ export function ChatWindow({
             key={`${message.role}-${i}`}
             message={message}
             showToolCalls={showToolCalls}
+            toolCallsMode={toolCallsMode}
+            toolCallsDefaultOpen={toolCallsDefaultOpen}
             showTimeline={showTimeline}
+            showThinkingIndicator={showThinkingIndicator}
             index={i}
           />
         ))}

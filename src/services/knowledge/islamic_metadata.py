@@ -18,7 +18,7 @@ Citation formats follow the Wahda AI-Imam Configuration spec:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .islamic_chunking import (
     IslamicSourceType,
@@ -78,7 +78,30 @@ HADITH_COLLECTIONS: Dict[str, str] = {
     "ahmad": "Musnad Ahmad",
     "malik": "Muwatta Malik",
     "muwatta": "Muwatta Malik",
+    "bulugh al-maram": "Bulugh Al-Maram",
+    "bulugh al maram": "Bulugh Al-Maram",
+    "bulugh almaram": "Bulugh Al-Maram",
+    "bulugh": "Bulugh Al-Maram",
 }
+
+# Common Quran translation names used in document titles
+QURAN_TRANSLATIONS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"saheeh\s+international", re.IGNORECASE), "Saheeh International"),
+    (re.compile(r"sahih\s+international", re.IGNORECASE), "Saheeh International"),
+    (re.compile(r"yusuf\s+ali", re.IGNORECASE), "Yusuf Ali"),
+    (re.compile(r"pickthall", re.IGNORECASE), "Pickthall"),
+    (re.compile(r"clearquran|the\s+clear\s+quran", re.IGNORECASE), "ClearQuran"),
+    (re.compile(r"hilali[-\s]?khan", re.IGNORECASE), "Hilali-Khan"),
+    (re.compile(r"muhammad\s+asad", re.IGNORECASE), "Muhammad Asad"),
+]
+
+# Known fiqh book naming patterns
+FIQH_BOOK_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"islamic jurisprudence according to the four sunni schools", re.IGNORECASE),
+     "Islamic Jurisprudence According to the Four Sunni Schools"),
+    (re.compile(r"book\s+of\s+inheritance", re.IGNORECASE),
+     "Islamic Jurisprudence According to the Four Sunni Schools"),
+]
 
 # Madhab detection patterns
 MADHAB_PATTERNS = {
@@ -99,14 +122,15 @@ class IslamicMetadataExtractor:
             source_type, source_reference, citation_text, language, madhab
         """
         doc_meta = document_metadata or {}
+        doc_title = _get_doc_title(doc_meta)
         result: Dict[str, Any] = {}
 
         # Source type detection
-        source_type = self.detect_source_type(text)
+        source_type = self.detect_source_type(text, doc_title=doc_title)
         result["source_type"] = source_type.value
 
         # Source reference extraction
-        source_ref = self._extract_reference(text, source_type)
+        source_ref = self._extract_reference(text, source_type, doc_meta=doc_meta, doc_title=doc_title)
         result["source_reference"] = source_ref
 
         # Pre-formatted citation
@@ -116,15 +140,19 @@ class IslamicMetadataExtractor:
         result["language"] = self.detect_language(text)
 
         # Madhab detection
-        madhab = self.detect_madhab(text)
+        madhab = self.detect_madhab(text) or self._detect_madhab_from_title(doc_title)
         if madhab:
             result["madhab"] = madhab
 
         return result
 
-    def detect_source_type(self, text: str) -> IslamicSourceType:
+    def detect_source_type(self, text: str, doc_title: Optional[str] = None) -> IslamicSourceType:
         """Detect the Islamic source type of a single chunk."""
-        return detect_islamic_source_type(text)
+        detected = detect_islamic_source_type(text)
+        if detected not in (IslamicSourceType.UNKNOWN, IslamicSourceType.GENERAL_ISLAMIC):
+            return detected
+        hinted = _detect_source_type_from_doc_title(doc_title)
+        return hinted or detected
 
     def detect_language(self, text: str) -> str:
         """Detect language: 'ar', 'en', or 'ar_en' (bilingual)."""
@@ -172,25 +200,8 @@ class IslamicMetadataExtractor:
         - Tafseer: "Tafsir [Author], Surah [X], Verse [X]"
         - Fiqh: "[Book], [School], [Topic]"
         """
-        def _doc_context(meta: Optional[Dict[str, Any]]) -> str:
-            meta = meta or {}
-            doc_name = meta.get("title") or meta.get("name") or meta.get("source_document") or ""
-            section = meta.get("section_title") or ""
-            para = meta.get("paragraph_index")
-            if para is None:
-                para = meta.get("chunk_index")
-            if para is None:
-                para = meta.get("position")
-            parts = []
-            if doc_name:
-                parts.append(str(doc_name))
-            if section:
-                parts.append(f"Section {section}")
-            if para is not None:
-                parts.append(f"Paragraph {para}")
-            return ", ".join(parts)
-
-        doc_context = _doc_context(doc_meta)
+        doc_meta = doc_meta or {}
+        doc_context = _get_doc_title(doc_meta)
 
         if not reference:
             # Fallback to document-level citation
@@ -199,35 +210,32 @@ class IslamicMetadataExtractor:
         if source_type == IslamicSourceType.QURAN:
             surah = reference.get("surah")
             verse_start = reference.get("verse_start")
-            surah_name = reference.get("surah_name", "")
+            translation = reference.get("translation") or _detect_translation(doc_context or "")
             if surah and verse_start:
                 verse_end = reference.get("verse_end")
                 verse_str = str(verse_start)
                 if verse_end and verse_end != verse_start:
                     verse_str = f"{verse_start}-{verse_end}"
-                name_part = f" - {surah_name}" if surah_name else ""
-                base = f"Quran {surah}:{verse_str}{name_part}"
-                return f"{doc_context} — {base}" if doc_context else base
-            return f"{doc_context} — Quran" if doc_context else "Quran"
+                translation_part = f" - {translation}" if translation else ""
+                return f"Quran {surah}:{verse_str}{translation_part}"
+            return "Quran"
 
         elif source_type == IslamicSourceType.HADITH:
             collection = reference.get("collection", "")
             book = reference.get("book")
             hadith_num = reference.get("hadith_number")
-            narrator = reference.get("narrator", "")
-
             parts = []
             if collection:
                 parts.append(collection)
-            if book:
+            if book and collection != "Bulugh Al-Maram":
                 parts.append(f"Book {book}")
             if hadith_num:
                 parts.append(f"Hadith {hadith_num}")
-            if narrator and not parts:
-                parts.append(f"Narrated by {narrator}")
-
-            base = ", ".join(parts) if parts else "Hadith"
-            return f"{doc_context} — {base}" if doc_context else base
+            elif collection:
+                parts.append("Hadith")
+            if parts:
+                return ", ".join(parts)
+            return "Hadith"
 
         elif source_type == IslamicSourceType.TAFSEER:
             author = reference.get("author", "")
@@ -240,31 +248,26 @@ class IslamicMetadataExtractor:
                 base = "Tafsir"
 
             if surah:
-                try:
-                    surah_name = SURAH_NAMES.get(int(surah), "")
-                except (ValueError, TypeError):
-                    surah_name = ""
-                base += f", Surah {surah_name or surah}"
+                base += f", Surah {surah}"
             if verse:
                 base += f", Verse {verse}"
-            return f"{doc_context} — {base}" if doc_context else base
+            return base
 
         elif source_type == IslamicSourceType.FIQH:
             school = reference.get("school", "")
             topic = reference.get("topic", "")
-            book = reference.get("book", "")
+            book = reference.get("book") or _detect_fiqh_book(doc_context or "")
 
             parts = []
             if book:
                 parts.append(book)
-            elif school:
-                parts.append(f"Islamic Jurisprudence According to the Four Sunni Schools")
+            else:
+                parts.append("Islamic Jurisprudence According to the Four Sunni Schools")
             if school:
                 parts.append(school.title())
             if topic:
                 parts.append(topic)
-            base = ", ".join(parts) if parts else "Islamic Jurisprudence"
-            return f"{doc_context} — {base}" if doc_context else base
+            return ", ".join(parts)
 
         return doc_context or ""
 
@@ -272,19 +275,30 @@ class IslamicMetadataExtractor:
     # Internal reference extraction
     # ------------------------------------------------------------------
 
-    def _extract_reference(self, text: str, source_type: IslamicSourceType) -> Dict[str, Any]:
+    def _extract_reference(
+        self,
+        text: str,
+        source_type: IslamicSourceType,
+        doc_meta: Optional[Dict[str, Any]] = None,
+        doc_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Extract structured reference data based on source type."""
         if source_type == IslamicSourceType.QURAN:
-            return self._extract_quran_reference(text)
+            return self._extract_quran_reference(text, doc_meta=doc_meta, doc_title=doc_title)
         elif source_type == IslamicSourceType.HADITH:
-            return self._extract_hadith_reference(text)
+            return self._extract_hadith_reference(text, doc_meta=doc_meta, doc_title=doc_title)
         elif source_type == IslamicSourceType.TAFSEER:
             return self._extract_tafseer_reference(text)
         elif source_type == IslamicSourceType.FIQH:
-            return self._extract_fiqh_reference(text)
+            return self._extract_fiqh_reference(text, doc_meta=doc_meta, doc_title=doc_title)
         return {}
 
-    def _extract_quran_reference(self, text: str) -> Dict[str, Any]:
+    def _extract_quran_reference(
+        self,
+        text: str,
+        doc_meta: Optional[Dict[str, Any]] = None,
+        doc_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Extract Quran reference: surah number, verse start/end, surah name."""
         ref: Dict[str, Any] = {}
 
@@ -321,6 +335,43 @@ class IslamicMetadataExtractor:
                 ref["verse_start"] = int(match.group(2))
                 ref["surah_name"] = SURAH_NAMES.get(surah, "")
 
+        # Try "X:Y" format at line start (common in translations)
+        if not ref:
+            match = re.search(r'^\s*(\d{1,3})\s*:\s*(\d{1,3})\b', text)
+            if match:
+                surah = int(match.group(1))
+                ref["surah"] = surah
+                ref["verse_start"] = int(match.group(2))
+                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+
+        # Try Tanzil format "sura|ayah|text"
+        if not ref:
+            match = re.search(r'^\s*(\d{1,3})\s*\|\s*(\d{1,3})\s*\|', text)
+            if match:
+                surah = int(match.group(1))
+                ref["surah"] = surah
+                ref["verse_start"] = int(match.group(2))
+                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+
+        # Fallback: explicit range "X:Y-Z" anywhere in text
+        if not ref.get("surah"):
+            range_match = re.search(r'\b(\d{1,3})\s*:\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\b', text)
+            if range_match:
+                surah = int(range_match.group(1))
+                ref["surah"] = surah
+                ref["verse_start"] = int(range_match.group(2))
+                ref["verse_end"] = int(range_match.group(3))
+                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+
+        # Fallback: any "X:Y" reference anywhere in text
+        if not ref.get("surah"):
+            all_refs = re.findall(r'\b(\d{1,3})\s*:\s*(\d{1,3})\b', text)
+            if all_refs:
+                surah = int(all_refs[0][0])
+                ref["surah"] = surah
+                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+                ref["verse_start"] = int(all_refs[0][1])
+
         # Try Surah name extraction
         if not ref.get("surah_name"):
             surah_match = re.search(
@@ -330,17 +381,40 @@ class IslamicMetadataExtractor:
             if surah_match:
                 ref["surah_name"] = surah_match.group(1).strip()
 
+        # Fallback: detect surah header + verse list like "Sūrah 107: al-Mā’ūn" and "1. ..."
+        if not ref.get("surah"):
+            header_match = re.search(r'(?:Surah|Sūrah|Chapter)\s+(\d{1,3})', text, re.IGNORECASE)
+            if header_match:
+                surah = int(header_match.group(1))
+                ref["surah"] = surah
+                ref["surah_name"] = ref.get("surah_name") or SURAH_NAMES.get(surah, "")
+                verse_nums = re.findall(r'^\s*(\d{1,3})\.\s', text, re.MULTILINE)
+                if verse_nums:
+                    ref["verse_start"] = int(verse_nums[0])
+                    ref["verse_end"] = int(verse_nums[-1])
+
+        translation = _detect_translation(doc_title or _get_doc_title(doc_meta or {}))
+        if translation:
+            ref["translation"] = translation
+
         return ref
 
-    def _extract_hadith_reference(self, text: str) -> Dict[str, Any]:
+    def _extract_hadith_reference(
+        self,
+        text: str,
+        doc_meta: Optional[Dict[str, Any]] = None,
+        doc_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Extract Hadith reference: collection, book, hadith number, narrator."""
         ref: Dict[str, Any] = {}
 
-        # Collection detection
-        for key, canonical in HADITH_COLLECTIONS.items():
-            if re.search(re.escape(key), text, re.IGNORECASE):
-                ref["collection"] = canonical
-                break
+        # Collection detection (prefer document title to avoid mis-attribution)
+        ref["collection"] = _detect_hadith_collection_from_title(doc_title or _get_doc_title(doc_meta or {}))
+        if not ref.get("collection"):
+            for key, canonical in HADITH_COLLECTIONS.items():
+                if re.search(re.escape(key), text, re.IGNORECASE):
+                    ref["collection"] = canonical
+                    break
 
         # Book number
         book_match = re.search(r'Book\s+(?:No\.?\s*)?(\d+)', text, re.IGNORECASE)
@@ -348,9 +422,30 @@ class IslamicMetadataExtractor:
             ref["book"] = int(book_match.group(1))
 
         # Hadith number
-        hadith_match = re.search(r'Hadith\s*(?:No\.?\s*)?#?\s*(\d+)', text, re.IGNORECASE)
+        sample = text[:800]
+        hadith_match = re.search(r'Hadith\s*(?:No\.?\s*)?#?\s*(\d+)', sample, re.IGNORECASE)
         if hadith_match:
             ref["hadith_number"] = int(hadith_match.group(1))
+        if "hadith_number" not in ref:
+            para_match = re.search(r'Paragraph\s*(\d+)', sample, re.IGNORECASE)
+            if para_match:
+                ref["hadith_number"] = int(para_match.group(1))
+        if "hadith_number" not in ref:
+            lead_match = re.search(r'^\s*(\d{1,5})\s*(?:[.)-])\s*(?:Narrated|Reported|$)', sample, re.IGNORECASE | re.MULTILINE)
+            if lead_match:
+                ref["hadith_number"] = int(lead_match.group(1))
+        if "hadith_number" not in ref:
+            line_match = re.search(r'^\s*(\d{1,5})\s*(?:[.)-])\s+', sample, re.MULTILINE)
+            if line_match:
+                ref["hadith_number"] = int(line_match.group(1))
+        if "hadith_number" not in ref:
+            context_match = re.search(
+                r'\b(?:bukhari|muslim|tirmidhi|nasai|ibn\s+majah|bulugh)\D{0,12}(\d{1,5})\b',
+                sample,
+                re.IGNORECASE,
+            )
+            if context_match:
+                ref["hadith_number"] = int(context_match.group(1))
 
         # Narrator
         narrator_match = re.search(
@@ -363,6 +458,12 @@ class IslamicMetadataExtractor:
             narrator = re.sub(r'\s+(?:that|who|said)$', '', narrator, flags=re.IGNORECASE)
             if len(narrator) > 2:
                 ref["narrator"] = narrator
+
+        # Bulugh Al-Maram uses hadith numbering; avoid "Book" in citations
+        if ref.get("collection") == "Bulugh Al-Maram":
+            if "hadith_number" not in ref and ref.get("book"):
+                ref["hadith_number"] = ref.get("book")
+            ref.pop("book", None)
 
         return ref
 
@@ -397,7 +498,12 @@ class IslamicMetadataExtractor:
 
         return ref
 
-    def _extract_fiqh_reference(self, text: str) -> Dict[str, Any]:
+    def _extract_fiqh_reference(
+        self,
+        text: str,
+        doc_meta: Optional[Dict[str, Any]] = None,
+        doc_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Extract Fiqh reference: school, topic, book."""
         ref: Dict[str, Any] = {}
 
@@ -406,6 +512,8 @@ class IslamicMetadataExtractor:
             if pattern.search(text):
                 ref["school"] = madhab
                 break
+        if not ref.get("school"):
+            ref["school"] = self._detect_madhab_from_title(doc_title or _get_doc_title(doc_meta or {}))
 
         # Topic detection from chapter headers
         topic_match = re.search(
@@ -415,9 +523,115 @@ class IslamicMetadataExtractor:
         if topic_match:
             topic = topic_match.group(1).strip()
             if len(topic) < 100:
-                ref["topic"] = topic
+                ref["topic"] = _normalize_topic(topic)
+
+        # Fallback to section title or document title for topic
+        if not ref.get("topic"):
+            section_title = (doc_meta or {}).get("section_title")
+            if section_title:
+                ref["topic"] = _normalize_topic(section_title)
+        if not ref.get("topic"):
+            inferred_topic = _infer_topic_from_title(doc_title or _get_doc_title(doc_meta or {}))
+            if inferred_topic:
+                ref["topic"] = inferred_topic
+
+        # Book detection
+        if doc_title:
+            ref["book"] = _detect_fiqh_book(doc_title)
+        if not ref.get("book") and ref.get("school") and ref.get("topic"):
+            ref["book"] = "Islamic Jurisprudence According to the Four Sunni Schools"
 
         return ref
+
+    def _detect_madhab_from_title(self, doc_title: Optional[str]) -> Optional[str]:
+        if not doc_title:
+            return None
+        for madhab, pattern in MADHAB_PATTERNS.items():
+            if pattern.search(doc_title):
+                return madhab
+        return None
+
+
+def _get_doc_title(meta: Dict[str, Any]) -> str:
+    for key in ("title", "name", "source_document", "document_title"):
+        value = meta.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _detect_translation(doc_title: str) -> Optional[str]:
+    if not doc_title:
+        return None
+    for pattern, label in QURAN_TRANSLATIONS:
+        if pattern.search(doc_title):
+            return label
+    return None
+
+
+def _detect_source_type_from_doc_title(doc_title: Optional[str]) -> Optional[IslamicSourceType]:
+    if not doc_title:
+        return None
+    title = doc_title.lower()
+    if any(t in title for t in ("quran", "qur'an", "qurān", "القرآن", "القران")):
+        return IslamicSourceType.QURAN
+    if any(t in title for t in ("hadith", "sahih", "sunan", "bulugh", "bukhari", "muslim")):
+        return IslamicSourceType.HADITH
+    if any(t in title for t in ("tafsir", "tafseer", "تفسير")):
+        return IslamicSourceType.TAFSEER
+    if any(t in title for t in ("fiqh", "jurisprudence", "فقه", "sharia")):
+        return IslamicSourceType.FIQH
+    # Fiqh heuristics: madhab in title implies fiqh (if not already matched above)
+    for _, pattern in MADHAB_PATTERNS.items():
+        if pattern.search(doc_title):
+            return IslamicSourceType.FIQH
+    if re.search(r"book\s+of\s+\w+", title, re.IGNORECASE):
+        return IslamicSourceType.FIQH
+    return None
+
+
+def _detect_hadith_collection_from_title(doc_title: str) -> Optional[str]:
+    if not doc_title:
+        return None
+    lowered = doc_title.lower()
+    for key, canonical in HADITH_COLLECTIONS.items():
+        if key in lowered:
+            return canonical
+    return None
+
+
+def _detect_fiqh_book(doc_title: str) -> Optional[str]:
+    if not doc_title:
+        return None
+    for pattern, label in FIQH_BOOK_PATTERNS:
+        if pattern.search(doc_title):
+            return label
+    return None
+
+
+def _normalize_topic(topic: str) -> str:
+    cleaned = topic.strip()
+    cleaned = re.sub(r"^(?:the\s+)?(?:chapter|book|section)\s+of\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:the\s+)?(?:chapter|book|section)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\((?:hanafi|maliki|shafi.?i|hanbali)[^)]*\)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\.(?:pdf|docx)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"['\"`]+", "", cleaned)
+    cleaned = re.sub(r"\bpage\s*\d+\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*[-–—]\s*\d+$", "", cleaned)
+    cleaned = re.sub(r"\s+\d+$", "", cleaned)
+    cleaned = re.sub(r"[\s\.,;:]+$", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
+def _infer_topic_from_title(doc_title: str) -> Optional[str]:
+    if not doc_title:
+        return None
+    # Try to extract topic from "(Hanafi)" style titles
+    match = re.match(r"(.+?)\s*\((hanafi|maliki|shafi.?i|hanbali)\)", doc_title, re.IGNORECASE)
+    if match:
+        return _normalize_topic(match.group(1))
+    return None
 
 
 # Singleton-like authority ordering for citation sorting

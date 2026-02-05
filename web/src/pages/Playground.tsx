@@ -20,7 +20,7 @@ import type { ArtifactData } from "@/components/agent/ArtifactCard";
 import { cn } from "@/lib/utils";
 import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
 import { MultimodalInput } from "@/components/MultimodalInput";
-import type { ContentItem, StreamChunk, ToolCall } from "@/types/gateway";
+import type { ContentItem, StreamChunk, ToolCall, ServiceUiPreferences } from "@/types/gateway";
 import {
   Select,
   SelectContent,
@@ -439,6 +439,13 @@ export function PlaygroundPage() {
     // Default to true if not set
     return stored === null ? true : stored === "true";
   });
+  const activeService = services.find((s) => s.service_id === serviceId);
+  const uiPreferences = (activeService?.metadata?.ui_preferences || {}) as ServiceUiPreferences;
+  const toolCallsMode = uiPreferences.tool_calls_mode ?? "full";
+  const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? false;
+  const showTimeline = !uiPreferences.hide_timeline;
+  const showThinkingIndicator = !uiPreferences.hide_thinking;
+  const effectiveShowToolCalls = showToolCalls && toolCallsMode !== "hidden";
 
   // AG-UI Timeline state management
   const {
@@ -737,7 +744,6 @@ export function PlaygroundPage() {
     if (!serviceId) return;
     // 获取认证 token（动态获取避免 stale closure）
     const token = useAuthStore.getState().token;
-    const activeService = services.find((s) => s.service_id === serviceId);
     const isLangGraphService =
       activeService?.service_type === "langgraph" ||
       activeService?.metadata?.adapter_type === "langgraph";
@@ -1758,7 +1764,14 @@ export function PlaygroundPage() {
               : t("playground.typeToStart", "Type a message to start.")}
           </div>
         ) : (
-          <ChatWindow messages={messages} showToolCalls={showToolCalls} />
+          <ChatWindow
+            messages={messages}
+            showToolCalls={effectiveShowToolCalls}
+            toolCallsMode={toolCallsMode}
+            toolCallsDefaultOpen={toolCallsDefaultOpen}
+            showTimeline={showTimeline}
+            showThinkingIndicator={showThinkingIndicator}
+          />
         )}
       </div>
 
@@ -1800,6 +1813,7 @@ export function PlaygroundPage() {
                 id="toggle-tool-calls"
                 checked={showToolCalls}
                 onCheckedChange={setShowToolCalls}
+                disabled={toolCallsMode === "hidden"}
               />
               {t("playground.showToolCalls", "Show tool calls")}
             </label>
