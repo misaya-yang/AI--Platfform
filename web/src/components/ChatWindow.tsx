@@ -10,6 +10,35 @@ import { ArtifactList, type ArtifactData } from "@/components/agent/ArtifactCard
 import type { ToolCall } from "@/types/gateway";
 import { Bot, User, Clock, Zap, MessageSquare, ChevronDown, Activity, Sparkles } from "lucide-react";
 
+/**
+ * Strip "Process (brief): Plan: ... Actions & observations:\n[•-] Action: ..." block
+ * for display in 智能对话 (Playground).
+ *
+ * SAFETY:
+ * 1. Only matches if text STARTS with "Process (brief):" (anchored with ^)
+ * 2. Requires both "Process (brief):" AND "Actions & observations:" to match
+ * 3. Strips consecutive lines containing "Action:" after the observations header
+ * 4. Handles various bullet formats: "• Action:", "- Action:", "Action:", etc.
+ * 5. Returns original text if stripping would result in empty content
+ */
+function stripProcessSectionForDisplay(text: string): string {
+  if (!text || typeof text !== "string") return text;
+
+  // Must start with "Process (brief):" to match
+  // Then match content until "Actions & observations:" header
+  // Then match zero or more lines containing "Action:" (with optional bullet prefix: •, -, *)
+  const re = /^Process\s*\(\s*brief\s*\)\s*:[\s\S]*?Actions\s*&\s*observations\s*:\s*\n+(?:\s*[•\-*]?\s*Action:[^\n]*(?:\n|$))*/i;
+
+  const stripped = text.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
+
+  // Safety: if stripping resulted in empty content, return original unchanged
+  if (!stripped) {
+    return text;
+  }
+
+  return stripped;
+}
+
 export interface ToolCallWithResult {
   toolCall: ToolCall;
   result?: string;
@@ -407,7 +436,7 @@ const ChatMessageItem = memo(
                   <div className="whitespace-pre-wrap">{message.content}</div>
                 ) : (
                   <StreamOutput
-                    text={message.content}
+                    text={stripProcessSectionForDisplay(message.content)}
                     isStreaming={!!message.isStreaming}
                     id={`msg-${index}`}
                   />
