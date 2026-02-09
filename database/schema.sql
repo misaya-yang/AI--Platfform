@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     tier VARCHAR(50) NOT NULL DEFAULT 'normal',
     rate_limit JSONB,
     allowed_services VARCHAR(255)[] NOT NULL DEFAULT ARRAY[]::VARCHAR(255)[],
+    allowed_models VARCHAR(255)[] NOT NULL DEFAULT ARRAY[]::VARCHAR(255)[],
     expires_at TIMESTAMPTZ,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     last_used_at TIMESTAMPTZ,
@@ -126,6 +127,7 @@ COMMENT ON COLUMN api_keys.permissions IS '权限列表（可选，细粒度权�
 COMMENT ON COLUMN api_keys.tier IS '用户层级（anonymous/normal/premium/enterprise/admin 等）。';
 COMMENT ON COLUMN api_keys.rate_limit IS 'Key 级限流覆盖配置（可选）。';
 COMMENT ON COLUMN api_keys.allowed_services IS '允许访问的服务列表（可选）。';
+COMMENT ON COLUMN api_keys.allowed_models IS '允许访问的模型白名单（可选）。';
 COMMENT ON COLUMN api_keys.expires_at IS '过期时间（可选）。';
 COMMENT ON COLUMN api_keys.enabled IS '是否启用。';
 COMMENT ON COLUMN api_keys.last_used_at IS '最后使用时间。';
@@ -760,6 +762,15 @@ CREATE TABLE IF NOT EXISTS usage_records (
     total_cost_cents INTEGER GENERATED ALWAYS AS (input_cost_cents + output_cost_cents) STORED,
     latency_ms INTEGER,
     first_token_ms INTEGER,
+    request_total_duration_ms INTEGER DEFAULT 0,
+    llm_inference_duration_ms INTEGER DEFAULT 0,
+    retrieval_duration_ms INTEGER DEFAULT 0,
+    tool_call_duration_ms INTEGER DEFAULT 0,
+    agent_or_graph_overhead_ms INTEGER DEFAULT 0,
+    tool_call_breakdown JSONB DEFAULT '{}'::jsonb,
+    error_type VARCHAR(32),
+    trace_sampled BOOLEAN NOT NULL DEFAULT FALSE,
+    sample_reason VARCHAR(32),
     status VARCHAR(32) DEFAULT 'success',
     request_type VARCHAR(32),
     metadata JSONB DEFAULT '{}',
@@ -767,6 +778,35 @@ CREATE TABLE IF NOT EXISTS usage_records (
 );
 
 COMMENT ON TABLE usage_records IS '使用记录表：细粒度请求记录（保留30天）';
+
+-- 请求追踪采样表（持久化可回放 Trace）
+CREATE TABLE IF NOT EXISTS request_traces (
+    trace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id VARCHAR(64) NOT NULL,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    service_id VARCHAR(64) NOT NULL,
+    assistant_id VARCHAR(64) NOT NULL DEFAULT '',
+    provider VARCHAR(64) NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'success',
+    error_type VARCHAR(32),
+    request_total_duration_ms INTEGER NOT NULL DEFAULT 0,
+    first_token_latency_ms INTEGER NOT NULL DEFAULT 0,
+    llm_inference_duration_ms INTEGER NOT NULL DEFAULT 0,
+    retrieval_duration_ms INTEGER NOT NULL DEFAULT 0,
+    tool_call_duration_ms INTEGER NOT NULL DEFAULT 0,
+    agent_or_graph_overhead_ms INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cost_cents INTEGER NOT NULL DEFAULT 0,
+    sample_reason VARCHAR(32) NOT NULL DEFAULT 'baseline',
+    trace_steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE request_traces IS '请求追踪采样表：用于 Dashboard Trace 追踪与故障定位。';
 
 -- ============================================================
 -- 16. 每日聚合表（永久保留）
@@ -851,6 +891,12 @@ CREATE TABLE IF NOT EXISTS user_quotas (
     blocked_reason VARCHAR(256),
     blocked_at TIMESTAMPTZ,
     warning_threshold INTEGER DEFAULT 80,
+    overage_strategy VARCHAR(32) NOT NULL DEFAULT 'allow_but_alert'
+        CHECK (overage_strategy IN ('hard_block', 'rate_limit', 'downgrade_model', 'allow_but_alert')),
+    downgraded_model VARCHAR(128),
+    temporary_extra_tokens BIGINT NOT NULL DEFAULT 0,
+    temporary_extra_cost_cents BIGINT NOT NULL DEFAULT 0,
+    temporary_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (tenant_id, user_id)
@@ -1482,6 +1528,7 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_keys_enabled ON api_keys(enabled);
 CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at ON api_keys(expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_keys_allowed_models_gin ON api_keys USING GIN(allowed_models);
 
 CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_tier ON users(tier);
@@ -1566,9 +1613,19 @@ CREATE INDEX IF NOT EXISTS idx_segment_images_proximity ON segment_images(segmen
 CREATE INDEX IF NOT EXISTS idx_usage_tenant_date ON usage_records (tenant_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_records (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_records (model, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records (provider, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_assistant ON usage_records (assistant_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_service ON usage_records (service_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_status_error_type ON usage_records (status, error_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_records (created_at);
+
+-- request_traces indexes
+CREATE INDEX IF NOT EXISTS idx_request_traces_tenant_created ON request_traces (tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_traces_request_id ON request_traces (request_id);
+CREATE INDEX IF NOT EXISTS idx_request_traces_service ON request_traces (service_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_traces_user ON request_traces (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_traces_provider_model ON request_traces (provider, model, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_request_traces_status_error ON request_traces (status, error_type, created_at DESC);
 
 -- usage_daily_aggregates indexes
 CREATE INDEX IF NOT EXISTS idx_usage_daily_tenant_date ON usage_daily_aggregates (tenant_id, date);

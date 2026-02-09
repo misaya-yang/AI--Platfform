@@ -16,7 +16,7 @@ import dayjs from "dayjs";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
-import { getUsageTimeSeries } from "@/api/usage";
+import { getPerformanceBreakdown } from "@/api/usage";
 import { useTranslation } from "react-i18next";
 
 type LatencyMetric = "p50" | "p95" | "p99" | "avg";
@@ -30,7 +30,7 @@ export function PerformancePanel() {
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["dashboard-performance", dateRange, granularity, lastRefresh.getTime()],
     queryFn: () =>
-      getUsageTimeSeries({
+      getPerformanceBreakdown({
         start_date: dateRange[0],
         end_date: dateRange[1],
         granularity,
@@ -40,10 +40,15 @@ export function PerformancePanel() {
 
   const chartData = (data?.data || []).map((point) => ({
     date: point.date,
-    avgLatency: point.avg_latency_ms,
-    p50: Math.round(point.avg_latency_ms * 0.7),
-    p95: Math.round(point.avg_latency_ms * 1.5),
-    p99: Math.round(point.avg_latency_ms * 2),
+    avgLatency: point.avg_total_ms,
+    p50: point.p50_total_ms,
+    p95: point.p95_total_ms,
+    p99: point.p99_total_ms,
+    ttfb: point.avg_first_token_ms,
+    llm: point.avg_llm_inference_ms,
+    retrieval: point.avg_retrieval_ms,
+    tool: point.avg_tool_call_ms,
+    overhead: point.avg_overhead_ms,
   }));
 
   const latestData = chartData[chartData.length - 1];
@@ -103,6 +108,52 @@ export function PerformancePanel() {
             value={latestData?.avgLatency || 0}
             suffix="ms"
             styles={{ content: { fontSize: 16, color: "#3b82f6" } }}
+          />
+        </Col>
+      </Row>
+
+      {/* Phase breakdown */}
+      <Row gutter={12} style={{ marginBottom: 16 }}>
+        <Col span={8}>
+          <Statistic
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>TTFB</span>}
+            value={latestData?.ttfb || 0}
+            suffix="ms"
+            styles={{ content: { fontSize: 14, color: "#06b6d4" } }}
+          />
+        </Col>
+        <Col span={8}>
+          <Statistic
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>LLM</span>}
+            value={latestData?.llm || 0}
+            suffix="ms"
+            styles={{ content: { fontSize: 14, color: "#8b5cf6" } }}
+          />
+        </Col>
+        <Col span={8}>
+          <Statistic
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Retrieval</span>}
+            value={latestData?.retrieval || 0}
+            suffix="ms"
+            styles={{ content: { fontSize: 14, color: "#10b981" } }}
+          />
+        </Col>
+      </Row>
+      <Row gutter={12} style={{ marginBottom: 8 }}>
+        <Col span={12}>
+          <Statistic
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Tool Calls</span>}
+            value={latestData?.tool || 0}
+            suffix="ms"
+            styles={{ content: { fontSize: 14, color: "#f59e0b" } }}
+          />
+        </Col>
+        <Col span={12}>
+          <Statistic
+            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Overhead</span>}
+            value={latestData?.overhead || 0}
+            suffix="ms"
+            styles={{ content: { fontSize: 14, color: "#ef4444" } }}
           />
         </Col>
       </Row>

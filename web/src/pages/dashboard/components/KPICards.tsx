@@ -10,6 +10,7 @@ import {
   DatabaseOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
+  MinusOutlined,
 } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import { useDashboardContext } from "../DashboardContext";
@@ -17,6 +18,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary } from "@/api/usage";
 import { LAYOUT, getColors, gridStyles } from "../styles";
 import { useTranslation } from "react-i18next";
+import dayjs from "dayjs";
 
 function formatNumber(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -29,15 +31,72 @@ function formatCurrency(value: number): string {
   return `$${value.toFixed(4)}`;
 }
 
-interface TrendProps {
-  value: number;
-  isPositiveGood?: boolean;
+/** 计算环比变化率: (current - previous) / previous * 100 */
+function computeTrend(current: number, previous: number): number | null {
+  if (previous === 0 && current === 0) return null;
+  if (previous === 0) return null; // NEW data, no baseline
+  return parseFloat(((current - previous) / previous * 100).toFixed(1));
 }
 
-function Trend({ value, isPositiveGood = true }: TrendProps) {
+/** 根据当前日期范围计算等长的"上一周期"范围 */
+function getPreviousPeriod(dateRange: [string, string]): [string, string] {
+  const start = dayjs(dateRange[0]);
+  const end = dayjs(dateRange[1]);
+  const durationDays = end.diff(start, "day") + 1;
+  const prevEnd = start.subtract(1, "day");
+  const prevStart = prevEnd.subtract(durationDays - 1, "day");
+  return [prevStart.format("YYYY-MM-DD"), prevEnd.format("YYYY-MM-DD")];
+}
+
+interface TrendProps {
+  value: number | null;
+  isPositiveGood?: boolean;
+  isNewData?: boolean;
+}
+
+function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
+
+  if (isNewData) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: 11,
+          fontWeight: 600,
+          color: colors.accent,
+          marginTop: 4,
+        }}
+      >
+        <span>NEW</span>
+        <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.noBaseline", "无基线对比")}</span>
+      </div>
+    );
+  }
+
+  if (value === null || value === undefined) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: 11,
+          fontWeight: 600,
+          color: colors.textMuted,
+          marginTop: 4,
+        }}
+      >
+        <MinusOutlined />
+        <span>--</span>
+      </div>
+    );
+  }
+
   const isUp = value > 0;
   const isGood = isUp === isPositiveGood;
   const color = isGood ? colors.success : colors.error;
@@ -69,8 +128,11 @@ interface KPICardProps {
   iconGradient: string;
   suffix?: string;
   loading?: boolean;
-  trend?: number;
+  trend?: number | null;
   isPositiveGood?: boolean;
+  isNewData?: boolean;
+  onClick?: () => void;
+  noData?: boolean;
 }
 
 function KPICard({ 
@@ -82,7 +144,10 @@ function KPICard({
   suffix, 
   loading,
   trend,
-  isPositiveGood 
+  isPositiveGood,
+  isNewData,
+  onClick,
+  noData,
 }: KPICardProps) {
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
@@ -103,7 +168,9 @@ function KPICard({
         transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
         position: "relative",
         overflow: "hidden",
+        cursor: onClick ? "pointer" : "default",
       }}
+      onClick={onClick}
       onMouseEnter={(e) => {
         e.currentTarget.style.transform = "translateY(-4px)";
         e.currentTarget.style.boxShadow = colors.shadowLg;
@@ -201,7 +268,13 @@ function KPICard({
                 </span>
               )}
             </div>
-            {trend !== undefined && <Trend value={trend} isPositiveGood={isPositiveGood} />}
+            {noData ? (
+              <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 4 }}>
+                暂无真实请求数据
+              </div>
+            ) : (
+              <Trend value={trend ?? null} isPositiveGood={isPositiveGood} isNewData={isNewData} />
+            )}
           </div>
         </div>
       )}
@@ -213,8 +286,9 @@ export function KPICards() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
-  const { dateRange, serviceId, userId, lastRefresh } = useDashboardContext();
+  const { dateRange, serviceId, userId, lastRefresh, setTraceFilter } = useDashboardContext();
 
+  // 当前周期数据
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard-kpi", dateRange, serviceId, userId, lastRefresh.getTime()],
     queryFn: () =>
@@ -227,50 +301,93 @@ export function KPICards() {
     staleTime: 30000,
   });
 
+  // 上一周期数据（用于真实环比计算）
+  const [prevStart, prevEnd] = getPreviousPeriod(dateRange);
+  const { data: prevData } = useQuery({
+    queryKey: ["dashboard-kpi-prev", prevStart, prevEnd, serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      getUsageSummary({
+        start_date: prevStart,
+        end_date: prevEnd,
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+      }),
+    staleTime: 60000,
+  });
+
+  const hasData = (data?.total_requests || 0) > 0;
+  const prevHasData = (prevData?.total_requests || 0) > 0;
+  const isNewData = hasData && !prevHasData;
+
+  // 真实环比计算
+  const requestsTrend = computeTrend(data?.total_requests || 0, prevData?.total_requests || 0);
+  const costTrend = computeTrend(data?.total_cost_usd || 0, prevData?.total_cost_usd || 0);
+  const latencyTrend = computeTrend(data?.avg_latency_ms || 0, prevData?.avg_latency_ms || 0);
+  const successRateTrend = computeTrend(data?.success_rate || 0, prevData?.success_rate || 0);
+  const tokensTrend = computeTrend(data?.total_tokens || 0, prevData?.total_tokens || 0);
+
   const kpiData = [
     {
       title: t("metrics.totalRequests"),
-      value: formatNumber(data?.total_requests || 0),
+      value: hasData ? formatNumber(data?.total_requests || 0) : "--",
       icon: <ApiOutlined />,
       iconColor: colors.accent,
       iconGradient: colors.accentGradient,
-      trend: 12.5,
+      trend: requestsTrend,
+      isNewData,
+      noData: !hasData,
     },
     {
-      title: t("analytics.totalCost"),
-      value: formatCurrency(data?.total_cost_usd || 0),
+      title: t("dashboard.kpi.totalCostUsd", "总成本 (USD)"),
+      value: hasData ? formatCurrency(data?.total_cost_usd || 0) : "--",
       icon: <DollarOutlined />,
       iconColor: colors.success,
       iconGradient: colors.successGradient,
-      trend: -5.2,
+      trend: costTrend,
       isPositiveGood: false,
+      isNewData,
+      noData: !hasData,
     },
     {
       title: t("metrics.avgLatency"),
-      value: Math.round(data?.avg_latency_ms || 0),
-      suffix: "ms",
+      value: hasData ? Math.round(data?.avg_latency_ms || 0) : "--",
+      suffix: hasData ? "ms" : undefined,
       icon: <ThunderboltOutlined />,
       iconColor: colors.warning,
       iconGradient: colors.warningGradient,
-      trend: -8.4,
+      trend: latencyTrend,
       isPositiveGood: false,
+      isNewData,
+      noData: !hasData,
+      onClick: () => {
+        setTraceFilter({ sample_reason: "slow_request" });
+        document.getElementById("request-trace-panel")?.scrollIntoView({ behavior: "smooth" });
+      },
     },
     {
       title: t("metrics.successRate"),
-      value: (data?.success_rate || 0).toFixed(1),
-      suffix: "%",
+      value: hasData ? (data?.success_rate || 0).toFixed(1) : "--",
+      suffix: hasData ? "%" : undefined,
       icon: <CheckCircleOutlined />,
       iconColor: data?.success_rate && data.success_rate >= 95 ? colors.success : colors.warning,
       iconGradient: data?.success_rate && data.success_rate >= 95 ? colors.successGradient : colors.warningGradient,
-      trend: 0.2,
+      trend: successRateTrend,
+      isNewData,
+      noData: !hasData,
+      onClick: () => {
+        setTraceFilter({ status: "error" });
+        document.getElementById("request-trace-panel")?.scrollIntoView({ behavior: "smooth" });
+      },
     },
     {
       title: t("metrics.totalTokens"),
-      value: formatNumber(data?.total_tokens || 0),
+      value: hasData ? formatNumber(data?.total_tokens || 0) : "--",
       icon: <DatabaseOutlined />,
       iconColor: colors.purple,
       iconGradient: colors.purpleGradient,
-      trend: 15.8,
+      trend: tokensTrend,
+      isNewData,
+      noData: !hasData,
     },
   ];
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 透明代理路由
 
 提供通配符路由 /proxy/{service_name}/{path:path}，支持：
@@ -19,13 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from ..deps import (
-    get_settings,
     get_user_context,
     get_auth_context,
     get_rate_limiter,
     AuthContext,
 )
-from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError
 from ...core.gateway.multi_dimension_rate_limiter import (
@@ -34,14 +32,16 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitHeaders,
 )
 from ...core.observability.logging import get_logger
+from ...core.utils import estimate_tokens
 from ...proxy import (
     TransparentProxy,
     ProxyRequest,
     ProxyConfigLoader,
-    ContextInjector,
     RequestContext,
 )
-from ...proxy.transparent_proxy import LANGGRAPH_OPERATION_TYPES
+from ...services.billing import get_quota_service
+from ...services.billing.quota_service import OverageStrategy, QuotaStatus
+from ...services.metrics.usage_parser import extract_model
 
 logger = get_logger(__name__)
 
@@ -70,6 +70,7 @@ async def _record_security_event(
 
 # ============ 依赖注入 ============
 
+
 def get_transparent_proxy(request: Request) -> TransparentProxy:
     """获取透明代理实例"""
     proxy = getattr(request.app.state, "transparent_proxy", None)
@@ -94,6 +95,7 @@ def get_proxy_config_loader(request: Request) -> ProxyConfigLoader:
 
 # ============ 权限和限流检查 ============
 
+
 def _normalize_allowed_services(value: Any) -> List[str]:
     if not value:
         return []
@@ -102,6 +104,259 @@ def _normalize_allowed_services(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+def _normalize_allowed_models(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
+def _is_model_allowed(allowed_models: List[str], model: str) -> bool:
+    if not allowed_models:
+        return True
+    normalized_model = (model or "").strip().lower()
+    if not normalized_model:
+        return False
+    for allowed in allowed_models:
+        normalized_allowed = allowed.strip().lower()
+        if not normalized_allowed:
+            continue
+        if normalized_allowed == "*":
+            return True
+        if normalized_allowed.endswith("*"):
+            if normalized_model.startswith(normalized_allowed[:-1]):
+                return True
+            continue
+        if normalized_model == normalized_allowed:
+            return True
+    return False
+
+
+def _estimate_tokens_from_payload(payload: Any) -> int:
+    """Best-effort request token estimate for pre-quota checks."""
+    if payload is None:
+        return 0
+    if isinstance(payload, str):
+        return estimate_tokens(payload)
+    if isinstance(payload, (list, dict)):
+        text_like_keys = {
+            "prompt",
+            "query",
+            "question",
+            "instruction",
+            "text",
+            "content",
+            "message",
+            "messages",
+            "input",
+        }
+
+        def _walk(node: Any, parent_key: str = "") -> int:
+            if isinstance(node, str):
+                return estimate_tokens(node) if parent_key in text_like_keys else 0
+            if isinstance(node, list):
+                return sum(_walk(item, parent_key) for item in node)
+            if isinstance(node, dict):
+                subtotal = 0
+                for key, value in node.items():
+                    key_name = str(key).strip().lower()
+                    if isinstance(value, str):
+                        if key_name in text_like_keys:
+                            subtotal += estimate_tokens(value)
+                    else:
+                        subtotal += _walk(value, key_name)
+                return subtotal
+            return 0
+
+        total = _walk(payload)
+    else:
+        total = 0
+
+    if total <= 0:
+        # Conservative fallback to avoid bypassing quota on unknown payload structures.
+        raw_size = len(json.dumps(payload, ensure_ascii=False))
+        total = max(raw_size // 4, 1)
+    return total
+
+
+def _override_model_in_request_payload(payload: Any, model: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    updated = dict(payload)
+    updated["model"] = model
+    if isinstance(updated.get("input"), dict):
+        input_payload = dict(updated["input"])
+        input_payload.setdefault("model", model)
+        updated["input"] = input_payload
+    if isinstance(updated.get("config"), dict):
+        config_payload = dict(updated["config"])
+        configurable = config_payload.get("configurable")
+        if isinstance(configurable, dict):
+            new_configurable = dict(configurable)
+            new_configurable["model"] = model
+            config_payload["configurable"] = new_configurable
+        updated["config"] = config_payload
+    return updated
+
+
+def _decode_json_body(body: Optional[bytes]) -> Optional[Any]:
+    if not body:
+        return None
+    try:
+        return json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _encode_json_body(payload: Any) -> Optional[bytes]:
+    if payload is None:
+        return None
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _should_apply_quota_policy(method: str, operation: str, path: str) -> bool:
+    if method.upper() not in {"POST", "PUT", "PATCH"}:
+        return False
+    if operation.startswith("run_"):
+        return True
+    normalized_path = path.lower()
+    return "/runs" in normalized_path
+
+
+async def _enforce_model_allowlist(
+    request: Request,
+    service_name: str,
+    user: UserContext,
+    auth: AuthContext,
+    model: Optional[str],
+) -> None:
+    api_key_info = getattr(request.state, "api_key_info", None)
+    if not api_key_info:
+        return
+    allowed_models = _normalize_allowed_models(api_key_info.get("allowed_models"))
+    if not allowed_models:
+        return
+    resolved_model = (model or "").strip()
+    if _is_model_allowed(allowed_models, resolved_model):
+        return
+
+    await _record_security_event(
+        event_type="auth_failed",
+        tenant_id=auth.tenant_id or user.tenant_id or "public",
+        user_id=user.user_id or auth.user_id or "anonymous",
+        service_id=service_name,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=f"Permission denied: model '{resolved_model or '<empty>'}' not allowed for this API key",
+    )
+
+
+async def _apply_quota_policy(
+    *,
+    request: Request,
+    user: UserContext,
+    auth: AuthContext,
+    service_name: str,
+    operation: str,
+    path: str,
+    body: Optional[bytes],
+    model_hint: Optional[str],
+) -> tuple[Optional[bytes], Optional[str]]:
+    """
+    Enforce quota governance policy before proxying.
+
+    Returns:
+        (possibly mutated body, final model to use)
+    """
+    if not _should_apply_quota_policy(request.method, operation, path):
+        return body, model_hint
+
+    quota_service = get_quota_service()
+    if not quota_service or not quota_service.database:
+        return body, model_hint
+
+    payload = _decode_json_body(body)
+    estimated_tokens = _estimate_tokens_from_payload(payload)
+
+    try:
+        check = await quota_service.check_quota(
+            tenant_id=auth.tenant_id or user.tenant_id or "default",
+            user_id=user.user_id or auth.user_id or "anonymous",
+            estimated_tokens=estimated_tokens,
+        )
+    except Exception as exc:
+        logger.warning(f"[ProxyQuota] quota check failed, skipping enforcement: {exc}")
+        return body, model_hint
+
+    if check.status == QuotaStatus.BLOCKED:
+        await _record_security_event(
+            event_type="quota_exceeded",
+            tenant_id=auth.tenant_id or user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": check.message,
+                "status": check.status.value,
+                "policy": check.overage_strategy.value,
+            },
+        )
+
+    if not check.can_proceed:
+        status_code = 429 if check.overage_strategy == OverageStrategy.RATE_LIMIT else 403
+        await _record_security_event(
+            event_type="quota_exceeded",
+            tenant_id=auth.tenant_id or user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "message": check.message,
+                "status": check.status.value,
+                "policy": check.overage_strategy.value,
+            },
+            headers={"Retry-After": "60"} if status_code == 429 else None,
+        )
+
+    final_model = (model_hint or "").strip() or None
+    if check.status == QuotaStatus.EXCEEDED:
+        await _record_security_event(
+            event_type="quota_exceeded",
+            tenant_id=auth.tenant_id or user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+        )
+        if check.overage_strategy == OverageStrategy.DOWNGRADE_MODEL and check.downgraded_model:
+            downgraded_model = check.downgraded_model.strip()
+            if downgraded_model and payload is not None:
+                payload = _override_model_in_request_payload(payload, downgraded_model)
+                body = _encode_json_body(payload)
+            final_model = downgraded_model
+        elif check.overage_strategy == OverageStrategy.ALLOW_BUT_ALERT:
+            try:
+                await quota_service.create_alert(
+                    tenant_id=auth.tenant_id or user.tenant_id or "default",
+                    user_id=user.user_id or "anonymous",
+                    alert_type="quota_allow_but_alert",
+                    threshold_value=check.warning_threshold,
+                    current_value=check.daily_tokens_used,
+                    limit_value=check.daily_tokens_limit or 0,
+                    message=check.message,
+                )
+            except Exception:
+                pass
+
+    return body, final_model
 
 
 async def _resolve_service_definition(registry, service_name: str):
@@ -155,10 +410,7 @@ async def check_service_authorization(
         logger.warning(
             f"[ProxyAuth] User {user.user_id} lacks service:invoke permission for {service_name}"
         )
-        raise HTTPException(
-            status_code=403,
-            detail="Permission denied: service:invoke required"
-        )
+        raise HTTPException(status_code=403, detail="Permission denied: service:invoke required")
 
     # 2. 服务级别认证配置检查
     registry = getattr(request.app.state, "registry", None)
@@ -171,7 +423,9 @@ async def check_service_authorization(
         if getattr(service, "name", None):
             service_aliases.add(service.name)
 
-        service_config = service.get_service_config() if hasattr(service, "get_service_config") else None
+        service_config = (
+            service.get_service_config() if hasattr(service, "get_service_config") else None
+        )
         if service_config and service_config.auth and service_config.auth.enabled:
             auth_config = service_config.auth
 
@@ -187,7 +441,7 @@ async def check_service_authorization(
                     )
                     raise HTTPException(
                         status_code=403,
-                        detail=f"Permission denied: authentication required for {service_name}"
+                        detail=f"Permission denied: authentication required for {service_name}",
                     )
 
                 # allowed_roles
@@ -206,7 +460,7 @@ async def check_service_authorization(
                         )
                         raise HTTPException(
                             status_code=403,
-                            detail=f"Permission denied: not authorized for service {service_name}"
+                            detail=f"Permission denied: not authorized for service {service_name}",
                         )
 
                 # allowed_api_keys (prefix allowlist)
@@ -226,12 +480,13 @@ async def check_service_authorization(
                         )
                         raise HTTPException(
                             status_code=403,
-                            detail=f"Permission denied: API key required for service {service_name}"
+                            detail=f"Permission denied: API key required for service {service_name}",
                         )
 
                     if "*" not in auth_config.allowed_api_keys:
                         matched = any(
-                            api_key_value.startswith(prefix) for prefix in auth_config.allowed_api_keys
+                            api_key_value.startswith(prefix)
+                            for prefix in auth_config.allowed_api_keys
                         )
                         if not matched:
                             await _record_security_event(
@@ -242,7 +497,7 @@ async def check_service_authorization(
                             )
                             raise HTTPException(
                                 status_code=403,
-                                detail=f"Permission denied: API key not allowed for service {service_name}"
+                                detail=f"Permission denied: API key not allowed for service {service_name}",
                             )
 
     # 3. 用户/API Key 级别 allowed_services 检查
@@ -277,7 +532,7 @@ async def check_service_authorization(
                     )
                     raise HTTPException(
                         status_code=403,
-                        detail=f"Permission denied: service {service_name} not in allowed services"
+                        detail=f"Permission denied: service {service_name} not in allowed services",
                     )
         except HTTPException:
             raise
@@ -318,6 +573,7 @@ async def check_proxy_rate_limit(
 
 
 # ============ 主路由处理 ============
+
 
 @router.api_route(
     "/{service_name}/{path:path}",
@@ -395,10 +651,41 @@ async def transparent_proxy_handler(
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     t_body = time.perf_counter()
 
-    # 5. 检查是否期望流式响应
+    # 5. 读取服务配置（用于默认模型、策略判定）
+    service_config = await config_loader.get_config(service_name)
+    request_payload = _decode_json_body(body)
+    requested_model = extract_model(request_payload)
+    if not requested_model and service_config:
+        requested_model = service_config.default_model
+
+    # 6. API Key 模型白名单
+    await _enforce_model_allowlist(
+        request=request,
+        service_name=service_name,
+        user=user,
+        auth=auth,
+        model=requested_model,
+    )
+
+    # 7. 配额策略预检查（可触发拒绝/降级/告警）
+    body, effective_model = await _apply_quota_policy(
+        request=request,
+        user=user,
+        auth=auth,
+        service_name=service_name,
+        operation=operation,
+        path=path,
+        body=body,
+        model_hint=requested_model,
+    )
+    if effective_model:
+        request.state.effective_model = effective_model
+    t_policy = time.perf_counter()
+
+    # 8. 检查是否期望流式响应
     wants_stream = _wants_streaming(request, path)
 
-    # 6. 构建代理请求
+    # 9. 构建代理请求
     proxy_request = ProxyRequest(
         service_name=service_name,
         path=path,
@@ -417,11 +704,12 @@ async def transparent_proxy_handler(
         f"rate_limit={((t_rate_limit - t_auth_check) * 1000):.1f}ms "
         f"context={((t_context - t_rate_limit) * 1000):.1f}ms "
         f"body_read={((t_body - t_context) * 1000):.1f}ms "
-        f"build={((t_build - t_body) * 1000):.1f}ms "
+        f"policy={((t_policy - t_body) * 1000):.1f}ms "
+        f"build={((t_build - t_policy) * 1000):.1f}ms "
         f"total_prep={((t_build - t_start) * 1000):.1f}ms"
     )
 
-    # 7. 执行代理
+    # 10. 执行代理
     logger.info(
         f"[ProxyRoute] {request.method} /proxy/{service_name}/{path} "
         f"user={user.user_id} op={operation} stream={wants_stream}"
@@ -454,7 +742,7 @@ async def transparent_proxy_handler(
     else:
         # 确定 content-type，保留原始响应的 content-type
         content_type = response.headers.get("content-type", "application/json")
-        
+
         # 错误透传：即使是 4xx/5xx，也原样返回上游的响应内容
         return Response(
             content=response.body or b"",
@@ -494,6 +782,7 @@ async def transparent_proxy_root_handler(
 
 # ============ 服务发现端点 ============
 
+
 @router.get(
     "",
     summary="列出代理服务",
@@ -510,10 +799,7 @@ async def list_proxy_services(
     try:
         request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
     except PermissionDeniedError:
-        raise HTTPException(
-            status_code=403,
-            detail="Permission denied: service:invoke required"
-        )
+        raise HTTPException(status_code=403, detail="Permission denied: service:invoke required")
 
     services = await config_loader.list_services()
     is_admin = "admin" in auth.roles
@@ -546,7 +832,7 @@ async def proxy_service_health(
 ):
     """检查服务健康状态"""
     healthy, message = await proxy.health_check(service_name)
-    
+
     if healthy:
         return {"status": "healthy", "service": service_name, "message": message}
     else:
@@ -587,12 +873,17 @@ async def proxy_service_selftest(
     config = await config_loader.get_config(service_name)
     if config:
         # 脱敏处理：只显示部分信息，避免暴露敏感配置
-        masked_assistant_id = (config.assistant_id[:8] + "...") if config.assistant_id and len(config.assistant_id) > 8 else config.assistant_id
+        masked_assistant_id = (
+            (config.assistant_id[:8] + "...")
+            if config.assistant_id and len(config.assistant_id) > 8
+            else config.assistant_id
+        )
         # 只显示 host 部分
         masked_upstream = None
         if config.upstream_url:
             try:
                 from urllib.parse import urlparse
+
                 parsed = urlparse(config.upstream_url)
                 masked_upstream = parsed.netloc
             except Exception:
@@ -682,11 +973,12 @@ async def proxy_service_selftest(
 
 # ============ 辅助函数 ============
 
+
 def _build_request_context(request: Request, user: UserContext) -> RequestContext:
     """从请求构建上下文"""
     # 提取原始请求头
     original_headers = dict(request.headers)
-    
+
     # 提取客户端 IP
     client_ip = ""
     if xff := request.headers.get("x-forwarded-for"):
@@ -695,12 +987,12 @@ def _build_request_context(request: Request, user: UserContext) -> RequestContex
         client_ip = real_ip
     elif request.client:
         client_ip = request.client.host
-    
+
     # 从 request.state 获取追踪信息
     request_id = getattr(request.state, "request_id", "")
     trace_id = getattr(request.state, "trace_id", "")
     span_id = getattr(request.state, "span_id", "")
-    
+
     return RequestContext(
         user_id=user.user_id,
         tenant_id=user.tenant_id,
@@ -722,7 +1014,7 @@ def _wants_streaming(request: Request, path: str) -> bool:
     accept = request.headers.get("accept", "")
     if "text/event-stream" in accept:
         return True
-    
+
     # 检查路径
     path_lower = path.lower()
     streaming_indicators = [
@@ -731,13 +1023,13 @@ def _wants_streaming(request: Request, path: str) -> bool:
         "/sse",
         "stream=true",
     ]
-    
+
     for indicator in streaming_indicators:
         if indicator in path_lower:
             return True
-    
+
     # 检查查询参数
     if request.query_params.get("stream") in ("true", "1", "yes"):
         return True
-    
+
     return False

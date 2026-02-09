@@ -7,3 +7,4 @@ export { CostAnalysisPanel } from "./CostAnalysisPanel";
 export { UserQuotaPanel } from "./UserQuotaPanel";
 export { SecurityEventsPanel } from "./SecurityEventsPanel";
 export { RequestTracePanel } from "./RequestTracePanel";
+export { FailureAnalysisPanel } from "./FailureAnalysisPanel";

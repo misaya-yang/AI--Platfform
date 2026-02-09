@@ -11,8 +11,11 @@ This service handles:
 from __future__ import annotations
 
 import logging
+import inspect
+import math
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -27,15 +30,26 @@ _quota_service: Optional["QuotaService"] = None
 
 class QuotaStatus(str, Enum):
     """Quota check status."""
+
     OK = "ok"
     WARNING = "warning"
     EXCEEDED = "exceeded"
     BLOCKED = "blocked"
 
 
+class OverageStrategy(str, Enum):
+    """Policy when quota is exceeded."""
+
+    HARD_BLOCK = "hard_block"
+    RATE_LIMIT = "rate_limit"
+    DOWNGRADE_MODEL = "downgrade_model"
+    ALLOW_BUT_ALERT = "allow_but_alert"
+
+
 @dataclass
 class QuotaCheckResult:
     """Result of a quota check."""
+
     status: QuotaStatus
     message: str = ""
     daily_tokens_used: int = 0
@@ -45,11 +59,18 @@ class QuotaCheckResult:
     daily_requests_used: int = 0
     daily_requests_limit: Optional[int] = None
     warning_threshold: int = 80
+    overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT
+    downgraded_model: Optional[str] = None
 
     @property
     def can_proceed(self) -> bool:
         """Whether the request can proceed."""
-        return self.status in (QuotaStatus.OK, QuotaStatus.WARNING)
+        if self.status in (QuotaStatus.OK, QuotaStatus.WARNING):
+            return True
+        return self.status == QuotaStatus.EXCEEDED and self.overage_strategy in {
+            OverageStrategy.ALLOW_BUT_ALERT,
+            OverageStrategy.DOWNGRADE_MODEL,
+        }
 
     @property
     def daily_tokens_percentage(self) -> float:
@@ -80,12 +101,18 @@ class QuotaCheckResult:
                 "used_cents": self.monthly_cost_used,
                 "used_usd": round(self.monthly_cost_used / 100, 2),
                 "limit_cents": self.monthly_cost_limit,
-                "limit_usd": round(self.monthly_cost_limit / 100, 2) if self.monthly_cost_limit else None,
+                "limit_usd": round(self.monthly_cost_limit / 100, 2)
+                if self.monthly_cost_limit
+                else None,
                 "percentage": self.monthly_cost_percentage,
             },
             "daily_requests": {
                 "used": self.daily_requests_used,
                 "limit": self.daily_requests_limit,
+            },
+            "policy": {
+                "overage_strategy": self.overage_strategy.value,
+                "downgraded_model": self.downgraded_model,
             },
         }
 
@@ -93,6 +120,7 @@ class QuotaCheckResult:
 @dataclass
 class UserQuota:
     """User quota configuration and current usage."""
+
     tenant_id: str
     user_id: str
     daily_token_limit: Optional[int] = None
@@ -109,6 +137,11 @@ class UserQuota:
     is_blocked: bool = False
     blocked_reason: Optional[str] = None
     warning_threshold: int = 80
+    overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT
+    downgraded_model: Optional[str] = None
+    temporary_extra_tokens: int = 0
+    temporary_extra_cost_cents: int = 0
+    temporary_expires_at: Optional[datetime] = None
 
 
 class QuotaService:
@@ -128,6 +161,80 @@ class QuotaService:
     def set_database(self, database: "DatabaseStorage") -> None:
         """Set or update the database storage instance."""
         self.database = database
+
+    def _get_pool(self):
+        if not self.database:
+            return None
+        # Prefer explicitly assigned attributes (works with both real DatabaseStorage and test doubles).
+        if hasattr(self.database, "__dict__"):
+            for attr in ("_pool", "pool"):
+                if attr in self.database.__dict__:
+                    pool = self.database.__dict__.get(attr)
+                    if pool is not None:
+                        return pool
+        return getattr(self.database, "_pool", None) or getattr(self.database, "pool", None)
+
+    @asynccontextmanager
+    async def _acquire_connection(self, pool):
+        """Acquire DB connection compatible with asyncpg pool and test doubles."""
+        acquired = pool.acquire()
+        if hasattr(acquired, "__aenter__"):
+            async with acquired as conn:
+                yield conn
+            return
+
+        if inspect.isawaitable(acquired):
+            acquired = await acquired
+
+        if hasattr(acquired, "__aenter__"):
+            async with acquired as conn:
+                yield conn
+            return
+
+        conn = acquired
+        try:
+            yield conn
+        finally:
+            release = getattr(pool, "release", None)
+            if callable(release):
+                released = release(conn)
+                if inspect.isawaitable(released):
+                    await released
+
+    @staticmethod
+    def _normalize_limit(value: Optional[int]) -> Optional[int]:
+        """Normalize quota limits: treat 0 as unlimited (None)."""
+        if value is None:
+            return None
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _coerce_overage_strategy(value: Any) -> OverageStrategy:
+        if isinstance(value, OverageStrategy):
+            return value
+        try:
+            return OverageStrategy(str(value or "").strip())
+        except Exception:
+            return OverageStrategy.ALLOW_BUT_ALERT
+
+    async def _record_quota_exceeded_event(
+        self,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """Record a quota_exceeded security event for dashboard visibility."""
+        try:
+            from ...services.metrics.security_event_recorder import get_security_event_recorder
+            recorder = get_security_event_recorder()
+            await recorder.record_event(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                service_id=None,
+                event_type="quota_exceeded",
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record quota_exceeded event: {e}")
 
     async def check_quota(
         self,
@@ -154,87 +261,105 @@ class QuotaService:
 
         # Check if blocked
         if quota.is_blocked:
+            await self._record_quota_exceeded_event(tenant_id, user_id)
             return QuotaCheckResult(
                 status=QuotaStatus.BLOCKED,
                 message=f"User is blocked: {quota.blocked_reason or 'Unknown reason'}",
+                overage_strategy=quota.overage_strategy,
+                downgraded_model=quota.downgraded_model,
             )
 
-        # Check daily token limit
-        if quota.daily_token_limit:
-            if quota.current_daily_tokens + estimated_tokens > quota.daily_token_limit:
-                return QuotaCheckResult(
-                    status=QuotaStatus.EXCEEDED,
-                    message="Daily token limit exceeded",
-                    daily_tokens_used=quota.current_daily_tokens,
-                    daily_tokens_limit=quota.daily_token_limit,
-                    monthly_cost_used=quota.current_monthly_cost_cents,
-                    monthly_cost_limit=quota.monthly_cost_limit_cents,
-                    warning_threshold=quota.warning_threshold,
+        now = datetime.now(timezone.utc)
+        temporary_active = bool(quota.temporary_expires_at and quota.temporary_expires_at > now)
+        extra_tokens = quota.temporary_extra_tokens if temporary_active else 0
+        extra_cost = quota.temporary_extra_cost_cents if temporary_active else 0
+
+        effective_daily_token_limit = (
+            (quota.daily_token_limit + extra_tokens)
+            if quota.daily_token_limit is not None
+            else None
+        )
+        effective_monthly_cost_limit = (
+            (quota.monthly_cost_limit_cents + extra_cost)
+            if quota.monthly_cost_limit_cents is not None
+            else None
+        )
+        effective_monthly_token_limit = (
+            (quota.monthly_token_limit + extra_tokens)
+            if quota.monthly_token_limit is not None
+            else None
+        )
+
+        def _result(status: QuotaStatus, message: str) -> QuotaCheckResult:
+            return QuotaCheckResult(
+                status=status,
+                message=message,
+                daily_tokens_used=quota.current_daily_tokens,
+                daily_tokens_limit=effective_daily_token_limit,
+                monthly_cost_used=quota.current_monthly_cost_cents,
+                monthly_cost_limit=effective_monthly_cost_limit,
+                daily_requests_used=quota.current_daily_requests,
+                daily_requests_limit=quota.requests_per_day,
+                warning_threshold=quota.warning_threshold,
+                overage_strategy=quota.overage_strategy,
+                downgraded_model=quota.downgraded_model,
+            )
+
+        async def _apply_overage_policy(base_message: str) -> QuotaCheckResult:
+            strategy = quota.overage_strategy
+            # Record quota_exceeded security event
+            await self._record_quota_exceeded_event(tenant_id, user_id)
+
+            if strategy == OverageStrategy.HARD_BLOCK:
+                return _result(QuotaStatus.BLOCKED, base_message)
+            if strategy == OverageStrategy.RATE_LIMIT:
+                return _result(QuotaStatus.EXCEEDED, f"{base_message}; strategy=rate_limit")
+            if strategy == OverageStrategy.DOWNGRADE_MODEL:
+                model_msg = (
+                    f"; downgrade={quota.downgraded_model}" if quota.downgraded_model else ""
                 )
+                return _result(
+                    QuotaStatus.EXCEEDED, f"{base_message}; strategy=downgrade_model{model_msg}"
+                )
+            return _result(QuotaStatus.EXCEEDED, f"{base_message}; strategy=allow_but_alert")
+
+        # Check daily token limit
+        if effective_daily_token_limit:
+            if quota.current_daily_tokens + estimated_tokens > effective_daily_token_limit:
+                return await _apply_overage_policy("Daily token limit exceeded")
+
+        # Check monthly token limit
+        if effective_monthly_token_limit:
+            if quota.current_monthly_tokens + estimated_tokens > effective_monthly_token_limit:
+                return await _apply_overage_policy("Monthly token limit exceeded")
 
         # Check monthly cost limit
-        if quota.monthly_cost_limit_cents:
-            if quota.current_monthly_cost_cents >= quota.monthly_cost_limit_cents:
-                return QuotaCheckResult(
-                    status=QuotaStatus.EXCEEDED,
-                    message="Monthly cost limit exceeded",
-                    daily_tokens_used=quota.current_daily_tokens,
-                    daily_tokens_limit=quota.daily_token_limit,
-                    monthly_cost_used=quota.current_monthly_cost_cents,
-                    monthly_cost_limit=quota.monthly_cost_limit_cents,
-                    warning_threshold=quota.warning_threshold,
-                )
+        if effective_monthly_cost_limit:
+            if quota.current_monthly_cost_cents >= effective_monthly_cost_limit:
+                return await _apply_overage_policy("Monthly cost limit exceeded")
 
         # Check daily request limit
         if quota.requests_per_day:
             if quota.current_daily_requests >= quota.requests_per_day:
-                return QuotaCheckResult(
-                    status=QuotaStatus.EXCEEDED,
-                    message="Daily request limit exceeded",
-                    daily_tokens_used=quota.current_daily_tokens,
-                    daily_tokens_limit=quota.daily_token_limit,
-                    daily_requests_used=quota.current_daily_requests,
-                    daily_requests_limit=quota.requests_per_day,
-                    warning_threshold=quota.warning_threshold,
-                )
+                return await _apply_overage_policy("Daily request limit exceeded")
 
         # Check warning threshold
         warning_messages = []
 
-        if quota.daily_token_limit:
-            pct = quota.current_daily_tokens / quota.daily_token_limit * 100
+        if effective_daily_token_limit:
+            pct = quota.current_daily_tokens / effective_daily_token_limit * 100
             if pct >= quota.warning_threshold:
                 warning_messages.append(f"Daily token usage at {pct:.1f}%")
 
-        if quota.monthly_cost_limit_cents:
-            pct = quota.current_monthly_cost_cents / quota.monthly_cost_limit_cents * 100
+        if effective_monthly_cost_limit:
+            pct = quota.current_monthly_cost_cents / effective_monthly_cost_limit * 100
             if pct >= quota.warning_threshold:
                 warning_messages.append(f"Monthly cost at {pct:.1f}%")
 
         if warning_messages:
-            return QuotaCheckResult(
-                status=QuotaStatus.WARNING,
-                message="; ".join(warning_messages),
-                daily_tokens_used=quota.current_daily_tokens,
-                daily_tokens_limit=quota.daily_token_limit,
-                monthly_cost_used=quota.current_monthly_cost_cents,
-                monthly_cost_limit=quota.monthly_cost_limit_cents,
-                daily_requests_used=quota.current_daily_requests,
-                daily_requests_limit=quota.requests_per_day,
-                warning_threshold=quota.warning_threshold,
-            )
+            return _result(QuotaStatus.WARNING, "; ".join(warning_messages))
 
-        return QuotaCheckResult(
-            status=QuotaStatus.OK,
-            message="Quota check passed",
-            daily_tokens_used=quota.current_daily_tokens,
-            daily_tokens_limit=quota.daily_token_limit,
-            monthly_cost_used=quota.current_monthly_cost_cents,
-            monthly_cost_limit=quota.monthly_cost_limit_cents,
-            daily_requests_used=quota.current_daily_requests,
-            daily_requests_limit=quota.requests_per_day,
-            warning_threshold=quota.warning_threshold,
-        )
+        return _result(QuotaStatus.OK, "Quota check passed")
 
     async def update_usage(
         self,
@@ -252,11 +377,12 @@ class QuotaService:
             tokens_used: Tokens consumed
             cost_cents: Cost in cents
         """
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 await conn.execute(
                     """
                     UPDATE user_quotas
@@ -306,11 +432,194 @@ class QuotaService:
                 "is_blocked": quota.is_blocked,
                 "blocked_reason": quota.blocked_reason,
             },
+            "policy": {
+                "overage_strategy": quota.overage_strategy.value,
+                "downgraded_model": quota.downgraded_model,
+            },
             "resets": {
-                "daily_reset_at": quota.daily_reset_at.isoformat() if quota.daily_reset_at else None,
-                "monthly_reset_at": quota.monthly_reset_at.isoformat() if quota.monthly_reset_at else None,
+                "daily_reset_at": quota.daily_reset_at.isoformat()
+                if quota.daily_reset_at
+                else None,
+                "monthly_reset_at": quota.monthly_reset_at.isoformat()
+                if quota.monthly_reset_at
+                else None,
+            },
+            "temporary_boost": {
+                "extra_tokens": quota.temporary_extra_tokens,
+                "extra_cost_cents": quota.temporary_extra_cost_cents,
+                "expires_at": quota.temporary_expires_at.isoformat()
+                if quota.temporary_expires_at
+                else None,
             },
             "warning_threshold": quota.warning_threshold,
+        }
+
+    @staticmethod
+    def _projected_breach_date(
+        *,
+        current_value: float,
+        limit_value: Optional[float],
+        average_daily_delta: float,
+        today: date,
+        days_remaining: int,
+    ) -> Optional[str]:
+        if not limit_value or limit_value <= 0:
+            return None
+        if current_value >= limit_value:
+            return today.isoformat()
+        if average_daily_delta <= 0:
+            return None
+
+        days_to_limit = math.ceil((limit_value - current_value) / average_daily_delta)
+        if days_to_limit <= 0:
+            return today.isoformat()
+        if days_to_limit > days_remaining:
+            return None
+        return (today + timedelta(days=days_to_limit - 1)).isoformat()
+
+    async def get_quota_forecast(
+        self,
+        tenant_id: str,
+        user_id: str,
+        lookback_days: int = 7,
+    ) -> Dict[str, Any]:
+        """
+        Predict month-end quota usage based on recent daily trend.
+
+        Forecast uses usage_daily_aggregates for the lookback window.
+        """
+        pool = self._get_pool()
+        if not pool:
+            return {"error": "Database not available"}
+
+        quota = await self._get_or_create_quota(tenant_id, user_id)
+        if not quota:
+            return {"error": "Quota not found"}
+
+        lookback_days = max(int(lookback_days), 1)
+        today = datetime.now(timezone.utc).date()
+        month_start = today.replace(day=1)
+        next_month = (month_start + timedelta(days=32)).replace(day=1)
+        days_in_month = (next_month - month_start).days
+        days_elapsed = max((today - month_start).days + 1, 1)
+        days_remaining = max(days_in_month - days_elapsed, 0)
+        window_start = today - timedelta(days=lookback_days - 1)
+
+        try:
+            async with self._acquire_connection(pool) as conn:
+                month_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_input_tokens + total_output_tokens), 0) AS month_tokens,
+                        COALESCE(SUM(total_cost_cents), 0) AS month_cost_microcents
+                    FROM usage_daily_aggregates
+                    WHERE tenant_id = $1 AND user_id = $2
+                      AND date >= $3 AND date <= $4
+                    """,
+                    tenant_id,
+                    user_id,
+                    month_start,
+                    today,
+                )
+                recent_row = await conn.fetchrow(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_input_tokens + total_output_tokens), 0) AS recent_tokens,
+                        COALESCE(SUM(total_cost_cents), 0) AS recent_cost_microcents
+                    FROM usage_daily_aggregates
+                    WHERE tenant_id = $1 AND user_id = $2
+                      AND date >= $3 AND date <= $4
+                    """,
+                    tenant_id,
+                    user_id,
+                    window_start,
+                    today,
+                )
+        except Exception as e:
+            logger.error(f"Failed to forecast quota for {tenant_id}/{user_id}: {e}")
+            return {"error": str(e)}
+
+        month_tokens = int((month_row or {}).get("month_tokens", 0) or 0)
+        month_cost_cents = float((month_row or {}).get("month_cost_microcents", 0) or 0) / 10000
+        recent_tokens = int((recent_row or {}).get("recent_tokens", 0) or 0)
+        recent_cost_cents = float((recent_row or {}).get("recent_cost_microcents", 0) or 0) / 10000
+
+        avg_daily_tokens = recent_tokens / lookback_days
+        avg_daily_cost_cents = recent_cost_cents / lookback_days
+
+        projected_tokens = int(round(month_tokens + avg_daily_tokens * days_remaining))
+        projected_cost_cents = int(round(month_cost_cents + avg_daily_cost_cents * days_remaining))
+
+        now = datetime.now(timezone.utc)
+        temporary_active = bool(quota.temporary_expires_at and quota.temporary_expires_at > now)
+        extra_tokens = quota.temporary_extra_tokens if temporary_active else 0
+        extra_cost = quota.temporary_extra_cost_cents if temporary_active else 0
+
+        effective_monthly_token_limit = (
+            (quota.monthly_token_limit + extra_tokens)
+            if quota.monthly_token_limit is not None
+            else None
+        )
+        effective_monthly_cost_limit_cents = (
+            (quota.monthly_cost_limit_cents + extra_cost)
+            if quota.monthly_cost_limit_cents is not None
+            else None
+        )
+
+        token_breach_date = self._projected_breach_date(
+            current_value=float(month_tokens),
+            limit_value=float(effective_monthly_token_limit)
+            if effective_monthly_token_limit is not None
+            else None,
+            average_daily_delta=avg_daily_tokens,
+            today=today,
+            days_remaining=days_remaining,
+        )
+        cost_breach_date = self._projected_breach_date(
+            current_value=month_cost_cents,
+            limit_value=float(effective_monthly_cost_limit_cents)
+            if effective_monthly_cost_limit_cents is not None
+            else None,
+            average_daily_delta=avg_daily_cost_cents,
+            today=today,
+            days_remaining=days_remaining,
+        )
+
+        return {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "window": {
+                "month_start": month_start.isoformat(),
+                "today": today.isoformat(),
+                "days_elapsed": days_elapsed,
+                "days_remaining": days_remaining,
+                "lookback_days": lookback_days,
+            },
+            "tokens": {
+                "current": month_tokens,
+                "avg_daily": round(avg_daily_tokens, 2),
+                "projected_month_end": projected_tokens,
+                "limit": effective_monthly_token_limit,
+                "projected_usage_pct": round(projected_tokens / effective_monthly_token_limit * 100, 2)
+                if effective_monthly_token_limit
+                else None,
+                "predicted_breach_date": token_breach_date,
+            },
+            "cost": {
+                "current_cents": round(month_cost_cents, 2),
+                "current_usd": round(month_cost_cents / 100, 4),
+                "avg_daily_cents": round(avg_daily_cost_cents, 2),
+                "projected_month_end_cents": projected_cost_cents,
+                "projected_month_end_usd": round(projected_cost_cents / 100, 4),
+                "limit_cents": effective_monthly_cost_limit_cents,
+                "limit_usd": round(effective_monthly_cost_limit_cents / 100, 4)
+                if effective_monthly_cost_limit_cents
+                else None,
+                "projected_usage_pct": round(projected_cost_cents / effective_monthly_cost_limit_cents * 100, 2)
+                if effective_monthly_cost_limit_cents
+                else None,
+                "predicted_breach_date": cost_breach_date,
+            },
         }
 
     async def set_user_quota(
@@ -323,25 +632,42 @@ class QuotaService:
         requests_per_minute: Optional[int] = None,
         requests_per_day: Optional[int] = None,
         warning_threshold: int = 80,
+        overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT,
+        downgraded_model: Optional[str] = None,
+        temporary_extra_tokens: Optional[int] = None,
+        temporary_extra_cost_cents: Optional[int] = None,
+        temporary_expires_at: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         """Set or update user quota limits."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return {"error": "Database not available"}
 
         try:
+            daily_token_limit = self._normalize_limit(daily_token_limit)
+            monthly_token_limit = self._normalize_limit(monthly_token_limit)
+            monthly_cost_limit_cents = self._normalize_limit(monthly_cost_limit_cents)
+            requests_per_minute = self._normalize_limit(requests_per_minute)
+            requests_per_day = self._normalize_limit(requests_per_day)
+            strategy = self._coerce_overage_strategy(overage_strategy)
+
             now = datetime.now(timezone.utc)
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            next_month = (now.replace(day=1) + timedelta(days=32)).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
 
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 await conn.execute(
                     """
                     INSERT INTO user_quotas (
                         tenant_id, user_id,
                         daily_token_limit, monthly_token_limit, monthly_cost_limit_cents,
                         requests_per_minute, requests_per_day,
-                        warning_threshold, daily_reset_at, monthly_reset_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        warning_threshold, overage_strategy, downgraded_model,
+                        temporary_extra_tokens, temporary_extra_cost_cents, temporary_expires_at,
+                        daily_reset_at, monthly_reset_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                     ON CONFLICT (tenant_id, user_id) DO UPDATE SET
                         daily_token_limit = COALESCE($3, user_quotas.daily_token_limit),
                         monthly_token_limit = COALESCE($4, user_quotas.monthly_token_limit),
@@ -349,6 +675,11 @@ class QuotaService:
                         requests_per_minute = COALESCE($6, user_quotas.requests_per_minute),
                         requests_per_day = COALESCE($7, user_quotas.requests_per_day),
                         warning_threshold = $8,
+                        overage_strategy = $9,
+                        downgraded_model = COALESCE($10, user_quotas.downgraded_model),
+                        temporary_extra_tokens = COALESCE($11, user_quotas.temporary_extra_tokens),
+                        temporary_extra_cost_cents = COALESCE($12, user_quotas.temporary_extra_cost_cents),
+                        temporary_expires_at = COALESCE($13, user_quotas.temporary_expires_at),
                         updated_at = CURRENT_TIMESTAMP
                     """,
                     tenant_id,
@@ -359,6 +690,11 @@ class QuotaService:
                     requests_per_minute,
                     requests_per_day,
                     warning_threshold,
+                    strategy.value,
+                    downgraded_model,
+                    temporary_extra_tokens,
+                    temporary_extra_cost_cents,
+                    temporary_expires_at,
                     tomorrow,
                     next_month,
                 )
@@ -371,14 +707,15 @@ class QuotaService:
 
     async def reset_daily_quotas(self) -> int:
         """Reset daily quotas for all users. Returns count of reset users."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return 0
 
         try:
             now = datetime.now(timezone.utc)
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 result = await conn.execute(
                     """
                     UPDATE user_quotas
@@ -402,14 +739,17 @@ class QuotaService:
 
     async def reset_monthly_quotas(self) -> int:
         """Reset monthly quotas for all users. Returns count of reset users."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return 0
 
         try:
             now = datetime.now(timezone.utc)
-            next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            next_month = (now.replace(day=1) + timedelta(days=32)).replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
 
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 result = await conn.execute(
                     """
                     UPDATE user_quotas
@@ -438,11 +778,12 @@ class QuotaService:
         reason: str,
     ) -> bool:
         """Block a user from making requests."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return False
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 await conn.execute(
                     """
                     UPDATE user_quotas
@@ -469,11 +810,12 @@ class QuotaService:
         user_id: str,
     ) -> bool:
         """Unblock a user."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return False
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 await conn.execute(
                     """
                     UPDATE user_quotas
@@ -500,11 +842,12 @@ class QuotaService:
         unacknowledged_only: bool = True,
     ) -> List[Dict[str, Any]]:
         """Get quota alerts for a tenant."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return []
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 query = """
                     SELECT *
                     FROM quota_alerts
@@ -546,11 +889,12 @@ class QuotaService:
         message: str,
     ) -> None:
         """Create a quota alert."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 await conn.execute(
                     """
                     INSERT INTO quota_alerts (
@@ -576,11 +920,12 @@ class QuotaService:
         user_id: str,
     ) -> Optional[UserQuota]:
         """Get or create a user quota record."""
-        if not self.database or not self.database._pool:
+        pool = self._get_pool()
+        if not pool:
             return None
 
         try:
-            async with self.database._pool.acquire() as conn:
+            async with self._acquire_connection(pool) as conn:
                 row = await conn.fetchrow(
                     """
                     SELECT *
@@ -594,8 +939,12 @@ class QuotaService:
                 if not row:
                     # Create default quota record
                     now = datetime.now(timezone.utc)
-                    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                    next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                    tomorrow = (now + timedelta(days=1)).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                    next_month = (now.replace(day=1) + timedelta(days=32)).replace(
+                        day=1, hour=0, minute=0, second=0, microsecond=0
+                    )
 
                     await conn.execute(
                         """
@@ -621,23 +970,44 @@ class QuotaService:
                     )
 
                 if row:
+                    def _value(key: str, default: Any = None) -> Any:
+                        if isinstance(row, dict):
+                            return row.get(key, default)
+                        getter = getattr(row, "get", None)
+                        if callable(getter):
+                            try:
+                                return getter(key, default)
+                            except TypeError:
+                                pass
+                        try:
+                            return row[key]
+                        except Exception:
+                            return default
+
                     return UserQuota(
-                        tenant_id=row["tenant_id"],
-                        user_id=row["user_id"],
-                        daily_token_limit=row["daily_token_limit"],
-                        monthly_token_limit=row["monthly_token_limit"],
-                        monthly_cost_limit_cents=row["monthly_cost_limit_cents"],
-                        requests_per_minute=row["requests_per_minute"],
-                        requests_per_day=row["requests_per_day"],
-                        current_daily_tokens=row["current_daily_tokens"] or 0,
-                        current_monthly_tokens=row["current_monthly_tokens"] or 0,
-                        current_monthly_cost_cents=row["current_monthly_cost_cents"] or 0,
-                        current_daily_requests=row["current_daily_requests"] or 0,
-                        daily_reset_at=row["daily_reset_at"],
-                        monthly_reset_at=row["monthly_reset_at"],
-                        is_blocked=row["is_blocked"] or False,
-                        blocked_reason=row["blocked_reason"],
-                        warning_threshold=row["warning_threshold"] or 80,
+                        tenant_id=str(_value("tenant_id", tenant_id)),
+                        user_id=str(_value("user_id", user_id)),
+                        daily_token_limit=_value("daily_token_limit"),
+                        monthly_token_limit=_value("monthly_token_limit"),
+                        monthly_cost_limit_cents=_value("monthly_cost_limit_cents"),
+                        requests_per_minute=_value("requests_per_minute"),
+                        requests_per_day=_value("requests_per_day"),
+                        current_daily_tokens=int(_value("current_daily_tokens", 0) or 0),
+                        current_monthly_tokens=int(_value("current_monthly_tokens", 0) or 0),
+                        current_monthly_cost_cents=int(_value("current_monthly_cost_cents", 0) or 0),
+                        current_daily_requests=int(_value("current_daily_requests", 0) or 0),
+                        daily_reset_at=_value("daily_reset_at"),
+                        monthly_reset_at=_value("monthly_reset_at"),
+                        is_blocked=bool(_value("is_blocked", False)),
+                        blocked_reason=_value("blocked_reason"),
+                        warning_threshold=int(_value("warning_threshold", 80) or 80),
+                        overage_strategy=self._coerce_overage_strategy(_value("overage_strategy")),
+                        downgraded_model=_value("downgraded_model"),
+                        temporary_extra_tokens=int(_value("temporary_extra_tokens", 0) or 0),
+                        temporary_extra_cost_cents=int(
+                            _value("temporary_extra_cost_cents", 0) or 0
+                        ),
+                        temporary_expires_at=_value("temporary_expires_at"),
                     )
 
                 return None

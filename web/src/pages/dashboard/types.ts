@@ -28,6 +28,14 @@ export type ServiceFilter = "all" | string;
 // User filter - "all" or specific user_id
 export type UserFilter = "all" | string;
 
+// Trace filter for KPI → Trace 联动
+export interface TraceFilter {
+  status?: "success" | "error";
+  error_type?: string;
+  service_id?: string;
+  sample_reason?: string;
+}
+
 // Dashboard context shared across panels
 export interface DashboardContext {
   dateRange: [string, string]; // [startDate, endDate] in YYYY-MM-DD
@@ -37,6 +45,7 @@ export interface DashboardContext {
   userId: UserFilter;
   refreshInterval: RefreshInterval;
   lastRefresh: Date;
+  traceFilter: TraceFilter;
 }
 
 // Panel configuration
@@ -54,7 +63,8 @@ export type PanelType =
   | "cost-analysis"
   | "user-quota"
   | "security-events"
-  | "request-trace";
+  | "request-trace"
+  | "failure-analysis";
 
 // KPI card data
 export interface KPIData {
@@ -184,10 +194,11 @@ export const DEFAULT_LAYOUTS: LayoutItem[] = [
   { i: "service-health", x: 0, y: 0, w: 12, h: 4, minW: 6, minH: 3 },
   { i: "performance", x: 0, y: 4, w: 6, h: 5, minW: 4, minH: 4 },
   { i: "token-usage", x: 6, y: 4, w: 6, h: 5, minW: 4, minH: 4 },
-  { i: "cost-analysis", x: 0, y: 9, w: 6, h: 6, minW: 4, minH: 5 },
-  { i: "user-quota", x: 6, y: 9, w: 6, h: 6, minW: 4, minH: 5 },
-  { i: "security-events", x: 0, y: 15, w: 6, h: 5, minW: 4, minH: 4 },
-  { i: "request-trace", x: 6, y: 15, w: 6, h: 5, minW: 4, minH: 4 },
+  { i: "failure-analysis", x: 0, y: 9, w: 6, h: 6, minW: 4, minH: 4 },
+  { i: "cost-analysis", x: 6, y: 9, w: 6, h: 6, minW: 4, minH: 5 },
+  { i: "user-quota", x: 0, y: 15, w: 6, h: 6, minW: 4, minH: 5 },
+  { i: "security-events", x: 6, y: 15, w: 6, h: 5, minW: 4, minH: 4 },
+  { i: "request-trace", x: 0, y: 21, w: 12, h: 6, minW: 6, minH: 4 },
 ];
 
 // Default panel configs
@@ -195,6 +206,7 @@ export const DEFAULT_PANELS: PanelConfig[] = [
   { id: "service-health", title: "Service Health", type: "service-health", visible: true },
   { id: "performance", title: "Performance", type: "performance", visible: true },
   { id: "token-usage", title: "Token Usage", type: "token-usage", visible: true },
+  { id: "failure-analysis", title: "Failure Analysis", type: "failure-analysis", visible: true },
   { id: "cost-analysis", title: "Cost Analysis", type: "cost-analysis", visible: true },
   { id: "user-quota", title: "User Quota", type: "user-quota", visible: true },
   { id: "security-events", title: "Security Events", type: "security-events", visible: true },

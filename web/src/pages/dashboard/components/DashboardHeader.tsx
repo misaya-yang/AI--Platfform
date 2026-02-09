@@ -16,14 +16,12 @@ import {
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
-import { getUsageBreakdown } from "@/api/usage";
-import { listServices } from "@/api/gateway";
 import { LAYOUT, getColors } from "../styles";
 import type { SourceFilter, RefreshInterval } from "../types";
+import { useDashboardEntityLabels } from "../hooks/useDashboardEntityLabels";
 
 const { RangePicker } = DatePicker;
 
@@ -50,6 +48,8 @@ export function DashboardHeader() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [filterCollapsed, setFilterCollapsed] = useState(false);
+  const { serviceOptions, userOptions, resolveServiceLabel, resolveUserLabel } =
+    useDashboardEntityLabels();
 
   // Auto-collapse on smaller screens
   useEffect(() => {
@@ -69,67 +69,6 @@ export function DashboardHeader() {
     setUserId("all");
     setSource("all");
   };
-
-  // 服务列表来自注册中心，确保新注册服务立即可见（不依赖 usage 落库）。
-  const { data: services } = useQuery({
-    queryKey: ["dashboard-services"],
-    queryFn: listServices,
-    staleTime: 60000,
-  });
-
-  const { data: serviceBreakdown } = useQuery({
-    queryKey: ["usage-services", dateRange],
-    queryFn: () =>
-      getUsageBreakdown({
-        dimension: "service",
-        start_date: dateRange[0],
-        end_date: dateRange[1],
-      }),
-    staleTime: 60000,
-  });
-
-  const { data: userBreakdown } = useQuery({
-    queryKey: ["usage-users", dateRange],
-    queryFn: () =>
-      getUsageBreakdown({
-        dimension: "user",
-        start_date: dateRange[0],
-        end_date: dateRange[1],
-      }),
-    staleTime: 60000,
-  });
-
-  // Build service options
-  const serviceOptionMap = new Map<string, string>();
-  (services || []).forEach((svc) => {
-    if (!svc?.service_id) return;
-    serviceOptionMap.set(svc.service_id, svc.name || svc.service_id);
-  });
-  (serviceBreakdown?.items || []).forEach((item) => {
-    if (!item.service) return;
-    if (!serviceOptionMap.has(item.service)) {
-      serviceOptionMap.set(item.service, item.service);
-    }
-  });
-
-  const serviceOptions = [
-    { label: t("dashboard.filters.allServices"), value: "all" },
-    ...Array.from(serviceOptionMap.entries()).map(([value, label]) => ({
-      label,
-      value,
-    })),
-  ];
-
-  // Build user options
-  const userOptions = [
-    { label: t("dashboard.filters.allUsers"), value: "all" },
-    ...(userBreakdown?.items || []).map((item) => ({
-      label: item.user?.startsWith("anon:")
-        ? t("dashboard.filters.anonymousUser", { id: item.user.slice(-6) })
-        : item.user || t("common.unknown"),
-      value: item.user || t("common.unknown"),
-    })),
-  ];
 
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -334,7 +273,7 @@ export function DashboardHeader() {
                       color: colors.accent,
                     }}
                   >
-                    {serviceId}
+                    {resolveServiceLabel(serviceId)}
                   </span>
                 )}
                 {userId !== "all" && (
@@ -347,7 +286,7 @@ export function DashboardHeader() {
                       color: "#10B981",
                     }}
                   >
-                    {userId.startsWith("anon:") ? t("dashboard.filters.anonymousUser", { id: userId.slice(-6) }) : userId}
+                    {resolveUserLabel(userId)}
                   </span>
                 )}
                 {source !== "all" && (

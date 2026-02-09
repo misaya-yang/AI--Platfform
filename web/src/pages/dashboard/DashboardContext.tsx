@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import dayjs from "dayjs";
-import type { DashboardContext, SourceFilter, ServiceFilter, UserFilter, RefreshInterval } from "./types";
+import type { DashboardContext, SourceFilter, ServiceFilter, UserFilter, RefreshInterval, TraceFilter } from "./types";
 
 interface DashboardContextValue extends DashboardContext {
   setDateRange: (range: [string, string]) => void;
@@ -12,6 +12,8 @@ interface DashboardContextValue extends DashboardContext {
   setUserId: (userId: UserFilter) => void;
   setRefreshInterval: (interval: RefreshInterval) => void;
   triggerRefresh: () => void;
+  setTraceFilter: (filter: TraceFilter) => void;
+  clearTraceFilter: () => void;
 }
 
 const Context = createContext<DashboardContextValue | null>(null);
@@ -27,6 +29,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const [userId, setUserId] = useState<UserFilter>("all");
   const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>(60);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [traceFilter, setTraceFilter] = useState<TraceFilter>({});
+
+  const clearTraceFilter = useCallback(() => {
+    setTraceFilter({});
+  }, []);
 
   const triggerRefresh = useCallback(() => {
     setLastRefresh(new Date());
@@ -53,6 +60,7 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       userId,
       refreshInterval,
       lastRefresh,
+      traceFilter,
       setDateRange,
       setGranularity,
       setSource,
@@ -60,8 +68,10 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
       setUserId,
       setRefreshInterval,
       triggerRefresh,
+      setTraceFilter,
+      clearTraceFilter,
     }),
-    [dateRange, granularity, source, serviceId, userId, refreshInterval, lastRefresh, triggerRefresh]
+    [dateRange, granularity, source, serviceId, userId, refreshInterval, lastRefresh, traceFilter, triggerRefresh, clearTraceFilter]
   );
 
   return <Context.Provider value={value}>{children}</Context.Provider>;

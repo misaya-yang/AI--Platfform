@@ -57,6 +57,8 @@ class APIKeyResponse(BaseModel):
     key_prefix: Optional[str] = None
     name: str
     description: Optional[str] = None
+    user_id: Optional[str] = None
+    derived_user_id: Optional[str] = None
     scopes: Optional[List[str]] = None
     roles: Optional[List[str]] = None
     tier: Optional[str] = None

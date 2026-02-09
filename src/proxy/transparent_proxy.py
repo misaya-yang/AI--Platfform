@@ -32,6 +32,11 @@ from ..services.metrics.usage_parser import (
     extract_provider,
     extract_token_usage,
 )
+from ..services.metrics.observability import (
+    classify_error_type,
+    ensure_duration_breakdown,
+    extract_duration_breakdown,
+)
 
 logger = get_logger(__name__)
 
@@ -663,10 +668,9 @@ class TransparentProxy:
         if not retry_assistant:
             return response, body
 
-        current_assistant = (
-            str((self._parse_json_body(body) or {}).get("assistant_id") or config.assistant_id or "")
-            .strip()
-        )
+        current_assistant = str(
+            (self._parse_json_body(body) or {}).get("assistant_id") or config.assistant_id or ""
+        ).strip()
         if retry_assistant == current_assistant:
             return response, body
 
@@ -704,15 +708,9 @@ class TransparentProxy:
 
         if isinstance(error_payload, dict):
             error_type = str(
-                error_payload.get("error")
-                or error_payload.get("type")
-                or "upstream_error"
+                error_payload.get("error") or error_payload.get("type") or "upstream_error"
             )
-            error_message = str(
-                error_payload.get("message")
-                or error_payload.get("detail")
-                or ""
-            )
+            error_message = str(error_payload.get("message") or error_payload.get("detail") or "")
         else:
             error_type = "upstream_error"
             error_message = str(error_payload)
@@ -721,6 +719,40 @@ class TransparentProxy:
         if error_message:
             metadata["upstream_error_message"] = error_message[:512]
         return metadata
+
+    @staticmethod
+    def _build_trace_steps(
+        total_duration_ms: int, breakdown: Dict[str, int], status: str
+    ) -> List[Dict[str, Any]]:
+        steps: List[Dict[str, Any]] = [
+            {
+                "name": "gateway.request_total",
+                "start_offset_ms": 0,
+                "duration_ms": max(int(total_duration_ms or 0), 0),
+                "status": status,
+            }
+        ]
+
+        offset = 0
+        for name, key in (
+            ("agent.retrieval", "retrieval_duration_ms"),
+            ("agent.tool_calls", "tool_call_duration_ms"),
+            ("llm.inference", "llm_inference_duration_ms"),
+            ("agent.overhead", "agent_or_graph_overhead_ms"),
+        ):
+            duration = max(int(breakdown.get(key, 0) or 0), 0)
+            if duration <= 0:
+                continue
+            steps.append(
+                {
+                    "name": name,
+                    "start_offset_ms": offset,
+                    "duration_ms": duration,
+                    "status": "success",
+                }
+            )
+            offset += duration
+        return steps
 
     async def _record_non_stream_usage(
         self,
@@ -755,9 +787,11 @@ class TransparentProxy:
         if not has_usage and not is_run_operation:
             return
 
-        response_error = bool(response_data and isinstance(response_data, dict) and (
-            "__error__" in response_data or "error" in response_data
-        ))
+        response_error = bool(
+            response_data
+            and isinstance(response_data, dict)
+            and ("__error__" in response_data or "error" in response_data)
+        )
         status = "error" if status_code >= 400 or response_error else "success"
 
         assistant_id = (
@@ -769,9 +803,15 @@ class TransparentProxy:
         model = (
             extract_model(response_data)
             or extract_model(request_data)
+            or config.default_model
             or ("langgraph-agent" if is_run_operation else "")
         )
-        provider = extract_provider(response_data) or extract_provider(request_data) or ""
+        provider = (
+            extract_provider(response_data)
+            or extract_provider(request_data)
+            or config.default_provider
+            or ""
+        )
 
         request_type = f"proxy_{operation}"
         metadata: Dict[str, Any] = {
@@ -782,6 +822,35 @@ class TransparentProxy:
             "response_has_error": response_error,
         }
         metadata.update(self._extract_error_metadata(response_data))
+
+        extracted_breakdown: Dict[str, Any] = {}
+        if isinstance(request_data, dict):
+            extracted_breakdown.update(extract_duration_breakdown(request_data))
+        if isinstance(response_data, dict):
+            extracted_breakdown.update(extract_duration_breakdown(response_data))
+
+        breakdown = ensure_duration_breakdown(
+            request_total_duration_ms=int(duration_ms),
+            first_token_latency_ms=extracted_breakdown.get(
+                "first_token_latency_ms", int(duration_ms)
+            ),
+            llm_inference_duration_ms=extracted_breakdown.get("llm_inference_duration_ms", 0),
+            retrieval_duration_ms=extracted_breakdown.get("retrieval_duration_ms", 0),
+            tool_call_duration_ms=extracted_breakdown.get("tool_call_duration_ms", 0),
+            agent_or_graph_overhead_ms=extracted_breakdown.get("agent_or_graph_overhead_ms", 0),
+        )
+        tool_breakdown = extracted_breakdown.get("tool_call_breakdown", {})
+        if not isinstance(tool_breakdown, dict):
+            tool_breakdown = {}
+        error_type = classify_error_type(
+            status=status,
+            status_code=status_code,
+            upstream_error_type=str(metadata.get("upstream_error_type") or ""),
+            upstream_error_message=str(metadata.get("upstream_error_message") or ""),
+        )
+        metadata["error_type"] = error_type
+        metadata["duration_breakdown"] = breakdown
+        metadata["tool_call_breakdown"] = tool_breakdown
 
         try:
             from ..services.metrics import get_usage_recorder
@@ -798,9 +867,22 @@ class TransparentProxy:
                 assistant_id=assistant_id,
                 provider=provider,
                 latency_ms=int(duration_ms),
+                first_token_ms=breakdown["first_token_latency_ms"],
+                request_total_duration_ms=breakdown["request_total_duration_ms"],
+                llm_inference_duration_ms=breakdown["llm_inference_duration_ms"],
+                retrieval_duration_ms=breakdown["retrieval_duration_ms"],
+                tool_call_duration_ms=breakdown["tool_call_duration_ms"],
+                agent_or_graph_overhead_ms=breakdown["agent_or_graph_overhead_ms"],
+                tool_call_breakdown=tool_breakdown,
+                error_type=error_type,
                 status=status,
                 request_type=request_type,
                 metadata=metadata,
+                trace_steps=self._build_trace_steps(
+                    breakdown["request_total_duration_ms"],
+                    breakdown,
+                    status,
+                ),
             )
         except Exception as e:
             logger.debug(f"[Proxy] Failed to record non-stream usage: {e}")
@@ -913,8 +995,8 @@ class TransparentProxy:
                 tenant_id=context.tenant_id,
                 assistant_id=assistant_id,
                 request_type=request_type,
-                model_hint=extract_model(request_data) or "",
-                provider_hint=extract_provider(request_data) or "",
+                model_hint=extract_model(request_data) or config.default_model or "langgraph-agent",
+                provider_hint=extract_provider(request_data) or config.default_provider or "",
             )
 
         # 先获取响应头，判断是否真的是流式响应

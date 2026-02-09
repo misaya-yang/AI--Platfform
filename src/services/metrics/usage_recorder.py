@@ -18,21 +18,28 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:
     from asyncpg import Connection
     from ...persistence.database import DatabaseStorage
+
+from .observability import KNOWN_ERROR_TYPES, should_sample_trace
 
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
 _usage_recorder: Optional["UsageRecorder"] = None
 
+UNATTRIBUTED_PROVIDER = "unattributed"
+UNATTRIBUTED_MODEL = "unattributed_model"
+UNATTRIBUTED_SERVICE = "unattributed_service"
+
 
 @dataclass
 class UsageRecord:
     """Single usage record data structure."""
+
     tenant_id: str
     user_id: str
     model: str
@@ -44,9 +51,17 @@ class UsageRecord:
     provider: str = ""
     latency_ms: int = 0
     first_token_ms: int = 0
+    request_total_duration_ms: int = 0
+    llm_inference_duration_ms: int = 0
+    retrieval_duration_ms: int = 0
+    tool_call_duration_ms: int = 0
+    agent_or_graph_overhead_ms: int = 0
+    tool_call_breakdown: Dict[str, int] = field(default_factory=dict)
+    error_type: Optional[str] = None
     status: str = "success"
     request_type: str = "chat"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    trace_steps: List[Dict[str, Any]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     # Computed fields (filled by UsageRecorder)
@@ -95,7 +110,12 @@ def group_records_by_hour(records: list[UsageRecord]) -> Dict[tuple, Dict[str, A
         agg["total_input_tokens"] += record.input_tokens
         agg["total_output_tokens"] += record.output_tokens
         agg["total_cost_cents"] += record.input_cost_cents + record.output_cost_cents
-        agg["latency_sum"] += record.latency_ms
+        total_duration = (
+            int(record.request_total_duration_ms)
+            if int(record.request_total_duration_ms or 0) > 0
+            else int(record.latency_ms or 0)
+        )
+        agg["latency_sum"] += total_duration
         agg["first_token_sum"] += record.first_token_ms
 
     return aggregates
@@ -117,21 +137,119 @@ class UsageRecorder:
         database: Optional["DatabaseStorage"] = None,
         buffer_size: int = 100,
         flush_interval_seconds: float = 5.0,
+        normal_trace_sample_rate: float = 0.03,
+        trace_p95_cache_ttl_seconds: float = 60.0,
+        default_trace_p95_threshold_ms: int = 10000,
     ):
         self.database = database
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval_seconds
+        self._normal_trace_sample_rate = max(0.0, min(float(normal_trace_sample_rate), 1.0))
+        self._trace_p95_cache_ttl_seconds = max(float(trace_p95_cache_ttl_seconds), 1.0)
+        self._default_trace_p95_threshold_ms = max(int(default_trace_p95_threshold_ms), 1)
         self._buffer: List[UsageRecord] = []
         self._buffer_lock = asyncio.Lock()
         self._flush_task: Optional[asyncio.Task] = None
         self._running = False
-        self._pricing_cache: Dict[str, Dict[str, Decimal]] = {}
+        self._pricing_cache: Dict[str, Dict[str, Any]] = {}
         self._pricing_cache_time: float = 0
         self._pricing_cache_ttl: float = 300  # 5 minutes
+        self._trace_p95_cache: Dict[str, Tuple[int, float]] = {}
 
     def set_database(self, database: "DatabaseStorage") -> None:
         """Set or update the database storage instance."""
         self.database = database
+
+    @staticmethod
+    def _normalize_identity(value: Optional[str], fallback: str) -> str:
+        normalized = str(value or "").strip()
+        if normalized.lower() in {"unknown", "none", "null", "n/a", "na"}:
+            return fallback
+        return normalized or fallback
+
+    @staticmethod
+    def _extract_provider_from_metadata(metadata: Dict[str, Any]) -> str:
+        for key in ("provider", "provider_id", "vendor", "llm_provider"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _extract_model_from_metadata(metadata: Dict[str, Any]) -> str:
+        for key in ("model", "model_id", "llm_model"):
+            value = metadata.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return ""
+
+    # Well-known model name prefix -> provider mappings for fallback inference
+    _MODEL_PREFIX_PROVIDER_MAP = {
+        "gemini": "google",
+        "gpt": "openai",
+        "claude": "anthropic",
+        "qwen": "dashscope",
+        "deepseek": "deepseek",
+        "llama": "meta",
+        "mistral": "mistral",
+        "mixtral": "mistral",
+        "command": "cohere",
+    }
+
+    async def _get_provider_for_model(self, model: str) -> str:
+        normalized_model = str(model or "").strip()
+        if not normalized_model:
+            return ""
+        # 1. Try exact match from model_pricing table
+        pricing = await self._get_model_pricing(normalized_model)
+        if pricing:
+            provider = pricing.get("provider")
+            if provider:
+                return str(provider).strip()
+        # 2. Fallback: infer from model name prefix
+        model_lower = normalized_model.lower()
+        for prefix, provider in self._MODEL_PREFIX_PROVIDER_MAP.items():
+            if model_lower.startswith(prefix):
+                return provider
+        return ""
+
+    async def _normalize_record_dimensions(self, record: UsageRecord) -> None:
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+
+        record.model = self._normalize_identity(
+            record.model or self._extract_model_from_metadata(metadata),
+            UNATTRIBUTED_MODEL,
+        )
+        record.service_id = self._normalize_identity(record.service_id, UNATTRIBUTED_SERVICE)
+        record.tenant_id = self._normalize_identity(record.tenant_id, "default")
+        record.user_id = self._normalize_identity(record.user_id, "anonymous")
+
+        provider = self._normalize_identity(
+            record.provider or self._extract_provider_from_metadata(metadata),
+            "",
+        )
+        if not provider:
+            provider = await self._get_provider_for_model(record.model)
+
+        record.provider = provider or UNATTRIBUTED_PROVIDER
+        if record.provider == UNATTRIBUTED_PROVIDER and isinstance(metadata, dict):
+            metadata.setdefault("attribution_issue", "missing_provider")
+            record.metadata = metadata
+
+        if record.request_total_duration_ms <= 0 and record.latency_ms > 0:
+            record.request_total_duration_ms = int(record.latency_ms)
+
+        if record.error_type:
+            normalized_error = str(record.error_type).strip().lower()
+            record.error_type = (
+                normalized_error if normalized_error in KNOWN_ERROR_TYPES else "unknown"
+            )
 
     async def start(self) -> None:
         """Start the background flush task."""
@@ -161,6 +279,7 @@ class UsageRecorder:
         The record will be buffered and written to the database
         in batches for efficiency.
         """
+        await self._normalize_record_dimensions(record)
         # Calculate cost
         await self._calculate_cost(record)
 
@@ -184,9 +303,17 @@ class UsageRecorder:
         provider: str = "",
         latency_ms: int = 0,
         first_token_ms: int = 0,
+        request_total_duration_ms: int = 0,
+        llm_inference_duration_ms: int = 0,
+        retrieval_duration_ms: int = 0,
+        tool_call_duration_ms: int = 0,
+        agent_or_graph_overhead_ms: int = 0,
+        tool_call_breakdown: Optional[Dict[str, int]] = None,
+        error_type: Optional[str] = None,
         status: str = "success",
         request_type: str = "chat",
         metadata: Optional[Dict[str, Any]] = None,
+        trace_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """
         Convenience method to record usage without creating UsageRecord manually.
@@ -203,9 +330,17 @@ class UsageRecorder:
             provider=provider,
             latency_ms=latency_ms,
             first_token_ms=first_token_ms,
+            request_total_duration_ms=request_total_duration_ms,
+            llm_inference_duration_ms=llm_inference_duration_ms,
+            retrieval_duration_ms=retrieval_duration_ms,
+            tool_call_duration_ms=tool_call_duration_ms,
+            agent_or_graph_overhead_ms=agent_or_graph_overhead_ms,
+            tool_call_breakdown=tool_call_breakdown or {},
+            error_type=error_type,
             status=status,
             request_type=request_type,
             metadata=metadata or {},
+            trace_steps=trace_steps or [],
         )
         await self.record(record)
 
@@ -227,7 +362,7 @@ class UsageRecorder:
             record.input_cost_cents = round(float(input_cost))
             record.output_cost_cents = round(float(output_cost))
 
-    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, Decimal]]:
+    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, Any]]:
         """Get pricing for a model from cache or database."""
         # Check cache
         now = time.time()
@@ -251,19 +386,71 @@ class UsageRecorder:
         if not self.database or not self.database._pool:
             # Use default pricing if no database
             self._pricing_cache = {
-                "gpt-4o": {"input": Decimal("0.0025"), "output": Decimal("0.01")},
-                "gpt-4o-mini": {"input": Decimal("0.00015"), "output": Decimal("0.0006")},
-                "gpt-4-turbo": {"input": Decimal("0.01"), "output": Decimal("0.03")},
-                "gpt-4": {"input": Decimal("0.03"), "output": Decimal("0.06")},
-                "gpt-3.5-turbo": {"input": Decimal("0.0005"), "output": Decimal("0.0015")},
-                "claude-3-opus": {"input": Decimal("0.015"), "output": Decimal("0.075")},
-                "claude-3-sonnet": {"input": Decimal("0.003"), "output": Decimal("0.015")},
-                "claude-3-5-sonnet": {"input": Decimal("0.003"), "output": Decimal("0.015")},
-                "claude-3-haiku": {"input": Decimal("0.00025"), "output": Decimal("0.00125")},
-                "deepseek-chat": {"input": Decimal("0.00014"), "output": Decimal("0.00028")},
-                "qwen-turbo": {"input": Decimal("0.0008"), "output": Decimal("0.002")},
-                "qwen-plus": {"input": Decimal("0.004"), "output": Decimal("0.012")},
-                "default": {"input": Decimal("0.001"), "output": Decimal("0.002")},
+                "gpt-4o": {
+                    "input": Decimal("0.0025"),
+                    "output": Decimal("0.01"),
+                    "provider": "openai",
+                },
+                "gpt-4o-mini": {
+                    "input": Decimal("0.00015"),
+                    "output": Decimal("0.0006"),
+                    "provider": "openai",
+                },
+                "gpt-4-turbo": {
+                    "input": Decimal("0.01"),
+                    "output": Decimal("0.03"),
+                    "provider": "openai",
+                },
+                "gpt-4": {
+                    "input": Decimal("0.03"),
+                    "output": Decimal("0.06"),
+                    "provider": "openai",
+                },
+                "gpt-3.5-turbo": {
+                    "input": Decimal("0.0005"),
+                    "output": Decimal("0.0015"),
+                    "provider": "openai",
+                },
+                "claude-3-opus": {
+                    "input": Decimal("0.015"),
+                    "output": Decimal("0.075"),
+                    "provider": "anthropic",
+                },
+                "claude-3-sonnet": {
+                    "input": Decimal("0.003"),
+                    "output": Decimal("0.015"),
+                    "provider": "anthropic",
+                },
+                "claude-3-5-sonnet": {
+                    "input": Decimal("0.003"),
+                    "output": Decimal("0.015"),
+                    "provider": "anthropic",
+                },
+                "claude-3-haiku": {
+                    "input": Decimal("0.00025"),
+                    "output": Decimal("0.00125"),
+                    "provider": "anthropic",
+                },
+                "deepseek-chat": {
+                    "input": Decimal("0.00014"),
+                    "output": Decimal("0.00028"),
+                    "provider": "deepseek",
+                },
+                "qwen-turbo": {
+                    "input": Decimal("0.0008"),
+                    "output": Decimal("0.002"),
+                    "provider": "dashscope",
+                },
+                "qwen-plus": {
+                    "input": Decimal("0.004"),
+                    "output": Decimal("0.012"),
+                    "provider": "dashscope",
+                },
+                "default": {
+                    "input": Decimal("0.001"),
+                    "output": Decimal("0.002"),
+                    "provider": UNATTRIBUTED_PROVIDER,
+                },
             }
             self._pricing_cache_time = time.time()
             return
@@ -272,7 +459,7 @@ class UsageRecorder:
             async with self.database._pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT model, input_price_per_1k, output_price_per_1k
+                    SELECT model, provider, input_price_per_1k, output_price_per_1k
                     FROM model_pricing
                     WHERE is_active = TRUE
                     """
@@ -281,6 +468,7 @@ class UsageRecorder:
                     row["model"]: {
                         "input": Decimal(str(row["input_price_per_1k"])),
                         "output": Decimal(str(row["output_price_per_1k"])),
+                        "provider": str(row["provider"] or "").strip(),
                     }
                     for row in rows
                 }
@@ -312,6 +500,7 @@ class UsageRecorder:
 
         records = self._buffer.copy()
         self._buffer.clear()
+        self._ensure_request_ids(records)
 
         if not self.database or not self.database._pool:
             logger.warning(f"No database connection, dropping {len(records)} usage records")
@@ -321,6 +510,8 @@ class UsageRecorder:
             async with self.database._pool.acquire() as conn:
                 async with conn.transaction():
                     await self._write_records(conn, records)
+                    await self._update_quota_counters(conn, records)
+                    await self._write_sampled_traces(conn, records)
                     await self._update_daily_aggregates(conn, records)
                     await self._update_hourly_aggregates(conn, records)
             logger.debug(f"Flushed {len(records)} usage records")
@@ -329,6 +520,129 @@ class UsageRecorder:
             # Re-add failed records to buffer (with limit)
             if len(self._buffer) + len(records) <= self.buffer_size * 2:
                 self._buffer.extend(records)
+
+    @staticmethod
+    def _ensure_request_ids(records: List[UsageRecord]) -> None:
+        for record in records:
+            if not record.request_id:
+                record.request_id = str(uuid.uuid4())
+
+    async def _get_trace_p95_threshold_ms(self, conn: "Connection", tenant_id: str) -> int:
+        cache_key = tenant_id or "default"
+        now = time.time()
+        cached = self._trace_p95_cache.get(cache_key)
+        if cached and now - cached[1] <= self._trace_p95_cache_ttl_seconds:
+            return cached[0]
+
+        threshold = self._default_trace_p95_threshold_ms
+        try:
+            value = await conn.fetchval(
+                """
+                SELECT
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (
+                        ORDER BY COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)
+                    )
+                FROM usage_records
+                WHERE tenant_id = $1
+                  AND created_at >= NOW() - INTERVAL '24 hours'
+                """,
+                tenant_id,
+            )
+            if value is not None:
+                threshold = max(int(float(value)), 1)
+        except Exception as e:
+            logger.debug(f"Failed to calculate P95 threshold for tenant {tenant_id}: {e}")
+
+        self._trace_p95_cache[cache_key] = (threshold, now)
+        return threshold
+
+    @staticmethod
+    def _record_total_duration(record: UsageRecord) -> int:
+        if record.request_total_duration_ms and record.request_total_duration_ms > 0:
+            return int(record.request_total_duration_ms)
+        if record.latency_ms and record.latency_ms > 0:
+            return int(record.latency_ms)
+        return 0
+
+    async def _write_sampled_traces(self, conn: "Connection", records: List[UsageRecord]) -> None:
+        sampled_rows: List[Tuple[Any, ...]] = []
+        sampled_flags: List[Tuple[str, str, str]] = []
+        threshold_cache: Dict[str, int] = {}
+
+        for record in records:
+            tenant_id = self._normalize_identity(record.tenant_id, "default")
+            if tenant_id not in threshold_cache:
+                threshold_cache[tenant_id] = await self._get_trace_p95_threshold_ms(conn, tenant_id)
+
+            total_duration = self._record_total_duration(record)
+            sampled, reason = should_sample_trace(
+                status=record.status,
+                request_total_duration_ms=total_duration,
+                p95_threshold_ms=threshold_cache[tenant_id],
+                normal_sample_rate=self._normal_trace_sample_rate,
+            )
+            if not sampled:
+                continue
+
+            trace_steps = record.trace_steps if isinstance(record.trace_steps, list) else []
+            sampled_rows.append(
+                (
+                    record.request_id,
+                    tenant_id,
+                    self._normalize_identity(record.user_id, "anonymous"),
+                    self._normalize_identity(record.service_id, UNATTRIBUTED_SERVICE),
+                    self._normalize_identity(record.assistant_id, ""),
+                    self._normalize_identity(record.provider, UNATTRIBUTED_PROVIDER),
+                    self._normalize_identity(record.model, UNATTRIBUTED_MODEL),
+                    record.status or "success",
+                    record.error_type,
+                    total_duration,
+                    max(int(record.first_token_ms or 0), 0),
+                    max(int(record.llm_inference_duration_ms or 0), 0),
+                    max(int(record.retrieval_duration_ms or 0), 0),
+                    max(int(record.tool_call_duration_ms or 0), 0),
+                    max(int(record.agent_or_graph_overhead_ms or 0), 0),
+                    max(int(record.input_tokens or 0), 0),
+                    max(int(record.output_tokens or 0), 0),
+                    max(int(record.input_cost_cents + record.output_cost_cents), 0),
+                    reason,
+                    json.dumps(trace_steps, ensure_ascii=False),
+                    json.dumps(record.metadata or {}, ensure_ascii=False),
+                    datetime.fromtimestamp(record.timestamp, tz=timezone.utc),
+                )
+            )
+            sampled_flags.append((record.request_id, tenant_id, reason))
+
+        if not sampled_rows:
+            return
+
+        await conn.executemany(
+            """
+            INSERT INTO request_traces (
+                request_id, tenant_id, user_id, service_id, assistant_id, provider, model,
+                status, error_type, request_total_duration_ms, first_token_latency_ms,
+                llm_inference_duration_ms, retrieval_duration_ms, tool_call_duration_ms,
+                agent_or_graph_overhead_ms, input_tokens, output_tokens, total_cost_cents,
+                sample_reason, trace_steps, metadata, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11,
+                $12, $13, $14,
+                $15, $16, $17, $18,
+                $19, $20::jsonb, $21::jsonb, $22
+            )
+            """,
+            sampled_rows,
+        )
+
+        await conn.executemany(
+            """
+            UPDATE usage_records
+            SET trace_sampled = TRUE, sample_reason = $3
+            WHERE request_id = $1 AND tenant_id = $2
+            """,
+            sampled_flags,
+        )
 
     async def _write_records(self, conn: "Connection", records: List[UsageRecord]) -> None:
         """Write records to usage_records table."""
@@ -339,17 +653,29 @@ class UsageRecorder:
                 service_id, assistant_id, model, provider,
                 input_tokens, output_tokens,
                 input_cost_cents, output_cost_cents,
-                latency_ms, first_token_ms, status,
+                latency_ms, first_token_ms,
+                request_total_duration_ms,
+                llm_inference_duration_ms, retrieval_duration_ms,
+                tool_call_duration_ms, agent_or_graph_overhead_ms,
+                tool_call_breakdown, error_type, status,
                 request_type, metadata, created_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9,
+                $10, $11,
+                $12, $13,
+                $14,
+                $15, $16,
+                $17, $18,
+                $19::jsonb, $20, $21,
+                $22, $23::jsonb, $24
             )
             """,
             [
                 (
                     r.tenant_id,
                     r.user_id,
-                    r.request_id or str(uuid.uuid4()),
+                    r.request_id,
                     r.service_id or None,
                     r.assistant_id or None,
                     r.model,
@@ -360,17 +686,70 @@ class UsageRecorder:
                     r.output_cost_cents,
                     r.latency_ms,
                     r.first_token_ms,
+                    r.request_total_duration_ms or r.latency_ms,
+                    r.llm_inference_duration_ms,
+                    r.retrieval_duration_ms,
+                    r.tool_call_duration_ms,
+                    r.agent_or_graph_overhead_ms,
+                    json.dumps(r.tool_call_breakdown or {}, ensure_ascii=False),
+                    r.error_type,
                     r.status,
                     r.request_type,
-                    json.dumps(r.metadata) if r.metadata else "{}",
-                    # Use naive UTC datetime to match TIMESTAMP column
-                    datetime.fromtimestamp(r.timestamp, tz=timezone.utc).replace(tzinfo=None),
+                    json.dumps(r.metadata, ensure_ascii=False) if r.metadata else "{}",
+                    datetime.utcfromtimestamp(r.timestamp),
                 )
                 for r in records
             ],
         )
 
-    async def _update_daily_aggregates(self, conn: "Connection", records: List[UsageRecord]) -> None:
+    async def _update_quota_counters(self, conn: "Connection", records: List[UsageRecord]) -> None:
+        """Update quota counters from flushed usage records."""
+        aggregates: Dict[Tuple[str, str], Dict[str, int]] = {}
+        for record in records:
+            key = (record.tenant_id, record.user_id)
+            current = aggregates.setdefault(
+                key,
+                {
+                    "tokens": 0,
+                    "cost_microcents": 0,
+                    "requests": 0,
+                },
+            )
+            current["tokens"] += max(int(record.input_tokens + record.output_tokens), 0)
+            current["cost_microcents"] += max(
+                int(record.input_cost_cents + record.output_cost_cents), 0
+            )
+            current["requests"] += 1
+
+        if not aggregates:
+            return
+
+        await conn.executemany(
+            """
+            UPDATE user_quotas
+            SET
+                current_daily_tokens = current_daily_tokens + $3,
+                current_monthly_tokens = current_monthly_tokens + $3,
+                current_monthly_cost_cents = current_monthly_cost_cents + $4,
+                current_daily_requests = current_daily_requests + $5,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE tenant_id = $1 AND user_id = $2
+            """,
+            [
+                (
+                    tenant_id,
+                    user_id,
+                    agg["tokens"],
+                    int(round(agg["cost_microcents"] / 10000)),
+                    agg["requests"],
+                )
+                for (tenant_id, user_id), agg in aggregates.items()
+            ],
+        )
+
+    async def _update_daily_aggregates(
+        self, conn: "Connection", records: List[UsageRecord]
+    ) -> None:
         """Update daily aggregates table."""
         # Group records by aggregation key
         aggregates: Dict[tuple, Dict[str, Any]] = {}
@@ -408,7 +787,7 @@ class UsageRecorder:
             agg["total_input_tokens"] += record.input_tokens
             agg["total_output_tokens"] += record.output_tokens
             agg["total_cost_cents"] += record.input_cost_cents + record.output_cost_cents
-            agg["latency_sum"] += record.latency_ms
+            agg["latency_sum"] += self._record_total_duration(record)
             agg["first_token_sum"] += record.first_token_ms
 
         for key, agg in aggregates.items():
@@ -489,7 +868,9 @@ class UsageRecorder:
                 avg_first_token,
             )
 
-    async def _update_hourly_aggregates(self, conn: "Connection", records: List[UsageRecord]) -> None:
+    async def _update_hourly_aggregates(
+        self, conn: "Connection", records: List[UsageRecord]
+    ) -> None:
         """Update hourly aggregates table."""
         aggregates = group_records_by_hour(records)
 
@@ -600,48 +981,73 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
-                # Base table and condition
-                table = "usage_daily_aggregates u"
-                conditions = ["u.tenant_id = $1", "u.date >= $2", "u.date <= $3"]
-                params: List[Any] = [tenant_id, start_date, end_date]
-                joins = ""
-
-                # Special handling for provider filter
+                # When provider filter is present we use raw usage_records to avoid
+                # lossy provider inference from model_pricing joins.
                 if provider:
-                    joins = "LEFT JOIN model_pricing mp ON u.model = mp.model"
-                    conditions.append(f"mp.provider = ${len(params) + 1}")
-                    params.append(provider)
+                    conditions = [
+                        "tenant_id = $1",
+                        "created_at::date >= $2",
+                        "created_at::date <= $3",
+                        f"provider = $4",
+                    ]
+                    params: List[Any] = [tenant_id, start_date, end_date, provider]
+                    if user_id:
+                        conditions.append(f"user_id = ${len(params) + 1}")
+                        params.append(user_id)
+                    if model:
+                        conditions.append(f"model = ${len(params) + 1}")
+                        params.append(model)
+                    if service_id:
+                        conditions.append(f"service_id = ${len(params) + 1}")
+                        params.append(service_id)
+                    if assistant_id:
+                        conditions.append(f"assistant_id = ${len(params) + 1}")
+                        params.append(assistant_id)
 
-                if user_id:
-                    conditions.append(f"u.user_id = ${len(params) + 1}")
-                    params.append(user_id)
-                if model:
-                    conditions.append(f"u.model = ${len(params) + 1}")
-                    params.append(model)
-                if service_id:
-                    conditions.append(f"u.service_id = ${len(params) + 1}")
-                    params.append(service_id)
-                if assistant_id:
-                    conditions.append(f"u.assistant_id = ${len(params) + 1}")
-                    params.append(assistant_id)
+                    query = f"""
+                        SELECT
+                            COUNT(*) as total_requests,
+                            COUNT(*) FILTER (WHERE status = 'success') as success_count,
+                            COUNT(*) FILTER (WHERE status != 'success') as error_count,
+                            COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                            COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                            COALESCE(SUM(total_cost_cents), 0) as total_cost_cents,
+                            COALESCE(AVG(COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)), 0) as avg_latency_ms
+                        FROM usage_records
+                        WHERE {" AND ".join(conditions)}
+                    """
+                    row = await conn.fetchrow(query, *params)
+                else:
+                    # Daily aggregates are more efficient for non-provider filtered views.
+                    conditions = ["u.tenant_id = $1", "u.date >= $2", "u.date <= $3"]
+                    params = [tenant_id, start_date, end_date]
+                    if user_id:
+                        conditions.append(f"u.user_id = ${len(params) + 1}")
+                        params.append(user_id)
+                    if model:
+                        conditions.append(f"u.model = ${len(params) + 1}")
+                        params.append(model)
+                    if service_id:
+                        conditions.append(f"u.service_id = ${len(params) + 1}")
+                        params.append(service_id)
+                    if assistant_id:
+                        conditions.append(f"u.assistant_id = ${len(params) + 1}")
+                        params.append(assistant_id)
 
-                where_clause = " AND ".join(conditions)
-                
-                query = f"""
-                    SELECT
-                        COALESCE(SUM(request_count), 0) as total_requests,
-                        COALESCE(SUM(success_count), 0) as success_count,
-                        COALESCE(SUM(error_count), 0) as error_count,
-                        COALESCE(SUM(total_input_tokens), 0) as total_input_tokens,
-                        COALESCE(SUM(total_output_tokens), 0) as total_output_tokens,
-                        COALESCE(SUM(total_cost_cents), 0) as total_cost_cents,
-                        COALESCE(AVG(avg_latency_ms), 0) as avg_latency_ms
-                    FROM {table}
-                    {joins}
-                    WHERE {where_clause}
-                """
+                    query = f"""
+                        SELECT
+                            COALESCE(SUM(request_count), 0) as total_requests,
+                            COALESCE(SUM(success_count), 0) as success_count,
+                            COALESCE(SUM(error_count), 0) as error_count,
+                            COALESCE(SUM(total_input_tokens), 0) as total_input_tokens,
+                            COALESCE(SUM(total_output_tokens), 0) as total_output_tokens,
+                            COALESCE(SUM(total_cost_cents), 0) as total_cost_cents,
+                            COALESCE(AVG(avg_latency_ms), 0) as avg_latency_ms
+                        FROM usage_daily_aggregates u
+                        WHERE {" AND ".join(conditions)}
+                    """
+                    row = await conn.fetchrow(query, *params)
 
-                row = await conn.fetchrow(query, *params)
                 if not row:
                     return self._empty_summary()
 
@@ -650,10 +1056,13 @@ class UsageRecorder:
 
                 return {
                     "total_requests": total_requests,
-                    "success_rate": round(success_count / total_requests * 100, 2) if total_requests > 0 else 100.0,
+                    "success_rate": round(success_count / total_requests * 100, 2)
+                    if total_requests > 0
+                    else 100.0,
                     "total_input_tokens": int(row["total_input_tokens"]),
                     "total_output_tokens": int(row["total_output_tokens"]),
-                    "total_tokens": int(row["total_input_tokens"]) + int(row["total_output_tokens"]),
+                    "total_tokens": int(row["total_input_tokens"])
+                    + int(row["total_output_tokens"]),
                     # cost_cents is stored as microcents (cents * 10000) for precision
                     # Convert: microcents / 10000 = cents, cents / 100 = USD
                     "total_cost_usd": round(int(row["total_cost_cents"]) / 1000000, 6),
@@ -687,11 +1096,11 @@ class UsageRecorder:
 
         # Whitelist of valid dimension -> column mappings (SQL injection prevention)
         dimension_mapping = {
-            "model": "model",
-            "user": "user_id",
-            "assistant": "assistant_id",
-            "service": "service_id",
-            "provider": "provider",  # Special handling via JOIN
+            "model": "u.model",
+            "user": "u.user_id",
+            "assistant": "u.assistant_id",
+            "service": "u.service_id",
+            "provider": "provider",  # Special handling via usage_records
         }
         if dimension not in dimension_mapping:
             logger.warning(f"Invalid dimension requested: {dimension}")
@@ -700,21 +1109,98 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
-                # Special query for provider dimension - requires JOIN with model_pricing
+                # Provider breakdown uses raw usage_records to avoid unknown join artifacts.
                 if dimension == "provider":
                     query = """
                         SELECT
-                            COALESCE(mp.provider, 'unknown') as dimension_value,
-                            SUM(u.request_count) as total_requests,
-                            SUM(u.total_input_tokens) as total_input_tokens,
-                            SUM(u.total_output_tokens) as total_output_tokens,
-                            SUM(u.total_cost_cents) as total_cost_cents
-                        FROM usage_daily_aggregates u
-                        LEFT JOIN model_pricing mp ON u.model = mp.model
-                        WHERE u.tenant_id = $1
-                          AND u.date >= $2
-                          AND u.date <= $3
+                            COALESCE(NULLIF(provider, ''), $4) as dimension_value,
+                            COALESCE(NULLIF(provider, ''), $4) as dimension_label,
+                            COUNT(*) as total_requests,
+                            COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                            COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                            COALESCE(SUM(total_cost_cents), 0) as total_cost_cents
+                        FROM usage_records
+                        WHERE tenant_id = $1
+                          AND created_at::date >= $2
+                          AND created_at::date <= $3
                     """
+                    params: List[Any] = [tenant_id, start_date, end_date, UNATTRIBUTED_PROVIDER]
+
+                    if user_id:
+                        query += " AND user_id = $" + str(len(params) + 1)
+                        params.append(user_id)
+                    if service_id:
+                        query += " AND service_id = $" + str(len(params) + 1)
+                        params.append(service_id)
+
+                    query += f" GROUP BY COALESCE(NULLIF(provider, ''), $4) ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                    params.append(limit)
+                else:
+                    if dimension == "service":
+                        query = """
+                            SELECT
+                                u.service_id as dimension_value,
+                                COALESCE(NULLIF(s.name, ''), u.service_id) as dimension_label,
+                                SUM(u.request_count) as total_requests,
+                                SUM(u.total_input_tokens) as total_input_tokens,
+                                SUM(u.total_output_tokens) as total_output_tokens,
+                                SUM(u.total_cost_cents) as total_cost_cents
+                            FROM usage_daily_aggregates u
+                            LEFT JOIN services s
+                              ON s.service_id = u.service_id
+                            WHERE u.tenant_id = $1
+                              AND u.date >= $2
+                              AND u.date <= $3
+                              AND u.service_id IS NOT NULL
+                        """
+                        group_by_expr = "u.service_id, dimension_label"
+                    elif dimension == "user":
+                        query = """
+                            SELECT
+                                u.user_id as dimension_value,
+                                COALESCE(
+                                    NULLIF(usr.display_name, ''),
+                                    NULLIF(usr.username, ''),
+                                    CASE
+                                        WHEN u.user_id LIKE 'apikey:%' THEN 'API Key · ' || COALESCE(NULLIF(ak.name, ''), SUBSTRING(u.user_id FROM 8 FOR 6))
+                                        WHEN u.user_id LIKE 'anon:%' THEN 'Anonymous · ' || RIGHT(u.user_id, 6)
+                                        ELSE u.user_id
+                                    END
+                                ) as dimension_label,
+                                SUM(u.request_count) as total_requests,
+                                SUM(u.total_input_tokens) as total_input_tokens,
+                                SUM(u.total_output_tokens) as total_output_tokens,
+                                SUM(u.total_cost_cents) as total_cost_cents
+                            FROM usage_daily_aggregates u
+                            LEFT JOIN users usr
+                              ON usr.user_id = u.user_id
+                             AND usr.tenant_id = u.tenant_id
+                            LEFT JOIN api_keys ak
+                              ON ak.tenant_id = u.tenant_id
+                             AND ('apikey:' || SUBSTRING(ak.key_hash, 1, 16)) = u.user_id
+                            WHERE u.tenant_id = $1
+                              AND u.date >= $2
+                              AND u.date <= $3
+                              AND u.user_id IS NOT NULL
+                        """
+                        group_by_expr = "u.user_id, dimension_label"
+                    else:
+                        query = f"""
+                            SELECT
+                                {dimension_column} as dimension_value,
+                                {dimension_column} as dimension_label,
+                                SUM(u.request_count) as total_requests,
+                                SUM(u.total_input_tokens) as total_input_tokens,
+                                SUM(u.total_output_tokens) as total_output_tokens,
+                                SUM(u.total_cost_cents) as total_cost_cents
+                            FROM usage_daily_aggregates u
+                            WHERE u.tenant_id = $1
+                              AND u.date >= $2
+                              AND u.date <= $3
+                              AND {dimension_column} IS NOT NULL
+                        """
+                        group_by_expr = f"{dimension_column}"
+
                     params: List[Any] = [tenant_id, start_date, end_date]
 
                     if user_id:
@@ -724,32 +1210,10 @@ class UsageRecorder:
                         query += " AND u.service_id = $" + str(len(params) + 1)
                         params.append(service_id)
 
-                    query += f" GROUP BY COALESCE(mp.provider, 'unknown') ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
-                    params.append(limit)
-                else:
-                    query = f"""
-                        SELECT
-                            {dimension_column} as dimension_value,
-                            SUM(request_count) as total_requests,
-                            SUM(total_input_tokens) as total_input_tokens,
-                            SUM(total_output_tokens) as total_output_tokens,
-                            SUM(total_cost_cents) as total_cost_cents
-                        FROM usage_daily_aggregates
-                        WHERE tenant_id = $1
-                          AND date >= $2
-                          AND date <= $3
-                          AND {dimension_column} IS NOT NULL
-                    """
-                    params: List[Any] = [tenant_id, start_date, end_date]
-
-                    if user_id:
-                        query += " AND user_id = $" + str(len(params) + 1)
-                        params.append(user_id)
-                    if service_id:
-                        query += " AND service_id = $" + str(len(params) + 1)
-                        params.append(service_id)
-
-                    query += f" GROUP BY {dimension_column} ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                    query += (
+                        f" GROUP BY {group_by_expr}"
+                        f" ORDER BY total_cost_cents DESC LIMIT ${len(params) + 1}"
+                    )
                     params.append(limit)
 
                 rows = await conn.fetch(query, *params)
@@ -759,13 +1223,17 @@ class UsageRecorder:
                 return [
                     {
                         dimension: row["dimension_value"],
+                        "label": row["dimension_label"],
                         "requests": int(row["total_requests"]),
                         "input_tokens": int(row["total_input_tokens"]),
                         "output_tokens": int(row["total_output_tokens"]),
-                        "total_tokens": int(row["total_input_tokens"]) + int(row["total_output_tokens"]),
+                        "total_tokens": int(row["total_input_tokens"])
+                        + int(row["total_output_tokens"]),
                         # cost_cents is stored as microcents (cents * 10000) for precision
                         "cost_usd": round(int(row["total_cost_cents"]) / 1000000, 6),
-                        "percentage": round(int(row["total_cost_cents"]) / total_cost * 100, 1) if total_cost > 0 else 0,
+                        "percentage": round(int(row["total_cost_cents"]) / total_cost * 100, 1)
+                        if total_cost > 0
+                        else 0,
                     }
                     for row in rows
                 ]
@@ -796,96 +1264,55 @@ class UsageRecorder:
 
         try:
             async with self.database._pool.acquire() as conn:
-                if granularity == "hour":
-                    query = f"""
-                        SELECT
-                            bucket_start as bucket,
-                            SUM(request_count) as requests,
-                            SUM(total_input_tokens) as input_tokens,
-                            SUM(total_output_tokens) as output_tokens,
-                            SUM(total_cost_cents) as cost_cents,
-                            AVG(avg_latency_ms) as avg_latency_ms
-                        FROM usage_hourly_aggregates u
-                        {("LEFT JOIN model_pricing mp ON u.model = mp.model" if provider else "")}
-                        WHERE u.tenant_id = $1
-                          AND u.date >= $2
-                          AND u.date <= $3
-                    """
-                    # Rebuild params cleanly
-                    params = [tenant_id, start_date, end_date]
-                    if provider:
-                         query += f" AND mp.provider = ${len(params)+1}"
-                         params.append(provider)
-                    if user_id:
-                        query += f" AND u.user_id = ${len(params)+1}"
-                        params.append(user_id)
-                    if model:
-                        query += f" AND u.model = ${len(params)+1}"
-                        params.append(model)
-                    if service_id:
-                        query += f" AND u.service_id = ${len(params)+1}"
-                        params.append(service_id)
-
-                    query += " GROUP BY bucket_start ORDER BY bucket_start"
-                    rows = await conn.fetch(query, *params)
-
-                    return [
-                        {
-                            "date": row["bucket"].isoformat(),
-                            "requests": int(row["requests"]),
-                            "input_tokens": int(row["input_tokens"]),
-                            "output_tokens": int(row["output_tokens"]),
-                            "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
-                            # cost_cents is stored as microcents (cents * 10000) for precision
-                            "cost_usd": round(int(row["cost_cents"]) / 1000000, 6),
-                            "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
-                        }
-                        for row in rows
-                    ]
-
+                bucket_expr = (
+                    "date_trunc('hour', created_at)"
+                    if granularity == "hour"
+                    else "date_trunc('day', created_at)"
+                )
                 query = f"""
                     SELECT
-                        date,
-                        SUM(request_count) as requests,
-                        SUM(total_input_tokens) as input_tokens,
-                        SUM(total_output_tokens) as output_tokens,
-                        SUM(total_cost_cents) as cost_cents,
-                        AVG(avg_latency_ms) as avg_latency_ms
-                    FROM usage_daily_aggregates u
-                    {("LEFT JOIN model_pricing mp ON u.model = mp.model" if provider else "")}
-                    WHERE u.tenant_id = $1
-                      AND u.date >= $2
-                      AND u.date <= $3
+                        {bucket_expr} AS bucket,
+                        COUNT(*) AS requests,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(total_cost_cents), 0) AS cost_cents,
+                        COALESCE(
+                            AVG(COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)),
+                            0
+                        ) AS avg_latency_ms
+                    FROM usage_records
+                    WHERE tenant_id = $1
+                      AND created_at::date >= $2
+                      AND created_at::date <= $3
                 """
-                params = [tenant_id, start_date, end_date]
+                params: List[Any] = [tenant_id, start_date, end_date]
                 if provider:
-                    query += f" AND mp.provider = ${len(params) + 1}"
+                    query += f" AND provider = ${len(params) + 1}"
                     params.append(provider)
-
                 if user_id:
-                    query += f" AND u.user_id = ${len(params) + 1}"
+                    query += f" AND user_id = ${len(params) + 1}"
                     params.append(user_id)
                 if model:
-                    query += f" AND u.model = ${len(params) + 1}"
+                    query += f" AND model = ${len(params) + 1}"
                     params.append(model)
                 if service_id:
-                    query += f" AND u.service_id = ${len(params) + 1}"
+                    query += f" AND service_id = ${len(params) + 1}"
                     params.append(service_id)
 
-                query += " GROUP BY date ORDER BY date"
-
+                query += " GROUP BY bucket ORDER BY bucket"
                 rows = await conn.fetch(query, *params)
 
                 return [
                     {
-                        "date": row["date"].isoformat(),
+                        "date": row["bucket"].isoformat(),
                         "requests": int(row["requests"]),
                         "input_tokens": int(row["input_tokens"]),
                         "output_tokens": int(row["output_tokens"]),
                         "total_tokens": int(row["input_tokens"]) + int(row["output_tokens"]),
-                        # cost_cents is stored as microcents (cents * 10000) for precision
                         "cost_usd": round(int(row["cost_cents"]) / 1000000, 6),
-                        "avg_latency_ms": int(row["avg_latency_ms"]) if row["avg_latency_ms"] else 0,
+                        "avg_latency_ms": int(row["avg_latency_ms"])
+                        if row["avg_latency_ms"]
+                        else 0,
                     }
                     for row in rows
                 ]
@@ -893,6 +1320,341 @@ class UsageRecorder:
         except Exception as e:
             logger.error(f"Failed to get usage timeseries: {e}")
             return []
+
+    @staticmethod
+    def _build_usage_record_conditions(
+        *,
+        tenant_id: str,
+        start_date: date,
+        end_date: date,
+        user_id: Optional[str] = None,
+        model: Optional[str] = None,
+        service_id: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> Tuple[List[str], List[Any]]:
+        conditions = [
+            "tenant_id = $1",
+            "created_at::date >= $2",
+            "created_at::date <= $3",
+        ]
+        params: List[Any] = [tenant_id, start_date, end_date]
+
+        if user_id:
+            conditions.append(f"user_id = ${len(params) + 1}")
+            params.append(user_id)
+        if model:
+            conditions.append(f"model = ${len(params) + 1}")
+            params.append(model)
+        if service_id:
+            conditions.append(f"service_id = ${len(params) + 1}")
+            params.append(service_id)
+        if provider:
+            conditions.append(f"provider = ${len(params) + 1}")
+            params.append(provider)
+
+        return conditions, params
+
+    async def get_latency_breakdown_timeseries(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        user_id: Optional[str] = None,
+        model: Optional[str] = None,
+        service_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        granularity: str = "day",
+    ) -> List[Dict[str, Any]]:
+        """Get detailed latency/phase breakdown for dashboard performance panel."""
+        if not self.database or not self.database._pool:
+            return []
+
+        if not start_date:
+            start_date = date.today()
+        if not end_date:
+            end_date = date.today()
+
+        bucket_expr = (
+            "date_trunc('hour', created_at)"
+            if granularity == "hour"
+            else "date_trunc('day', created_at)"
+        )
+        conditions, params = self._build_usage_record_conditions(
+            tenant_id=tenant_id,
+            start_date=start_date,
+            end_date=end_date,
+            user_id=user_id,
+            model=model,
+            service_id=service_id,
+            provider=provider,
+        )
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                query = f"""
+                    SELECT
+                        {bucket_expr} AS bucket,
+                        COUNT(*) AS request_count,
+                        COALESCE(
+                            AVG(COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)),
+                            0
+                        ) AS avg_total_ms,
+                        COALESCE(
+                            PERCENTILE_CONT(0.50) WITHIN GROUP (
+                                ORDER BY COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)
+                            ),
+                            0
+                        ) AS p50_total_ms,
+                        COALESCE(
+                            PERCENTILE_CONT(0.95) WITHIN GROUP (
+                                ORDER BY COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)
+                            ),
+                            0
+                        ) AS p95_total_ms,
+                        COALESCE(
+                            PERCENTILE_CONT(0.99) WITHIN GROUP (
+                                ORDER BY COALESCE(NULLIF(request_total_duration_ms, 0), latency_ms, 0)
+                            ),
+                            0
+                        ) AS p99_total_ms,
+                        COALESCE(AVG(first_token_ms), 0) AS avg_first_token_ms,
+                        COALESCE(AVG(llm_inference_duration_ms), 0) AS avg_llm_inference_ms,
+                        COALESCE(AVG(retrieval_duration_ms), 0) AS avg_retrieval_ms,
+                        COALESCE(AVG(tool_call_duration_ms), 0) AS avg_tool_call_ms,
+                        COALESCE(AVG(agent_or_graph_overhead_ms), 0) AS avg_overhead_ms
+                    FROM usage_records
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY bucket
+                    ORDER BY bucket
+                """
+                rows = await conn.fetch(query, *params)
+                return [
+                    {
+                        "date": row["bucket"].isoformat(),
+                        "request_count": int(row["request_count"]),
+                        "avg_total_ms": int(row["avg_total_ms"] or 0),
+                        "p50_total_ms": int(row["p50_total_ms"] or 0),
+                        "p95_total_ms": int(row["p95_total_ms"] or 0),
+                        "p99_total_ms": int(row["p99_total_ms"] or 0),
+                        "avg_first_token_ms": int(row["avg_first_token_ms"] or 0),
+                        "avg_llm_inference_ms": int(row["avg_llm_inference_ms"] or 0),
+                        "avg_retrieval_ms": int(row["avg_retrieval_ms"] or 0),
+                        "avg_tool_call_ms": int(row["avg_tool_call_ms"] or 0),
+                        "avg_overhead_ms": int(row["avg_overhead_ms"] or 0),
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error(f"Failed to get latency breakdown: {e}")
+            return []
+
+    async def get_failure_breakdown(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        dimension: str = "service",
+        user_id: Optional[str] = None,
+        model: Optional[str] = None,
+        service_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Get failure categorization breakdown by dimension + error_type."""
+        if not self.database or not self.database._pool:
+            return []
+
+        if not start_date:
+            start_date = date.today()
+        if not end_date:
+            end_date = date.today()
+
+        dimension_map = {
+            "service": "COALESCE(NULLIF(service_id, ''), 'unattributed_service')",
+            "model": "COALESCE(NULLIF(model, ''), 'unattributed_model')",
+            "provider": "COALESCE(NULLIF(provider, ''), 'unattributed')",
+            "user": "COALESCE(NULLIF(user_id, ''), 'anonymous')",
+        }
+        dimension_expr = dimension_map.get(dimension)
+        if not dimension_expr:
+            return []
+
+        conditions, params = self._build_usage_record_conditions(
+            tenant_id=tenant_id,
+            start_date=start_date,
+            end_date=end_date,
+            user_id=user_id,
+            model=model,
+            service_id=service_id,
+            provider=provider,
+        )
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                query = f"""
+                    SELECT
+                        {dimension_expr} AS dimension_value,
+                        COALESCE(NULLIF(error_type, ''), 'unknown') AS error_type,
+                        COUNT(*) FILTER (WHERE status != 'success') AS failure_count,
+                        COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+                        COUNT(*) AS total_count
+                    FROM usage_records
+                    WHERE {" AND ".join(conditions)}
+                    GROUP BY dimension_value, error_type
+                    HAVING COUNT(*) FILTER (WHERE status != 'success') > 0
+                    ORDER BY failure_count DESC, total_count DESC
+                    LIMIT ${len(params) + 1}
+                """
+                params.append(limit)
+                rows = await conn.fetch(query, *params)
+                return [
+                    {
+                        "dimension": dimension,
+                        "dimension_value": row["dimension_value"],
+                        "error_type": row["error_type"],
+                        "failure_count": int(row["failure_count"]),
+                        "success_count": int(row["success_count"]),
+                        "total_count": int(row["total_count"]),
+                        "success_rate": (
+                            round(int(row["success_count"]) / int(row["total_count"]) * 100, 2)
+                            if int(row["total_count"]) > 0
+                            else 0.0
+                        ),
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error(f"Failed to get failure breakdown: {e}")
+            return []
+
+    async def get_request_trace_by_id(
+        self, tenant_id: str, request_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get latest sampled trace by request_id."""
+        if not self.database or not self.database._pool:
+            return None
+        try:
+            async with self.database._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM request_traces
+                    WHERE tenant_id = $1 AND request_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    tenant_id,
+                    request_id,
+                )
+                return self._trace_row_to_dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get request trace: {e}")
+            return None
+
+    async def list_request_traces(
+        self,
+        tenant_id: str,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        service_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        error_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List sampled traces for dashboard trace table."""
+        if not self.database or not self.database._pool:
+            return []
+
+        if not start_date:
+            start_date = date.today()
+        if not end_date:
+            end_date = date.today()
+
+        conditions = [
+            "tenant_id = $1",
+            "created_at::date >= $2",
+            "created_at::date <= $3",
+        ]
+        params: List[Any] = [tenant_id, start_date, end_date]
+        if service_id:
+            conditions.append(f"service_id = ${len(params) + 1}")
+            params.append(service_id)
+        if user_id:
+            conditions.append(f"user_id = ${len(params) + 1}")
+            params.append(user_id)
+        if provider:
+            conditions.append(f"provider = ${len(params) + 1}")
+            params.append(provider)
+        if model:
+            conditions.append(f"model = ${len(params) + 1}")
+            params.append(model)
+        if status:
+            conditions.append(f"status = ${len(params) + 1}")
+            params.append(status)
+        if error_type:
+            conditions.append(f"error_type = ${len(params) + 1}")
+            params.append(error_type)
+
+        try:
+            async with self.database._pool.acquire() as conn:
+                query = f"""
+                    SELECT *
+                    FROM request_traces
+                    WHERE {" AND ".join(conditions)}
+                    ORDER BY created_at DESC
+                    LIMIT ${len(params) + 1}
+                """
+                params.append(limit)
+                rows = await conn.fetch(query, *params)
+                return [self._trace_row_to_dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to list request traces: {e}")
+            return []
+
+    @staticmethod
+    def _trace_row_to_dict(row: Any) -> Dict[str, Any]:
+        if not row:
+            return {}
+        trace_steps = row["trace_steps"]
+        metadata = row["metadata"]
+        if isinstance(trace_steps, str):
+            try:
+                trace_steps = json.loads(trace_steps)
+            except Exception:
+                trace_steps = []
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        return {
+            "trace_id": str(row["trace_id"]),
+            "request_id": row["request_id"],
+            "tenant_id": row["tenant_id"],
+            "user_id": row["user_id"],
+            "service_id": row["service_id"],
+            "assistant_id": row["assistant_id"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "status": row["status"],
+            "error_type": row["error_type"],
+            "request_total_duration_ms": int(row["request_total_duration_ms"] or 0),
+            "first_token_latency_ms": int(row["first_token_latency_ms"] or 0),
+            "llm_inference_duration_ms": int(row["llm_inference_duration_ms"] or 0),
+            "retrieval_duration_ms": int(row["retrieval_duration_ms"] or 0),
+            "tool_call_duration_ms": int(row["tool_call_duration_ms"] or 0),
+            "agent_or_graph_overhead_ms": int(row["agent_or_graph_overhead_ms"] or 0),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+            "total_cost_usd": round(int(row["total_cost_cents"] or 0) / 1000000, 6),
+            "sample_reason": row["sample_reason"],
+            "trace_steps": trace_steps if isinstance(trace_steps, list) else [],
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "timestamp": row["created_at"].isoformat() if row["created_at"] else None,
+        }
 
     async def get_last_ingested_at(
         self,

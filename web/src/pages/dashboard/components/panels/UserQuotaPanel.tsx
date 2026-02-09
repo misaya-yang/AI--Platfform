@@ -1,14 +1,16 @@
 // web/src/pages/dashboard/components/panels/UserQuotaPanel.tsx
+// 用户配额面板 - 接入真实配额数据
 
 import { Table, Progress, Tag, Select, Tooltip, Button } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { WarningOutlined, ExclamationCircleOutlined, ExpandOutlined } from "@ant-design/icons";
+import { WarningOutlined, ExclamationCircleOutlined, ExpandOutlined, StopOutlined } from "@ant-design/icons";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
-import { getUsageBreakdown } from "@/api/usage";
+import { getQuotaUsersOverview, type QuotaUserOverviewItem } from "@/api/usage";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useDashboardEntityLabels } from "../../hooks/useDashboardEntityLabels";
 
 function formatTokens(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -16,78 +18,44 @@ function formatTokens(num: number): string {
   return num.toLocaleString();
 }
 
+const STRATEGY_CONFIG: Record<string, { color: string; label: string }> = {
+  hard_block: { color: "red", label: "硬限制" },
+  rate_limit: { color: "orange", label: "限流" },
+  downgrade_model: { color: "blue", label: "降级" },
+  allow_but_alert: { color: "gold", label: "告警" },
+};
+
 export function UserQuotaPanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-  const { dateRange, serviceId, lastRefresh } = useDashboardContext();
-  const [sortBy, setSortBy] = useState<"usage" | "cost">("usage");
+  const { lastRefresh } = useDashboardContext();
+  const { resolveUserLabel } = useDashboardEntityLabels();
+  const [sortBy, setSortBy] = useState<"daily_tokens" | "monthly_cost" | "status">("daily_tokens");
 
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ["dashboard-user-quota", dateRange, serviceId, lastRefresh.getTime()],
+    queryKey: ["dashboard-user-quota-overview", sortBy, lastRefresh.getTime()],
     queryFn: () =>
-      getUsageBreakdown({
-        dimension: "user",
-        start_date: dateRange[0],
-        end_date: dateRange[1],
+      getQuotaUsersOverview({
         limit: 20,
+        sort_by: sortBy,
       }),
     staleTime: 30000,
   });
 
-  const users = (data?.items || []).map((item) => {
-    // Mock quota limits - in production these would come from backend
-    const dailyLimit = 100000; // 100K tokens
-    const monthlyLimit = 1000000; // 1M tokens
-    const dailyUsed = item.total_tokens || 0;
-    const monthlyUsed = dailyUsed * 7; // Mock monthly as 7x daily
-    const dailyPercent = (dailyUsed / dailyLimit) * 100;
-    const monthlyPercent = (monthlyUsed / monthlyLimit) * 100;
-
-    let status: "normal" | "warning" | "exceeded" = "normal";
-    if (dailyPercent >= 100 || monthlyPercent >= 100) {
-      status = "exceeded";
-    } else if (dailyPercent >= 80 || monthlyPercent >= 80) {
-      status = "warning";
-    }
-
-    return {
-      user: item.user || t("common.unknown"),
-      dailyUsed,
-      dailyLimit,
-      dailyPercent,
-      monthlyUsed,
-      monthlyLimit,
-      monthlyPercent,
-      cost: item.cost_usd || 0,
-      status,
-    };
-  });
-
-  const sortedUsers = [...users].sort((a, b) => {
-    if (sortBy === "usage") return b.dailyUsed - a.dailyUsed;
-    return b.cost - a.cost;
-  });
-
-  const warningCount = users.filter((u) => u.status === "warning" || u.status === "exceeded").length;
-
-  // Format user display name
-  const formatUserName = (user: string) => {
-    if (user.startsWith("anon:")) {
-      return t("dashboard.filters.anonymousUser", { id: user.slice(-6) });
-    }
-    return user;
-  };
+  const users = data?.users || [];
+  const summary = data?.summary || { total: 0, blocked: 0, exceeded: 0, warning: 0, ok: 0 };
+  const warningCount = summary.warning + summary.exceeded + summary.blocked;
 
   const columns = [
     {
       title: t("common.user"),
-      dataIndex: "user",
-      key: "user",
+      dataIndex: "user_id",
+      key: "user_id",
       width: 100,
       ellipsis: true,
       render: (text: string) => (
         <span style={{ fontWeight: 500, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
-          {formatUserName(text)}
+          {resolveUserLabel(text)}
         </span>
       ),
     },
@@ -95,43 +63,74 @@ export function UserQuotaPanel() {
       title: t("metrics.totalTokens"),
       key: "daily",
       width: 130,
-      render: (_: unknown, record: (typeof users)[0]) => (
-        <div>
-          <Progress
-            percent={Math.min(record.dailyPercent, 100)}
-            size="small"
-            strokeColor={record.dailyPercent >= 80 ? "#f59e0b" : "#3b82f6"}
-            showInfo={false}
-          />
-          <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
-            {formatTokens(record.dailyUsed)}/{formatTokens(record.dailyLimit)}
+      render: (_: unknown, record: QuotaUserOverviewItem) => {
+        const hasLimit = record.daily_tokens_limit !== null && record.daily_tokens_limit > 0;
+        const percent = hasLimit ? Math.min((record.daily_tokens_used / record.daily_tokens_limit!) * 100, 100) : 0;
+        return (
+          <div>
+            {hasLimit ? (
+              <>
+                <Progress
+                  percent={percent}
+                  size="small"
+                  strokeColor={percent >= 80 ? "#f59e0b" : "#3b82f6"}
+                  showInfo={false}
+                />
+                <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
+                  {formatTokens(record.daily_tokens_used)}/{formatTokens(record.daily_tokens_limit!)}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
+                {formatTokens(record.daily_tokens_used)} / <span style={{ color: "#10b981" }}>∞</span>
+              </div>
+            )}
           </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       title: t("analytics.cost"),
-      dataIndex: "cost",
       key: "cost",
       width: 80,
-      render: (cost: number) => (
-        <span style={{ fontWeight: 500, color: "#10b981" }}>
-          ${cost >= 1 ? cost.toFixed(2) : cost.toFixed(4)}
-        </span>
-      ),
+      render: (_: unknown, record: QuotaUserOverviewItem) => {
+        const costUsd = record.monthly_cost_used_cents / 100;
+        return (
+          <span style={{ fontWeight: 500, color: "#10b981" }}>
+            ${costUsd >= 1 ? costUsd.toFixed(2) : costUsd.toFixed(4)}
+          </span>
+        );
+      },
+    },
+    {
+      title: t("dashboard.userQuota.strategy", "策略"),
+      key: "strategy",
+      width: 70,
+      render: (_: unknown, record: QuotaUserOverviewItem) => {
+        const config = STRATEGY_CONFIG[record.overage_strategy] || { color: "default", label: record.overage_strategy };
+        return <Tag color={config.color} style={{ margin: 0, fontSize: 10 }}>{config.label}</Tag>;
+      },
     },
     {
       title: t("common.status"),
       dataIndex: "status",
       key: "status",
       width: 70,
-      render: (status: string) => {
-        const config = {
-          normal: { color: "success", text: t("dashboard.userQuota.status.normal") },
+      render: (status: string, record: QuotaUserOverviewItem) => {
+        if (record.is_blocked) {
+          return (
+            <Tooltip title={record.blocked_reason || "已封禁"}>
+              <Tag icon={<StopOutlined />} color="error">{t("dashboard.userQuota.status.blocked", "封禁")}</Tag>
+            </Tooltip>
+          );
+        }
+        const config: Record<string, { color: string; text: string }> = {
+          ok: { color: "success", text: t("dashboard.userQuota.status.normal") },
           warning: { color: "warning", text: t("dashboard.userQuota.status.warning") },
           exceeded: { color: "error", text: t("dashboard.userQuota.status.exceeded") },
-        }[status] || { color: "default", text: status };
-        return <Tag color={config.color}>{config.text}</Tag>;
+        };
+        const c = config[status] || { color: "default", text: status };
+        return <Tag color={c.color}>{c.text}</Tag>;
       },
     },
   ];
@@ -146,14 +145,36 @@ export function UserQuotaPanel() {
           value={sortBy}
           onChange={setSortBy}
           size="small"
-          style={{ width: 90 }}
+          style={{ width: 100 }}
           options={[
-            { value: "usage", label: t("dashboard.userQuota.sort.usage") },
-            { value: "cost", label: t("dashboard.userQuota.sort.cost") },
+            { value: "daily_tokens", label: t("dashboard.userQuota.sort.usage") },
+            { value: "monthly_cost", label: t("dashboard.userQuota.sort.cost") },
+            { value: "status", label: t("common.status") },
           ]}
         />
       }
     >
+      {/* Summary badges */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          marginBottom: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <Tag style={{ margin: 0 }}>{t("dashboard.userQuota.total", "总计")}: {summary.total}</Tag>
+        {summary.blocked > 0 && (
+          <Tag color="error" style={{ margin: 0 }}>{t("dashboard.userQuota.status.blocked", "封禁")}: {summary.blocked}</Tag>
+        )}
+        {summary.exceeded > 0 && (
+          <Tag color="warning" style={{ margin: 0 }}>{t("dashboard.userQuota.status.exceeded")}: {summary.exceeded}</Tag>
+        )}
+        {summary.warning > 0 && (
+          <Tag color="gold" style={{ margin: 0 }}>{t("dashboard.userQuota.status.warning")}: {summary.warning}</Tag>
+        )}
+      </div>
+
       {/* Warning summary - more prominent for exceeded users */}
       {warningCount > 0 && (
         <div
@@ -161,21 +182,17 @@ export function UserQuotaPanel() {
             padding: "12px 16px",
             marginBottom: 12,
             borderRadius: 8,
-            background: users.some((u) => u.status === "exceeded")
-              ? darkMode
-                ? "rgba(239, 68, 68, 0.15)"
-                : "rgba(239, 68, 68, 0.08)"
-              : darkMode
-              ? "rgba(245, 158, 11, 0.15)"
-              : "rgba(245, 158, 11, 0.08)",
-            border: users.some((u) => u.status === "exceeded")
+            background: summary.exceeded > 0 || summary.blocked > 0
+              ? darkMode ? "rgba(239, 68, 68, 0.15)" : "rgba(239, 68, 68, 0.08)"
+              : darkMode ? "rgba(245, 158, 11, 0.15)" : "rgba(245, 158, 11, 0.08)",
+            border: summary.exceeded > 0 || summary.blocked > 0
               ? "1px solid rgba(239, 68, 68, 0.4)"
               : "1px solid rgba(245, 158, 11, 0.4)",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {users.some((u) => u.status === "exceeded") ? (
+              {summary.exceeded > 0 || summary.blocked > 0 ? (
                 <ExclamationCircleOutlined style={{ fontSize: 16, color: "#ef4444" }} />
               ) : (
                 <WarningOutlined style={{ fontSize: 16, color: "#f59e0b" }} />
@@ -185,12 +202,14 @@ export function UserQuotaPanel() {
                   style={{
                     fontSize: 13,
                     fontWeight: 600,
-                    color: users.some((u) => u.status === "exceeded") ? "#ef4444" : "#f59e0b",
+                    color: summary.exceeded > 0 || summary.blocked > 0 ? "#ef4444" : "#f59e0b",
                   }}
                 >
-                  {users.filter((u) => u.status === "exceeded").length > 0
-                    ? t("dashboard.userQuota.alert.exceeded", { count: users.filter((u) => u.status === "exceeded").length })
-                    : t("dashboard.userQuota.alert.warning", { count: warningCount })}
+                  {summary.blocked > 0
+                    ? t("dashboard.userQuota.alert.blocked", { count: summary.blocked }, `${summary.blocked} 个用户已封禁`)
+                    : summary.exceeded > 0
+                    ? t("dashboard.userQuota.alert.exceeded", { count: summary.exceeded })
+                    : t("dashboard.userQuota.alert.warning", { count: summary.warning })}
                 </div>
                 <div
                   style={{
@@ -214,9 +233,9 @@ export function UserQuotaPanel() {
 
       {/* User table */}
       <Table
-        dataSource={sortedUsers}
+        dataSource={users}
         columns={columns}
-        rowKey="user"
+        rowKey="user_id"
         size="small"
         pagination={false}
         scroll={{ y: 200 }}
@@ -224,7 +243,7 @@ export function UserQuotaPanel() {
           background: "transparent",
         }}
         rowClassName={(record) =>
-          record.status === "exceeded"
+          record.status === "exceeded" || record.is_blocked
             ? "quota-exceeded-row"
             : record.status === "warning"
             ? "quota-warning-row"

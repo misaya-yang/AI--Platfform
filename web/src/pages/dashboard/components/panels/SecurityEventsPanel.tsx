@@ -1,4 +1,5 @@
 // web/src/pages/dashboard/components/panels/SecurityEventsPanel.tsx
+// 安全事件面板 - 修复 timeseries 格式，增加 quota_exceeded 事件类型
 
 import { Row, Col, Select } from "antd";
 import { useQuery } from "@tanstack/react-query";
@@ -9,10 +10,11 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  Legend,
 } from "recharts";
 import { SafeResponsiveChart } from "@/components/SafeResponsiveChart";
 import dayjs from "dayjs";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { PanelWrapper } from "../PanelWrapper";
 import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
@@ -21,32 +23,40 @@ import { useTranslation } from "react-i18next";
 
 interface SecurityBreakdownResponse {
   items: Array<{
-    user?: string;
-    service?: string;
-    event_type: string;
+    name: string;
     count: number;
+    percentage: number;
   }>;
+  dimension: string;
+  event_type: string;
   start_date: string;
   end_date: string;
+  data_status: string;
+  data_freshness_minutes: number;
+  last_ingested_at?: string | null;
+}
+
+interface SecurityTimeseriesPoint {
+  date: string;
+  count: number;
 }
 
 interface SecurityTimeseriesResponse {
-  data: Array<{
-    date: string;
-    auth_failed: number;
-    rate_limited: number;
-  }>;
+  data: SecurityTimeseriesPoint[];
+  event_type: string;
+  data_status: string;
+  data_freshness_minutes: number;
 }
 
 async function getSecurityBreakdown(params: {
   dimension: string;
-  event_type?: string;
+  event_type: string;
   start_date?: string;
   end_date?: string;
 }): Promise<SecurityBreakdownResponse> {
   const searchParams = new URLSearchParams();
   searchParams.set("dimension", params.dimension);
-  if (params.event_type) searchParams.set("event_type", params.event_type);
+  searchParams.set("event_type", params.event_type);
   if (params.start_date) searchParams.set("start_date", params.start_date);
   if (params.end_date) searchParams.set("end_date", params.end_date);
   const response = await api.get<SecurityBreakdownResponse>(`/api/v1/metrics/security/breakdown?${searchParams}`);
@@ -54,11 +64,13 @@ async function getSecurityBreakdown(params: {
 }
 
 async function getSecurityTimeseries(params: {
+  event_type: string;
   start_date?: string;
   end_date?: string;
   granularity?: string;
 }): Promise<SecurityTimeseriesResponse> {
   const searchParams = new URLSearchParams();
+  searchParams.set("event_type", params.event_type);
   if (params.start_date) searchParams.set("start_date", params.start_date);
   if (params.end_date) searchParams.set("end_date", params.end_date);
   if (params.granularity) searchParams.set("granularity", params.granularity);
@@ -75,21 +87,73 @@ export function SecurityEventsPanel() {
   const actualStartDate = timeRange === "today" ? dayjs().format("YYYY-MM-DD") : dateRange[0];
   const actualEndDate = timeRange === "today" ? dayjs().format("YYYY-MM-DD") : dateRange[1];
 
-  const breakdownQuery = useQuery({
-    queryKey: ["dashboard-security-breakdown", actualStartDate, actualEndDate, lastRefresh.getTime()],
+  // 并行请求各 event_type 的 breakdown
+  const authBreakdownQuery = useQuery({
+    queryKey: ["sec-breakdown-auth", actualStartDate, actualEndDate, lastRefresh.getTime()],
     queryFn: () =>
       getSecurityBreakdown({
         dimension: "user",
+        event_type: "auth_failed",
         start_date: actualStartDate,
         end_date: actualEndDate,
       }),
     staleTime: 30000,
   });
 
-  const timeseriesQuery = useQuery({
-    queryKey: ["dashboard-security-timeseries", actualStartDate, actualEndDate, granularity, lastRefresh.getTime()],
+  const rateLimitBreakdownQuery = useQuery({
+    queryKey: ["sec-breakdown-rate", actualStartDate, actualEndDate, lastRefresh.getTime()],
+    queryFn: () =>
+      getSecurityBreakdown({
+        dimension: "user",
+        event_type: "rate_limited",
+        start_date: actualStartDate,
+        end_date: actualEndDate,
+      }),
+    staleTime: 30000,
+  });
+
+  const quotaBreakdownQuery = useQuery({
+    queryKey: ["sec-breakdown-quota", actualStartDate, actualEndDate, lastRefresh.getTime()],
+    queryFn: () =>
+      getSecurityBreakdown({
+        dimension: "user",
+        event_type: "quota_exceeded",
+        start_date: actualStartDate,
+        end_date: actualEndDate,
+      }),
+    staleTime: 30000,
+  });
+
+  // 并行请求各 event_type 的 timeseries
+  const authTsQuery = useQuery({
+    queryKey: ["sec-ts-auth", actualStartDate, actualEndDate, granularity, lastRefresh.getTime()],
     queryFn: () =>
       getSecurityTimeseries({
+        event_type: "auth_failed",
+        start_date: actualStartDate,
+        end_date: actualEndDate,
+        granularity,
+      }),
+    staleTime: 30000,
+  });
+
+  const rateLimitTsQuery = useQuery({
+    queryKey: ["sec-ts-rate", actualStartDate, actualEndDate, granularity, lastRefresh.getTime()],
+    queryFn: () =>
+      getSecurityTimeseries({
+        event_type: "rate_limited",
+        start_date: actualStartDate,
+        end_date: actualEndDate,
+        granularity,
+      }),
+    staleTime: 30000,
+  });
+
+  const quotaTsQuery = useQuery({
+    queryKey: ["sec-ts-quota", actualStartDate, actualEndDate, granularity, lastRefresh.getTime()],
+    queryFn: () =>
+      getSecurityTimeseries({
+        event_type: "quota_exceeded",
         start_date: actualStartDate,
         end_date: actualEndDate,
         granularity,
@@ -98,29 +162,77 @@ export function SecurityEventsPanel() {
   });
 
   const refetch = () => {
-    breakdownQuery.refetch();
-    timeseriesQuery.refetch();
+    authBreakdownQuery.refetch();
+    rateLimitBreakdownQuery.refetch();
+    quotaBreakdownQuery.refetch();
+    authTsQuery.refetch();
+    rateLimitTsQuery.refetch();
+    quotaTsQuery.refetch();
   };
 
-  const breakdown = breakdownQuery.data?.items || [];
-  const chartData = timeseriesQuery.data?.data || [];
+  // 计算汇总
+  const authFailures = (authBreakdownQuery.data?.items || []).reduce((sum, i) => sum + i.count, 0);
+  const rateLimitHits = (rateLimitBreakdownQuery.data?.items || []).reduce((sum, i) => sum + i.count, 0);
+  const quotaExceeded = (quotaBreakdownQuery.data?.items || []).reduce((sum, i) => sum + i.count, 0);
 
-  // Calculate totals
-  const authFailures = breakdown.filter((i) => i.event_type === "auth_failed").reduce((sum, i) => sum + i.count, 0);
-  const rateLimitHits = breakdown.filter((i) => i.event_type === "rate_limited").reduce((sum, i) => sum + i.count, 0);
+  // 合并 timeseries 为统一 chart data
+  const chartData = useMemo(() => {
+    const authData = authTsQuery.data?.data || [];
+    const rateData = rateLimitTsQuery.data?.data || [];
+    const quotaData = quotaTsQuery.data?.data || [];
 
-  // Top users with events
-  const userEvents = breakdown.reduce((acc, item) => {
-    const key = item.user || "unknown";
-    if (!acc[key]) acc[key] = { user: key, authFailed: 0, rateLimited: 0 };
-    if (item.event_type === "auth_failed") acc[key].authFailed += item.count;
-    if (item.event_type === "rate_limited") acc[key].rateLimited += item.count;
-    return acc;
-  }, {} as Record<string, { user: string; authFailed: number; rateLimited: number }>);
+    // 收集所有日期
+    const dateMap = new Map<string, { auth_failed: number; rate_limited: number; quota_exceeded: number }>();
 
-  const topUsers = Object.values(userEvents)
-    .sort((a, b) => b.authFailed + b.rateLimited - (a.authFailed + a.rateLimited))
-    .slice(0, 3);
+    for (const point of authData) {
+      const existing = dateMap.get(point.date) || { auth_failed: 0, rate_limited: 0, quota_exceeded: 0 };
+      existing.auth_failed = point.count;
+      dateMap.set(point.date, existing);
+    }
+    for (const point of rateData) {
+      const existing = dateMap.get(point.date) || { auth_failed: 0, rate_limited: 0, quota_exceeded: 0 };
+      existing.rate_limited = point.count;
+      dateMap.set(point.date, existing);
+    }
+    for (const point of quotaData) {
+      const existing = dateMap.get(point.date) || { auth_failed: 0, rate_limited: 0, quota_exceeded: 0 };
+      existing.quota_exceeded = point.count;
+      dateMap.set(point.date, existing);
+    }
+
+    return Array.from(dateMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, counts]) => ({ date, ...counts }));
+  }, [authTsQuery.data, rateLimitTsQuery.data, quotaTsQuery.data]);
+
+  // Top users with events (合并所有事件类型)
+  const userEvents = useMemo(() => {
+    const map: Record<string, { user: string; authFailed: number; rateLimited: number; quotaExceeded: number }> = {};
+
+    for (const item of (authBreakdownQuery.data?.items || [])) {
+      const key = item.name || "unknown";
+      if (!map[key]) map[key] = { user: key, authFailed: 0, rateLimited: 0, quotaExceeded: 0 };
+      map[key].authFailed += item.count;
+    }
+    for (const item of (rateLimitBreakdownQuery.data?.items || [])) {
+      const key = item.name || "unknown";
+      if (!map[key]) map[key] = { user: key, authFailed: 0, rateLimited: 0, quotaExceeded: 0 };
+      map[key].rateLimited += item.count;
+    }
+    for (const item of (quotaBreakdownQuery.data?.items || [])) {
+      const key = item.name || "unknown";
+      if (!map[key]) map[key] = { user: key, authFailed: 0, rateLimited: 0, quotaExceeded: 0 };
+      map[key].quotaExceeded += item.count;
+    }
+
+    return Object.values(map)
+      .sort((a, b) => (b.authFailed + b.rateLimited + b.quotaExceeded) - (a.authFailed + a.rateLimited + a.quotaExceeded))
+      .slice(0, 3);
+  }, [authBreakdownQuery.data, rateLimitBreakdownQuery.data, quotaBreakdownQuery.data]);
+
+  // Data status from any available response
+  const dataStatus = authBreakdownQuery.data?.data_status || rateLimitBreakdownQuery.data?.data_status;
+  const dataFreshness = authBreakdownQuery.data?.data_freshness_minutes ?? rateLimitBreakdownQuery.data?.data_freshness_minutes;
 
   const gridColor = darkMode ? "#334155" : "#e2e8f0";
 
@@ -128,7 +240,9 @@ export function SecurityEventsPanel() {
     <PanelWrapper
       title={t("dashboard.security.title")}
       onRefresh={refetch}
-      loading={breakdownQuery.isLoading}
+      loading={authBreakdownQuery.isLoading}
+      dataStatus={dataStatus}
+      dataFreshnessMinutes={dataFreshness}
       extra={
         <Select
           value={timeRange}
@@ -144,45 +258,58 @@ export function SecurityEventsPanel() {
     >
       {/* Summary stats */}
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}>
+        <Col span={6}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
               background: darkMode ? "#0f172a" : "#f8fafc",
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 24, fontWeight: 700, color: "#ef4444" }}>{authFailures}</div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.authFailed")}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#ef4444" }}>{authFailures}</div>
+            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.authFailed")}</div>
           </div>
         </Col>
-        <Col span={8}>
+        <Col span={6}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
               background: darkMode ? "#0f172a" : "#f8fafc",
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 24, fontWeight: 700, color: "#f59e0b" }}>{rateLimitHits}</div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.rateLimited")}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#f59e0b" }}>{rateLimitHits}</div>
+            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.rateLimited")}</div>
           </div>
         </Col>
-        <Col span={8}>
+        <Col span={6}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
               background: darkMode ? "#0f172a" : "#f8fafc",
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 24, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
-              {authFailures + rateLimitHits}
+            <div style={{ fontSize: 22, fontWeight: 700, color: "#f97316" }}>{quotaExceeded}</div>
+            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.quotaExceeded", "配额超限")}</div>
+          </div>
+        </Col>
+        <Col span={6}>
+          <div
+            style={{
+              padding: 10,
+              borderRadius: 8,
+              background: darkMode ? "#0f172a" : "#f8fafc",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+              {authFailures + rateLimitHits + quotaExceeded}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.total")}</div>
+            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.total")}</div>
           </div>
         </Col>
       </Row>
@@ -200,8 +327,10 @@ export function SecurityEventsPanel() {
           <Tooltip
             labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
           />
+          <Legend wrapperStyle={{ fontSize: 10 }} />
           <Bar dataKey="auth_failed" name={t("dashboard.security.authFailed")} fill="#ef4444" stackId="a" />
-          <Bar dataKey="rate_limited" name={t("dashboard.security.rateLimitedShort")} fill="#f59e0b" stackId="a" />
+          <Bar dataKey="rate_limited" name={t("dashboard.security.rateLimitedShort", "限流")} fill="#f59e0b" stackId="a" />
+          <Bar dataKey="quota_exceeded" name={t("dashboard.security.quotaExceeded", "配额超限")} fill="#f97316" stackId="a" />
         </BarChart>
       </SafeResponsiveChart>
 
@@ -210,30 +339,39 @@ export function SecurityEventsPanel() {
         <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
           {t("dashboard.security.topUsers")}
         </div>
-        {topUsers.map((user, index) => (
-          <div
-            key={user.user}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "6px 0",
-              borderBottom: index < topUsers.length - 1 ? `1px solid ${gridColor}` : "none",
-            }}
-          >
-            <span style={{ fontSize: 12, color: darkMode ? "#e2e8f0" : "#475569" }}>
-              {index + 1}. {user.user}
-            </span>
-            <div style={{ display: "flex", gap: 12 }}>
-              {user.authFailed > 0 && (
-                <span style={{ fontSize: 11, color: "#ef4444" }}>{t("dashboard.security.authFailedCount", { count: user.authFailed })}</span>
-              )}
-              {user.rateLimited > 0 && (
-                <span style={{ fontSize: 11, color: "#f59e0b" }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
-              )}
-            </div>
+        {userEvents.length === 0 ? (
+          <div style={{ fontSize: 12, color: darkMode ? "#64748b" : "#94a3b8", textAlign: "center", padding: "8px 0" }}>
+            {t("dashboard.security.noEvents", "当前时间范围内无安全事件")}
           </div>
-        ))}
+        ) : (
+          userEvents.map((user, index) => (
+            <div
+              key={user.user}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "6px 0",
+                borderBottom: index < userEvents.length - 1 ? `1px solid ${gridColor}` : "none",
+              }}
+            >
+              <span style={{ fontSize: 12, color: darkMode ? "#e2e8f0" : "#475569" }}>
+                {index + 1}. {user.user}
+              </span>
+              <div style={{ display: "flex", gap: 10 }}>
+                {user.authFailed > 0 && (
+                  <span style={{ fontSize: 11, color: "#ef4444" }}>{t("dashboard.security.authFailedCount", { count: user.authFailed })}</span>
+                )}
+                {user.rateLimited > 0 && (
+                  <span style={{ fontSize: 11, color: "#f59e0b" }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
+                )}
+                {user.quotaExceeded > 0 && (
+                  <span style={{ fontSize: 11, color: "#f97316" }}>{t("dashboard.security.quotaExceededCount", { count: user.quotaExceeded }, `配额${user.quotaExceeded}`)}</span>
+                )}
+              </div>
+            </div>
+          ))
+        )}
       </div>
     </PanelWrapper>
   );

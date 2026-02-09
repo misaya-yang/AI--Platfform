@@ -196,6 +196,7 @@ class APIKeyService:
                 key_id, key_prefix, name, description,
                 user_id, tenant_id, scopes, roles, tier,
                 rate_limit, enabled as is_active, created_at,
+                ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
                 last_used_at, expires_at, use_count
             FROM api_keys
             WHERE {where_clause}
@@ -212,6 +213,7 @@ class APIKeyService:
                 key_id, key_prefix, name, description,
                 user_id, tenant_id, scopes, roles, tier,
                 rate_limit, enabled as is_active,
+                ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
                 created_at, last_used_at, expires_at, use_count
             FROM api_keys
             WHERE key_id = $1

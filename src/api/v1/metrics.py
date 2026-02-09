@@ -1,4 +1,4 @@
-﻿"""
+"""
 Metrics API - 系统指标统计接口
 
 Provides dashboard metrics including:
@@ -479,7 +479,7 @@ async def get_security_event_breakdown(
     if dimension not in valid_dimensions:
         raise HTTPException(status_code=400, detail=f"Invalid dimension: {dimension}")
 
-    valid_event_types = {"auth_failed", "rate_limited"}
+    valid_event_types = {"auth_failed", "rate_limited", "quota_exceeded"}
     if event_type not in valid_event_types:
         raise HTTPException(status_code=400, detail=f"Invalid event_type: {event_type}")
 
@@ -554,7 +554,7 @@ async def get_security_event_timeseries(
     if dimension not in valid_dimensions:
         raise HTTPException(status_code=400, detail=f"Invalid dimension: {dimension}")
 
-    valid_event_types = {"auth_failed", "rate_limited"}
+    valid_event_types = {"auth_failed", "rate_limited", "quota_exceeded"}
     if event_type not in valid_event_types:
         raise HTTPException(status_code=400, detail=f"Invalid event_type: {event_type}")
 

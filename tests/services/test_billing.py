@@ -8,10 +8,12 @@ Tests for:
 """
 
 import pytest
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 from decimal import Decimal
 
+from src.api.v1.proxy import _estimate_tokens_from_payload
+from src.core.utils import estimate_tokens
 from src.services.billing.quota_service import QuotaService, QuotaStatus
 from src.services.billing.model_pricing import ModelPricingService, DEFAULT_PRICING, ModelPrice
 
@@ -181,6 +183,57 @@ class TestQuotaService:
         assert result.status == QuotaStatus.BLOCKED
         assert result.can_proceed is False
 
+    @pytest.mark.asyncio
+    async def test_get_quota_forecast(self, quota_service, mock_db):
+        """Forecast should project month-end usage from recent trend."""
+        now = datetime.now(timezone.utc)
+        quota_row = {
+            "tenant_id": "test_tenant",
+            "user_id": "test_user",
+            "daily_token_limit": None,
+            "monthly_token_limit": 10000,
+            "monthly_cost_limit_cents": 200,
+            "requests_per_minute": 60,
+            "requests_per_day": 1000,
+            "current_daily_tokens": 0,
+            "current_monthly_tokens": 3000,
+            "current_monthly_cost_cents": 25,
+            "current_daily_requests": 0,
+            "daily_reset_at": now,
+            "monthly_reset_at": now,
+            "is_blocked": False,
+            "blocked_reason": None,
+            "warning_threshold": 80,
+            "overage_strategy": "allow_but_alert",
+            "downgraded_model": None,
+            "temporary_extra_tokens": 0,
+            "temporary_extra_cost_cents": 0,
+            "temporary_expires_at": None,
+        }
+        month_row = {"month_tokens": 3000, "month_cost_microcents": 250000}
+        recent_row = {"recent_tokens": 2100, "recent_cost_microcents": 140000}
+
+        mock_conn = AsyncMock()
+        mock_conn.fetchrow = AsyncMock(side_effect=[quota_row, month_row, recent_row])
+        mock_db.pool.acquire = AsyncMock()
+        mock_db.pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_db.pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        result = await quota_service.get_quota_forecast(
+            tenant_id="test_tenant",
+            user_id="test_user",
+            lookback_days=7,
+        )
+
+        assert "error" not in result
+        assert result["tokens"]["current"] == 3000
+        assert result["tokens"]["avg_daily"] == 300.0
+        assert result["tokens"]["projected_month_end"] >= result["tokens"]["current"]
+        assert result["cost"]["current_cents"] == 25.0
+        assert result["cost"]["avg_daily_cents"] == 2.0
+        assert result["tokens"]["limit"] == 10000
+        assert result["cost"]["limit_cents"] == 200
+
 
 class TestQuotaStatusEnum:
     """Test QuotaStatus enum values"""
@@ -272,3 +325,30 @@ class TestUsageRecorderBasics:
         assert record.first_token_ms == 200
         assert record.status == "success"
         assert record.request_type == "chat"
+
+
+class TestProxyTokenEstimate:
+    """Proxy token estimate helper tests."""
+
+    def test_estimate_tokens_no_double_count_nested_messages(self):
+        payload = {
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "hello world"},
+                ]
+            }
+        }
+        expected = estimate_tokens("hello world")
+        assert _estimate_tokens_from_payload(payload) == expected
+
+    def test_estimate_tokens_aggregates_distinct_text_fields(self):
+        payload = {
+            "query": "how are you",
+            "input": {
+                "messages": [
+                    {"role": "user", "content": "explain zakat rules"},
+                ]
+            },
+        }
+        expected = estimate_tokens("how are you") + estimate_tokens("explain zakat rules")
+        assert _estimate_tokens_from_payload(payload) == expected

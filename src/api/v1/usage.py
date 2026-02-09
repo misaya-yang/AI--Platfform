@@ -28,6 +28,7 @@ router = APIRouter(prefix="/usage", tags=["usage"])
 
 class UsageSummaryResponse(BaseModel):
     """Usage summary response."""
+
     total_requests: int
     success_rate: float
     total_input_tokens: int
@@ -44,6 +45,7 @@ class UsageSummaryResponse(BaseModel):
 
 class UsageBreakdownItem(BaseModel):
     """Single item in usage breakdown."""
+
     dimension_value: str = Field(..., alias="model")
     requests: int
     input_tokens: int
@@ -58,6 +60,7 @@ class UsageBreakdownItem(BaseModel):
 
 class UsageBreakdownResponse(BaseModel):
     """Usage breakdown response."""
+
     dimension: str
     items: List[Dict[str, Any]]
     start_date: str
@@ -70,6 +73,7 @@ class UsageBreakdownResponse(BaseModel):
 
 class UsageTimeSeriesPoint(BaseModel):
     """Single point in time series."""
+
     date: str
     requests: int
     input_tokens: int
@@ -81,6 +85,7 @@ class UsageTimeSeriesPoint(BaseModel):
 
 class UsageTimeSeriesResponse(BaseModel):
     """Usage time series response."""
+
     data: List[UsageTimeSeriesPoint]
     start_date: str
     end_date: str
@@ -92,10 +97,88 @@ class UsageTimeSeriesResponse(BaseModel):
 
 class UserUsageResponse(BaseModel):
     """Per-user usage response."""
+
     user_id: str
     summary: UsageSummaryResponse
     top_models: List[Dict[str, Any]]
     daily_trend: List[UsageTimeSeriesPoint]
+
+
+class LatencyBreakdownPoint(BaseModel):
+    """Latency breakdown point."""
+
+    date: str
+    request_count: int
+    avg_total_ms: int
+    p50_total_ms: int
+    p95_total_ms: int
+    p99_total_ms: int
+    avg_first_token_ms: int
+    avg_llm_inference_ms: int
+    avg_retrieval_ms: int
+    avg_tool_call_ms: int
+    avg_overhead_ms: int
+
+
+class LatencyBreakdownResponse(BaseModel):
+    """Latency breakdown response."""
+
+    data: List[LatencyBreakdownPoint]
+    start_date: str
+    end_date: str
+    granularity: str
+    data_status: str
+    data_freshness_minutes: int
+    last_ingested_at: Optional[str] = None
+
+
+class FailureBreakdownItem(BaseModel):
+    """Failure breakdown item."""
+
+    dimension: str
+    dimension_value: str
+    error_type: str
+    failure_count: int
+    success_count: int
+    total_count: int
+    success_rate: float
+
+
+class FailureBreakdownResponse(BaseModel):
+    """Failure breakdown response."""
+
+    dimension: str
+    items: List[FailureBreakdownItem]
+    start_date: str
+    end_date: str
+
+
+class RequestTraceResponse(BaseModel):
+    """Sampled request trace response."""
+
+    trace_id: str
+    request_id: str
+    tenant_id: str
+    user_id: str
+    service_id: str
+    assistant_id: str
+    provider: str
+    model: str
+    status: str
+    error_type: Optional[str] = None
+    request_total_duration_ms: int
+    first_token_latency_ms: int
+    llm_inference_duration_ms: int
+    retrieval_duration_ms: int
+    tool_call_duration_ms: int
+    agent_or_graph_overhead_ms: int
+    input_tokens: int
+    output_tokens: int
+    total_cost_usd: float
+    sample_reason: str
+    trace_steps: List[Dict[str, Any]]
+    metadata: Dict[str, Any]
+    timestamp: Optional[str] = None
 
 
 # ============ API Endpoints ============
@@ -159,7 +242,9 @@ async def get_usage_summary(
 @router.get("/breakdown", response_model=UsageBreakdownResponse)
 async def get_usage_breakdown(
     request: Request,
-    dimension: str = Query("model", description="Breakdown dimension: model, user, assistant, service"),
+    dimension: str = Query(
+        "model", description="Breakdown dimension: model, user, assistant, service"
+    ),
     start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
@@ -179,7 +264,7 @@ async def get_usage_breakdown(
     if dimension not in valid_dimensions:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid dimension. Must be one of: {', '.join(valid_dimensions)}"
+            detail=f"Invalid dimension. Must be one of: {', '.join(valid_dimensions)}",
         )
 
     # Default to last 7 days
@@ -282,6 +367,152 @@ async def get_usage_timeseries(
     )
 
 
+@router.get("/performance-breakdown", response_model=LatencyBreakdownResponse)
+async def get_performance_breakdown(
+    request: Request,
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    model: Optional[str] = Query(None, description="Filter by model"),
+    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+    granularity: str = Query("day", description="Granularity: hour, day"),
+    auth: AuthContext = Depends(get_auth_context),
+) -> LatencyBreakdownResponse:
+    """Get detailed latency phase breakdown (TTFB/LLM/Retrieval/Tool/Overhead)."""
+    recorder = get_usage_recorder()
+
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=7)
+
+    data = await recorder.get_latency_breakdown_timeseries(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        user_id=user_id,
+        model=model,
+        service_id=service_id,
+        provider=provider,
+        granularity=granularity,
+    )
+
+    total_requests = sum(point.get("request_count", 0) for point in data)
+    last_ingested_at = await recorder.get_last_ingested_at(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        granularity=granularity,
+    )
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=total_requests,
+    )
+
+    return LatencyBreakdownResponse(
+        data=[LatencyBreakdownPoint(**point) for point in data],
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        granularity=granularity,
+        data_status=data_status,
+        data_freshness_minutes=freshness_minutes,
+        last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
+    )
+
+
+@router.get("/failure-breakdown", response_model=FailureBreakdownResponse)
+async def get_failure_breakdown(
+    request: Request,
+    dimension: str = Query("service", description="service | model | provider | user"),
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    model: Optional[str] = Query(None, description="Filter by model"),
+    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+    limit: int = Query(50, ge=1, le=200),
+    auth: AuthContext = Depends(get_auth_context),
+) -> FailureBreakdownResponse:
+    """Get failure classification breakdown for operational analysis."""
+    recorder = get_usage_recorder()
+    if dimension not in {"service", "model", "provider", "user"}:
+        raise HTTPException(status_code=400, detail="Invalid dimension")
+
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=7)
+
+    items = await recorder.get_failure_breakdown(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        dimension=dimension,
+        user_id=user_id,
+        model=model,
+        service_id=service_id,
+        provider=provider,
+        limit=limit,
+    )
+    return FailureBreakdownResponse(
+        dimension=dimension,
+        items=[FailureBreakdownItem(**item) for item in items],
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+    )
+
+
+@router.get("/traces", response_model=List[RequestTraceResponse])
+async def list_request_traces(
+    request: Request,
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    provider: Optional[str] = Query(None, description="Filter by provider"),
+    model: Optional[str] = Query(None, description="Filter by model"),
+    status: Optional[str] = Query(None, description="Filter by request status"),
+    error_type: Optional[str] = Query(None, description="Filter by error type"),
+    limit: int = Query(100, ge=1, le=500),
+    auth: AuthContext = Depends(get_auth_context),
+) -> List[RequestTraceResponse]:
+    """List sampled traces."""
+    recorder = get_usage_recorder()
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=7)
+
+    rows = await recorder.list_request_traces(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        service_id=service_id,
+        user_id=user_id,
+        provider=provider,
+        model=model,
+        status=status,
+        error_type=error_type,
+        limit=limit,
+    )
+    return [RequestTraceResponse(**row) for row in rows]
+
+
+@router.get("/traces/{request_id}", response_model=RequestTraceResponse)
+async def get_request_trace(
+    request_id: str,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> RequestTraceResponse:
+    """Get latest sampled trace for a request."""
+    recorder = get_usage_recorder()
+    trace = await recorder.get_request_trace_by_id(auth.tenant_id, request_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return RequestTraceResponse(**trace)
+
+
 @router.get("/user/{user_id}", response_model=UserUsageResponse)
 async def get_user_usage(
     user_id: str,
@@ -310,6 +541,16 @@ async def get_user_usage(
         end_date=end_date,
         user_id=user_id,
     )
+    last_ingested_at = await recorder.get_last_ingested_at(
+        tenant_id=auth.tenant_id,
+        start_date=start_date,
+        end_date=end_date,
+        granularity="day",
+    )
+    data_status, freshness_minutes = compute_data_status(
+        last_ingested_at,
+        total_requests=summary.get("total_requests"),
+    )
 
     # Get top models for this user
     top_models = await recorder.get_usage_breakdown(
@@ -330,7 +571,12 @@ async def get_user_usage(
 
     return UserUsageResponse(
         user_id=user_id,
-        summary=UsageSummaryResponse(**summary),
+        summary=UsageSummaryResponse(
+            **summary,
+            data_status=data_status,
+            data_freshness_minutes=freshness_minutes,
+            last_ingested_at=last_ingested_at.isoformat() if last_ingested_at else None,
+        ),
         top_models=top_models,
         daily_trend=[UsageTimeSeriesPoint(**d) for d in daily_trend],
     )
@@ -394,31 +640,55 @@ async def export_usage(
 
     # Write time series section
     writer.writerow(["=== Daily Usage ==="])
-    writer.writerow(["Date", "Requests", "Input Tokens", "Output Tokens", "Total Tokens", "Cost (USD)", "Avg Latency (ms)"])
+    writer.writerow(
+        [
+            "Date",
+            "Requests",
+            "Input Tokens",
+            "Output Tokens",
+            "Total Tokens",
+            "Cost (USD)",
+            "Avg Latency (ms)",
+        ]
+    )
     for row in timeseries:
-        writer.writerow([
-            row["date"],
-            row["requests"],
-            row["input_tokens"],
-            row["output_tokens"],
-            row["total_tokens"],
-            row["cost_usd"],
-            row["avg_latency_ms"],
-        ])
+        writer.writerow(
+            [
+                row["date"],
+                row["requests"],
+                row["input_tokens"],
+                row["output_tokens"],
+                row["total_tokens"],
+                row["cost_usd"],
+                row["avg_latency_ms"],
+            ]
+        )
 
     writer.writerow([])
     writer.writerow([f"=== Breakdown by {dimension.title()} ==="])
-    writer.writerow([dimension.title(), "Requests", "Input Tokens", "Output Tokens", "Total Tokens", "Cost (USD)", "Percentage"])
+    writer.writerow(
+        [
+            dimension.title(),
+            "Requests",
+            "Input Tokens",
+            "Output Tokens",
+            "Total Tokens",
+            "Cost (USD)",
+            "Percentage",
+        ]
+    )
     for row in breakdown:
-        writer.writerow([
-            row.get(dimension, "Unknown"),
-            row.get("requests", 0),
-            row.get("input_tokens", 0),
-            row.get("output_tokens", 0),
-            row.get("total_tokens", 0),
-            row.get("cost_usd", 0),
-            row.get("percentage", 0),
-        ])
+        writer.writerow(
+            [
+                row.get(dimension, "Unknown"),
+                row.get("requests", 0),
+                row.get("input_tokens", 0),
+                row.get("output_tokens", 0),
+                row.get("total_tokens", 0),
+                row.get("cost_usd", 0),
+                row.get("percentage", 0),
+            ]
+        )
 
     output.seek(0)
     filename = f"usage_export_{start_date}_{end_date}.csv"

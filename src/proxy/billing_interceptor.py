@@ -25,6 +25,11 @@ from ..services.metrics.usage_parser import (
     extract_provider,
     extract_token_usage,
 )
+from ..services.metrics.observability import (
+    classify_error_type,
+    ensure_duration_breakdown,
+    extract_duration_breakdown,
+)
 
 logger = get_logger(__name__)
 
@@ -54,6 +59,15 @@ class UsageData:
     # 时间信息
     timestamp: float = field(default_factory=time.time)
     duration_ms: float = 0.0
+    first_token_latency_ms: int = 0
+    request_total_duration_ms: int = 0
+    llm_inference_duration_ms: int = 0
+    retrieval_duration_ms: int = 0
+    tool_call_duration_ms: int = 0
+    agent_or_graph_overhead_ms: int = 0
+    tool_call_breakdown: Dict[str, int] = field(default_factory=dict)
+    error_type: Optional[str] = None
+    trace_steps: List[Dict[str, Any]] = field(default_factory=list)
 
     # 原始元数据
     raw_metadata: Dict[str, Any] = field(default_factory=dict)
@@ -61,6 +75,8 @@ class UsageData:
     def __post_init__(self):
         if self.total_tokens == 0:
             self.total_tokens = self.input_tokens + self.output_tokens
+        if self.request_total_duration_ms <= 0 and self.duration_ms > 0:
+            self.request_total_duration_ms = int(self.duration_ms)
 
 
 # 计费回调类型
@@ -215,9 +231,18 @@ class BillingInterceptor:
                     assistant_id=usage.assistant_id,
                     provider=usage.provider,
                     latency_ms=int(usage.duration_ms),
+                    first_token_ms=usage.first_token_latency_ms,
+                    request_total_duration_ms=usage.request_total_duration_ms,
+                    llm_inference_duration_ms=usage.llm_inference_duration_ms,
+                    retrieval_duration_ms=usage.retrieval_duration_ms,
+                    tool_call_duration_ms=usage.tool_call_duration_ms,
+                    agent_or_graph_overhead_ms=usage.agent_or_graph_overhead_ms,
+                    tool_call_breakdown=usage.tool_call_breakdown,
+                    error_type=usage.error_type,
                     status=usage.status,
                     request_type=usage.request_type,
                     metadata=usage.raw_metadata,
+                    trace_steps=usage.trace_steps,
                 )
         except Exception as e:
             logger.warning(f"Failed to record usage to database: {e}")
@@ -329,6 +354,9 @@ class StreamProcessor:
         self._request_complete_recorded = False
         self._status = "success"
         self._error_metadata: Dict[str, Any] = {}
+        self._first_chunk_offset_ms = 0
+        self._event_offsets_ms: Dict[str, int] = {}
+        self._duration_breakdown: Dict[str, Any] = {}
 
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
@@ -351,6 +379,12 @@ class StreamProcessor:
                     )
                 except Exception as e:
                     logger.debug(f"Failed to record request start: {e}")
+
+        if self._first_chunk_offset_ms <= 0:
+            self._first_chunk_offset_ms = max(
+                int((time.time() - self.start_time) * 1000),
+                1,
+            )
 
         try:
             # 尝试解码
@@ -386,6 +420,13 @@ class StreamProcessor:
 
         if event_type.lower() == "error":
             self._mark_error("stream_error_event")
+        elif event_type:
+            lowered = event_type.lower()
+            if lowered not in self._event_offsets_ms:
+                self._event_offsets_ms[lowered] = max(
+                    int((time.time() - self.start_time) * 1000),
+                    0,
+                )
 
         # 不限制事件类型，直接尝试从任意事件解析 usage。
         # LangGraph/OpenAI 在不同版本会把 usage 放在 metadata/messages/updates 等事件里。
@@ -401,11 +442,7 @@ class StreamProcessor:
     @staticmethod
     def _extract_error_payload(data: Dict[str, Any]) -> Dict[str, str]:
         """从事件数据中抽取上游错误信息，统一元数据字段。"""
-        if (
-            isinstance(data.get("error"), str)
-            and data.get("error")
-            and "message" in data
-        ):
+        if isinstance(data.get("error"), str) and data.get("error") and "message" in data:
             error_type = str(data.get("error"))
             error_message = str(data.get("message") or "")
             payload: Dict[str, str] = {"upstream_error_type": error_type[:128]}
@@ -419,15 +456,9 @@ class StreamProcessor:
 
         if isinstance(error_payload, dict):
             error_type = str(
-                error_payload.get("error")
-                or error_payload.get("type")
-                or "upstream_error"
+                error_payload.get("error") or error_payload.get("type") or "upstream_error"
             )
-            error_message = str(
-                error_payload.get("message")
-                or error_payload.get("detail")
-                or ""
-            )
+            error_message = str(error_payload.get("message") or error_payload.get("detail") or "")
         else:
             error_type = "upstream_error"
             error_message = str(error_payload)
@@ -481,6 +512,7 @@ class StreamProcessor:
             if error_meta:
                 self._status = "error"
                 self._error_metadata.update(error_meta)
+            self._merge_duration_breakdown(data)
 
         usage = extract_token_usage(data)
         if usage:
@@ -490,6 +522,96 @@ class StreamProcessor:
         # 仅做调试日志，避免噪声。
         if event_type == "metadata" and isinstance(data, dict) and "run_id" in data:
             logger.debug(f"LangGraph run metadata: run_id={data.get('run_id')}")
+
+    def _merge_duration_breakdown(self, payload: Any) -> None:
+        extracted = extract_duration_breakdown(payload)
+        if not extracted:
+            return
+
+        for key, value in extracted.items():
+            if key == "tool_call_breakdown" and isinstance(value, dict):
+                existing = self._duration_breakdown.get("tool_call_breakdown", {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                merged = dict(existing)
+                for tool_name, duration in value.items():
+                    try:
+                        parsed = max(int(float(duration)), 0)
+                    except (TypeError, ValueError):
+                        parsed = 0
+                    if parsed > 0:
+                        merged[str(tool_name)] = int(merged.get(str(tool_name), 0)) + parsed
+                self._duration_breakdown["tool_call_breakdown"] = merged
+                continue
+
+            try:
+                parsed = max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                continue
+            if parsed <= 0:
+                continue
+            current = int(self._duration_breakdown.get(key, 0) or 0)
+            self._duration_breakdown[key] = max(current, parsed)
+
+    def _build_trace_steps(
+        self, total_duration_ms: int, breakdown: Dict[str, int]
+    ) -> List[Dict[str, Any]]:
+        steps: List[Dict[str, Any]] = []
+        steps.append(
+            {
+                "name": "gateway.request_total",
+                "start_offset_ms": 0,
+                "duration_ms": total_duration_ms,
+                "status": self._status,
+            }
+        )
+
+        phase_order = [
+            ("agent.retrieval", breakdown.get("retrieval_duration_ms", 0)),
+            ("agent.tool_calls", breakdown.get("tool_call_duration_ms", 0)),
+            ("llm.inference", breakdown.get("llm_inference_duration_ms", 0)),
+            ("agent.overhead", breakdown.get("agent_or_graph_overhead_ms", 0)),
+        ]
+
+        offset = 0
+        for name, duration in phase_order:
+            parsed = max(int(duration or 0), 0)
+            if parsed <= 0:
+                continue
+            steps.append(
+                {
+                    "name": name,
+                    "start_offset_ms": offset,
+                    "duration_ms": parsed,
+                    "status": "success",
+                }
+            )
+            offset += parsed
+
+        first_token = max(int(breakdown.get("first_token_latency_ms", 0) or 0), 0)
+        if first_token > 0:
+            steps.append(
+                {
+                    "name": "llm.first_token",
+                    "start_offset_ms": 0,
+                    "duration_ms": first_token,
+                    "status": "success",
+                }
+            )
+
+        for event_name, event_offset in sorted(
+            self._event_offsets_ms.items(), key=lambda item: item[1]
+        ):
+            steps.append(
+                {
+                    "name": f"stream.event.{event_name}",
+                    "start_offset_ms": max(int(event_offset), 0),
+                    "duration_ms": 0,
+                    "status": "success",
+                }
+            )
+
+        return steps
 
     async def _record_usage(self, usage: Dict[str, Any], raw_data: Dict[str, Any]) -> None:
         """记录 usage 数据"""
@@ -502,14 +624,42 @@ class StreamProcessor:
 
         # 计算耗时
         duration_ms = (time.time() - self.start_time) * 1000
+        breakdown = ensure_duration_breakdown(
+            request_total_duration_ms=int(duration_ms),
+            first_token_latency_ms=self._duration_breakdown.get(
+                "first_token_latency_ms",
+                self._first_chunk_offset_ms,
+            ),
+            llm_inference_duration_ms=self._duration_breakdown.get("llm_inference_duration_ms", 0),
+            retrieval_duration_ms=self._duration_breakdown.get("retrieval_duration_ms", 0),
+            tool_call_duration_ms=self._duration_breakdown.get("tool_call_duration_ms", 0),
+            agent_or_graph_overhead_ms=self._duration_breakdown.get(
+                "agent_or_graph_overhead_ms",
+                0,
+            ),
+        )
+        tool_call_breakdown = self._duration_breakdown.get("tool_call_breakdown", {})
+        if not isinstance(tool_call_breakdown, dict):
+            tool_call_breakdown = {}
+        trace_steps = self._build_trace_steps(breakdown["request_total_duration_ms"], breakdown)
+        error_type = classify_error_type(
+            status=self._status,
+            upstream_error_type=str(self._error_metadata.get("upstream_error_type") or ""),
+            upstream_error_message=str(self._error_metadata.get("upstream_error_message") or ""),
+        )
 
-        model_name = extract_model(raw_data) or self.model_hint
-        provider = extract_provider(raw_data) or self.provider_hint
+        model_name = extract_model(raw_data) or self.model_hint or "langgraph-agent"
+        provider = extract_provider(raw_data) or self.provider_hint or "unattributed"
         assistant_id = self.assistant_id or extract_assistant_id(raw_data) or ""
         metadata = dict(raw_data) if isinstance(raw_data, dict) else {"raw_data": raw_data}
         metadata.update(self._error_metadata)
         metadata.setdefault("source", "stream_usage")
         metadata.setdefault("request_type", self.request_type)
+        metadata.setdefault("provider", provider)
+        metadata.setdefault("model", model_name)
+        metadata["error_type"] = error_type
+        metadata["duration_breakdown"] = breakdown
+        metadata["tool_call_breakdown"] = tool_call_breakdown
 
         # 创建 UsageData
         usage_data = UsageData(
@@ -527,6 +677,15 @@ class StreamProcessor:
             request_type=self.request_type,
             timestamp=time.time(),
             duration_ms=duration_ms,
+            first_token_latency_ms=breakdown["first_token_latency_ms"],
+            request_total_duration_ms=breakdown["request_total_duration_ms"],
+            llm_inference_duration_ms=breakdown["llm_inference_duration_ms"],
+            retrieval_duration_ms=breakdown["retrieval_duration_ms"],
+            tool_call_duration_ms=breakdown["tool_call_duration_ms"],
+            agent_or_graph_overhead_ms=breakdown["agent_or_graph_overhead_ms"],
+            tool_call_breakdown=tool_call_breakdown,
+            error_type=error_type,
+            trace_steps=trace_steps,
             raw_metadata=metadata,
         )
 
@@ -566,6 +725,17 @@ class StreamProcessor:
 
         if not self._usage_collected and self._should_record_fallback(self.request_type):
             duration_ms = (time.time() - self.start_time) * 1000
+            fallback_breakdown = ensure_duration_breakdown(
+                request_total_duration_ms=int(duration_ms),
+                first_token_latency_ms=self._first_chunk_offset_ms,
+            )
+            error_type = classify_error_type(
+                status=self._status,
+                upstream_error_type=str(self._error_metadata.get("upstream_error_type") or ""),
+                upstream_error_message=str(
+                    self._error_metadata.get("upstream_error_message") or ""
+                ),
+            )
             usage_data = UsageData(
                 input_tokens=0,
                 output_tokens=0,
@@ -575,15 +745,28 @@ class StreamProcessor:
                 user_id=self.user_id,
                 tenant_id=self.tenant_id,
                 model=self.model_hint or "langgraph-agent",
-                provider=self.provider_hint,
+                provider=self.provider_hint or "unattributed",
                 assistant_id=self.assistant_id,
                 status=self._status,
                 request_type=self.request_type,
                 timestamp=time.time(),
                 duration_ms=duration_ms,
+                first_token_latency_ms=fallback_breakdown["first_token_latency_ms"],
+                request_total_duration_ms=fallback_breakdown["request_total_duration_ms"],
+                llm_inference_duration_ms=fallback_breakdown["llm_inference_duration_ms"],
+                retrieval_duration_ms=fallback_breakdown["retrieval_duration_ms"],
+                tool_call_duration_ms=fallback_breakdown["tool_call_duration_ms"],
+                agent_or_graph_overhead_ms=fallback_breakdown["agent_or_graph_overhead_ms"],
+                error_type=error_type,
+                trace_steps=self._build_trace_steps(
+                    fallback_breakdown["request_total_duration_ms"],
+                    fallback_breakdown,
+                ),
                 raw_metadata={
                     "source": "stream_finalize_fallback",
                     "request_type": self.request_type,
+                    "error_type": error_type,
+                    "duration_breakdown": fallback_breakdown,
                     **self._error_metadata,
                 },
             )

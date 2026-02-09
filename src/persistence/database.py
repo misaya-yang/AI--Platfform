@@ -3,18 +3,21 @@ PostgreSQL 数据库存储层
 
 提供与 database/schema.sql 表结构对应的完整 CRUD 操作
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import asyncpg
+
     HAS_ASYNCPG = True
 except ImportError:
     HAS_ASYNCPG = False
@@ -141,7 +144,9 @@ class DatabaseStorage:
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
         )
-        logger.info(f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}")
+        logger.info(
+            f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}"
+        )
         if self.auto_init:
             await self._auto_initialize_schema()
             await self._auto_apply_account_permission_migration()
@@ -151,6 +156,7 @@ class DatabaseStorage:
             await self._auto_apply_fts_migration()
             await self._auto_apply_islamic_metadata_migration()
             await self._auto_apply_openai_embedding_migration()
+            await self._auto_apply_observability_governance_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -183,7 +189,7 @@ class DatabaseStorage:
         """执行 SQL 建表脚本"""
         if not self._pool:
             return
-        with open(schema_path, 'r', encoding='utf-8') as f:
+        with open(schema_path, "r", encoding="utf-8") as f:
             sql = f.read()
         async with self._pool.acquire() as conn:
             await conn.execute(sql)
@@ -227,9 +233,7 @@ class DatabaseStorage:
                 WHERE table_name = 'users' AND column_name = 'password_hash'
                 """
             )
-            permissions_table = await conn.fetchval(
-                "SELECT to_regclass('public.permissions')"
-            )
+            permissions_table = await conn.fetchval("SELECT to_regclass('public.permissions')")
             return password_col is None or permissions_table is None
 
     async def _auto_apply_account_permission_migration(self) -> None:
@@ -260,9 +264,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            table_exists = await conn.fetchval(
-                "SELECT to_regclass('public.user_permissions')"
-            )
+            table_exists = await conn.fetchval("SELECT to_regclass('public.user_permissions')")
             return table_exists is None
 
     async def _auto_apply_user_extra_permissions_migration(self) -> None:
@@ -455,7 +457,9 @@ class DatabaseStorage:
                         CREATE INDEX IF NOT EXISTS idx_segments_source_type ON segments(source_type);
                         CREATE INDEX IF NOT EXISTS idx_segments_language ON segments(language);
                     """)
-                logger.info("Applied Islamic metadata migration: added source_type, source_reference, citation_text, etc.")
+                logger.info(
+                    "Applied Islamic metadata migration: added source_type, source_reference, citation_text, etc."
+                )
         except Exception as e:
             if "already exists" in str(e).lower():
                 logger.info("Islamic metadata migration already applied")
@@ -516,6 +520,75 @@ class DatabaseStorage:
             else:
                 logger.error(f"Failed to apply migration 029: {e}")
 
+    async def _observability_governance_needs_migration(self) -> bool:
+        """Check whether observability/governance schema migration (033) is required."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            trace_table = await conn.fetchval("SELECT to_regclass('public.request_traces')")
+            if trace_table is None:
+                return True
+
+            usage_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'usage_records' AND column_name = 'request_total_duration_ms'
+                """
+            )
+            if usage_col is None:
+                return True
+
+            quota_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'user_quotas' AND column_name = 'overage_strategy'
+                """
+            )
+            if quota_col is None:
+                return True
+
+            api_key_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'api_keys' AND column_name = 'allowed_models'
+                """
+            )
+            return api_key_col is None
+
+    async def _auto_apply_observability_governance_migration(self) -> None:
+        """Apply migration 033 for observability/tracing/quota governance when required."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._observability_governance_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check observability governance migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "033_observability_and_quota_governance.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 033 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 033_observability_and_quota_governance.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 033 already applied")
+            else:
+                logger.error(f"Failed to apply migration 033: {e}")
+
     # =========================================================================
     # 服务定义表 (services)
     # =========================================================================
@@ -525,7 +598,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO services (
                     service_id, name, description, version, service_type, 
                     connector_type, connector_config, supported_modes, 
@@ -602,16 +676,14 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM services WHERE service_id = $1", service_id
-            )
+            row = await conn.fetchrow("SELECT * FROM services WHERE service_id = $1", service_id)
             return self._row_to_dict(row) if row else None
 
     async def list_services(
         self,
         status: Optional[str] = None,
         service_type: Optional[str] = None,
-        tags: Optional[List[str]] = None
+        tags: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """获取服务列表
 
@@ -620,11 +692,7 @@ class DatabaseStorage:
         if not self._pool:
             return []
 
-        query, params = build_service_query(
-            status=status,
-            service_type=service_type,
-            tags=tags
-        )
+        query, params = build_service_query(status=status, service_type=service_type, tags=tags)
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
@@ -635,9 +703,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM services WHERE service_id = $1", service_id
-            )
+            result = await conn.execute("DELETE FROM services WHERE service_id = $1", service_id)
             return result == "DELETE 1"
 
     async def update_service_status(self, service_id: str, status: str) -> None:
@@ -647,7 +713,8 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE services SET status = $1, updated_at = NOW() WHERE service_id = $2",
-                status, service_id
+                status,
+                service_id,
             )
 
     # =========================================================================
@@ -659,7 +726,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO sessions (
                     session_id, service_id, user_id, tenant_id,
                     state, history, metadata, config, status, expires_at
@@ -691,9 +759,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM sessions WHERE session_id = $1", session_id
-            )
+            row = await conn.fetchrow("SELECT * FROM sessions WHERE session_id = $1", session_id)
             return self._row_to_dict(row) if row else None
 
     async def append_session_message(
@@ -720,20 +786,29 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             # 使用 JSONB || 操作符原子追加消息
             if metadata_update:
-                result = await conn.execute("""
+                result = await conn.execute(
+                    """
                     UPDATE sessions
                     SET history = history || $2::jsonb,
                         metadata = metadata || $3::jsonb,
                         updated_at = NOW()
                     WHERE session_id = $1
-                """, session_id, json.dumps([message]), json.dumps(metadata_update))
+                """,
+                    session_id,
+                    json.dumps([message]),
+                    json.dumps(metadata_update),
+                )
             else:
-                result = await conn.execute("""
+                result = await conn.execute(
+                    """
                     UPDATE sessions
                     SET history = history || $2::jsonb,
                         updated_at = NOW()
                     WHERE session_id = $1
-                """, session_id, json.dumps([message]))
+                """,
+                    session_id,
+                    json.dumps([message]),
+                )
             return result == "UPDATE 1"
 
     async def list_sessions(
@@ -742,31 +817,31 @@ class DatabaseStorage:
         tenant_id: Optional[str] = None,
         service_id: Optional[str] = None,
         status: str = "active",
-        limit: int = 100
+        limit: int = 100,
     ) -> List[Dict[str, Any]]:
         """获取会话列表"""
         if not self._pool:
             return []
-        
+
         query = "SELECT * FROM sessions WHERE 1=1"
         params = []
         param_idx = 1
-        
+
         if user_id:
             query += f" AND user_id = ${param_idx}"
             params.append(user_id)
             param_idx += 1
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         if service_id:
             query += f" AND service_id = ${param_idx}"
             params.append(service_id)
             param_idx += 1
-        
+
         if status:
             query += f" AND status = ${param_idx}"
             params.append(status)
@@ -775,40 +850,34 @@ class DatabaseStorage:
         # By default, hide expired sessions from list views.
         if status == "active":
             query += " AND (expires_at IS NULL OR expires_at > NOW())"
-        
+
         query += f" ORDER BY updated_at DESC LIMIT ${param_idx}"
         params.append(limit)
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
-    async def update_session_history(
-        self, 
-        session_id: str, 
-        history: List[Dict[str, Any]]
-    ) -> None:
+    async def update_session_history(self, session_id: str, history: List[Dict[str, Any]]) -> None:
         """更新会话历史"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE sessions SET history = $1, updated_at = NOW() WHERE session_id = $2",
-                json.dumps(history), session_id
+                json.dumps(history),
+                session_id,
             )
 
-    async def update_session_state(
-        self, 
-        session_id: str, 
-        state: Dict[str, Any]
-    ) -> None:
+    async def update_session_state(self, session_id: str, state: Dict[str, Any]) -> None:
         """更新会话状态"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE sessions SET state = $1, updated_at = NOW() WHERE session_id = $2",
-                json.dumps(state), session_id
+                json.dumps(state),
+                session_id,
             )
 
     async def delete_session(self, session_id: str) -> bool:
@@ -816,9 +885,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM sessions WHERE session_id = $1", session_id
-            )
+            result = await conn.execute("DELETE FROM sessions WHERE session_id = $1", session_id)
             return result == "DELETE 1"
 
     async def cleanup_expired_sessions(self) -> int:
@@ -843,7 +910,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO tasks (
                     task_id, request_id, service_id, user_id, tenant_id,
                     status, progress, request_data, result, error,
@@ -890,9 +958,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM tasks WHERE task_id = $1", task_id
-            )
+            row = await conn.fetchrow("SELECT * FROM tasks WHERE task_id = $1", task_id)
             return self._row_to_dict(row) if row else None
 
     async def list_tasks(
@@ -902,39 +968,39 @@ class DatabaseStorage:
         service_id: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """获取任务列表"""
         if not self._pool:
             return []
-        
+
         query = "SELECT * FROM tasks WHERE 1=1"
         params = []
         param_idx = 1
-        
+
         if user_id:
             query += f" AND user_id = ${param_idx}"
             params.append(user_id)
             param_idx += 1
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         if service_id:
             query += f" AND service_id = ${param_idx}"
             params.append(service_id)
             param_idx += 1
-        
+
         if status:
             query += f" AND status = ${param_idx}"
             params.append(status)
             param_idx += 1
-        
+
         query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -945,31 +1011,31 @@ class DatabaseStorage:
         status: str,
         progress: float = None,
         result: Any = None,
-        error: str = None
+        error: str = None,
     ) -> None:
         """更新任务状态"""
         if not self._pool:
             return
-        
+
         updates = ["status = $1", "updated_at = NOW()"]
         params = [status]
         param_idx = 2
-        
+
         if progress is not None:
             updates.append(f"progress = ${param_idx}")
             params.append(progress)
             param_idx += 1
-        
+
         if result is not None:
             updates.append(f"result = ${param_idx}")
             params.append(json.dumps(result))
             param_idx += 1
-        
+
         if error is not None:
             updates.append(f"error = ${param_idx}")
             params.append(error)
             param_idx += 1
-        
+
         if status == "processing":
             updates.append(f"started_at = ${param_idx}")
             params.append(datetime.utcnow())
@@ -978,10 +1044,10 @@ class DatabaseStorage:
             updates.append(f"completed_at = ${param_idx}")
             params.append(datetime.utcnow())
             param_idx += 1
-        
+
         params.append(task_id)
         query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
-        
+
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
@@ -992,7 +1058,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE tasks SET callback_sent = TRUE, updated_at = NOW() WHERE task_id = $1",
-                task_id
+                task_id,
             )
 
     async def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -1000,12 +1066,15 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM tasks 
                 WHERE status = 'pending' 
                 ORDER BY priority DESC, created_at ASC 
                 LIMIT $1
-            """, limit)
+            """,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
@@ -1121,9 +1190,7 @@ class DatabaseStorage:
             if not include_public:
                 query += " AND visibility != 'public'"
 
-        query += (
-            f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
-        )
+        query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
@@ -1170,13 +1237,23 @@ class DatabaseStorage:
                 )
 
                 # Keep dataset record for audit/compliance, remove active payload data.
-                await conn.execute("DELETE FROM confluence_space_bindings WHERE dataset_id = $1", dataset_id)
-                await conn.execute("DELETE FROM version_retention_policies WHERE dataset_id = $1", dataset_id)
-                await conn.execute("DELETE FROM dataset_keyword_tables WHERE dataset_id = $1", dataset_id)
-                await conn.execute("DELETE FROM dataset_process_rules WHERE dataset_id = $1", dataset_id)
+                await conn.execute(
+                    "DELETE FROM confluence_space_bindings WHERE dataset_id = $1", dataset_id
+                )
+                await conn.execute(
+                    "DELETE FROM version_retention_policies WHERE dataset_id = $1", dataset_id
+                )
+                await conn.execute(
+                    "DELETE FROM dataset_keyword_tables WHERE dataset_id = $1", dataset_id
+                )
+                await conn.execute(
+                    "DELETE FROM dataset_process_rules WHERE dataset_id = $1", dataset_id
+                )
                 await conn.execute("DELETE FROM dataset_queries WHERE dataset_id = $1", dataset_id)
                 await conn.execute("DELETE FROM child_chunks WHERE dataset_id = $1", dataset_id)
-                await conn.execute("DELETE FROM dataset_permissions WHERE dataset_id = $1", dataset_id)
+                await conn.execute(
+                    "DELETE FROM dataset_permissions WHERE dataset_id = $1", dataset_id
+                )
                 await conn.execute("DELETE FROM documents WHERE dataset_id = $1", dataset_id)
 
             return True
@@ -1350,9 +1427,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM documents WHERE document_id = $1", document_id
-            )
+            row = await conn.fetchrow("SELECT * FROM documents WHERE document_id = $1", document_id)
             return self._row_to_dict(row) if row else None
 
     async def list_documents(
@@ -1454,26 +1529,35 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM documents WHERE document_id = $1", document_id
-            )
+            result = await conn.execute("DELETE FROM documents WHERE document_id = $1", document_id)
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
 
-    async def update_document_fields(
-        self, document_id: str, fields: Dict[str, Any]
-    ) -> None:
+    async def update_document_fields(self, document_id: str, fields: Dict[str, Any]) -> None:
         """Update arbitrary document fields (Dify-style enable/disable/archive support)"""
         if not self._pool or not fields:
             return
 
         # Allowed fields for update (content excluded — use save_document for content updates)
         allowed = {
-            "title", "metadata", "enabled", "disabled_at", "disabled_by",
-            "archived", "archived_reason", "archived_by", "archived_at",
-            "batch", "doc_type", "doc_form", "doc_language", "word_count",
-            "segment_count", "tokens", "process_rule_id",
+            "title",
+            "metadata",
+            "enabled",
+            "disabled_at",
+            "disabled_by",
+            "archived",
+            "archived_reason",
+            "archived_by",
+            "archived_at",
+            "batch",
+            "doc_type",
+            "doc_form",
+            "doc_language",
+            "word_count",
+            "segment_count",
+            "tokens",
+            "process_rule_id",
         }
         filtered = {k: v for k, v in fields.items() if k in allowed}
         if not filtered:
@@ -1505,7 +1589,8 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE documents SET content = $1, updated_at = NOW() WHERE document_id = $2",
-                content, document_id,
+                content,
+                document_id,
             )
 
     async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
@@ -1553,7 +1638,9 @@ class DatabaseStorage:
                     seg.get("content_hash"),
                     # Islamic knowledge traceability fields
                     seg.get("source_type") or seg_meta.get("source_type", "unknown"),
-                    json.dumps(seg.get("source_reference") or seg_meta.get("source_reference") or {}),
+                    json.dumps(
+                        seg.get("source_reference") or seg_meta.get("source_reference") or {}
+                    ),
                     seg.get("citation_text") or seg_meta.get("citation_text", ""),
                     seg.get("page_number") or seg_meta.get("page_number"),
                     seg.get("section_header") or seg_meta.get("section_header", ""),
@@ -1713,7 +1800,9 @@ class DatabaseStorage:
             params.append(f"%{query_text}%")
             param_idx += 1
 
-        query += f" ORDER BY document_id ASC, position ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        query += (
+            f" ORDER BY document_id ASC, position ASC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        )
         params.extend([limit, offset])
 
         async with self._pool.acquire() as conn:
@@ -1780,7 +1869,7 @@ class DatabaseStorage:
         top_k: int = 10,
     ) -> List[Dict[str, Any]]:
         """Vector search placeholder - delegates to vector_store.
-        
+
         Note: Actual vector search should use VectorStore.search() directly.
         This method exists for API compatibility.
         """
@@ -1905,9 +1994,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM segments WHERE segment_id = $1", segment_id
-            )
+            row = await conn.fetchrow("SELECT * FROM segments WHERE segment_id = $1", segment_id)
             return self._row_to_dict(row) if row else None
 
     async def get_segments_by_ids(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
@@ -1961,18 +2048,25 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def update_segment_fields(
-        self, segment_id: str, fields: Dict[str, Any]
-    ) -> None:
+    async def update_segment_fields(self, segment_id: str, fields: Dict[str, Any]) -> None:
         """Update arbitrary segment fields (Dify-style enable/disable support)"""
         if not self._pool or not fields:
             return
 
         # Allowed fields for update
         allowed = {
-            "enabled", "disabled_at", "disabled_by", "status", "hit_count",
-            "word_count", "keywords", "answer", "index_node_id", "index_node_hash",
-            "vector_id", "error",
+            "enabled",
+            "disabled_at",
+            "disabled_by",
+            "status",
+            "hit_count",
+            "word_count",
+            "keywords",
+            "answer",
+            "index_node_id",
+            "index_node_hash",
+            "vector_id",
+            "error",
         }
         filtered = {k: v for k, v in fields.items() if k in allowed}
         if not filtered:
@@ -2002,9 +2096,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM segments WHERE segment_id = $1", segment_id
-            )
+            result = await conn.execute("DELETE FROM segments WHERE segment_id = $1", segment_id)
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
@@ -2082,9 +2174,7 @@ class DatabaseStorage:
                 "completed",  # status
             )
 
-    async def get_image_segments_by_document(
-        self, document_id: str
-    ) -> List[Dict[str, Any]]:
+    async def get_image_segments_by_document(self, document_id: str) -> List[Dict[str, Any]]:
         """获取文档的所有图片段
 
         Args:
@@ -2287,9 +2377,7 @@ class DatabaseStorage:
                         continue
             return count
 
-    async def get_segment_associated_images(
-        self, segment_id: str
-    ) -> List[Dict[str, Any]]:
+    async def get_segment_associated_images(self, segment_id: str) -> List[Dict[str, Any]]:
         """Get all images associated with a text segment.
 
         Args:
@@ -2366,9 +2454,7 @@ class DatabaseStorage:
                     result[seg_id].append(dict(row))
             return result
 
-    async def delete_segment_image_associations(
-        self, segment_id: str
-    ) -> int:
+    async def delete_segment_image_associations(self, segment_id: str) -> int:
         """Delete all image associations for a text segment.
 
         Args:
@@ -2389,9 +2475,7 @@ class DatabaseStorage:
                 return int(result.split()[-1])
             return 0
 
-    async def delete_image_associations_by_document(
-        self, document_id: str
-    ) -> int:
+    async def delete_image_associations_by_document(self, document_id: str) -> int:
         """Delete all image associations for segments in a document.
 
         Args:
@@ -2417,9 +2501,7 @@ class DatabaseStorage:
                 return int(result.split()[-1])
             return 0
 
-    async def update_segment_image_flags(
-        self, segment_id: str
-    ) -> None:
+    async def update_segment_image_flags(self, segment_id: str) -> None:
         """Update has_images and image_count flags for a segment.
 
         This should be called after adding/removing image associations.
@@ -2458,17 +2540,19 @@ class DatabaseStorage:
         tier: str = "normal",
         rate_limit: Dict = None,
         allowed_services: List[str] = None,
-        expires_at: datetime = None
+        allowed_models: List[str] = None,
+        expires_at: datetime = None,
     ) -> int:
         """保存 API Key"""
         if not self._pool:
             return 0
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 INSERT INTO api_keys (
                     key_hash, name, description, tenant_id, user_id,
-                    roles, permissions, tier, rate_limit, allowed_services, expires_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    roles, permissions, tier, rate_limit, allowed_services, allowed_models, expires_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (key_hash) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
@@ -2479,6 +2563,7 @@ class DatabaseStorage:
                     tier = EXCLUDED.tier,
                     rate_limit = EXCLUDED.rate_limit,
                     allowed_services = EXCLUDED.allowed_services,
+                    allowed_models = EXCLUDED.allowed_models,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = NOW()
                 RETURNING id
@@ -2493,6 +2578,7 @@ class DatabaseStorage:
                 tier,
                 json.dumps(rate_limit) if rate_limit else None,
                 allowed_services or [],
+                allowed_models or [],
                 expires_at,
             )
             return row["id"] if row else 0
@@ -2502,57 +2588,60 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 SELECT * FROM api_keys 
                 WHERE key_hash = $1 AND enabled = TRUE
                 AND (expires_at IS NULL OR expires_at > NOW())
-            """, key_hash)
+            """,
+                key_hash,
+            )
             if row:
                 # 更新使用统计
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE api_keys SET 
                         last_used_at = NOW(), 
                         use_count = use_count + 1 
                     WHERE key_hash = $1
-                """, key_hash)
+                """,
+                    key_hash,
+                )
             return self._row_to_dict(row) if row else None
 
     async def list_api_keys(
-        self,
-        tenant_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        enabled: bool = None
+        self, tenant_id: Optional[str] = None, user_id: Optional[str] = None, enabled: bool = None
     ) -> List[Dict[str, Any]]:
         """获取 API Key 列表（不返回哈希）"""
         if not self._pool:
             return []
-        
+
         query = """
             SELECT id, name, description, tenant_id, user_id, roles, 
-                   permissions, tier, rate_limit, allowed_services,
+                   permissions, tier, rate_limit, allowed_services, allowed_models,
                    expires_at, enabled, last_used_at, use_count, created_at, updated_at
             FROM api_keys WHERE 1=1
         """
         params = []
         param_idx = 1
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         if user_id:
             query += f" AND user_id = ${param_idx}"
             params.append(user_id)
             param_idx += 1
-        
+
         if enabled is not None:
             query += f" AND enabled = ${param_idx}"
             params.append(enabled)
             param_idx += 1
-        
+
         query += " ORDER BY created_at DESC"
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -2563,8 +2652,7 @@ class DatabaseStorage:
             return False
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "UPDATE api_keys SET enabled = FALSE, updated_at = NOW() WHERE id = $1",
-                key_id
+                "UPDATE api_keys SET enabled = FALSE, updated_at = NOW() WHERE id = $1", key_id
             )
             return result == "UPDATE 1"
 
@@ -2573,9 +2661,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM api_keys WHERE id = $1", key_id
-            )
+            result = await conn.execute("DELETE FROM api_keys WHERE id = $1", key_id)
             return result == "DELETE 1"
 
     # =========================================================================
@@ -2587,7 +2673,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO users (
                     user_id, username, email, display_name, tenant_id,
                     tier, roles, permissions, quota_config, status, metadata
@@ -2622,38 +2709,33 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE user_id = $1", user_id
-            )
+            row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
             return self._row_to_dict(row) if row else None
 
     async def list_users(
-        self,
-        tenant_id: Optional[str] = None,
-        status: str = "active",
-        limit: int = 100
+        self, tenant_id: Optional[str] = None, status: str = "active", limit: int = 100
     ) -> List[Dict[str, Any]]:
         """获取用户列表"""
         if not self._pool:
             return []
-        
+
         query = "SELECT * FROM users WHERE 1=1"
         params = []
         param_idx = 1
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         if status:
             query += f" AND status = ${param_idx}"
             params.append(status)
             param_idx += 1
-        
+
         query += f" ORDER BY created_at DESC LIMIT ${param_idx}"
         params.append(limit)
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -2664,8 +2746,7 @@ class DatabaseStorage:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET last_active_at = NOW() WHERE user_id = $1",
-                user_id
+                "UPDATE users SET last_active_at = NOW() WHERE user_id = $1", user_id
             )
 
     # =========================================================================
@@ -2677,7 +2758,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO tenants (
                     tenant_id, name, description, tier, quota_config,
                     rate_limit, allowed_services, status, metadata
@@ -2709,9 +2791,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM tenants WHERE tenant_id = $1", tenant_id
-            )
+            row = await conn.fetchrow("SELECT * FROM tenants WHERE tenant_id = $1", tenant_id)
             return self._row_to_dict(row) if row else None
 
     async def list_tenants(self, status: str = "active") -> List[Dict[str, Any]]:
@@ -2720,8 +2800,7 @@ class DatabaseStorage:
             return []
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM tenants WHERE status = $1 ORDER BY created_at DESC",
-                status
+                "SELECT * FROM tenants WHERE status = $1 ORDER BY created_at DESC", status
             )
             return [self._row_to_dict(row) for row in rows]
 
@@ -2737,13 +2816,14 @@ class DatabaseStorage:
         window_seconds: int,
         burst: int = 0,
         strategy: str = "sliding_window",
-        priority: int = 0
+        priority: int = 0,
     ) -> None:
         """保存限流配置"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO rate_limit_config (
                     scope, scope_id, requests, window_seconds, burst, strategy, priority
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -2754,17 +2834,23 @@ class DatabaseStorage:
                     strategy = EXCLUDED.strategy,
                     priority = EXCLUDED.priority,
                     updated_at = NOW()
-            """, scope, scope_id or "", requests, window_seconds, burst, strategy, priority)
+            """,
+                scope,
+                scope_id or "",
+                requests,
+                window_seconds,
+                burst,
+                strategy,
+                priority,
+            )
 
     async def get_rate_limits(
-        self,
-        scope: Optional[str] = None,
-        enabled: bool = True
+        self, scope: Optional[str] = None, enabled: bool = True
     ) -> List[Dict[str, Any]]:
         """获取限流配置"""
         if not self._pool:
             return []
-        
+
         query = """
             SELECT id, scope, scope_id, requests, window_seconds, 
                    burst, strategy, enabled, priority, created_at, updated_at
@@ -2772,19 +2858,19 @@ class DatabaseStorage:
         """
         params = []
         param_idx = 1
-        
+
         if scope:
             query += f" AND scope = ${param_idx}"
             params.append(scope)
             param_idx += 1
-        
+
         if enabled is not None:
             query += f" AND enabled = ${param_idx}"
             params.append(enabled)
             param_idx += 1
-        
+
         query += " ORDER BY priority DESC, scope"
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -2796,7 +2882,8 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM rate_limit_config WHERE scope = $1 AND scope_id = $2",
-                scope, scope_id or ""
+                scope,
+                scope_id or "",
             )
             return result == "DELETE 1"
 
@@ -2809,9 +2896,7 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name"
-            )
+            rows = await conn.fetch("SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name")
             return [self._row_to_dict(row) for row in rows]
 
     async def get_role_permissions(self, role_name: str) -> List[str]:
@@ -2820,8 +2905,7 @@ class DatabaseStorage:
             return []
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT permissions FROM rbac_roles WHERE role_name = $1",
-                role_name
+                "SELECT permissions FROM rbac_roles WHERE role_name = $1", role_name
             )
             return row["permissions"] if row else []
 
@@ -2830,20 +2914,26 @@ class DatabaseStorage:
         role_name: str,
         permissions: List[str],
         description: str = None,
-        is_system: bool = False
+        is_system: bool = False,
     ) -> None:
         """保存角色"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO rbac_roles (role_name, permissions, description, is_system)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (role_name) DO UPDATE SET
                     permissions = EXCLUDED.permissions,
                     description = EXCLUDED.description,
                     updated_at = NOW()
-            """, role_name, permissions, description, is_system)
+            """,
+                role_name,
+                permissions,
+                description,
+                is_system,
+            )
 
     # =========================================================================
     # 审计日志表 (audit_logs)
@@ -2863,24 +2953,33 @@ class DatabaseStorage:
         request_summary: Dict = None,
         response_summary: Dict = None,
         error_message: str = None,
-        duration_ms: int = None
+        duration_ms: int = None,
     ) -> None:
         """记录审计日志"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO audit_logs (
                     event_type, user_id, tenant_id, ip_address, user_agent,
                     resource_type, resource_id, action, request_summary,
                     response_summary, status, error_message, duration_ms
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
-                event_type, user_id, tenant_id, ip_address, user_agent,
-                resource_type, resource_id, action,
+                event_type,
+                user_id,
+                tenant_id,
+                ip_address,
+                user_agent,
+                resource_type,
+                resource_id,
+                action,
                 json.dumps(request_summary) if request_summary else None,
                 json.dumps(response_summary) if response_summary else None,
-                status, error_message, duration_ms
+                status,
+                error_message,
+                duration_ms,
             )
 
     async def query_audit_logs(
@@ -2891,44 +2990,44 @@ class DatabaseStorage:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         limit: int = 100,
-        offset: int = 0
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """查询审计日志"""
         if not self._pool:
             return []
-        
+
         query = "SELECT * FROM audit_logs WHERE 1=1"
         params = []
         param_idx = 1
-        
+
         if event_type:
             query += f" AND event_type = ${param_idx}"
             params.append(event_type)
             param_idx += 1
-        
+
         if user_id:
             query += f" AND user_id = ${param_idx}"
             params.append(user_id)
             param_idx += 1
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         if start_time:
             query += f" AND created_at >= ${param_idx}"
             params.append(start_time)
             param_idx += 1
-        
+
         if end_time:
             query += f" AND created_at <= ${param_idx}"
             params.append(end_time)
             param_idx += 1
-        
+
         query += f" ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
         params.extend([limit, offset])
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -2943,36 +3042,40 @@ class DatabaseStorage:
         status: str,
         response_time_ms: int = None,
         details: Dict = None,
-        error_message: str = None
+        error_message: str = None,
     ) -> None:
         """记录健康检查结果"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO service_health_records (
                     service_id, status, response_time_ms, details, error_message
                 ) VALUES ($1, $2, $3, $4, $5)
             """,
-                service_id, status, response_time_ms,
-                json.dumps(details or {}), error_message
+                service_id,
+                status,
+                response_time_ms,
+                json.dumps(details or {}),
+                error_message,
             )
 
-    async def get_health_history(
-        self,
-        service_id: str,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
+    async def get_health_history(self, service_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         """获取服务健康历史"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM service_health_records 
                 WHERE service_id = $1 
                 ORDER BY checked_at DESC 
                 LIMIT $2
-            """, service_id, limit)
+            """,
+                service_id,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
@@ -2990,13 +3093,14 @@ class DatabaseStorage:
         error_count: int = 0,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        response_time_ms: int = None
+        response_time_ms: int = None,
     ) -> None:
         """更新使用统计"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO usage_statistics (
                     dimension, dimension_id, period_type, period_start,
                     request_count, success_count, error_count,
@@ -3019,9 +3123,16 @@ class DatabaseStorage:
                     min_response_time_ms = LEAST(COALESCE(usage_statistics.min_response_time_ms, 999999999), COALESCE($10, 999999999)),
                     updated_at = NOW()
             """,
-                dimension, dimension_id, period_type, period_start,
-                request_count, success_count, error_count,
-                input_tokens, output_tokens, response_time_ms
+                dimension,
+                dimension_id,
+                period_type,
+                period_start,
+                request_count,
+                success_count,
+                error_count,
+                input_tokens,
+                output_tokens,
+                response_time_ms,
             )
 
     async def get_usage_stats(
@@ -3030,18 +3141,25 @@ class DatabaseStorage:
         dimension_id: str,
         period_type: str,
         start_time: datetime,
-        end_time: datetime
+        end_time: datetime,
     ) -> List[Dict[str, Any]]:
         """获取使用统计"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM usage_statistics 
                 WHERE dimension = $1 AND dimension_id = $2 AND period_type = $3
                 AND period_start >= $4 AND period_start <= $5
                 ORDER BY period_start
-            """, dimension, dimension_id, period_type, start_time, end_time)
+            """,
+                dimension,
+                dimension_id,
+                period_type,
+                start_time,
+                end_time,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
@@ -3235,13 +3353,14 @@ class DatabaseStorage:
         assistant_id: str = None,
         metadata: Dict = None,
         is_anonymous: bool = False,
-        expires_at: datetime = None
+        expires_at: datetime = None,
     ) -> None:
         """保存 LangGraph Thread 映射"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO langgraph_threads (
                     thread_id, user_id, tenant_id, assistant_id, 
                     metadata, is_anonymous, expires_at
@@ -3253,8 +3372,13 @@ class DatabaseStorage:
                     last_accessed_at = NOW(),
                     updated_at = NOW()
             """,
-                thread_id, user_id, tenant_id or "", assistant_id,
-                json.dumps(metadata or {}), is_anonymous, expires_at
+                thread_id,
+                user_id,
+                tenant_id or "",
+                assistant_id,
+                json.dumps(metadata or {}),
+                is_anonymous,
+                expires_at,
             )
 
     async def get_langgraph_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
@@ -3264,37 +3388,34 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM langgraph_threads WHERE thread_id = $1 AND status = 'active'",
-                thread_id
+                thread_id,
             )
             if row:
                 await conn.execute(
                     "UPDATE langgraph_threads SET last_accessed_at = NOW() WHERE thread_id = $1",
-                    thread_id
+                    thread_id,
                 )
             return self._row_to_dict(row) if row else None
 
     async def list_user_threads(
-        self,
-        user_id: str,
-        tenant_id: Optional[str] = None,
-        limit: int = 100
+        self, user_id: str, tenant_id: Optional[str] = None, limit: int = 100
     ) -> List[Dict[str, Any]]:
         """获取用户的 LangGraph Threads"""
         if not self._pool:
             return []
-        
+
         query = "SELECT * FROM langgraph_threads WHERE user_id = $1 AND status = 'active'"
         params = [user_id]
         param_idx = 2
-        
+
         if tenant_id:
             query += f" AND tenant_id = ${param_idx}"
             params.append(tenant_id)
             param_idx += 1
-        
+
         query += f" ORDER BY last_accessed_at DESC NULLS LAST LIMIT ${param_idx}"
         params.append(limit)
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
@@ -3311,13 +3432,14 @@ class DatabaseStorage:
         input_text: str = None,
         output_data: Dict = None,
         metadata: Dict = None,
-        expires_at: datetime = None
+        expires_at: datetime = None,
     ) -> None:
         """保存语义缓存"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO semantic_cache (
                     service_id, input_hash, input_text, output_text, 
                     output_data, metadata, expires_at
@@ -3330,33 +3452,41 @@ class DatabaseStorage:
                     hit_count = semantic_cache.hit_count + 1,
                     last_hit_at = NOW()
             """,
-                service_id, input_hash, input_text, output_text,
+                service_id,
+                input_hash,
+                input_text,
+                output_text,
                 json.dumps(output_data) if output_data else None,
-                json.dumps(metadata or {}), expires_at
+                json.dumps(metadata or {}),
+                expires_at,
             )
 
-    async def get_cache(
-        self,
-        service_id: str,
-        input_hash: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_cache(self, service_id: str, input_hash: str) -> Optional[Dict[str, Any]]:
         """获取语义缓存"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 SELECT * FROM semantic_cache 
                 WHERE service_id = $1 AND input_hash = $2
                 AND (expires_at IS NULL OR expires_at > NOW())
-            """, service_id, input_hash)
+            """,
+                service_id,
+                input_hash,
+            )
             if row:
                 # 更新命中统计
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE semantic_cache SET 
                         hit_count = hit_count + 1, 
                         last_hit_at = NOW() 
                     WHERE service_id = $1 AND input_hash = $2
-                """, service_id, input_hash)
+                """,
+                    service_id,
+                    input_hash,
+                )
             return self._row_to_dict(row) if row else None
 
     async def cleanup_expired_cache(self) -> int:
@@ -3381,29 +3511,30 @@ class DatabaseStorage:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM auth_config WHERE config_type = $1 AND enabled = TRUE",
-                config_type
+                "SELECT * FROM auth_config WHERE config_type = $1 AND enabled = TRUE", config_type
             )
             return self._row_to_dict(row) if row else None
 
     async def save_auth_config(
-        self,
-        config_type: str,
-        config: Dict[str, Any],
-        enabled: bool = True
+        self, config_type: str, config: Dict[str, Any], enabled: bool = True
     ) -> None:
         """保存鉴权配置"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO auth_config (config_type, config, enabled)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (config_type) DO UPDATE SET
                     config = EXCLUDED.config,
                     enabled = EXCLUDED.enabled,
                     updated_at = NOW()
-            """, config_type, json.dumps(config), enabled)
+            """,
+                config_type,
+                json.dumps(config),
+                enabled,
+            )
 
     # =========================================================================
     # Confluence 集成表
@@ -3414,7 +3545,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO confluence_connections (
                     connection_id, tenant_id, name, domain, email, api_token,
                     sync_mode, polling_interval_minutes, status,
@@ -3454,8 +3586,7 @@ class DatabaseStorage:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM confluence_connections WHERE connection_id = $1",
-                connection_id
+                "SELECT * FROM confluence_connections WHERE connection_id = $1", connection_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -3539,8 +3670,7 @@ class DatabaseStorage:
             return False
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM confluence_connections WHERE connection_id = $1",
-                connection_id
+                "DELETE FROM confluence_connections WHERE connection_id = $1", connection_id
             )
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
@@ -3560,8 +3690,15 @@ class DatabaseStorage:
         param_idx = 1
 
         allowed_fields = {
-            "name", "domain", "email", "api_token", "sync_mode",
-            "polling_interval_minutes", "status", "last_sync_at", "last_error"
+            "name",
+            "domain",
+            "email",
+            "api_token",
+            "sync_mode",
+            "polling_interval_minutes",
+            "status",
+            "last_sync_at",
+            "last_error",
         }
 
         for key, value in updates.items():
@@ -3619,7 +3756,8 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 INSERT INTO confluence_space_bindings (
                     binding_id, connection_id, tenant_id, dataset_id, space_key, space_id,
                     space_name, root_page_id, root_page_title,
@@ -3677,8 +3815,7 @@ class DatabaseStorage:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM confluence_space_bindings WHERE binding_id = $1",
-                binding_id
+                "SELECT * FROM confluence_space_bindings WHERE binding_id = $1", binding_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -3689,25 +3826,29 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_space_bindings
                 WHERE connection_id = $1
                 ORDER BY created_at
-            """, connection_id)
+            """,
+                connection_id,
+            )
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_confluence_bindings_by_dataset(
-        self, dataset_id: str
-    ) -> List[Dict[str, Any]]:
+    async def get_confluence_bindings_by_dataset(self, dataset_id: str) -> List[Dict[str, Any]]:
         """获取数据集关联的所有空间绑定"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_space_bindings
                 WHERE dataset_id = $1
                 ORDER BY created_at
-            """, dataset_id)
+            """,
+                dataset_id,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     async def update_confluence_binding_status(
@@ -3759,8 +3900,7 @@ class DatabaseStorage:
             return False
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM confluence_space_bindings WHERE binding_id = $1",
-                binding_id
+                "DELETE FROM confluence_space_bindings WHERE binding_id = $1", binding_id
             )
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
@@ -3780,12 +3920,25 @@ class DatabaseStorage:
         param_idx = 1
 
         allowed_fields = {
-            "space_id", "space_name", "include_patterns", "exclude_patterns",
-            "max_depth", "include_attachments", "include_comments", "status",
-            "last_sync_at", "synced_page_count", "total_page_count", "last_error",
-            "root_page_id", "root_page_title",
-            "sync_mode", "polling_interval_minutes", "last_incremental_sync_at",  # binding 级别同步配置
-            "sync_enabled", "next_sync_at",  # 调度器相关
+            "space_id",
+            "space_name",
+            "include_patterns",
+            "exclude_patterns",
+            "max_depth",
+            "include_attachments",
+            "include_comments",
+            "status",
+            "last_sync_at",
+            "synced_page_count",
+            "total_page_count",
+            "last_error",
+            "root_page_id",
+            "root_page_title",
+            "sync_mode",
+            "polling_interval_minutes",
+            "last_incremental_sync_at",  # binding 级别同步配置
+            "sync_enabled",
+            "next_sync_at",  # 调度器相关
         }
 
         # JSON 字段需要序列化
@@ -3864,7 +4017,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO confluence_pages (
                     id, binding_id, document_id, page_id, space_key, title,
                     version, content_hash, parent_page_id, depth, status,
@@ -3902,16 +4056,13 @@ class DatabaseStorage:
                 page.get("author"),
             )
 
-    async def get_confluence_page(
-        self, page_record_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_confluence_page(self, page_record_id: str) -> Optional[Dict[str, Any]]:
         """通过记录 ID 获取 Confluence 页面记录"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM confluence_pages WHERE id = $1",
-                page_record_id
+                "SELECT * FROM confluence_pages WHERE id = $1", page_record_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -3922,22 +4073,23 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 SELECT * FROM confluence_pages
                 WHERE binding_id = $1 AND page_id = $2
-            """, binding_id, page_id)
+            """,
+                binding_id,
+                page_id,
+            )
             return self._row_to_dict(row) if row else None
 
-    async def get_confluence_page_by_document(
-        self, document_id: str
-    ) -> Optional[Dict[str, Any]]:
+    async def get_confluence_page_by_document(self, document_id: str) -> Optional[Dict[str, Any]]:
         """根据文档 ID 获取 Confluence 页面记录"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM confluence_pages WHERE document_id = $1",
-                document_id
+                "SELECT * FROM confluence_pages WHERE document_id = $1", document_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -4122,9 +4274,7 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM confluence_pages WHERE id = $1", id
-            )
+            result = await conn.execute("DELETE FROM confluence_pages WHERE id = $1", id)
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
@@ -4135,8 +4285,7 @@ class DatabaseStorage:
             return 0
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM confluence_pages WHERE binding_id = $1",
-                binding_id
+                "DELETE FROM confluence_pages WHERE binding_id = $1", binding_id
             )
             if result.startswith("DELETE "):
                 return int(result.split()[-1])
@@ -4151,10 +4300,14 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("""
+            row = await conn.fetchrow(
+                """
                 SELECT * FROM confluence_pages
                 WHERE binding_id = $1 AND page_id = $2
-            """, binding_id, page_id)
+            """,
+                binding_id,
+                page_id,
+            )
             return self._row_to_dict(row) if row else None
 
     async def update_confluence_page_sync_config(
@@ -4167,8 +4320,11 @@ class DatabaseStorage:
             return None
 
         allowed_fields = {
-            "sync_mode", "polling_interval_minutes", "sync_enabled",
-            "next_sync_at", "sync_priority",
+            "sync_mode",
+            "polling_interval_minutes",
+            "sync_enabled",
+            "next_sync_at",
+            "sync_priority",
         }
 
         set_clauses = ["updated_at = NOW()"]
@@ -4187,7 +4343,7 @@ class DatabaseStorage:
         params.append(page_id)
         query = f"""
             UPDATE confluence_pages
-            SET {', '.join(set_clauses)}
+            SET {", ".join(set_clauses)}
             WHERE id = ${param_idx}
             RETURNING *
         """
@@ -4201,7 +4357,8 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_space_bindings
                 WHERE sync_enabled = TRUE
                   AND sync_mode = 'polling'
@@ -4209,7 +4366,9 @@ class DatabaseStorage:
                   AND next_sync_at <= NOW()
                 ORDER BY next_sync_at ASC
                 LIMIT $1
-            """, limit)
+            """,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     async def get_pages_due_for_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
@@ -4217,7 +4376,8 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_pages
                 WHERE sync_enabled = TRUE
                   AND sync_mode = 'polling'
@@ -4225,7 +4385,9 @@ class DatabaseStorage:
                   AND next_sync_at <= NOW()
                 ORDER BY sync_priority DESC, next_sync_at ASC
                 LIMIT $1
-            """, limit)
+            """,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     async def get_all_polling_pages(self, limit: int = 500) -> List[Dict[str, Any]]:
@@ -4241,13 +4403,16 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_pages
                 WHERE sync_enabled = TRUE
                   AND sync_mode = 'polling'
                 ORDER BY sync_priority DESC, next_sync_at ASC NULLS FIRST
                 LIMIT $1
-            """, limit)
+            """,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     async def schedule_next_sync(
@@ -4287,12 +4452,16 @@ class DatabaseStorage:
 
         async with self._pool.acquire() as conn:
             # 使用参数化的 interval 值
-            await conn.execute(f"""
+            await conn.execute(
+                f"""
                 UPDATE {table}
                 SET next_sync_at = NOW() + $1 * INTERVAL '1 minute',
                     updated_at = NOW()
                 WHERE {id_field} = $2
-            """, interval_minutes, id_value)
+            """,
+                interval_minutes,
+                id_value,
+            )
 
     async def upsert_confluence_page(
         self,
@@ -4322,14 +4491,13 @@ class DatabaseStorage:
         if confluence_updated_at:
             if isinstance(confluence_updated_at, str):
                 # 处理 ISO 格式: '2025-08-12T04:04:43.266Z'
-                updated_at_dt = datetime.fromisoformat(
-                    confluence_updated_at.replace("Z", "+00:00")
-                )
+                updated_at_dt = datetime.fromisoformat(confluence_updated_at.replace("Z", "+00:00"))
             else:
                 updated_at_dt = confluence_updated_at
 
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO confluence_pages (
                     id, binding_id, document_id, page_id, space_key, title,
                     version, content_hash, parent_page_id, depth, status,
@@ -4373,10 +4541,14 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute("""
+            result = await conn.execute(
+                """
                 DELETE FROM confluence_pages
                 WHERE binding_id = $1 AND page_id = $2
-            """, binding_id, page_id)
+            """,
+                binding_id,
+                page_id,
+            )
             if result.startswith("DELETE "):
                 return int(result.split()[-1]) > 0
             return False
@@ -4390,7 +4562,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO confluence_sync_tasks (
                     task_id, binding_id, page_id, task_type, priority,
                     status, retry_count, max_retries, progress,
@@ -4433,8 +4606,7 @@ class DatabaseStorage:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM confluence_sync_tasks WHERE task_id = $1",
-                task_id
+                "SELECT * FROM confluence_sync_tasks WHERE task_id = $1", task_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -4516,7 +4688,9 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(task_id)
-        query = f"UPDATE confluence_sync_tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+        query = (
+            f"UPDATE confluence_sync_tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+        )
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -4526,12 +4700,15 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM confluence_sync_tasks
                 WHERE status = 'pending'
                 ORDER BY priority DESC, created_at ASC
                 LIMIT $1
-            """, limit)
+            """,
+                limit,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     async def create_confluence_sync_task(
@@ -4548,7 +4725,8 @@ class DatabaseStorage:
             return
 
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO confluence_sync_tasks (
                     task_id, binding_id, page_id, task_type, priority,
                     status, retry_count, max_retries, progress,
@@ -4577,8 +4755,15 @@ class DatabaseStorage:
         param_idx = 1
 
         allowed_fields = {
-            "status", "retry_count", "progress", "total_items",
-            "processed_items", "error", "result", "started_at", "completed_at"
+            "status",
+            "retry_count",
+            "progress",
+            "total_items",
+            "processed_items",
+            "error",
+            "result",
+            "started_at",
+            "completed_at",
         }
 
         for key, value in updates.items():
@@ -4661,12 +4846,17 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT * FROM documents
                 WHERE confluence_binding_id = $1
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
-            """, binding_id, limit, offset)
+            """,
+                binding_id,
+                limit,
+                offset,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
@@ -4678,9 +4868,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE LOWER(email) = LOWER($1)", email
-            )
+            row = await conn.fetchrow("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", email)
             return self._row_to_dict(row) if row else None
 
     async def save_user_with_password(self, user: Dict[str, Any]) -> None:
@@ -4688,7 +4876,8 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO users (
                     user_id, username, email, display_name, department, tenant_id,
                     tier, roles, permissions, quota_config, status,
@@ -4730,21 +4919,26 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE users SET
                     password_hash = $1,
                     force_password_change = FALSE,
                     password_changed_at = NOW(),
                     updated_at = NOW()
                 WHERE user_id = $2
-            """, password_hash, user_id)
+            """,
+                password_hash,
+                user_id,
+            )
 
     async def reset_user_password(self, user_id: str, password_hash: str) -> None:
         """重置用户密码为默认值，需强制修改"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE users SET
                     password_hash = $1,
                     force_password_change = TRUE,
@@ -4753,7 +4947,10 @@ class DatabaseStorage:
                     locked_until = NULL,
                     updated_at = NOW()
                 WHERE user_id = $2
-            """, password_hash, user_id)
+            """,
+                password_hash,
+                user_id,
+            )
 
     async def increment_login_attempts(self, user_id: str) -> None:
         """增加登录失败计数"""
@@ -4762,7 +4959,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE users SET login_attempts = COALESCE(login_attempts, 0) + 1 WHERE user_id = $1",
-                user_id
+                user_id,
             )
 
     async def reset_login_attempts(self, user_id: str) -> None:
@@ -4772,7 +4969,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 "UPDATE users SET login_attempts = 0, locked_until = NULL WHERE user_id = $1",
-                user_id
+                user_id,
             )
 
     async def lock_user_account(self, user_id: str, minutes: int = 30) -> None:
@@ -4780,25 +4977,33 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE users SET
                     locked_until = NOW() + INTERVAL '%s minutes',
                     updated_at = NOW()
                 WHERE user_id = $1
-            """ % minutes, user_id)
+            """
+                % minutes,
+                user_id,
+            )
 
     async def update_last_login(self, user_id: str, ip_address: str) -> None:
         """更新最后登录信息"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE users SET
                     last_login_at = NOW(),
                     last_login_ip = $1,
                     last_active_at = NOW()
                 WHERE user_id = $2
-            """, ip_address, user_id)
+            """,
+                ip_address,
+                user_id,
+            )
 
     async def log_login_audit(
         self,
@@ -4807,16 +5012,24 @@ class DatabaseStorage:
         action: str,
         ip_address: str,
         user_agent: str,
-        details: Dict[str, Any]
+        details: Dict[str, Any],
     ) -> None:
         """记录登录审计日志"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO login_audit (user_id, email, action, ip_address, user_agent, details)
                 VALUES ($1, $2, $3, $4, $5, $6)
-            """, user_id, email, action, ip_address, user_agent, json.dumps(details))
+            """,
+                user_id,
+                email,
+                action,
+                ip_address,
+                user_agent,
+                json.dumps(details),
+            )
 
     async def get_user_permissions(self, user_id: str) -> List[str]:
         """获取用户的所有权限（角色权限 + 额外权限）"""
@@ -4830,30 +5043,36 @@ class DatabaseStorage:
 
             # 1. 从 role_permissions 表获取角色权限
             try:
-                rows = await conn.fetch("""
+                rows = await conn.fetch(
+                    """
                     SELECT DISTINCT rp.permission_code
                     FROM user_roles ur
                     JOIN role_permissions rp ON ur.role_name = rp.role_name
                     WHERE ur.user_id = $1
                       AND (ur.expires_at IS NULL OR ur.expires_at > NOW())
-                """, user_id)
+                """,
+                    user_id,
+                )
                 for row in rows:
-                    permissions_set.add(row['permission_code'])
+                    permissions_set.add(row["permission_code"])
             except Exception:
                 pass
 
             # 2. 如果 role_permissions 为空，回退到 rbac_roles 的 permissions 数组
             if not permissions_set:
                 try:
-                    rows = await conn.fetch("""
+                    rows = await conn.fetch(
+                        """
                         SELECT DISTINCT unnest(rr.permissions) as permission_code
                         FROM user_roles ur
                         JOIN rbac_roles rr ON ur.role_name = rr.role_name
                         WHERE ur.user_id = $1
                           AND (ur.expires_at IS NULL OR ur.expires_at > NOW())
-                    """, user_id)
+                    """,
+                        user_id,
+                    )
                     for row in rows:
-                        permissions_set.add(row['permission_code'])
+                        permissions_set.add(row["permission_code"])
                 except Exception:
                     pass
 
@@ -4879,14 +5098,17 @@ class DatabaseStorage:
 
             # 4. 获取用户额外权限（直接分配）
             try:
-                extra_rows = await conn.fetch("""
+                extra_rows = await conn.fetch(
+                    """
                     SELECT permission_code
                     FROM user_permissions
                     WHERE user_id = $1
                       AND (expires_at IS NULL OR expires_at > NOW())
-                """, user_id)
+                """,
+                    user_id,
+                )
                 for row in extra_rows:
-                    permissions_set.add(row['permission_code'])
+                    permissions_set.add(row["permission_code"])
             except Exception:
                 # user_permissions 表可能不存在
                 pass
@@ -4901,7 +5123,7 @@ class DatabaseStorage:
         search: Optional[str] = None,
         tenant_id: Optional[str] = None,
         limit: int = 20,
-        offset: int = 0
+        offset: int = 0,
     ) -> tuple:
         """分页获取用户列表"""
         if not self._pool:
@@ -4947,8 +5169,16 @@ class DatabaseStorage:
             return
 
         allowed_fields = {
-            "display_name", "username", "department", "tier", "roles", "permissions",
-            "quota_config", "status", "metadata", "email_verified"
+            "display_name",
+            "username",
+            "department",
+            "tier",
+            "roles",
+            "permissions",
+            "quota_config",
+            "status",
+            "metadata",
+            "email_verified",
         }
         filtered = {k: v for k, v in updates.items() if k in allowed_fields}
         if not filtered:
@@ -4984,20 +5214,23 @@ class DatabaseStorage:
             result = await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
             return result == "DELETE 1"
 
-    async def assign_user_role(
-        self, user_id: str, role_name: str, granted_by: str
-    ) -> None:
+    async def assign_user_role(self, user_id: str, role_name: str, granted_by: str) -> None:
         """为用户分配角色"""
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO user_roles (user_id, role_name, granted_by)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (user_id, role_name) DO UPDATE SET
                     granted_at = NOW(),
                     granted_by = EXCLUDED.granted_by
-            """, user_id, role_name, granted_by)
+            """,
+                user_id,
+                role_name,
+                granted_by,
+            )
         await self._invalidate_permission_cache(user_id)
 
     async def remove_user_role(self, user_id: str, role_name: str) -> bool:
@@ -5006,15 +5239,12 @@ class DatabaseStorage:
             return False
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM user_roles WHERE user_id = $1 AND role_name = $2",
-                user_id, role_name
+                "DELETE FROM user_roles WHERE user_id = $1 AND role_name = $2", user_id, role_name
             )
         await self._invalidate_permission_cache(user_id)
         return result == "DELETE 1"
 
-    async def update_user_roles(
-        self, user_id: str, roles: List[str], granted_by: str
-    ) -> None:
+    async def update_user_roles(self, user_id: str, roles: List[str], granted_by: str) -> None:
         """更新用户的所有角色"""
         if not self._pool:
             return
@@ -5023,14 +5253,18 @@ class DatabaseStorage:
             await conn.execute("DELETE FROM user_roles WHERE user_id = $1", user_id)
             # 插入新角色
             for role in roles:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO user_roles (user_id, role_name, granted_by)
                     VALUES ($1, $2, $3)
-                """, user_id, role, granted_by)
+                """,
+                    user_id,
+                    role,
+                    granted_by,
+                )
             # 同时更新 users 表的 roles 字段
             await conn.execute(
-                "UPDATE users SET roles = $1, updated_at = NOW() WHERE user_id = $2",
-                roles, user_id
+                "UPDATE users SET roles = $1, updated_at = NOW() WHERE user_id = $2", roles, user_id
             )
         await self._invalidate_permission_cache(user_id)
 
@@ -5039,13 +5273,16 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT role_name FROM user_roles
                 WHERE user_id = $1
                   AND (expires_at IS NULL OR expires_at > NOW())
                 ORDER BY granted_at
-            """, user_id)
-            return [row['role_name'] for row in rows]
+            """,
+                user_id,
+            )
+            return [row["role_name"] for row in rows]
 
     # =========================================================================
     # 角色和权限管理方法
@@ -5056,9 +5293,7 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name"
-            )
+            rows = await conn.fetch("SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name")
             return [self._row_to_dict(row) for row in rows]
 
     async def get_role(self, role_name: str) -> Optional[Dict[str, Any]]:
@@ -5066,9 +5301,7 @@ class DatabaseStorage:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM rbac_roles WHERE role_name = $1", role_name
-            )
+            row = await conn.fetchrow("SELECT * FROM rbac_roles WHERE role_name = $1", role_name)
             return self._row_to_dict(row) if row else None
 
     async def create_role(
@@ -5078,18 +5311,27 @@ class DatabaseStorage:
         if not self._pool:
             return
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO rbac_roles (role_name, description, permissions, is_system)
                 VALUES ($1, $2, $3, FALSE)
-            """, role_name, description, permissions)
+            """,
+                role_name,
+                description,
+                permissions,
+            )
 
             # 同时插入 role_permissions
             for perm in permissions:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO role_permissions (role_name, permission_code)
                     VALUES ($1, $2)
                     ON CONFLICT DO NOTHING
-                """, role_name, perm)
+                """,
+                    role_name,
+                    perm,
+                )
         await self._invalidate_permission_cache()
 
     async def update_role(
@@ -5100,39 +5342,54 @@ class DatabaseStorage:
             return
         async with self._pool.acquire() as conn:
             if description is not None and permissions is not None:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE rbac_roles SET
                         description = $1,
                         permissions = $2,
                         updated_at = NOW()
                     WHERE role_name = $3
-                """, description, permissions, role_name)
+                """,
+                    description,
+                    permissions,
+                    role_name,
+                )
             elif description is not None:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE rbac_roles SET
                         description = $1,
                         updated_at = NOW()
                     WHERE role_name = $2
-                """, description, role_name)
+                """,
+                    description,
+                    role_name,
+                )
             elif permissions is not None:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     UPDATE rbac_roles SET
                         permissions = $1,
                         updated_at = NOW()
                     WHERE role_name = $2
-                """, permissions, role_name)
+                """,
+                    permissions,
+                    role_name,
+                )
 
             # 如果更新了权限，同步 role_permissions 表
             if permissions is not None:
-                await conn.execute(
-                    "DELETE FROM role_permissions WHERE role_name = $1", role_name
-                )
+                await conn.execute("DELETE FROM role_permissions WHERE role_name = $1", role_name)
                 for perm in permissions:
-                    await conn.execute("""
+                    await conn.execute(
+                        """
                         INSERT INTO role_permissions (role_name, permission_code)
                         VALUES ($1, $2)
                         ON CONFLICT DO NOTHING
-                    """, role_name, perm)
+                    """,
+                        role_name,
+                        perm,
+                    )
         await self._invalidate_permission_cache()
 
     async def delete_role(self, role_name: str) -> bool:
@@ -5141,17 +5398,12 @@ class DatabaseStorage:
             return False
         async with self._pool.acquire() as conn:
             # 先删除 role_permissions
-            await conn.execute(
-                "DELETE FROM role_permissions WHERE role_name = $1", role_name
-            )
+            await conn.execute("DELETE FROM role_permissions WHERE role_name = $1", role_name)
             # 删除 user_roles 中的引用
-            await conn.execute(
-                "DELETE FROM user_roles WHERE role_name = $1", role_name
-            )
+            await conn.execute("DELETE FROM user_roles WHERE role_name = $1", role_name)
             # 删除角色
             result = await conn.execute(
-                "DELETE FROM rbac_roles WHERE role_name = $1 AND is_system = FALSE",
-                role_name
+                "DELETE FROM rbac_roles WHERE role_name = $1 AND is_system = FALSE", role_name
             )
             await self._invalidate_permission_cache()
             return result == "DELETE 1"
@@ -5164,7 +5416,7 @@ class DatabaseStorage:
             if category:
                 rows = await conn.fetch(
                     "SELECT * FROM permissions WHERE category = $1 ORDER BY permission_code",
-                    category
+                    category,
                 )
             else:
                 rows = await conn.fetch(
@@ -5178,8 +5430,7 @@ class DatabaseStorage:
             return 0
         async with self._pool.acquire() as conn:
             count = await conn.fetchval(
-                "SELECT COUNT(*) FROM user_roles WHERE role_name = $1",
-                role_name
+                "SELECT COUNT(*) FROM user_roles WHERE role_name = $1", role_name
             )
             return count or 0
 
@@ -5188,13 +5439,16 @@ class DatabaseStorage:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(
+                """
                 SELECT u.user_id, u.email, u.display_name, u.status, ur.granted_at
                 FROM users u
                 JOIN user_roles ur ON u.user_id = ur.user_id
                 WHERE ur.role_name = $1
                 ORDER BY ur.granted_at DESC
-            """, role_name)
+            """,
+                role_name,
+            )
             return [self._row_to_dict(row) for row in rows]
 
     # =========================================================================
@@ -5207,13 +5461,16 @@ class DatabaseStorage:
             return []
         async with self._pool.acquire() as conn:
             try:
-                rows = await conn.fetch("""
+                rows = await conn.fetch(
+                    """
                     SELECT permission_code, granted_by, granted_at, expires_at, note
                     FROM user_permissions
                     WHERE user_id = $1
                       AND (expires_at IS NULL OR expires_at > NOW())
                     ORDER BY granted_at DESC
-                """, user_id)
+                """,
+                    user_id,
+                )
                 return [self._row_to_dict(row) for row in rows]
             except Exception:
                 # Table might not exist yet
@@ -5225,7 +5482,7 @@ class DatabaseStorage:
         permission_code: str,
         granted_by: str,
         note: Optional[str] = None,
-        expires_at: Optional[datetime] = None
+        expires_at: Optional[datetime] = None,
     ) -> bool:
         """给用户添加额外权限"""
         if not self._pool:
@@ -5233,7 +5490,8 @@ class DatabaseStorage:
         await self._invalidate_permission_cache(user_id)
         async with self._pool.acquire() as conn:
             try:
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO user_permissions (user_id, permission_code, granted_by, note, expires_at)
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (user_id, permission_code) DO UPDATE SET
@@ -5241,7 +5499,13 @@ class DatabaseStorage:
                         granted_at = NOW(),
                         note = EXCLUDED.note,
                         expires_at = EXCLUDED.expires_at
-                """, user_id, permission_code, granted_by, note, expires_at)
+                """,
+                    user_id,
+                    permission_code,
+                    granted_by,
+                    note,
+                    expires_at,
+                )
                 return True
             except Exception:
                 return False
@@ -5253,19 +5517,20 @@ class DatabaseStorage:
         await self._invalidate_permission_cache(user_id)
         async with self._pool.acquire() as conn:
             try:
-                result = await conn.execute("""
+                result = await conn.execute(
+                    """
                     DELETE FROM user_permissions
                     WHERE user_id = $1 AND permission_code = $2
-                """, user_id, permission_code)
+                """,
+                    user_id,
+                    permission_code,
+                )
                 return "DELETE" in result
             except Exception:
                 return False
 
     async def update_user_extra_permissions(
-        self,
-        user_id: str,
-        permissions: List[str],
-        granted_by: str
+        self, user_id: str, permissions: List[str], granted_by: str
     ) -> None:
         """更新用户的额外权限（替换所有）"""
         if not self._pool:
@@ -5274,16 +5539,18 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 # 删除现有的额外权限
-                await conn.execute(
-                    "DELETE FROM user_permissions WHERE user_id = $1",
-                    user_id
-                )
+                await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
                 # 添加新的额外权限
                 for perm in permissions:
-                    await conn.execute("""
+                    await conn.execute(
+                        """
                         INSERT INTO user_permissions (user_id, permission_code, granted_by)
                         VALUES ($1, $2, $3)
-                    """, user_id, perm, granted_by)
+                    """,
+                        user_id,
+                        perm,
+                        granted_by,
+                    )
 
     # =========================================================================
     # 辅助方法
@@ -5296,14 +5563,17 @@ class DatabaseStorage:
         result = dict(row)
 
         # JSON 字段列表 - 需要解析为 Python 对象（字典类型）
-        json_dict_fields = {
-            "metadata", "embedding_config", "index_config", "result", "config"
-        }
+        json_dict_fields = {"metadata", "embedding_config", "index_config", "result", "config"}
 
         # JSON 字段列表 - 需要解析为 Python 对象（列表类型）
         json_list_fields = {
-            "roles", "keywords", "include_patterns", "exclude_patterns",
-            "labels", "events", "history"
+            "roles",
+            "keywords",
+            "include_patterns",
+            "exclude_patterns",
+            "labels",
+            "events",
+            "history",
         }
 
         for key, value in result.items():
@@ -5975,7 +6245,7 @@ class DatabaseStorage:
     async def save_document_summary(self, data: Dict[str, Any]) -> bool:
         """
         Save or update a document summary for L1 hierarchical indexing.
-        
+
         Args:
             data: Dictionary containing:
                 - document_id: UUID
@@ -5983,17 +6253,17 @@ class DatabaseStorage:
                 - keywords: List of keywords
                 - topics: List of topics
                 - vector_id: Qdrant vector ID
-        
+
         Returns:
             True if saved successfully
         """
         if not self._pool:
             return False
-        
+
         document_id = data.get("document_id")
         if not document_id:
             return False
-        
+
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -6018,16 +6288,16 @@ class DatabaseStorage:
     async def get_document_summary(self, document_id: str) -> Optional[Dict[str, Any]]:
         """
         Get document summary for L1 retrieval context.
-        
+
         Args:
             document_id: Document UUID
-            
+
         Returns:
             Summary dict or None if not found
         """
         if not self._pool:
             return None
-        
+
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -6042,16 +6312,16 @@ class DatabaseStorage:
     async def delete_document_summary(self, document_id: str) -> bool:
         """
         Delete document summary.
-        
+
         Args:
             document_id: Document UUID
-            
+
         Returns:
             True if deleted
         """
         if not self._pool:
             return False
-        
+
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM document_summaries WHERE document_id = $1",
@@ -6066,17 +6336,17 @@ class DatabaseStorage:
     ) -> List[Dict[str, Any]]:
         """
         Get all document summaries in a dataset.
-        
+
         Args:
             dataset_id: Dataset UUID
             limit: Max summaries to return
-            
+
         Returns:
             List of summary dicts
         """
         if not self._pool:
             return []
-        
+
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """

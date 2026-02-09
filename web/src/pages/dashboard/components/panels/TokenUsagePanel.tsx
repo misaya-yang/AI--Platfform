@@ -92,13 +92,20 @@ export function TokenUsagePanel() {
 
   const summary = summaryQuery.data;
   const breakdown = breakdownQuery.data?.items || [];
-  const providerBreakdown = providerQuery.data?.items || [];
+  const providerBreakdown = (providerQuery.data?.items || []).filter((item) => {
+    const provider = (item.provider || "").trim().toLowerCase();
+    return provider !== "unknown" && provider !== "none" && provider !== "null";
+  });
   const timeseries = timeseriesQuery.data?.data || [];
 
   const totalTokens = summary?.total_tokens || 0;
   const inputTokens = summary?.total_input_tokens || 0;
   const outputTokens = summary?.total_output_tokens || 0;
   const inputPercent = totalTokens > 0 ? (inputTokens / totalTokens) * 100 : 0;
+
+  // 检测 unattributed 条目
+  const hasUnattributed = breakdown.some((item) => (item.model || "").startsWith("unattributed")) ||
+    providerBreakdown.some((item) => (item.provider || "").startsWith("unattributed"));
 
   const chartData = timeseries.map((point) => ({
     date: point.date,
@@ -114,6 +121,24 @@ export function TokenUsagePanel() {
       onRefresh={refetch}
       loading={summaryQuery.isLoading}
     >
+      {/* Unattributed 归因警告 */}
+      {hasUnattributed && (
+        <div
+          style={{
+            padding: "8px 12px",
+            marginBottom: 12,
+            borderRadius: 6,
+            background: darkMode ? "rgba(245, 158, 11, 0.12)" : "rgba(245, 158, 11, 0.08)",
+            border: "1px solid rgba(245, 158, 11, 0.4)",
+            fontSize: 12,
+            color: "#f59e0b",
+            fontWeight: 500,
+          }}
+        >
+          ⚠ {t("dashboard.cost.unattributedWarning", "部分请求未归因到具体厂商/模型，请检查服务配置")}
+        </div>
+      )}
+
       {/* Total and breakdown */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 24, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
@@ -192,8 +217,10 @@ export function TokenUsagePanel() {
           </div>
           {providerBreakdown.slice(0, 3).map((item, index) => {
             const providerColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
-            const providerName = item.provider || "unknown";
-            const displayName = t(`models.providers.${providerName}`, providerName);
+            const providerName = item.provider || "unattributed";
+            const displayName = providerName === "unattributed"
+              ? "UNATTRIBUTED"
+              : t(`models.providers.${providerName}`, providerName);
             return (
               <div
                 key={providerName}

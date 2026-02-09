@@ -6,6 +6,7 @@ import { SyncOutlined } from "@ant-design/icons";
 import { useAppStore } from "@/store/useAppStore";
 import { LAYOUT, getColors } from "../styles";
 import { useTranslation } from "react-i18next";
+import { DataStatusBadge } from "./DataStatusBadge";
 
 interface PanelWrapperProps {
   title: string;
@@ -15,6 +16,8 @@ interface PanelWrapperProps {
   extra?: ReactNode;
   className?: string;
   noPadding?: boolean;
+  dataStatus?: string;
+  dataFreshnessMinutes?: number;
 }
 
 export function PanelWrapper({
@@ -25,6 +28,8 @@ export function PanelWrapper({
   extra,
   className = "",
   noPadding = false,
+  dataStatus,
+  dataFreshnessMinutes,
 }: PanelWrapperProps) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
@@ -55,16 +60,21 @@ export function PanelWrapper({
           flexShrink: 0,
         }}
       >
-        <span
-          style={{
-            fontSize: 15, // Slightly larger
-            fontWeight: 700, // Bolder
-            color: colors.textPrimary,
-            letterSpacing: "-0.01em",
-          }}
-        >
-          {title}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              fontSize: 15,
+              fontWeight: 700,
+              color: colors.textPrimary,
+              letterSpacing: "-0.01em",
+            }}
+          >
+            {title}
+          </span>
+          {dataStatus !== undefined && (
+            <DataStatusBadge dataStatus={dataStatus} dataFreshnessMinutes={dataFreshnessMinutes} />
+          )}
+        </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           {extra}
