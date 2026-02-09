@@ -17,7 +17,7 @@ import {
 import { sseFetch, sseFetchEvents, streamChunkToAGUIEvent, type AGUIEvent } from "@/lib/sse";
 import { useAgentTimeline } from "@/hooks/useAgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
-import { cn } from "@/lib/utils";
+import { buildHttpFailureError, cn, getPlaygroundErrorMessage } from "@/lib/utils";
 import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
 import { MultimodalInput } from "@/components/MultimodalInput";
 import type { ContentItem, StreamChunk, ToolCall, ServiceUiPreferences } from "@/types/gateway";
@@ -1635,10 +1635,7 @@ export function PlaygroundPage() {
             });
             if (!resp.ok) {
               const errorText = await resp.text().catch(() => "");
-              if (resp.status === 401) {
-                throw new Error(`Run wait failed: 401 Unauthorized. Server response: ${errorText}`);
-              }
-              throw new Error(`Run wait failed: ${resp.status} ${errorText}`);
+              throw buildHttpFailureError("Run wait failed", resp.status, errorText);
             }
             const data = await resp.json();
             acc = extractRunWaitContent(data);
@@ -1710,7 +1707,8 @@ export function PlaygroundPage() {
       // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
       if (err instanceof Error && err.name === 'AbortError') return;
 
-      const message = err instanceof Error ? err.message : t("common.error");
+      console.error("[Playground] request failed:", err);
+      const message = getPlaygroundErrorMessage(err, t);
       setMessages((m) => {
         const next = [...m];
         if (next[assistantIndex]) {

@@ -5,6 +5,22 @@ export interface SSEFetchOptions extends RequestInit {
   signal?: AbortSignal;
 }
 
+async function readResponseErrorDetail(resp: Response): Promise<string> {
+  const text = (await resp.text().catch(() => "")).trim();
+  if (!text) return "";
+
+  try {
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    const detail = payload.detail ?? payload.message ?? payload.error;
+    if (typeof detail === "string") return detail.trim();
+    if (detail != null) return JSON.stringify(detail);
+  } catch {
+    // Keep plain response body if it's not JSON.
+  }
+
+  return text.replace(/\s+/g, " ").trim().slice(0, 400);
+}
+
 // ============================================================================
 // AG-UI Protocol Types
 // ============================================================================
@@ -149,7 +165,9 @@ export async function* sseFetch<T>(
   }
   
   if (!resp.ok || !resp.body) {
-    throw new Error(`SSE request failed: ${resp.status}`);
+    const errorDetail = await readResponseErrorDetail(resp);
+    const suffix = errorDetail ? ` ${errorDetail}` : "";
+    throw new Error(`SSE request failed: ${resp.status}${suffix}`);
   }
   const reader = resp.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -251,7 +269,9 @@ export async function* sseFetchEvents<T>(
   }
 
   if (!resp.ok || !resp.body) {
-    throw new Error(`SSE request failed: ${resp.status}`);
+    const errorDetail = await readResponseErrorDetail(resp);
+    const suffix = errorDetail ? ` ${errorDetail}` : "";
+    throw new Error(`SSE request failed: ${resp.status}${suffix}`);
   }
 
   const reader = resp.body.getReader();
@@ -373,18 +393,9 @@ export async function* sseFetchAGUI(
   }
 
   if (!resp.ok || !resp.body) {
-    // Try to extract error message from response
-    let errorMessage = `SSE request failed: ${resp.status}`;
-    try {
-      const errorText = await resp.text();
-      if (errorText) {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.detail || errorJson.message || errorMessage;
-      }
-    } catch {
-      // Ignore parse errors
-    }
-    throw new Error(errorMessage);
+    const errorDetail = await readResponseErrorDetail(resp);
+    const suffix = errorDetail ? ` ${errorDetail}` : "";
+    throw new Error(`SSE request failed: ${resp.status}${suffix}`);
   }
 
   const reader = resp.body.getReader();

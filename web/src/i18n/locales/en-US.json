@@ -1702,6 +1702,20 @@
     "typeToStart": "Type a message to start.",
     "showToolCalls": "Show tool calls",
     "disclaimer": "AI responses may be inaccurate",
+    "errors": {
+      "cancelled": "Request was cancelled.",
+      "authExpired": "Your login has expired. Please sign in again.",
+      "forbidden": "You do not have permission to use this service.",
+      "notFound": "The requested service is unavailable or misconfigured.",
+      "rateLimited": "The model is busy or quota is exhausted. Please retry in a moment.",
+      "invalidAssistant": "Service configuration is invalid (assistant/graph mismatch). Please contact an administrator.",
+      "upstreamUnavailable": "Upstream agent service is unavailable. Please check service health and retry.",
+      "timeout": "The request timed out. Please try again.",
+      "network": "Network connection failed. Please check your connection and retry.",
+      "serverUnavailable": "Service is temporarily unavailable (HTTP {{status}}). Please try again later.",
+      "requestFailedWithStatus": "Request failed (HTTP {{status}}). Please try again.",
+      "unknown": "Request failed. Please try again later."
+    },
     "stats": {
       "ttft": "TTFT",
       "tokens": "tokens",

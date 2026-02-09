@@ -1703,6 +1703,20 @@
     "typeToStart": "输入消息开始对话。",
     "showToolCalls": "显示工具调用",
     "disclaimer": "AI 回答可能不准确",
+    "errors": {
+      "cancelled": "请求已取消。",
+      "authExpired": "登录状态已过期，请重新登录。",
+      "forbidden": "你没有权限使用该服务。",
+      "notFound": "请求的服务不可用或配置异常。",
+      "rateLimited": "当前模型繁忙或额度已达上限，请稍后重试。",
+      "invalidAssistant": "服务配置异常（assistant/graph 不匹配），请联系管理员检查。",
+      "upstreamUnavailable": "上游 Agent 服务暂时不可用，请确认服务状态后重试。",
+      "timeout": "请求超时，请稍后重试。",
+      "network": "网络连接异常，请检查网络后重试。",
+      "serverUnavailable": "服务暂时不可用（HTTP {{status}}），请稍后重试。",
+      "requestFailedWithStatus": "请求失败（HTTP {{status}}），请稍后重试。",
+      "unknown": "请求失败，请稍后重试。"
+    },
     "stats": {
       "ttft": "首Token",
       "tokens": "tokens",
