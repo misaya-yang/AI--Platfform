@@ -22,6 +22,7 @@ from ..core.observability.logging import get_logger
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
+    extract_provider,
     extract_token_usage,
 )
 
@@ -45,7 +46,10 @@ class UsageData:
 
     # 模型信息
     model: str = ""
+    provider: str = ""
     assistant_id: str = ""
+    status: str = "success"
+    request_type: str = "chat"
 
     # 时间信息
     timestamp: float = field(default_factory=time.time)
@@ -209,9 +213,11 @@ class BillingInterceptor:
                     request_id=usage.request_id,
                     service_id=usage.service_id,
                     assistant_id=usage.assistant_id,
+                    provider=usage.provider,
                     latency_ms=int(usage.duration_ms),
-                    status="success",
-                    request_type="chat",
+                    status=usage.status,
+                    request_type=usage.request_type,
+                    metadata=usage.raw_metadata,
                 )
         except Exception as e:
             logger.warning(f"Failed to record usage to database: {e}")
@@ -229,10 +235,13 @@ class BillingInterceptor:
                 "user_id": usage.user_id,
                 "tenant_id": usage.tenant_id,
                 "model": usage.model,
+                "provider": usage.provider,
                 "assistant_id": usage.assistant_id,
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
                 "total_tokens": usage.total_tokens,
+                "status": usage.status,
+                "request_type": usage.request_type,
                 "timestamp": usage.timestamp,
                 "duration_ms": usage.duration_ms,
             }
@@ -249,6 +258,9 @@ class BillingInterceptor:
         user_id: str = "",
         tenant_id: str = "",
         assistant_id: str = "",
+        request_type: str = "proxy_run_stream",
+        model_hint: str = "",
+        provider_hint: str = "",
     ) -> "StreamProcessor":
         """
         创建流处理器
@@ -259,6 +271,9 @@ class BillingInterceptor:
             user_id: 用户 ID
             tenant_id: 租户 ID
             assistant_id: Assistant ID
+            request_type: 请求类型（用于统计维度）
+            model_hint: 请求侧模型提示
+            provider_hint: 请求侧厂商提示
 
         Returns:
             StreamProcessor 实例
@@ -270,6 +285,9 @@ class BillingInterceptor:
             user_id=user_id,
             tenant_id=tenant_id,
             assistant_id=assistant_id,
+            request_type=request_type,
+            model_hint=model_hint,
+            provider_hint=provider_hint,
         )
 
 
@@ -288,6 +306,9 @@ class StreamProcessor:
         user_id: str = "",
         tenant_id: str = "",
         assistant_id: str = "",
+        request_type: str = "proxy_run_stream",
+        model_hint: str = "",
+        provider_hint: str = "",
     ):
         self.interceptor = interceptor
         self.request_id = request_id
@@ -295,14 +316,19 @@ class StreamProcessor:
         self.user_id = user_id
         self.tenant_id = tenant_id
         self.assistant_id = assistant_id
+        self.request_type = request_type
+        self.model_hint = model_hint
+        self.provider_hint = provider_hint
 
         self.start_time = time.time()
 
         # SSE 解析状态
         self._buffer = ""
-        self._current_event = ""
         self._usage_collected = False
         self._realtime_started = False  # 跟踪是否已开始实时指标记录
+        self._request_complete_recorded = False
+        self._status = "success"
+        self._error_metadata: Dict[str, Any] = {}
 
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
@@ -329,7 +355,8 @@ class StreamProcessor:
         try:
             # 尝试解码
             text = chunk.decode("utf-8", errors="ignore")
-            self._buffer += text
+            # 统一行分隔符，避免上游使用 CRLF 时无法按 SSE 事件分块。
+            self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
 
             # 解析完整的 SSE 事件
             await self._parse_events()
@@ -357,11 +384,82 @@ class StreamProcessor:
             elif line.startswith("data:"):
                 data_lines.append(line[5:].strip())
 
+        if event_type.lower() == "error":
+            self._mark_error("stream_error_event")
+
         # 不限制事件类型，直接尝试从任意事件解析 usage。
         # LangGraph/OpenAI 在不同版本会把 usage 放在 metadata/messages/updates 等事件里。
         if data_lines:
             data_str = "\n".join(data_lines)
             await self._extract_usage(data_str, event_type)
+
+    @staticmethod
+    def _should_record_fallback(request_type: str) -> bool:
+        normalized = (request_type or "").lower()
+        return normalized.startswith("proxy_run_") or normalized.startswith("run_")
+
+    @staticmethod
+    def _extract_error_payload(data: Dict[str, Any]) -> Dict[str, str]:
+        """从事件数据中抽取上游错误信息，统一元数据字段。"""
+        if (
+            isinstance(data.get("error"), str)
+            and data.get("error")
+            and "message" in data
+        ):
+            error_type = str(data.get("error"))
+            error_message = str(data.get("message") or "")
+            payload: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+            if error_message:
+                payload["upstream_error_message"] = error_message[:512]
+            return payload
+
+        error_payload = data.get("__error__") or data.get("error")
+        if not error_payload:
+            return {}
+
+        if isinstance(error_payload, dict):
+            error_type = str(
+                error_payload.get("error")
+                or error_payload.get("type")
+                or "upstream_error"
+            )
+            error_message = str(
+                error_payload.get("message")
+                or error_payload.get("detail")
+                or ""
+            )
+        else:
+            error_type = "upstream_error"
+            error_message = str(error_payload)
+
+        payload: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+        if error_message:
+            payload["upstream_error_message"] = error_message[:512]
+        return payload
+
+    def _mark_error(self, error_type: str, error_message: str = "") -> None:
+        """标记本次流为错误状态。"""
+        self._status = "error"
+        self._error_metadata["upstream_error_type"] = str(error_type)[:128]
+        if error_message:
+            self._error_metadata["upstream_error_message"] = str(error_message)[:512]
+
+    async def _record_request_complete(self) -> None:
+        """记录实时请求完成事件（只记录一次）。"""
+        if self._request_complete_recorded or not self.interceptor.realtime_metrics:
+            return
+
+        duration_ms = (time.time() - self.start_time) * 1000
+        status_code = 200 if self._status == "success" else 500
+
+        try:
+            await self.interceptor.realtime_metrics.record_request_complete(
+                status_code=status_code,
+                duration_ms=int(duration_ms),
+            )
+            self._request_complete_recorded = True
+        except Exception as e:
+            logger.debug(f"Failed to record request complete: {e}")
 
     async def _extract_usage(self, data_str: str, event_type: str) -> None:
         """从数据中提取 usage 信息"""
@@ -374,7 +472,15 @@ class StreamProcessor:
         try:
             data = json.loads(data_str)
         except json.JSONDecodeError:
+            if event_type.lower() == "error":
+                self._mark_error("stream_error_event", data_str)
             return
+
+        if isinstance(data, dict):
+            error_meta = self._extract_error_payload(data)
+            if error_meta:
+                self._status = "error"
+                self._error_metadata.update(error_meta)
 
         usage = extract_token_usage(data)
         if usage:
@@ -397,8 +503,13 @@ class StreamProcessor:
         # 计算耗时
         duration_ms = (time.time() - self.start_time) * 1000
 
-        model_name = extract_model(raw_data) or ""
+        model_name = extract_model(raw_data) or self.model_hint
+        provider = extract_provider(raw_data) or self.provider_hint
         assistant_id = self.assistant_id or extract_assistant_id(raw_data) or ""
+        metadata = dict(raw_data) if isinstance(raw_data, dict) else {"raw_data": raw_data}
+        metadata.update(self._error_metadata)
+        metadata.setdefault("source", "stream_usage")
+        metadata.setdefault("request_type", self.request_type)
 
         # 创建 UsageData
         usage_data = UsageData(
@@ -410,10 +521,13 @@ class StreamProcessor:
             user_id=self.user_id,
             tenant_id=self.tenant_id,
             model=model_name,
+            provider=provider,
             assistant_id=assistant_id,
+            status=self._status,
+            request_type=self.request_type,
             timestamp=time.time(),
             duration_ms=duration_ms,
-            raw_metadata=raw_data,
+            raw_metadata=metadata,
         )
 
         logger.info(
@@ -423,18 +537,15 @@ class StreamProcessor:
         )
 
         # 修复：记录实时指标（用于 Dashboard WebSocket 推送）
+        await self._record_request_complete()
         if self.interceptor.realtime_metrics:
             try:
-                await self.interceptor.realtime_metrics.record_request_complete(
-                    status_code=200,  # 成功完成
-                    duration_ms=int(duration_ms),
-                )
                 await self.interceptor.realtime_metrics.record_token_usage(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
             except Exception as e:
-                logger.debug(f"Failed to record realtime metrics: {e}")
+                logger.debug(f"Failed to record realtime token metrics: {e}")
 
         # 添加到缓冲区
         async with self.interceptor._buffer_lock:
@@ -452,6 +563,37 @@ class StreamProcessor:
         """
         if self._buffer:
             await self._parse_events()
+
+        if not self._usage_collected and self._should_record_fallback(self.request_type):
+            duration_ms = (time.time() - self.start_time) * 1000
+            usage_data = UsageData(
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                request_id=self.request_id,
+                service_id=self.service_id,
+                user_id=self.user_id,
+                tenant_id=self.tenant_id,
+                model=self.model_hint or "langgraph-agent",
+                provider=self.provider_hint,
+                assistant_id=self.assistant_id,
+                status=self._status,
+                request_type=self.request_type,
+                timestamp=time.time(),
+                duration_ms=duration_ms,
+                raw_metadata={
+                    "source": "stream_finalize_fallback",
+                    "request_type": self.request_type,
+                    **self._error_metadata,
+                },
+            )
+
+            async with self.interceptor._buffer_lock:
+                self.interceptor._buffer.append(usage_data)
+                if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
+                    asyncio.create_task(self.interceptor._flush_buffer())
+
+        await self._record_request_complete()
 
         # 记录请求结束（用于实时并发计数）
         if self._realtime_started and self.interceptor.realtime_metrics:

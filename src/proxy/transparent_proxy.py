@@ -421,7 +421,7 @@ class TransparentProxy:
             return body
 
         # 检查是否是需要注入的路径
-        path_lower = path.lower()
+        path_lower = self._normalize_path(path).lower()
         needs_injection = any(pattern in path_lower for pattern in LANGGRAPH_ASSISTANT_PATHS)
 
         if not needs_injection:
@@ -441,6 +441,15 @@ class TransparentProxy:
         except (json.JSONDecodeError, UnicodeDecodeError):
             # 非 JSON 请求体，原样返回
             return body
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        normalized = (path or "").strip()
+        if not normalized:
+            return "/"
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        return normalized
 
     @staticmethod
     def _stream_mode_wants_messages(stream_mode: Any) -> bool:
@@ -465,9 +474,10 @@ class TransparentProxy:
         """
         if not body:
             return body
-        if not self._is_streaming_path(path):
+        normalized_path = self._normalize_path(path)
+        if not self._is_streaming_path(normalized_path):
             return body
-        if "/runs/stream" not in path.lower():
+        if "/runs/stream" not in normalized_path.lower():
             return body
 
         try:
@@ -508,6 +518,34 @@ class TransparentProxy:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
+    @staticmethod
+    def _extract_error_metadata(payload: Any) -> Dict[str, str]:
+        if not isinstance(payload, dict):
+            return {}
+        error_payload = payload.get("__error__") or payload.get("error")
+        if not error_payload:
+            return {}
+
+        if isinstance(error_payload, dict):
+            error_type = str(
+                error_payload.get("error")
+                or error_payload.get("type")
+                or "upstream_error"
+            )
+            error_message = str(
+                error_payload.get("message")
+                or error_payload.get("detail")
+                or ""
+            )
+        else:
+            error_type = "upstream_error"
+            error_message = str(error_payload)
+
+        metadata: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+        if error_message:
+            metadata["upstream_error_message"] = error_message[:512]
+        return metadata
+
     async def _record_non_stream_usage(
         self,
         response_body: bytes,
@@ -520,25 +558,31 @@ class TransparentProxy:
         duration_ms: float,
         status_code: int,
     ) -> None:
-        # 只处理成功且 JSON 响应。
-        if status_code >= 400 or "application/json" not in (response_content_type or "").lower():
+        operation = self.detect_operation_type(method, path)
+        is_run_operation = operation.startswith("run_")
+
+        response_data = None
+        if "application/json" in (response_content_type or "").lower():
+            response_data = self._parse_json_body(response_body)
+
+        # 非 run 请求仍保持「必须有 usage 才记录」策略，避免噪音数据。
+        if response_data is None and not is_run_operation:
             return
 
-        response_data = self._parse_json_body(response_body)
-        if response_data is None:
-            return
-
-        usage = extract_token_usage(response_data)
-        if not usage:
-            return
-
+        usage = extract_token_usage(response_data) if response_data is not None else None
         request_data = self._parse_json_body(request_body)
 
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
-        if total_tokens <= 0 and (input_tokens <= 0 and output_tokens <= 0):
+        input_tokens = int((usage or {}).get("input_tokens") or 0)
+        output_tokens = int((usage or {}).get("output_tokens") or 0)
+        total_tokens = int((usage or {}).get("total_tokens") or (input_tokens + output_tokens))
+        has_usage = total_tokens > 0 or input_tokens > 0 or output_tokens > 0
+        if not has_usage and not is_run_operation:
             return
+
+        response_error = bool(response_data and isinstance(response_data, dict) and (
+            "__error__" in response_data or "error" in response_data
+        ))
+        status = "error" if status_code >= 400 or response_error else "success"
 
         assistant_id = (
             config.assistant_id
@@ -546,10 +590,22 @@ class TransparentProxy:
             or extract_assistant_id(response_data)
             or ""
         )
-        model = extract_model(response_data) or extract_model(request_data) or ""
+        model = (
+            extract_model(response_data)
+            or extract_model(request_data)
+            or ("langgraph-agent" if is_run_operation else "")
+        )
         provider = extract_provider(response_data) or extract_provider(request_data) or ""
 
-        request_type = f"proxy_{self.detect_operation_type(method, path)}"
+        request_type = f"proxy_{operation}"
+        metadata: Dict[str, Any] = {
+            "source": "transparent_proxy_non_stream",
+            "path": self._normalize_path(path),
+            "http_status": status_code,
+            "response_has_usage": bool(usage),
+            "response_has_error": response_error,
+        }
+        metadata.update(self._extract_error_metadata(response_data))
 
         try:
             from ..services.metrics import get_usage_recorder
@@ -566,12 +622,9 @@ class TransparentProxy:
                 assistant_id=assistant_id,
                 provider=provider,
                 latency_ms=int(duration_ms),
-                status="success",
+                status=status,
                 request_type=request_type,
-                metadata={
-                    "source": "transparent_proxy_non_stream",
-                    "path": path,
-                },
+                metadata=metadata,
             )
         except Exception as e:
             logger.debug(f"[Proxy] Failed to record non-stream usage: {e}")
@@ -662,12 +715,17 @@ class TransparentProxy:
         stream_processor: Optional[StreamProcessor] = None
         if self.billing_interceptor:
             assistant_id = config.assistant_id or extract_assistant_id(request_data) or ""
+            operation = self.detect_operation_type(method, path)
+            request_type = f"proxy_{operation}"
             stream_processor = self.billing_interceptor.create_stream_processor(
                 request_id=context.request_id,
                 service_id=config.service_id,
                 user_id=context.user_id,
                 tenant_id=context.tenant_id,
                 assistant_id=assistant_id,
+                request_type=request_type,
+                model_hint=extract_model(request_data) or "",
+                provider_hint=extract_provider(request_data) or "",
             )
 
         # 先获取响应头，判断是否真的是流式响应
@@ -709,6 +767,18 @@ class TransparentProxy:
         # 错误透传：4xx/5xx 错误原样返回，不覆盖
         if response.status_code >= 400:
             error_body = await response.aread()
+            duration_ms = (time.perf_counter() - request_started) * 1000
+            await self._record_non_stream_usage(
+                response_body=error_body,
+                response_content_type=response_content_type,
+                request_body=body,
+                config=config,
+                context=context,
+                method=method,
+                path=path,
+                duration_ms=duration_ms,
+                status_code=response.status_code,
+            )
             await response.aclose()
             logger.warning(
                 f"[Proxy] Upstream error {response.status_code}: {error_body[:200].decode('utf-8', errors='ignore')}"
@@ -757,16 +827,17 @@ class TransparentProxy:
                         chunk = await stream_processor.process_chunk(chunk)
                     yield chunk
 
-                # 完成处理
-                if stream_processor:
-                    await stream_processor.finalize()
-
             except Exception as e:
                 logger.error(f"[Proxy] Streaming error: {e}")
                 # 发送错误事件
                 error_event = f"event: error\ndata: {str(e)}\n\n"
                 yield error_event.encode("utf-8")
             finally:
+                if stream_processor:
+                    try:
+                        await stream_processor.finalize()
+                    except Exception as finalize_err:
+                        logger.debug(f"[Proxy] Failed to finalize stream processor: {finalize_err}")
                 await response.aclose()
 
         # 返回流式响应，保留原始状态码
@@ -796,7 +867,7 @@ class TransparentProxy:
             "/sse",
         ]
 
-        path_lower = path.lower()
+        path_lower = self._normalize_path(path).lower()
 
         # 精确匹配流式后缀
         for suffix in streaming_suffixes:
@@ -825,7 +896,9 @@ class TransparentProxy:
         """
         import re
 
-        path_lower = path.lower().rstrip("/")
+        path_lower = TransparentProxy._normalize_path(path).lower()
+        if path_lower != "/":
+            path_lower = path_lower.rstrip("/")
         method_upper = method.upper()
 
         # 首先尝试精确匹配

@@ -316,6 +316,44 @@ class TestBillingInterceptor:
 
         # 验证处理完成（不应抛出异常）
 
+    @pytest.mark.asyncio
+    async def test_stream_processor_finalize_records_error_without_usage(self):
+        """测试 error 事件即使无 usage 也会记录请求。"""
+        captured: List[UsageData] = []
+
+        async def callback(data: UsageData):
+            captured.append(data)
+
+        interceptor = BillingInterceptor(
+            callback=callback,
+            redis_client=None,
+            buffer_size=10,
+            flush_interval=1.0,
+        )
+        interceptor._record_to_database = AsyncMock()
+
+        processor = interceptor.create_stream_processor(
+            request_id="req_error_001",
+            service_id="imam_service",
+            user_id="user_123",
+            tenant_id="default",
+            assistant_id="assistant_imam",
+            request_type="proxy_run_stream",
+            model_hint="gemini-2.0-flash",
+        )
+
+        await processor.process_chunk(
+            b'event: error\r\ndata: {"error": {"message": "quota exhausted"}}\r\n\r\n'
+        )
+        await processor.finalize()
+        await interceptor._flush_buffer()
+
+        assert len(captured) == 1
+        assert captured[0].total_tokens == 0
+        assert captured[0].status == "error"
+        assert captured[0].request_type == "proxy_run_stream"
+        assert captured[0].model == "gemini-2.0-flash"
+
 
 # ============ SSE Event Parsing Tests ============
 

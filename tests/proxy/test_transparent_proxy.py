@@ -242,6 +242,47 @@ class TestTransparentProxy:
         assert kwargs["input_tokens"] == 7
         assert kwargs["output_tokens"] == 3
 
+    @pytest.mark.asyncio
+    async def test_record_non_stream_usage_run_error_without_usage(
+        self, transparent_proxy, proxy_config
+    ):
+        """测试 run 请求即使无 usage 也会记录错误统计。"""
+        context = RequestContext(
+            user_id="user_usage_err",
+            tenant_id="tenant_usage_err",
+            request_id="req_usage_err",
+        )
+        response_body = json.dumps(
+            {
+                "__error__": {
+                    "error": "upstream_error",
+                    "message": "quota exhausted",
+                }
+            }
+        ).encode("utf-8")
+
+        recorder = AsyncMock()
+        with patch("src.services.metrics.get_usage_recorder", return_value=recorder):
+            await transparent_proxy._record_non_stream_usage(
+                response_body=response_body,
+                response_content_type="application/json",
+                request_body=json.dumps({}).encode("utf-8"),
+                config=proxy_config,
+                context=context,
+                method="POST",
+                path="runs/wait",  # 无前导斜杠
+                duration_ms=32.5,
+                status_code=200,
+            )
+
+        recorder.record_usage.assert_awaited_once()
+        kwargs = recorder.record_usage.await_args.kwargs
+        assert kwargs["input_tokens"] == 0
+        assert kwargs["output_tokens"] == 0
+        assert kwargs["status"] == "error"
+        assert kwargs["request_type"] == "proxy_run_wait"
+        assert kwargs["metadata"]["response_has_error"] is True
+
     # -------- Assistant ID 注入测试 --------
 
     def test_inject_assistant_id_to_runs(self, transparent_proxy):
@@ -264,6 +305,19 @@ class TestTransparentProxy:
         result = transparent_proxy._inject_assistant_id(
             body=body,
             path="/runs/stream",
+            assistant_id="test_assistant",
+        )
+
+        data = json.loads(result.decode())
+        assert data.get("assistant_id") == "test_assistant"
+
+    def test_inject_assistant_id_runs_wait_without_leading_slash(self, transparent_proxy):
+        """测试 runs/wait（无前导斜杠）也会注入 assistant_id"""
+        body = json.dumps({"input": {"messages": [{"role": "user", "content": "hello"}]}}).encode()
+
+        result = transparent_proxy._inject_assistant_id(
+            body=body,
+            path="runs/wait",
             assistant_id="test_assistant",
         )
 
@@ -399,6 +453,11 @@ class TestTransparentProxy:
         """测试检测 run_stream 操作"""
         op = TransparentProxy.detect_operation_type("POST", "/runs/stream")
         assert op == "run_stream"
+
+    def test_detect_operation_type_run_wait_without_leading_slash(self):
+        """测试无前导斜杠路径也能识别 run_wait。"""
+        op = TransparentProxy.detect_operation_type("POST", "runs/wait")
+        assert op == "run_wait"
 
     def test_detect_operation_type_thread_create(self):
         """测试检测 thread_create 操作"""
