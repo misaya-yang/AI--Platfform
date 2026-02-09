@@ -124,6 +124,7 @@ export interface ChunkingConfig {
   chunk_overlap: number;
   max_chunk_size?: number;
   min_chunk_size?: number;
+  strict_section_traceability?: boolean;
   
   // Token-based
   use_token_count?: boolean;
@@ -236,6 +237,7 @@ export interface IslamicEnhancementConfig {
   citation_format?: boolean;    // POST_RANKING: attach formatted citations
   authority_sort?: boolean;     // POST_RANKING: sort by Quran > Hadith > Tafseer > Fiqh
   contextual_prefix?: boolean;  // INDEX-TIME: prepend context prefix (requires re-index)
+  strict_section_traceability?: boolean; // INDEX-TIME: enforce section_title on every chunk
   max_expanded_queries?: number; // Max queries for multi_query (default 3)
 }
 

@@ -21,6 +21,7 @@ import { useTranslation } from "react-i18next";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageBreakdown } from "@/api/usage";
+import { listServices } from "@/api/gateway";
 import { LAYOUT, getColors } from "../styles";
 import type { SourceFilter, RefreshInterval } from "../types";
 
@@ -69,7 +70,13 @@ export function DashboardHeader() {
     setSource("all");
   };
 
-  // Fetch services and users from usage breakdown
+  // 服务列表来自注册中心，确保新注册服务立即可见（不依赖 usage 落库）。
+  const { data: services } = useQuery({
+    queryKey: ["dashboard-services"],
+    queryFn: listServices,
+    staleTime: 60000,
+  });
+
   const { data: serviceBreakdown } = useQuery({
     queryKey: ["usage-services", dateRange],
     queryFn: () =>
@@ -93,11 +100,23 @@ export function DashboardHeader() {
   });
 
   // Build service options
+  const serviceOptionMap = new Map<string, string>();
+  (services || []).forEach((svc) => {
+    if (!svc?.service_id) return;
+    serviceOptionMap.set(svc.service_id, svc.name || svc.service_id);
+  });
+  (serviceBreakdown?.items || []).forEach((item) => {
+    if (!item.service) return;
+    if (!serviceOptionMap.has(item.service)) {
+      serviceOptionMap.set(item.service, item.service);
+    }
+  });
+
   const serviceOptions = [
     { label: t("dashboard.filters.allServices"), value: "all" },
-    ...(serviceBreakdown?.items || []).map((item) => ({
-      label: item.service || t("common.unknown"),
-      value: item.service || t("common.unknown"),
+    ...Array.from(serviceOptionMap.entries()).map(([value, label]) => ({
+      label,
+      value,
     })),
   ];
 

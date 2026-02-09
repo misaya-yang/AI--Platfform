@@ -5,20 +5,26 @@ import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from ...models.enums import ContentType, StreamEventType
-
-logger = logging.getLogger(__name__)
 from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
+from ...services.metrics.usage_parser import (
+    extract_assistant_id,
+    extract_model,
+    extract_provider,
+    extract_token_usage,
+)
+from ...services.registry.service_registry import ServiceRegistry
+from ...services.session.session_manager import SessionManager
+from ...services.task.task_manager import TaskManager
 from ..auth.rbac import RBAC
 from ..exceptions import ServiceNotFoundError, RateLimitExceededError
 from ..utils import estimate_tokens
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
 from .validator import RequestValidator
-from ...services.registry.service_registry import ServiceRegistry
-from ...services.task.task_manager import TaskManager
-from ...services.session.session_manager import SessionManager
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayDispatcher:
@@ -64,6 +70,116 @@ class GatewayDispatcher:
                 continue
         return ""
 
+    def _resolve_model_name(
+        self,
+        request: UnifiedRequest,
+        service: ServiceDefinition,
+        payload: Any,
+    ) -> str:
+        params = request.parameters or {}
+        service_meta = service.metadata or {}
+        connector_cfg = service.connector_config or {}
+        return (
+            extract_model(payload)
+            or str(params.get("model") or "")
+            or str(service_meta.get("model") or "")
+            or str(connector_cfg.get("model") or "")
+            or "unknown"
+        )
+
+    def _resolve_provider_name(
+        self,
+        service: ServiceDefinition,
+        payload: Any,
+    ) -> str:
+        service_meta = service.metadata or {}
+        connector_cfg = service.connector_config or {}
+        return (
+            extract_provider(payload)
+            or str(service_meta.get("provider") or "")
+            or str(connector_cfg.get("provider") or "")
+            or ""
+        )
+
+    def _resolve_assistant_id(
+        self,
+        request: UnifiedRequest,
+        service: ServiceDefinition,
+        payload: Any,
+    ) -> str:
+        params = request.parameters or {}
+        service_meta = service.metadata or {}
+        connector_cfg = service.connector_config or {}
+        return (
+            extract_assistant_id(payload)
+            or str(params.get("assistant_id") or "")
+            or str(connector_cfg.get("assistant_id") or "")
+            or str(service_meta.get("assistant_id") or "")
+            or ""
+        )
+
+    def _resolve_usage_tokens(
+        self,
+        payload: Any,
+        input_text: str,
+        output_text: str,
+    ) -> Dict[str, int]:
+        extracted = extract_token_usage(payload) or {}
+
+        input_raw = extracted.get("input_tokens") if "input_tokens" in extracted else None
+        output_raw = extracted.get("output_tokens") if "output_tokens" in extracted else None
+        total_raw = extracted.get("total_tokens") if "total_tokens" in extracted else None
+
+        input_tokens = int(input_raw) if input_raw is not None else estimate_tokens(input_text)
+        output_tokens = int(output_raw) if output_raw is not None else estimate_tokens(output_text)
+        total_tokens = int(total_raw) if total_raw is not None else (input_tokens + output_tokens)
+        if total_tokens < input_tokens + output_tokens:
+            total_tokens = input_tokens + output_tokens
+        return {
+            "input_tokens": max(input_tokens, 0),
+            "output_tokens": max(output_tokens, 0),
+            "total_tokens": max(total_tokens, 0),
+        }
+
+    async def _record_usage_event(
+        self,
+        request: UnifiedRequest,
+        service: ServiceDefinition,
+        payload: Any,
+        duration_ms: int,
+        request_type: str,
+        status: str,
+        output_text: str,
+    ) -> None:
+        try:
+            from ...services.metrics import get_usage_recorder
+
+            tokens = self._resolve_usage_tokens(
+                payload=payload,
+                input_text=self._inputs_to_text(request),
+                output_text=output_text,
+            )
+            recorder = get_usage_recorder()
+            await recorder.record_usage(
+                tenant_id=request.tenant_id or "default",
+                user_id=request.user_id or "anonymous",
+                model=self._resolve_model_name(request, service, payload),
+                input_tokens=tokens["input_tokens"],
+                output_tokens=tokens["output_tokens"],
+                request_id=request.request_id or "",
+                service_id=service.service_id,
+                assistant_id=self._resolve_assistant_id(request, service, payload),
+                provider=self._resolve_provider_name(service, payload),
+                latency_ms=max(duration_ms, 0),
+                status=status,
+                request_type=request_type,
+                metadata={
+                    "source": "dispatcher",
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record dispatcher usage: {e}")
+
     async def _get_service(self, service_id: str) -> ServiceDefinition:
         service = await self.registry.get(service_id)
         if not service:
@@ -108,6 +224,7 @@ class GatewayDispatcher:
         client_ip: Optional[str] = None,
     ) -> UnifiedResponse:
         import time
+
         t0 = time.perf_counter()
 
         service = await self._get_service(request.service_id)
@@ -190,7 +307,9 @@ class GatewayDispatcher:
                     user_text = self._inputs_to_text(request)
                     stats.setdefault("input_tokens", estimate_tokens(user_text))
                     stats.setdefault("output_tokens", estimate_tokens(assistant_text))
-                    stats.setdefault("total_tokens", stats.get("input_tokens", 0) + stats.get("output_tokens", 0))
+                    stats.setdefault(
+                        "total_tokens", stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
+                    )
 
                 duration_ms = int((t_end - t0) * 1000)
                 stats.setdefault("duration_ms", duration_ms)
@@ -200,6 +319,19 @@ class GatewayDispatcher:
                 await self.session_manager.add_message(
                     session_id, "assistant", assistant_text, metadata=metadata
                 )
+
+        await self._record_usage_event(
+            request=request,
+            service=service,
+            payload={
+                "usage": resp.usage if isinstance(resp.usage, dict) else {},
+                "metadata": resp.metadata if isinstance(resp.metadata, dict) else {},
+            },
+            duration_ms=int((t_end - t0) * 1000),
+            request_type="invoke",
+            status=str(resp.status or "success"),
+            output_text=self._response_to_text(resp),
+        )
         return resp
 
     async def stream(
@@ -234,7 +366,6 @@ class GatewayDispatcher:
             do_rate_limit(),
             return_exceptions=False,  # Raise first exception
         )
-        t_validate = time.perf_counter()
 
         # Step 2b: Create session only after validation passes
         session = None
@@ -270,9 +401,9 @@ class GatewayDispatcher:
         t_ready = time.perf_counter()
         logger.debug(
             f"[TIMING] dispatcher.stream preflight: "
-            f"service={((t_service - t0)*1000):.1f}ms, "
-            f"parallel(validate+rate_limit+session)={((t_parallel - t_service)*1000):.1f}ms, "
-            f"total={((t_ready - t0)*1000):.1f}ms"
+            f"service={((t_service - t0) * 1000):.1f}ms, "
+            f"parallel(validate+rate_limit+session)={((t_parallel - t_service) * 1000):.1f}ms, "
+            f"total={((t_ready - t0) * 1000):.1f}ms"
         )
 
         adapter = self.registry.get_adapter(service)
@@ -282,13 +413,17 @@ class GatewayDispatcher:
         # Collect tool calls and stats for session metadata
         tool_calls_map: Dict[str, Dict] = {}  # tool_call_id -> {name, arguments, result}
         usage_stats: Optional[Dict] = None
+        stream_status = "success"
+        record_stats: Dict[str, Any] = {}
 
         try:
             async for chunk in adapter.stream(request):
                 event_type = None
                 if first_chunk:
                     t_first_chunk = time.perf_counter()
-                    logger.info(f"[TIMING] dispatcher first chunk: {((t_first_chunk - t0)*1000):.1f}ms from stream start")
+                    logger.info(
+                        f"[TIMING] dispatcher first chunk: {((t_first_chunk - t0) * 1000):.1f}ms from stream start"
+                    )
                     first_chunk = False
                 try:
                     event_type = getattr(chunk, "event_type", None)
@@ -299,7 +434,11 @@ class GatewayDispatcher:
                             acc_text += delta
 
                     # Collect tool call information
-                    elif event_type in (StreamEventType.TOOL_CALL_START, StreamEventType.TOOL_CALL_DELTA, StreamEventType.TOOL_CALL_END):
+                    elif event_type in (
+                        StreamEventType.TOOL_CALL_START,
+                        StreamEventType.TOOL_CALL_DELTA,
+                        StreamEventType.TOOL_CALL_END,
+                    ):
                         tc = getattr(chunk, "tool_call", None)
                         if tc:
                             tc_id = getattr(tc, "tool_call_id", None)
@@ -316,7 +455,9 @@ class GatewayDispatcher:
                                     tool_calls_map[tc_id]["name"] = tc.name
                                 # Update arguments - keep the longest/most complete version
                                 tc_args = getattr(tc, "arguments", "")
-                                if tc_args and len(tc_args) > len(tool_calls_map[tc_id].get("arguments", "")):
+                                if tc_args and len(tc_args) > len(
+                                    tool_calls_map[tc_id].get("arguments", "")
+                                ):
                                     tool_calls_map[tc_id]["arguments"] = tc_args
 
                     # Collect tool result
@@ -377,7 +518,9 @@ class GatewayDispatcher:
                 if "output_tokens" not in stats:
                     stats["output_tokens"] = estimate_tokens(acc_text)
                 if "total_tokens" not in stats:
-                    stats["total_tokens"] = stats.get("input_tokens", 0) + stats.get("output_tokens", 0)
+                    stats["total_tokens"] = stats.get("input_tokens", 0) + stats.get(
+                        "output_tokens", 0
+                    )
 
             # Add timing stats
             stats["duration_ms"] = int((t_end - t0) * 1000)
@@ -386,6 +529,7 @@ class GatewayDispatcher:
 
             # Send stream_end event with stats
             logger.info(f"[STREAM END] Sending stats to frontend: {stats}")
+            record_stats = dict(stats)
             yield DomainStreamChunk(
                 request_id=request.request_id,
                 chunk_index=9999,
@@ -394,15 +538,47 @@ class GatewayDispatcher:
                 event_type=StreamEventType.STREAM_END,
                 metadata={"usage": stats} if stats else None,
             )
+        except Exception:
+            stream_status = "error"
+            raise
         finally:
-            logger.info(f"[STREAM FINALLY] session_id={session_id}, session_enabled={service.session_enabled if service else 'N/A'}, acc_text_len={len(acc_text)}")
+            logger.info(
+                f"[STREAM FINALLY] session_id={session_id}, session_enabled={service.session_enabled if service else 'N/A'}, acc_text_len={len(acc_text)}"
+            )
+            if not record_stats:
+                # Error/cancel path may skip stream_end，补齐最终统计。
+                if usage_stats:
+                    record_stats.update(usage_stats)
+                if stream_status == "error" and not usage_stats and not acc_text.strip():
+                    # Avoid over-counting failed requests when upstream never returned usage.
+                    record_stats.setdefault("input_tokens", 0)
+                    record_stats.setdefault("output_tokens", 0)
+                    record_stats.setdefault("total_tokens", 0)
+                else:
+                    if "input_tokens" not in record_stats:
+                        record_stats["input_tokens"] = estimate_tokens(
+                            self._inputs_to_text(request)
+                        )
+                    if "output_tokens" not in record_stats:
+                        record_stats["output_tokens"] = estimate_tokens(acc_text)
+                    if "total_tokens" not in record_stats:
+                        record_stats["total_tokens"] = record_stats.get(
+                            "input_tokens", 0
+                        ) + record_stats.get("output_tokens", 0)
+                t_final = time.perf_counter()
+                record_stats["duration_ms"] = int((t_final - t0) * 1000)
+                if t_first_chunk is not None:
+                    record_stats["first_token_ms"] = int((t_first_chunk - t0) * 1000)
+
             if session_id and service.session_enabled and acc_text.strip():
                 # Build metadata with tool calls and stats for session storage
                 metadata: Dict = {}
 
                 if tool_calls_map:
                     metadata["tool_calls"] = list(tool_calls_map.values())
-                    logger.debug(f"Collected {len(tool_calls_map)} tool calls for session {session_id}")
+                    logger.debug(
+                        f"Collected {len(tool_calls_map)} tool calls for session {session_id}"
+                    )
 
                 # Reuse stats from stream_end event if available
                 # Otherwise recalculate (fallback for error cases)
@@ -420,8 +596,12 @@ class GatewayDispatcher:
                     if "output_tokens" not in final_stats:
                         final_stats["output_tokens"] = estimate_tokens(acc_text)
                     if "total_tokens" not in final_stats:
-                        final_stats["total_tokens"] = final_stats.get("input_tokens", 0) + final_stats.get("output_tokens", 0)
-                    logger.debug(f"Estimated tokens: input={final_stats.get('input_tokens')}, output={final_stats.get('output_tokens')}")
+                        final_stats["total_tokens"] = final_stats.get(
+                            "input_tokens", 0
+                        ) + final_stats.get("output_tokens", 0)
+                    logger.debug(
+                        f"Estimated tokens: input={final_stats.get('input_tokens')}, output={final_stats.get('output_tokens')}"
+                    )
 
                 # Add timing stats (recalculate for session storage)
                 t_final = time.perf_counter()
@@ -430,7 +610,9 @@ class GatewayDispatcher:
                     final_stats["first_token_ms"] = int((t_first_chunk - t0) * 1000)
 
                 metadata["stats"] = final_stats
-                logger.info(f"Saving assistant message to session {session_id} with metadata: tool_calls={len(tool_calls_map)}, stats={final_stats}")
+                logger.info(
+                    f"Saving assistant message to session {session_id} with metadata: tool_calls={len(tool_calls_map)}, stats={final_stats}"
+                )
 
                 try:
                     await asyncio.shield(
@@ -439,7 +621,19 @@ class GatewayDispatcher:
                         )
                     )
                 except Exception as e:
-                    logger.error(f"Failed to persist assistant message for session {session_id}: {e}")
+                    logger.error(
+                        f"Failed to persist assistant message for session {session_id}: {e}"
+                    )
+
+            await self._record_usage_event(
+                request=request,
+                service=service,
+                payload={"usage": record_stats},
+                duration_ms=int(record_stats.get("duration_ms") or 0),
+                request_type="stream",
+                status=stream_status,
+                output_text=acc_text,
+            )
 
     async def submit(
         self,

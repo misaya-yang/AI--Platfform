@@ -19,6 +19,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 
 from ..core.observability.logging import get_logger
+from ..services.metrics.usage_parser import (
+    extract_assistant_id,
+    extract_model,
+    extract_token_usage,
+)
 
 logger = get_logger(__name__)
 
@@ -26,29 +31,29 @@ logger = get_logger(__name__)
 @dataclass
 class UsageData:
     """Token 使用量数据"""
-    
+
     # Token 计数
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
-    
+
     # 请求信息
     request_id: str = ""
     service_id: str = ""
     user_id: str = ""
     tenant_id: str = ""
-    
+
     # 模型信息
     model: str = ""
     assistant_id: str = ""
-    
+
     # 时间信息
     timestamp: float = field(default_factory=time.time)
     duration_ms: float = 0.0
-    
+
     # 原始元数据
     raw_metadata: Dict[str, Any] = field(default_factory=dict)
-    
+
     def __post_init__(self):
         if self.total_tokens == 0:
             self.total_tokens = self.input_tokens + self.output_tokens
@@ -61,14 +66,14 @@ BillingCallback = Callable[[UsageData], Awaitable[None]]
 class BillingInterceptor:
     """
     流式计费拦截器
-    
+
     解析 SSE 流中的 metadata 事件，提取 usage 信息并异步推送。
     """
-    
+
     # SSE 事件正则
     EVENT_PATTERN = re.compile(r"^event:\s*(.+)$", re.MULTILINE)
     DATA_PATTERN = re.compile(r"^data:\s*(.+)$", re.MULTILINE)
-    
+
     def __init__(
         self,
         callback: Optional[BillingCallback] = None,
@@ -111,35 +116,38 @@ class BillingInterceptor:
         if self._realtime_metrics is None:
             try:
                 from ..services.metrics.realtime_metrics import get_realtime_metrics
+
                 self._realtime_metrics = get_realtime_metrics()
             except Exception:
                 pass
         return self._realtime_metrics
-    
+
     async def start(self) -> None:
         """启动后台刷新任务"""
         if self._running:
             return
-        
+
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
         logger.info("Billing interceptor started")
-    
+
     async def stop(self) -> None:
         """停止后台任务并刷新剩余数据"""
         self._running = False
-        
+
         if self._flush_task:
             self._flush_task.cancel()
             try:
                 await self._flush_task
             except asyncio.CancelledError:
                 pass
-        
+
         # 刷新剩余数据
         await self._flush_buffer()
-        logger.info(f"Billing interceptor stopped. Total events: {self._total_events}, tokens: {self._total_tokens}")
-    
+        logger.info(
+            f"Billing interceptor stopped. Total events: {self._total_events}, tokens: {self._total_tokens}"
+        )
+
     async def _flush_loop(self) -> None:
         """后台刷新循环"""
         while self._running:
@@ -150,20 +158,20 @@ class BillingInterceptor:
                 break
             except Exception as e:
                 logger.error(f"Billing flush error: {e}")
-    
+
     async def _flush_buffer(self) -> None:
         """刷新缓冲区"""
         async with self._buffer_lock:
             if not self._buffer:
                 return
-            
+
             to_flush = self._buffer[:]
             self._buffer.clear()
-        
+
         # 批量推送
         for usage in to_flush:
             await self._push_usage(usage)
-    
+
     async def _push_usage(self, usage: UsageData) -> None:
         """推送单条计费数据"""
         try:
@@ -207,12 +215,12 @@ class BillingInterceptor:
                 )
         except Exception as e:
             logger.warning(f"Failed to record usage to database: {e}")
-    
+
     async def _publish_to_redis(self, usage: UsageData) -> None:
         """发布计费事件到 Redis"""
         if not self.redis:
             return
-        
+
         try:
             event_data = {
                 "type": "billing",
@@ -228,12 +236,12 @@ class BillingInterceptor:
                 "timestamp": usage.timestamp,
                 "duration_ms": usage.duration_ms,
             }
-            
+
             await self.redis.publish("gateway:billing", json.dumps(event_data))
-            
+
         except Exception as e:
             logger.warning(f"Failed to publish billing to Redis: {e}")
-    
+
     def create_stream_processor(
         self,
         request_id: str,
@@ -244,14 +252,14 @@ class BillingInterceptor:
     ) -> "StreamProcessor":
         """
         创建流处理器
-        
+
         Args:
             request_id: 请求 ID
             service_id: 服务 ID
             user_id: 用户 ID
             tenant_id: 租户 ID
             assistant_id: Assistant ID
-            
+
         Returns:
             StreamProcessor 实例
         """
@@ -268,10 +276,10 @@ class BillingInterceptor:
 class StreamProcessor:
     """
     单个请求的流处理器
-    
+
     解析 SSE 流并提取 metadata。
     """
-    
+
     def __init__(
         self,
         interceptor: BillingInterceptor,
@@ -295,7 +303,7 @@ class StreamProcessor:
         self._current_event = ""
         self._usage_collected = False
         self._realtime_started = False  # 跟踪是否已开始实时指标记录
-    
+
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
         处理流数据块
@@ -331,13 +339,13 @@ class StreamProcessor:
 
         # 透传原始数据
         return chunk
-    
+
     async def _parse_events(self) -> None:
         """解析缓冲区中的 SSE 事件"""
         while "\n\n" in self._buffer:
             event_block, self._buffer = self._buffer.split("\n\n", 1)
             await self._process_event_block(event_block)
-    
+
     async def _process_event_block(self, block: str) -> None:
         """处理单个 SSE 事件块"""
         event_type = ""
@@ -349,14 +357,12 @@ class StreamProcessor:
             elif line.startswith("data:"):
                 data_lines.append(line[5:].strip())
 
-        # 处理可能包含 usage 的事件类型
-        # - metadata: 标准 metadata 事件
-        # - messages/partial: LangGraph 消息流（可能包含 usage_metadata）
-        # - 无事件类型的数据行（某些 OpenAI 格式）
-        if event_type in ("metadata", "messages/partial") or (not event_type and data_lines):
+        # 不限制事件类型，直接尝试从任意事件解析 usage。
+        # LangGraph/OpenAI 在不同版本会把 usage 放在 metadata/messages/updates 等事件里。
+        if data_lines:
             data_str = "\n".join(data_lines)
             await self._extract_usage(data_str, event_type)
-    
+
     async def _extract_usage(self, data_str: str, event_type: str) -> None:
         """从数据中提取 usage 信息"""
         if self._usage_collected:
@@ -370,61 +376,30 @@ class StreamProcessor:
         except json.JSONDecodeError:
             return
 
-        # 查找 usage 字段（支持多种格式）
-        usage = None
-
-        # LangGraph messages/partial 格式（数组）
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    # 检查 usage_metadata（LangGraph 消息格式）
-                    usage_metadata = item.get("usage_metadata")
-                    if usage_metadata and isinstance(usage_metadata, dict):
-                        # usage_metadata 包含 input_tokens, output_tokens, total_tokens
-                        if usage_metadata.get("input_tokens") or usage_metadata.get("output_tokens"):
-                            usage = usage_metadata
-                            break
-
-        # LangGraph/OpenAI 字典格式
-        elif isinstance(data, dict):
-            usage = data.get("usage")
-
-            # OpenAI 格式（嵌套在 choices 中）
-            if not usage and "choices" in data:
-                usage = data.get("usage")
-
-            # 检查 run_id 等元数据
-            if event_type == "metadata":
-                # LangGraph metadata 事件
-                if "run_id" in data:
-                    logger.debug(f"LangGraph run metadata: run_id={data.get('run_id')}")
-
-        if usage and isinstance(usage, dict):
+        usage = extract_token_usage(data)
+        if usage:
             await self._record_usage(usage, data)
-    
+            return
+
+        # 仅做调试日志，避免噪声。
+        if event_type == "metadata" and isinstance(data, dict) and "run_id" in data:
+            logger.debug(f"LangGraph run metadata: run_id={data.get('run_id')}")
+
     async def _record_usage(self, usage: Dict[str, Any], raw_data: Dict[str, Any]) -> None:
         """记录 usage 数据"""
         self._usage_collected = True
-        
-        # 提取 token 计数
-        input_tokens = (
-            usage.get("input_tokens")
-            or usage.get("prompt_tokens")
-            or 0
-        )
-        output_tokens = (
-            usage.get("output_tokens")
-            or usage.get("completion_tokens")
-            or 0
-        )
-        total_tokens = (
-            usage.get("total_tokens")
-            or input_tokens + output_tokens
-        )
-        
+
+        # usage 在 _extract_usage 中已经做过归一化。
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+
         # 计算耗时
         duration_ms = (time.time() - self.start_time) * 1000
-        
+
+        model_name = extract_model(raw_data) or ""
+        assistant_id = self.assistant_id or extract_assistant_id(raw_data) or ""
+
         # 创建 UsageData
         usage_data = UsageData(
             input_tokens=input_tokens,
@@ -434,13 +409,13 @@ class StreamProcessor:
             service_id=self.service_id,
             user_id=self.user_id,
             tenant_id=self.tenant_id,
-            model=raw_data.get("model", ""),
-            assistant_id=self.assistant_id,
+            model=model_name,
+            assistant_id=assistant_id,
             timestamp=time.time(),
             duration_ms=duration_ms,
             raw_metadata=raw_data,
         )
-        
+
         logger.info(
             f"[Billing] request={self.request_id} "
             f"input={input_tokens} output={output_tokens} total={total_tokens} "
@@ -468,7 +443,7 @@ class StreamProcessor:
             # 如果缓冲区满，立即刷新
             if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
                 asyncio.create_task(self.interceptor._flush_buffer())
-    
+
     async def finalize(self) -> None:
         """
         完成流处理
@@ -487,4 +462,3 @@ class StreamProcessor:
                 )
             except Exception as e:
                 logger.debug(f"Failed to record request end: {e}")
-

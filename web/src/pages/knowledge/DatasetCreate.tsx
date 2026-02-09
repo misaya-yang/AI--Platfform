@@ -56,7 +56,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
 import { createDataset, uploadDocument, createDocumentFromUrl, previewChunking, type ChunkPreviewItem } from "@/api/knowledge";
-import type { ChunkingMode, ChunkingConfig, IslamicEnhancementConfig } from "@/types/knowledge";
+import type { ChunkingMode, ChunkingConfig } from "@/types/knowledge";
 
 // ============================================================
 // Types & Constants
@@ -86,6 +86,7 @@ const CHUNKING_MODES: Array<{ id: ChunkingMode; nameKey: string; descKey: string
   { id: "heading", nameKey: "knowledge.create.chunkHeading", descKey: "knowledge.create.chunkHeadingDesc" },
   { id: "recursive", nameKey: "knowledge.create.chunkRecursive", descKey: "knowledge.create.chunkRecursiveDesc" },
   { id: "hierarchical", nameKey: "knowledge.create.chunkHierarchical", descKey: "knowledge.create.chunkHierarchicalDesc" },
+  { id: "islamic", nameKey: "knowledge.create.chunkIslamic", descKey: "knowledge.create.chunkIslamicDesc" },
 ];
 
 const EMBEDDING_MODELS = [
@@ -98,8 +99,8 @@ const EMBEDDING_MODELS = [
   { provider: "dashscope", model: "text-embedding-v2", nameKey: "knowledge.create.embeddingDashscopeV2", dimension: 1536 },
 
   // SiliconFlow
-  { provider: "siliconflow", model: "BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3", dimension: 8192 },
-  { provider: "siliconflow", model: "Pro/BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3Pro", dimension: 8192 },
+  { provider: "siliconflow", model: "BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3", dimension: 1024 },
+  { provider: "siliconflow", model: "Pro/BAAI/bge-m3", nameKey: "knowledge.create.embeddingBgeM3Pro", dimension: 1024 },
   { provider: "siliconflow", model: "BAAI/bge-large-zh-v1.5", nameKey: "knowledge.create.embeddingBgeLargeZh15", dimension: 1024 },
   { provider: "siliconflow", model: "BAAI/bge-large-en-v1.5", nameKey: "knowledge.create.embeddingBgeLargeEn15", dimension: 1024 },
   { provider: "siliconflow", model: "netease-youdao/bce-embedding-base_v1", nameKey: "knowledge.create.embeddingBceBase", dimension: 512 },
@@ -109,6 +110,7 @@ const RERANK_MODELS = [
   { id: "default", nameKey: "knowledge.create.rerankDefault" },
   { id: "gte-rerank", name: "GTE-ReRank" },
   { id: "gte-rerank-v2", name: "GTE-ReRank v2" },
+  { id: "bge-reranker-v2-m3", name: "BGE Reranker v2-m3" },
 ];
 
 // Visibility options
@@ -211,7 +213,10 @@ const IMAGE_EXTENSIONS = /\.(png|jpg|jpeg|gif|bmp)$/i;
 // Sub-Components
 // ============================================================
 
-type ChunkPreviewConfig = Pick<ChunkingConfig, "mode" | "chunk_size" | "chunk_overlap" | "remove_extra_spaces">;
+type ChunkPreviewConfig = Pick<
+  ChunkingConfig,
+  "mode" | "chunk_size" | "chunk_overlap" | "remove_extra_spaces" | "strict_section_traceability"
+>;
 
 function ChunkPreviewSection({ datasetId, config }: { datasetId: string; config: ChunkPreviewConfig }) {
   const { t } = useTranslation();
@@ -319,6 +324,7 @@ export default function DatasetCreatePage() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastNonIslamicModeRef = useRef<ChunkingMode>("automatic");
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -356,10 +362,34 @@ export default function DatasetCreatePage() {
   const [islamicCitation, setIslamicCitation] = useState(false);
   const [islamicAuthoritySort, setIslamicAuthoritySort] = useState(false);
   const [islamicMaxQueries, setIslamicMaxQueries] = useState(3);
+  const [islamicStrictTraceability, setIslamicStrictTraceability] = useState(false);
 
   // ============================================================
   // Handlers
   // ============================================================
+  const isIslamicChunking = chunkingMode === "islamic";
+
+  const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
+    if (mode !== "islamic") {
+      lastNonIslamicModeRef.current = mode;
+    }
+    setChunkingMode(mode);
+  }, []);
+
+  const handleIslamicChunkingToggle = useCallback((checked: boolean) => {
+    if (checked) {
+      if (chunkingMode !== "islamic") {
+        lastNonIslamicModeRef.current = chunkingMode;
+      }
+      setChunkingMode("islamic");
+      setIslamicCitation(true);
+      setIslamicAuthoritySort(true);
+      return;
+    }
+    if (chunkingMode === "islamic") {
+      setChunkingMode(lastNonIslamicModeRef.current || "automatic");
+    }
+  }, [chunkingMode]);
 
   const handleFilesSelect = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -443,6 +473,11 @@ export default function DatasetCreatePage() {
       // Parse embedding model
       const [provider, model] = embeddingModel.split(":");
       const embModel = EMBEDDING_MODELS.find((m) => m.provider === provider && m.model === model);
+      const enforceCitation = isIslamicChunking || islamicCitation;
+      const enforceAuthoritySort = isIslamicChunking || islamicAuthoritySort;
+      const strictTraceability = isIslamicChunking && islamicStrictTraceability;
+      const islamicEnabled = islamicMultiQuery || enforceCitation || enforceAuthoritySort || strictTraceability;
+      const rerankProvider = rerankModel.startsWith("bge-") ? "bge" : "dashscope";
 
       // Create dataset
       const dataset = await createDataset({
@@ -461,6 +496,7 @@ export default function DatasetCreatePage() {
             chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
             extract_metadata: metadataExtract,
             remove_extra_spaces: true,
+            ...(strictTraceability ? { strict_section_traceability: true } : {}),
           },
           retrieval: {
             mode: "hybrid",
@@ -468,13 +504,15 @@ export default function DatasetCreatePage() {
             score_threshold: scoreThreshold,
             rerank: {
               enabled: rerankModel !== "default",
+              provider: rerankProvider,
               model: rerankModel === "default" ? "gte-rerank" : rerankModel,
             },
-            ...((islamicMultiQuery || islamicCitation || islamicAuthoritySort) && {
+            ...(islamicEnabled && {
               islamic: {
                 multi_query: islamicMultiQuery,
-                citation_format: islamicCitation,
-                authority_sort: islamicAuthoritySort,
+                citation_format: enforceCitation,
+                authority_sort: enforceAuthoritySort,
+                strict_section_traceability: strictTraceability,
                 max_expanded_queries: islamicMaxQueries,
               },
             }),
@@ -1001,7 +1039,7 @@ export default function DatasetCreatePage() {
                       ? "border-2 border-primary bg-primary/5"
                       : "border hover:border-border"
                       }`}
-                    onClick={() => setChunkingMode(mode.id)}
+                    onClick={() => handleChunkingModeSelect(mode.id)}
                   >
                     <div className="flex items-start justify-between">
                       <h4 className="text-sm font-medium text-foreground">{t(mode.nameKey)}</h4>
@@ -1060,6 +1098,9 @@ export default function DatasetCreatePage() {
                 chunk_size: maxChunkSize,
                 chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
                 remove_extra_spaces: true,
+                ...(isIslamicChunking && islamicStrictTraceability
+                  ? { strict_section_traceability: true }
+                  : {}),
               }}
             />
 
@@ -1136,6 +1177,44 @@ export default function DatasetCreatePage() {
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
                 <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicChunking")}</span>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.islamicChunkingHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch checked={isIslamicChunking} onCheckedChange={handleIslamicChunkingToggle} />
+              </div>
+
+              <div className={`flex items-center justify-between p-3 rounded-lg bg-card border ${isIslamicChunking ? "" : "opacity-50"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicStrictTraceability")}</span>
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs">{t("knowledge.create.islamicStrictTraceabilityHint")}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </div>
+                <Switch
+                  checked={islamicStrictTraceability}
+                  onCheckedChange={setIslamicStrictTraceability}
+                  disabled={!isIslamicChunking}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
+                <div className="flex items-center gap-2">
                   <span className="text-sm text-foreground/80">{t("knowledge.create.islamicMultiQuery")}</span>
                   <TooltipProvider>
                     <Tooltip>
@@ -1185,7 +1264,7 @@ export default function DatasetCreatePage() {
                     </Tooltip>
                   </TooltipProvider>
                 </div>
-                <Switch checked={islamicCitation} onCheckedChange={setIslamicCitation} />
+                <Switch checked={islamicCitation} onCheckedChange={setIslamicCitation} disabled={isIslamicChunking} />
               </div>
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
@@ -1202,7 +1281,7 @@ export default function DatasetCreatePage() {
                     </Tooltip>
                   </TooltipProvider>
                 </div>
-                <Switch checked={islamicAuthoritySort} onCheckedChange={setIslamicAuthoritySort} />
+                <Switch checked={islamicAuthoritySort} onCheckedChange={setIslamicAuthoritySort} disabled={isIslamicChunking} />
               </div>
 
               <div className="flex items-center justify-between p-3 rounded-lg bg-card border opacity-50">

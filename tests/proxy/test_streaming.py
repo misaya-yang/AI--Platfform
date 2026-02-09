@@ -27,6 +27,7 @@ from src.proxy.billing_interceptor import BillingInterceptor, UsageData, StreamP
 
 # ============ Mock Streaming Response ============
 
+
 class MockStreamResponse:
     """Mock 流式响应"""
 
@@ -56,6 +57,7 @@ class MockStreamResponse:
 
 
 # ============ Streaming Tests ============
+
 
 class TestStreamingProxy:
     """流式代理测试"""
@@ -95,7 +97,7 @@ class TestStreamingProxy:
             b'event: messages/partial\ndata: [{"role": "assistant", "content": "Hello, how"}]\n\n',
             b'event: messages/partial\ndata: [{"role": "assistant", "content": "Hello, how can I help?"}]\n\n',
             b'event: metadata\ndata: {"usage": {"input_tokens": 10, "output_tokens": 20}}\n\n',
-            b'event: end\ndata: null\n\n',
+            b"event: end\ndata: null\n\n",
         ]
 
     @pytest.fixture
@@ -151,9 +153,7 @@ class TestStreamingProxy:
     @pytest.mark.asyncio
     async def test_stream_defaults_applied(self, transparent_proxy):
         """测试流式请求默认参数被应用"""
-        body = json.dumps({
-            "input": {"messages": [{"role": "user", "content": "test"}]}
-        }).encode()
+        body = json.dumps({"input": {"messages": [{"role": "user", "content": "test"}]}}).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs/stream")
         data = json.loads(result.decode())
@@ -164,10 +164,12 @@ class TestStreamingProxy:
     @pytest.mark.asyncio
     async def test_stream_subgraphs_enabled_for_messages(self, transparent_proxy):
         """测试 messages 模式下自动启用 stream_subgraphs"""
-        body = json.dumps({
-            "input": {"messages": []},
-            "stream_mode": ["messages"],
-        }).encode()
+        body = json.dumps(
+            {
+                "input": {"messages": []},
+                "stream_mode": ["messages"],
+            }
+        ).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs/stream")
         data = json.loads(result.decode())
@@ -177,9 +179,7 @@ class TestStreamingProxy:
     @pytest.mark.asyncio
     async def test_stream_defaults_not_applied_to_non_stream(self, transparent_proxy):
         """测试非流式路径不应用默认参数"""
-        body = json.dumps({
-            "input": {"messages": []}
-        }).encode()
+        body = json.dumps({"input": {"messages": []}}).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs")
         data = json.loads(result.decode())
@@ -189,6 +189,7 @@ class TestStreamingProxy:
 
 
 # ============ Billing Interceptor Tests ============
+
 
 class TestBillingInterceptor:
     """计费拦截器测试"""
@@ -260,6 +261,44 @@ class TestBillingInterceptor:
         assert result == chunk
 
     @pytest.mark.asyncio
+    async def test_stream_processor_extract_usage_from_updates_event(self):
+        """测试从 LangGraph updates 事件中提取 usage_metadata"""
+        captured: List[UsageData] = []
+
+        async def callback(data: UsageData):
+            captured.append(data)
+
+        interceptor = BillingInterceptor(
+            callback=callback,
+            redis_client=None,
+            buffer_size=10,
+            flush_interval=1.0,
+        )
+        interceptor._record_to_database = AsyncMock()
+
+        processor = interceptor.create_stream_processor(
+            request_id="req_updates_001",
+            service_id="imam_service",
+            user_id="user_123",
+            tenant_id="default",
+        )
+
+        chunk = (
+            b"event: updates\n"
+            b'data: {"model":{"messages":[{"usage_metadata":{"input_tokens":12,"output_tokens":8,"total_tokens":20}}]}}\n\n'
+        )
+
+        await processor.process_chunk(chunk)
+        await processor.finalize()
+        await interceptor._flush_buffer()
+
+        assert len(captured) == 1
+        assert captured[0].input_tokens == 12
+        assert captured[0].output_tokens == 8
+        assert captured[0].total_tokens == 20
+        assert captured[0].service_id == "imam_service"
+
+    @pytest.mark.asyncio
     async def test_stream_processor_finalize(self, billing_interceptor):
         """测试流处理器完成处理"""
         processor = billing_interceptor.create_stream_processor(
@@ -279,6 +318,7 @@ class TestBillingInterceptor:
 
 
 # ============ SSE Event Parsing Tests ============
+
 
 class TestSSEParsing:
     """SSE 事件解析测试"""
@@ -321,7 +361,7 @@ class TestSSEParsing:
 
     def test_parse_end_event(self):
         """测试解析 end 事件"""
-        event = b'event: end\ndata: null\n\n'
+        event = b"event: end\ndata: null\n\n"
 
         lines = event.decode().strip().split("\n")
         event_type = None
@@ -334,6 +374,7 @@ class TestSSEParsing:
 
 
 # ============ Error Handling Tests ============
+
 
 class TestStreamingErrorHandling:
     """流式错误处理测试"""
@@ -389,6 +430,7 @@ class TestStreamingErrorHandling:
 
 
 # ============ Content Type Detection Tests ============
+
 
 class TestContentTypeDetection:
     """Content-Type 检测测试"""

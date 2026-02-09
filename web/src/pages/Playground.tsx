@@ -428,6 +428,7 @@ export function PlaygroundPage() {
   } = useAppStore();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -464,6 +465,7 @@ export function PlaygroundPage() {
   const [sessionEnabled, setSessionEnabled] = useState(true);
 
   const isInitialMount = useRef(true);
+  const interactionStartedRef = useRef(false);
 
   // 鐢ㄤ簬鍙栨秷姝ｅ湪杩涜鐨勮姹傦紝瑙ｅ喅绔炴€佹潯浠?
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -472,6 +474,10 @@ export function PlaygroundPage() {
   // 鐢ㄤ簬杩借釬褰撳墠姝ｅ湪鍔犺浇鐨勫巻鍙蹭會璇滻D
   const loadingHistorySessionRef = useRef<string | null>(null);
   const sessionThreadIdRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
 
   const refreshSessions = useCallback(async () => {
@@ -505,9 +511,15 @@ export function PlaygroundPage() {
     } finally {
       setSessionsLoading(false);
     }
-  }, [serviceId]);
+  }, [serviceId, setLocalTitles]);
+
+  const invalidatePendingHistoryLoad = useCallback(() => {
+    loadingHistorySessionRef.current = null;
+    setHistoryLoading(false);
+  }, []);
 
   const handleSelectSession = useCallback(async (id: string) => {
+    interactionStartedRef.current = true;
     // 鍙栨秷姝ｅ湪杩涜鐨勬祦寮忚姹?
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -583,12 +595,15 @@ export function PlaygroundPage() {
 
   const handleNewSession = useCallback(async () => {
     if (!serviceId) return;
+    interactionStartedRef.current = true;
 
     // 鍙栨秷姝ｅ湪杩涜鐨勬祦寮忚姹?
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    // 使任何进行中的历史加载结果失效，避免晚到覆盖新会话消息。
+    invalidatePendingHistoryLoad();
 
     const created = await createSession({ service_id: serviceId });
     loadingHistorySessionRef.current = created.session_id;
@@ -596,7 +611,7 @@ export function PlaygroundPage() {
     setActiveSessionId(created.session_id);
     setMessages([]);
     await refreshSessions();
-  }, [serviceId, refreshSessions, setActiveSessionId]);
+  }, [serviceId, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
 
   const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior) => {
     const el = scrollRef.current;
@@ -659,6 +674,9 @@ export function PlaygroundPage() {
   const handleDeleteSession = useCallback(
     async (id: string) => {
       await deleteSession(id);
+      if (loadingHistorySessionRef.current === id) {
+        invalidatePendingHistoryLoad();
+      }
       if (activeSessionId === id) {
         setActiveSessionId(undefined);
         setMessages([]);
@@ -671,11 +689,13 @@ export function PlaygroundPage() {
       });
       await refreshSessions();
     },
-    [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles]
+    [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles, invalidatePendingHistoryLoad]
   );
 
   // 1. 鍒濆鍖栨寕杞斤細濡傛灉宸叉湁鎸佷箙鍖栫姸鎬侊紝鎭㈠鏁版嵁
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
       // Safety: Check URL params for reset flag to recover from stuck sessions
       const urlParams = new URLSearchParams(window.location.search);
@@ -695,7 +715,22 @@ export function PlaygroundPage() {
       if (serviceId) {
         // 获取当前服务的会话列表
         const data = await listSessions({ service_id: serviceId, limit: 100 });
+        if (cancelled) return;
         setSessions(data);
+
+        const latestStore = useAppStore.getState();
+        const activeSessionChanged = latestStore.activeSessionId !== activeSessionId;
+        const serviceChanged = latestStore.selectedServiceId !== serviceId;
+        // Ignore stale init result if user already started interacting with chat.
+        if (
+          interactionStartedRef.current ||
+          activeSessionChanged ||
+          serviceChanged ||
+          messagesRef.current.length > 0
+        ) {
+          isInitialMount.current = false;
+          return;
+        }
         
         // 安全检查：验证 activeSessionId 是否属于当前服务
         // 如果 activeSessionId 不在当前服务的会话列表中，说明它属于其他服务或 AI助手
@@ -715,6 +750,9 @@ export function PlaygroundPage() {
       isInitialMount.current = false;
     };
     void init();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -731,17 +769,22 @@ export function PlaygroundPage() {
       }
       // 娓呴櫎浼氳瘽杩借釜
       currentRequestSessionRef.current = null;
-      loadingHistorySessionRef.current = null;
+      invalidatePendingHistoryLoad();
 
       setMessages([]);
       setActiveSessionId(undefined);
       void refreshSessions();
     }
     prevServiceId.current = serviceId;
-  }, [serviceId, refreshSessions, setActiveSessionId]);
+  }, [serviceId, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
 
   async function handleSend(inputs: ContentItem[]) {
     if (!serviceId) return;
+    interactionStartedRef.current = true;
+    // 使任何进行中的历史加载结果失效，避免晚到覆盖首条用户消息。
+    if (loadingHistorySessionRef.current) {
+      invalidatePendingHistoryLoad();
+    }
     // 获取认证 token（动态获取避免 stale closure）
     const token = useAuthStore.getState().token;
     const isLangGraphService =

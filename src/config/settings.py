@@ -200,6 +200,26 @@ class KnowledgeSiliconFlowSettings(BaseModel):
     timeout_seconds: float = 30.0
 
 
+class KnowledgeIslamicProfileSettings(BaseModel):
+    """Islamic retrieval profile defaults (applied only on explicit Islamic opt-in)."""
+
+    enabled: bool = True
+
+    # Retrieval defaults
+    top_k: int = 8
+    score_threshold: float = 0.3
+    rerank_enabled: bool = False
+    rerank_provider: str = "bge"
+    rerank_model: str = "bge-reranker-v2-m3"
+
+    # Islamic retrieval enhancements
+    multi_query: bool = False
+    citation_format: bool = True
+    authority_sort: bool = True
+    strict_section_traceability: bool = True
+    max_expanded_queries: int = 3
+
+
 class KnowledgeSettings(BaseModel):
     enabled: bool = True
     worker_concurrency: int = 2
@@ -207,12 +227,13 @@ class KnowledgeSettings(BaseModel):
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     gemini: KnowledgeGeminiSettings = Field(default_factory=KnowledgeGeminiSettings)
     siliconflow: KnowledgeSiliconFlowSettings = Field(default_factory=KnowledgeSiliconFlowSettings)
+    islamic_profile: KnowledgeIslamicProfileSettings = Field(default_factory=KnowledgeIslamicProfileSettings)
     
     # =============================================
     # Text Embedding Configuration (for text-only datasets)
     # Uses Gemini by default for high-speed embedding
     # =============================================
-    text_embedding_provider: str = "gemini"  # gemini | dashscope
+    text_embedding_provider: str = "gemini"  # gemini | dashscope | siliconflow
     text_embedding_model: str = "gemini-embedding-001"
     text_embedding_dimension: int = 1024
     text_embedding_batch_size: int = 50  # Gemini supports 100, use 50 for safety

@@ -33,6 +33,7 @@ from src.proxy.context_injector import ContextInjector, RequestContext
 
 # ============ Proxy Request/Response Tests ============
 
+
 class TestProxyRequest:
     """代理请求测试"""
 
@@ -96,6 +97,7 @@ class TestProxyResponse:
 
 # ============ TransparentProxy Tests ============
 
+
 class TestTransparentProxy:
     """透明代理核心测试"""
 
@@ -151,7 +153,9 @@ class TestTransparentProxy:
         assert "not found" in response.error.lower()
 
     @pytest.mark.asyncio
-    async def test_proxy_service_disabled(self, transparent_proxy, mock_config_loader, proxy_config):
+    async def test_proxy_service_disabled(
+        self, transparent_proxy, mock_config_loader, proxy_config
+    ):
         """测试服务已禁用"""
         proxy_config.enabled = False
         mock_config_loader.get_config.return_value = proxy_config
@@ -175,9 +179,7 @@ class TestTransparentProxy:
             content=b'{"status": "ok"}',
         )
 
-        with patch.object(
-            httpx.AsyncClient, "request", new_callable=AsyncMock
-        ) as mock_request:
+        with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_request:
             # 创建一个返回正确内容的 mock
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -196,13 +198,55 @@ class TestTransparentProxy:
             # 验证请求被正确转发
             assert mock_request.called or response.status_code in (200, 502)
 
+    @pytest.mark.asyncio
+    async def test_record_non_stream_usage_from_json_response(
+        self, transparent_proxy, proxy_config
+    ):
+        """测试非流式 JSON 响应会写入 usage 统计"""
+        proxy_config.assistant_id = None
+        context = RequestContext(
+            user_id="user_usage_1",
+            tenant_id="tenant_usage_1",
+            request_id="req_usage_1",
+        )
+        response_body = json.dumps(
+            {
+                "model": "gpt-4o-mini",
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "total_tokens": 10,
+                },
+            }
+        ).encode("utf-8")
+        request_body = json.dumps({"assistant_id": "imam_asst_1"}).encode("utf-8")
+
+        recorder = AsyncMock()
+        with patch("src.services.metrics.get_usage_recorder", return_value=recorder):
+            await transparent_proxy._record_non_stream_usage(
+                response_body=response_body,
+                response_content_type="application/json; charset=utf-8",
+                request_body=request_body,
+                config=proxy_config,
+                context=context,
+                method="POST",
+                path="/runs/wait",
+                duration_ms=128.4,
+                status_code=200,
+            )
+
+        recorder.record_usage.assert_awaited_once()
+        kwargs = recorder.record_usage.await_args.kwargs
+        assert kwargs["service_id"] == proxy_config.service_id
+        assert kwargs["assistant_id"] == "imam_asst_1"
+        assert kwargs["input_tokens"] == 7
+        assert kwargs["output_tokens"] == 3
+
     # -------- Assistant ID 注入测试 --------
 
     def test_inject_assistant_id_to_runs(self, transparent_proxy):
         """测试 /runs 路径注入 assistant_id"""
-        body = json.dumps({
-            "input": {"messages": [{"role": "user", "content": "hello"}]}
-        }).encode()
+        body = json.dumps({"input": {"messages": [{"role": "user", "content": "hello"}]}}).encode()
 
         result = transparent_proxy._inject_assistant_id(
             body=body,
@@ -215,9 +259,7 @@ class TestTransparentProxy:
 
     def test_inject_assistant_id_to_runs_stream(self, transparent_proxy):
         """测试 /runs/stream 路径注入 assistant_id"""
-        body = json.dumps({
-            "input": {"messages": [{"role": "user", "content": "hello"}]}
-        }).encode()
+        body = json.dumps({"input": {"messages": [{"role": "user", "content": "hello"}]}}).encode()
 
         result = transparent_proxy._inject_assistant_id(
             body=body,
@@ -230,10 +272,9 @@ class TestTransparentProxy:
 
     def test_inject_assistant_id_not_override(self, transparent_proxy):
         """测试不覆盖已有的 assistant_id"""
-        body = json.dumps({
-            "assistant_id": "existing_assistant",
-            "input": {"messages": []}
-        }).encode()
+        body = json.dumps(
+            {"assistant_id": "existing_assistant", "input": {"messages": []}}
+        ).encode()
 
         result = transparent_proxy._inject_assistant_id(
             body=body,
@@ -285,9 +326,7 @@ class TestTransparentProxy:
 
     def test_ensure_stream_defaults_adds_stream_mode(self, transparent_proxy):
         """测试自动添加 stream_mode"""
-        body = json.dumps({
-            "input": {"messages": [{"role": "user", "content": "hello"}]}
-        }).encode()
+        body = json.dumps({"input": {"messages": [{"role": "user", "content": "hello"}]}}).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs/stream")
 
@@ -298,10 +337,12 @@ class TestTransparentProxy:
 
     def test_ensure_stream_defaults_adds_stream_subgraphs(self, transparent_proxy):
         """测试自动添加 stream_subgraphs"""
-        body = json.dumps({
-            "input": {"messages": []},
-            "stream_mode": ["messages"],
-        }).encode()
+        body = json.dumps(
+            {
+                "input": {"messages": []},
+                "stream_mode": ["messages"],
+            }
+        ).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs/stream")
 
@@ -310,11 +351,13 @@ class TestTransparentProxy:
 
     def test_ensure_stream_defaults_not_override_existing(self, transparent_proxy):
         """测试不覆盖已有配置"""
-        body = json.dumps({
-            "input": {"messages": []},
-            "stream_mode": ["values"],
-            "stream_subgraphs": False,
-        }).encode()
+        body = json.dumps(
+            {
+                "input": {"messages": []},
+                "stream_mode": ["values"],
+                "stream_subgraphs": False,
+            }
+        ).encode()
 
         result = transparent_proxy._ensure_stream_defaults(body, "/runs/stream")
 
@@ -473,6 +516,7 @@ class TestTransparentProxy:
 
 # ============ Stream Mode Helper Tests ============
 
+
 class TestStreamModeHelpers:
     """流式模式辅助函数测试"""
 
@@ -501,6 +545,7 @@ class TestStreamModeHelpers:
 
 
 # ============ Constants Tests ============
+
 
 class TestConstants:
     """常量测试"""

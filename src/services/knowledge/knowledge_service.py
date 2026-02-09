@@ -414,82 +414,119 @@ class KnowledgeService:
         embedding_config: Optional[Dict[str, Any]] = None,
     ) -> "BaseEmbedding":
         """Create embedder for text-only datasets using dataset-level config."""
-        from .embedding import GeminiEmbedding, DashScopeEmbedding, create_embedding, EmbeddingConfig
+        from .embedding import create_embedding
 
-        ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
+        ec = _ensure_dict(embedding_config) if embedding_config is not None else _ensure_dict(dataset.get("embedding_config"))
         provider = str(dataset.get("embedding_provider") or "").lower() or "local"
         model = str(dataset.get("embedding_model") or "")
         dimension = int(dataset.get("embedding_dimension") or 0) or None
+        default_model = {
+            "gemini": "gemini-embedding-001",
+            "google": "gemini-embedding-001",
+            "dashscope": "text-embedding-v3",
+            "aliyun": "text-embedding-v3",
+            "siliconflow": "BAAI/bge-m3",
+            "silicon": "BAAI/bge-m3",
+            "sf": "BAAI/bge-m3",
+        }.get(provider, "hash-384")
+        resolved_model = model or default_model
 
-        # Resolve configuration based on provider
-        if provider in {"gemini", "google"}:
-            api_key = str(ec.get("api_key") or "").strip()
-            if not api_key:
-                raise ValidationFailedError("Gemini api_key is required in dataset embedding_config")
-            
-            return GeminiEmbedding(
-                api_key=api_key,
-                model=model or "gemini-embedding-001",
-                dimension=dimension or self.settings.knowledge.text_embedding_dimension,
-                base_url=ec.get("base_url") or None,
-                timeout_seconds=30.0,
-            )
-        elif provider in {"dashscope", "aliyun"}:
-            api_key = str(ec.get("api_key") or "").strip()
-            if not api_key:
-                raise ValidationFailedError("DashScope api_key is required in dataset embedding_config")
-            
-            return DashScopeEmbedding(
-                model=model or "text-embedding-v3",
-                api_key=api_key,
-                dimension=dimension or self.settings.knowledge.text_embedding_dimension,
-                base_url=ec.get("base_url"),
-            )
-        elif provider in {"siliconflow", "silicon", "sf"}:
-            api_key = str(ec.get("api_key") or "").strip()
-            if not api_key:
-                raise ValidationFailedError("SiliconFlow api_key is required in dataset embedding_config")
+        econf = self._resolve_embedding_config(
+            provider=provider,
+            model=resolved_model,
+            embedding_config=ec,
+        )
+        resolved_dimension = dimension
+        if resolved_dimension is None and provider not in {"local", "builtin", "hash"}:
+            resolved_dimension = self.settings.knowledge.text_embedding_dimension
+        return create_embedding(econf, dimension=resolved_dimension)
 
-            base_url = ec.get("base_url") or None
-            if base_url and base_url.rstrip("/").endswith("/v1"):
-                base_url = base_url.rstrip("/") + "/embeddings"
-
-            econf = EmbeddingConfig(
-                provider="siliconflow",
-                model=model or "BAAI/bge-m3",
-                api_key=api_key,
-                base_url=base_url,
-                timeout_seconds=float(ec.get("timeout_seconds") or 30.0),
-            )
-            return create_embedding(econf, dimension=dimension)
-        else:
-            # Fall back to local hash embedding
-            econf = EmbeddingConfig(
-                provider="local",
-                model=model or "hash-384",
-                api_key=None,
-                base_url=None,
-                timeout_seconds=5.0,
-            )
-            return create_embedding(econf)
+    def _build_islamic_dataset_defaults(self) -> Dict[str, Any]:
+        profile = self.settings.knowledge.islamic_profile
+        if not profile.enabled:
+            return {}
+        return {
+            "retrieval": {
+                "top_k": profile.top_k,
+                "score_threshold": profile.score_threshold,
+                "rerank": {
+                    "enabled": profile.rerank_enabled,
+                    "provider": profile.rerank_provider,
+                    "model": profile.rerank_model,
+                },
+                "islamic": {
+                    "multi_query": profile.multi_query,
+                    "citation_format": profile.citation_format,
+                    "authority_sort": profile.authority_sort,
+                    "strict_section_traceability": profile.strict_section_traceability,
+                    "max_expanded_queries": profile.max_expanded_queries,
+                },
+            },
+            "chunking": {
+                "strict_section_traceability": profile.strict_section_traceability,
+            },
+        }
 
     @staticmethod
-    def _apply_islamic_dataset_defaults(dataset_name: str, index_config: Dict[str, Any]) -> Dict[str, Any]:
-        if not dataset_name:
-            return index_config
-        name_lower = dataset_name.lower()
+    def _apply_islamic_dataset_defaults(
+        dataset_name: str,
+        index_config: Dict[str, Any],
+        defaults: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        _ = dataset_name  # keep signature for compatibility
+        chunking = _ensure_dict(index_config.get("chunking"))
         retrieval = _ensure_dict(index_config.get("retrieval"))
         islamic_cfg = _ensure_dict(retrieval.get("islamic"))
-        is_islamic = bool(islamic_cfg) or "imam" in name_lower or "islam" in name_lower
+        chunk_mode = str(chunking.get("mode") or "").lower()
+
+        # Explicit opt-in only. Never infer Islamic mode from dataset name.
+        is_islamic = bool(islamic_cfg) or chunk_mode == "islamic"
         if not is_islamic:
             return index_config
 
-        chunking = _ensure_dict(index_config.get("chunking"))
-        if not chunking.get("mode"):
-            chunking["mode"] = "islamic"
-        if chunking.get("strict_section_traceability") is None:
+        default_cfg = _ensure_dict(defaults)
+        default_retrieval = _ensure_dict(default_cfg.get("retrieval"))
+        default_islamic = _ensure_dict(default_retrieval.get("islamic"))
+        default_rerank = _ensure_dict(default_retrieval.get("rerank"))
+        default_chunking = _ensure_dict(default_cfg.get("chunking"))
+
+        for key, value in default_retrieval.items():
+            if key in {"islamic", "rerank"}:
+                continue
+            retrieval.setdefault(key, value)
+
+        if default_rerank:
+            rerank_cfg = _ensure_dict(retrieval.get("rerank"))
+            for key, value in default_rerank.items():
+                rerank_cfg.setdefault(key, value)
+            retrieval["rerank"] = rerank_cfg
+
+        for key, value in default_islamic.items():
+            islamic_cfg.setdefault(key, value)
+        if islamic_cfg:
+            retrieval["islamic"] = islamic_cfg
+
+        # Keep retrieval/chunking strict traceability flags aligned when explicitly enabled.
+        if (
+            chunk_mode == "islamic"
+            and chunking.get("strict_section_traceability") is None
+            and default_chunking.get("strict_section_traceability") is not None
+        ):
+            chunking["strict_section_traceability"] = bool(default_chunking.get("strict_section_traceability"))
+
+        if (
+            chunk_mode == "islamic"
+            and islamic_cfg.get("strict_section_traceability")
+            and chunking.get("strict_section_traceability") is None
+        ):
             chunking["strict_section_traceability"] = True
-        index_config["chunking"] = chunking
+
+        if chunking.get("strict_section_traceability") and not islamic_cfg.get("strict_section_traceability"):
+            islamic_cfg["strict_section_traceability"] = True
+            retrieval["islamic"] = islamic_cfg
+
+        if chunking:
+            index_config["chunking"] = chunking
         if retrieval:
             index_config["retrieval"] = retrieval
         return index_config
@@ -978,7 +1015,12 @@ class KnowledgeService:
 
         embedding_config = _ensure_dict(data.get("embedding_config"))
         index_config = _ensure_dict(data.get("index_config"))
-        index_config = self._apply_islamic_dataset_defaults(str(data.get("name") or dataset_id), index_config)
+        islamic_defaults = self._build_islamic_dataset_defaults()
+        index_config = self._apply_islamic_dataset_defaults(
+            str(data.get("name") or dataset_id),
+            index_config,
+            islamic_defaults,
+        )
 
         embedder: Optional[BaseEmbedding] = None
         dim: int = 0
@@ -1059,9 +1101,11 @@ class KnowledgeService:
         updated = dict(dataset)
         updated.update(filtered)
         if "index_config" in filtered or "name" in filtered:
+            islamic_defaults = self._build_islamic_dataset_defaults()
             updated["index_config"] = self._apply_islamic_dataset_defaults(
                 str(updated.get("name") or dataset_id),
                 _ensure_dict(updated.get("index_config")),
+                islamic_defaults,
             )
 
         # If embedding settings changed, ensure a matching collection.
@@ -5516,15 +5560,27 @@ class KnowledgeService:
             )
         if provider_key in {"gemini", "google"}:
             if not api_key:
+                api_key = str(self.settings.knowledge.gemini.api_key or "").strip()
+            if not api_key:
                 raise ValidationFailedError("Gemini api_key is required in dataset embedding_config")
         elif provider_key in {"dashscope", "aliyun"}:
+            if not api_key:
+                api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
             if not api_key:
                 raise ValidationFailedError("DashScope api_key is required in dataset embedding_config")
         elif provider_key in {"siliconflow", "silicon", "sf"}:
             if not api_key:
+                api_key = str(self.settings.knowledge.siliconflow.api_key or "").strip()
+            if not api_key:
                 raise ValidationFailedError("SiliconFlow api_key is required in dataset embedding_config")
-            if not base_url:
-                base_url = "https://api.siliconflow.cn/v1/embeddings"
+            endpoint = base_url or (
+                str(self.settings.knowledge.siliconflow.base_url or "").strip()
+                or "https://api.siliconflow.cn/v1"
+            )
+            if endpoint.rstrip("/").endswith("/embeddings"):
+                base_url = endpoint
+            else:
+                base_url = f"{endpoint.rstrip('/')}/embeddings"
         else:
             raise ValidationFailedError(f"Unsupported embedding provider: {provider}")
 

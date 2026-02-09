@@ -11,30 +11,24 @@ import type { ToolCall } from "@/types/gateway";
 import { Bot, User, Clock, Zap, MessageSquare, ChevronDown, Activity, Sparkles } from "lucide-react";
 
 /**
- * Strip "Process (brief): Plan: ... Actions & observations:\n[•-] Action: ..." block
- * for display in 智能对话 (Playground).
- *
- * SAFETY:
- * 1. Only matches if text STARTS with "Process (brief):" (anchored with ^)
- * 2. Requires both "Process (brief):" AND "Actions & observations:" to match
- * 3. Strips consecutive lines containing "Action:" after the observations header
- * 4. Handles various bullet formats: "• Action:", "- Action:", "Action:", etc.
- * 5. Returns original text if stripping would result in empty content
+ * Remove internal "Process (brief)" execution traces from assistant output.
+ * Handles traces appearing at the beginning, middle, or end of a message.
  */
 function stripProcessSectionForDisplay(text: string): string {
   if (!text || typeof text !== "string") return text;
 
-  // Must start with "Process (brief):" to match
-  // Then match content until "Actions & observations:" header
-  // Then match zero or more lines containing "Action:" (with optional bullet prefix: •, -, *)
-  const re = /^Process\s*\(\s*brief\s*\)\s*:[\s\S]*?Actions\s*&\s*observations\s*:\s*\n+(?:\s*[•\-*]?\s*Action:[^\n]*(?:\n|$))*/i;
+  // Match optional separator + "Process (brief)" + "Actions & observations" + one or more Action lines.
+  const processBlockRe =
+    /(?:^|\n)(?:\s*---\s*\n)?\s*Process\s*\(\s*brief\s*\)\s*:[\s\S]*?Actions\s*&\s*observations\s*:\s*(?:\n+\s*[•\-*]?\s*Action:[^\n]*)+/gi;
 
-  const stripped = text.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
+  const withoutProcess = text.replace(processBlockRe, "\n");
+  const removedProcess = withoutProcess !== text;
 
-  // Safety: if stripping resulted in empty content, return original unchanged
-  if (!stripped) {
-    return text;
+  let stripped = withoutProcess;
+  if (removedProcess) {
+    stripped = stripped.replace(/(?:^|\n)\s*---\s*(?=\n|$)/g, "\n");
   }
+  stripped = stripped.replace(/\n{3,}/g, "\n\n").trim();
 
   return stripped;
 }
@@ -270,7 +264,6 @@ const ChatMessageItem = memo(
         message,
         showToolCalls,
         toolCallsMode = "full",
-        toolCallsDefaultOpen = false,
         showTimeline = true,
         showThinkingIndicator = true,
         index,

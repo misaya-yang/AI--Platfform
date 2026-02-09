@@ -21,13 +21,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .islamic_chunking import (
+    ARABIC_RANGE,
     IslamicSourceType,
     detect_islamic_source_type,
-    QURAN_PATTERNS,
-    HADITH_PATTERNS,
-    FIQH_PATTERNS,
-    TAFSEER_PATTERNS,
-    ARABIC_RANGE,
 )
 
 
@@ -63,6 +59,25 @@ SURAH_NAMES: Dict[int, str] = {
     109: "Al-Kafirun", 110: "An-Nasr", 111: "Al-Masad", 112: "Al-Ikhlas",
     113: "Al-Falaq", 114: "An-Nas",
 }
+
+# Quran chapter -> verse counts (validated against Quran.com chapter metadata)
+SURAH_VERSE_COUNTS: Dict[int, int] = {
+    1: 7, 2: 286, 3: 200, 4: 176, 5: 120, 6: 165, 7: 206, 8: 75, 9: 129, 10: 109,
+    11: 123, 12: 111, 13: 43, 14: 52, 15: 99, 16: 128, 17: 111, 18: 110, 19: 98, 20: 135,
+    21: 112, 22: 78, 23: 118, 24: 64, 25: 77, 26: 227, 27: 93, 28: 88, 29: 69, 30: 60,
+    31: 34, 32: 30, 33: 73, 34: 54, 35: 45, 36: 83, 37: 182, 38: 88, 39: 75, 40: 85,
+    41: 54, 42: 53, 43: 89, 44: 59, 45: 37, 46: 35, 47: 38, 48: 29, 49: 18, 50: 45,
+    51: 60, 52: 49, 53: 62, 54: 55, 55: 78, 56: 96, 57: 29, 58: 22, 59: 24, 60: 13,
+    61: 14, 62: 11, 63: 11, 64: 18, 65: 12, 66: 12, 67: 30, 68: 52, 69: 52, 70: 44,
+    71: 28, 72: 28, 73: 20, 74: 56, 75: 40, 76: 31, 77: 50, 78: 40, 79: 46, 80: 42,
+    81: 29, 82: 19, 83: 36, 84: 25, 85: 22, 86: 17, 87: 19, 88: 26, 89: 30, 90: 20,
+    91: 15, 92: 21, 93: 11, 94: 8, 95: 8, 96: 19, 97: 5, 98: 8, 99: 8, 100: 11,
+    101: 11, 102: 8, 103: 3, 104: 9, 105: 5, 106: 4, 107: 7, 108: 3, 109: 6, 110: 3,
+    111: 5, 112: 4, 113: 5, 114: 6,
+}
+
+ARABIC_INDIC_DIGIT_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+QURAN_CUE_PATTERN = re.compile(r"(?:quran|qur'?an|surah|sura|ayah|verse|سورة|آية)", re.IGNORECASE)
 
 # Hadith collection name normalization
 HADITH_COLLECTIONS: Dict[str, str] = {
@@ -302,98 +317,98 @@ class IslamicMetadataExtractor:
         """Extract Quran reference: surah number, verse start/end, surah name."""
         ref: Dict[str, Any] = {}
 
-        # Match (X:Y) pattern
-        match = re.search(r'\(\s*(\d{1,3})\s*:\s*(\d{1,3})\s*\)', text)
-        if match:
-            surah = int(match.group(1))
-            verse = int(match.group(2))
+        resolved_title = doc_title or _get_doc_title(doc_meta or {})
+        normalized_text = _normalize_digits(text)
+        is_quran_doc = _detect_source_type_from_doc_title(resolved_title) == IslamicSourceType.QURAN
+        has_quran_cues = bool(QURAN_CUE_PATTERN.search(normalized_text))
+
+        def apply_reference(
+            surah_raw: Any,
+            verse_start_raw: Any,
+            verse_end_raw: Optional[Any] = None,
+        ) -> bool:
+            surah = _coerce_int(surah_raw)
+            verse_start = _coerce_int(verse_start_raw)
+            verse_end = _coerce_int(verse_end_raw) if verse_end_raw is not None else None
+            if not _is_valid_quran_reference(surah, verse_start, verse_end):
+                return False
+            if surah is None or verse_start is None:
+                return False
             ref["surah"] = surah
-            ref["verse_start"] = verse
+            ref["verse_start"] = verse_start
             ref["surah_name"] = SURAH_NAMES.get(surah, "")
+            if verse_end is not None and verse_end != verse_start:
+                ref["verse_end"] = verse_end
+            return True
 
-            # Check for verse range: (2:255-257)
-            range_match = re.search(
-                r'\(\s*\d{1,3}\s*:\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\s*\)', text
-            )
-            if range_match:
-                ref["verse_start"] = int(range_match.group(1))
-                ref["verse_end"] = int(range_match.group(2))
-            else:
-                # Check for multiple verse refs to find range
-                all_refs = re.findall(r'\(\s*' + str(surah) + r'\s*:\s*(\d{1,3})\s*\)', text)
-                if len(all_refs) > 1:
-                    verses = sorted(int(v) for v in all_refs)
-                    ref["verse_start"] = verses[0]
-                    ref["verse_end"] = verses[-1]
+        # Highest confidence: Tanzil line format "sura|ayah|text"
+        tanzil_match = re.search(r'^\s*(\d{1,3})\s*\|\s*(\d{1,3})\s*\|', normalized_text, re.MULTILINE)
+        if tanzil_match:
+            apply_reference(tanzil_match.group(1), tanzil_match.group(2))
 
-        # Try "Quran X:Y" format
+        # Parenthesized references
         if not ref:
-            match = re.search(r'(?:Quran|Qur\'?an|Q)\s*[\[\(]?\s*(\d{1,3})\s*:\s*(\d{1,3})', text, re.IGNORECASE)
-            if match:
-                surah = int(match.group(1))
-                ref["surah"] = surah
-                ref["verse_start"] = int(match.group(2))
-                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+            for pattern in (
+                r'\(\s*(\d{1,3})\s*:\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\s*\)',
+                r'\(\s*(\d{1,3})\s*:\s*(\d{1,3})\s*\)',
+            ):
+                for match in re.finditer(pattern, normalized_text):
+                    verse_end = match.group(3) if match.lastindex and match.lastindex >= 3 else None
+                    if apply_reference(match.group(1), match.group(2), verse_end):
+                        break
+                if ref:
+                    break
 
-        # Try "X:Y" format at line start (common in translations)
+        # Labeled references: "Quran 2:255", "Surah 2:255"
         if not ref:
-            match = re.search(r'^\s*(\d{1,3})\s*:\s*(\d{1,3})\b', text)
-            if match:
-                surah = int(match.group(1))
-                ref["surah"] = surah
-                ref["verse_start"] = int(match.group(2))
-                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+            for match in re.finditer(
+                r'(?:Quran|Qur\'?an|Surah|Sura|Chapter)\s*[\[\(]?\s*(\d{1,3})\s*:\s*(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?',
+                normalized_text,
+                re.IGNORECASE,
+            ):
+                if apply_reference(match.group(1), match.group(2), match.group(3)):
+                    break
 
-        # Try Tanzil format "sura|ayah|text"
-        if not ref:
-            match = re.search(r'^\s*(\d{1,3})\s*\|\s*(\d{1,3})\s*\|', text)
-            if match:
-                surah = int(match.group(1))
-                ref["surah"] = surah
-                ref["verse_start"] = int(match.group(2))
-                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+        # Quran translations frequently use line-start "2:255"
+        if not ref and is_quran_doc:
+            for match in re.finditer(r'^\s*(\d{1,3})\s*:\s*(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?\b', normalized_text, re.MULTILINE):
+                if apply_reference(match.group(1), match.group(2), match.group(3)):
+                    break
 
-        # Fallback: explicit range "X:Y-Z" anywhere in text
-        if not ref.get("surah"):
-            range_match = re.search(r'\b(\d{1,3})\s*:\s*(\d{1,3})\s*[-–]\s*(\d{1,3})\b', text)
-            if range_match:
-                surah = int(range_match.group(1))
-                ref["surah"] = surah
-                ref["verse_start"] = int(range_match.group(2))
-                ref["verse_end"] = int(range_match.group(3))
-                ref["surah_name"] = SURAH_NAMES.get(surah, "")
+        # Generic fallback only in Quran context (title cue or text cue)
+        if not ref and (is_quran_doc or has_quran_cues):
+            for match in re.finditer(r'\b(\d{1,3})\s*:\s*(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?\b', normalized_text):
+                if apply_reference(match.group(1), match.group(2), match.group(3)):
+                    break
 
-        # Fallback: any "X:Y" reference anywhere in text
-        if not ref.get("surah"):
-            all_refs = re.findall(r'\b(\d{1,3})\s*:\s*(\d{1,3})\b', text)
-            if all_refs:
-                surah = int(all_refs[0][0])
-                ref["surah"] = surah
-                ref["surah_name"] = SURAH_NAMES.get(surah, "")
-                ref["verse_start"] = int(all_refs[0][1])
-
-        # Try Surah name extraction
+        # Surah name extraction
         if not ref.get("surah_name"):
             surah_match = re.search(
                 r'(?:Surah|سورة)\s+([\w\s\'-]+?)(?:\s*[,،\(\[]|\s*$)',
-                text, re.IGNORECASE
+                normalized_text, re.IGNORECASE
             )
             if surah_match:
                 ref["surah_name"] = surah_match.group(1).strip()
 
-        # Fallback: detect surah header + verse list like "Sūrah 107: al-Mā’ūn" and "1. ..."
+        # Fallback: "Surah 107" header + numbered verse lines "1. ..."
         if not ref.get("surah"):
-            header_match = re.search(r'(?:Surah|Sūrah|Chapter)\s+(\d{1,3})', text, re.IGNORECASE)
+            header_match = re.search(r'(?:Surah|Sūrah|Chapter)\s+(\d{1,3})', normalized_text, re.IGNORECASE)
             if header_match:
-                surah = int(header_match.group(1))
-                ref["surah"] = surah
-                ref["surah_name"] = ref.get("surah_name") or SURAH_NAMES.get(surah, "")
-                verse_nums = re.findall(r'^\s*(\d{1,3})\.\s', text, re.MULTILINE)
-                if verse_nums:
-                    ref["verse_start"] = int(verse_nums[0])
-                    ref["verse_end"] = int(verse_nums[-1])
+                surah = _coerce_int(header_match.group(1))
+                if surah is not None and surah in SURAH_NAMES:
+                    ref["surah"] = surah
+                    ref["surah_name"] = ref.get("surah_name") or SURAH_NAMES.get(surah, "")
+                    verse_nums = [_coerce_int(v) for v in re.findall(r'^\s*(\d{1,3})\.\s', normalized_text, re.MULTILINE)]
+                    verse_nums = [v for v in verse_nums if v is not None]
+                    if verse_nums:
+                        verse_start = verse_nums[0]
+                        verse_end = verse_nums[-1]
+                        if _is_valid_quran_reference(surah, verse_start, verse_end):
+                            ref["verse_start"] = verse_start
+                            if verse_end != verse_start:
+                                ref["verse_end"] = verse_end
 
-        translation = _detect_translation(doc_title or _get_doc_title(doc_meta or {}))
+        translation = _detect_translation(resolved_title)
         if translation:
             ref["translation"] = translation
 
@@ -558,6 +573,36 @@ def _get_doc_title(meta: Dict[str, Any]) -> str:
         if value:
             return str(value)
     return ""
+
+
+def _normalize_digits(text: str) -> str:
+    if not text:
+        return ""
+    return text.translate(ARABIC_INDIC_DIGIT_MAP)
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_valid_quran_reference(
+    surah: Optional[int],
+    verse_start: Optional[int],
+    verse_end: Optional[int] = None,
+) -> bool:
+    if surah is None or verse_start is None:
+        return False
+    max_verse = SURAH_VERSE_COUNTS.get(surah)
+    if max_verse is None or verse_start < 1 or verse_start > max_verse:
+        return False
+    if verse_end is None:
+        return True
+    return verse_start <= verse_end <= max_verse
 
 
 def _detect_translation(doc_title: str) -> Optional[str]:
