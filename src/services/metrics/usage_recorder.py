@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from asyncpg import Connection
     from ...persistence.database import DatabaseStorage
 
 logger = logging.getLogger(__name__)
@@ -317,9 +318,11 @@ class UsageRecorder:
             return
 
         try:
-            await self._write_records(records)
-            await self._update_daily_aggregates(records)
-            await self._update_hourly_aggregates(records)
+            async with self.database._pool.acquire() as conn:
+                async with conn.transaction():
+                    await self._write_records(conn, records)
+                    await self._update_daily_aggregates(conn, records)
+                    await self._update_hourly_aggregates(conn, records)
             logger.debug(f"Flushed {len(records)} usage records")
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
@@ -327,55 +330,48 @@ class UsageRecorder:
             if len(self._buffer) + len(records) <= self.buffer_size * 2:
                 self._buffer.extend(records)
 
-    async def _write_records(self, records: List[UsageRecord]) -> None:
+    async def _write_records(self, conn: "Connection", records: List[UsageRecord]) -> None:
         """Write records to usage_records table."""
-        if not self.database or not self.database._pool:
-            return
-
-        async with self.database._pool.acquire() as conn:
-            await conn.executemany(
-                """
-                INSERT INTO usage_records (
-                    tenant_id, user_id, request_id,
-                    service_id, assistant_id, model, provider,
-                    input_tokens, output_tokens,
-                    input_cost_cents, output_cost_cents,
-                    latency_ms, first_token_ms, status,
-                    request_type, metadata, created_at
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
-                )
-                """,
-                [
-                    (
-                        r.tenant_id,
-                        r.user_id,
-                        r.request_id or str(uuid.uuid4()),
-                        r.service_id or None,
-                        r.assistant_id or None,
-                        r.model,
-                        r.provider or None,
-                        r.input_tokens,
-                        r.output_tokens,
-                        r.input_cost_cents,
-                        r.output_cost_cents,
-                        r.latency_ms,
-                        r.first_token_ms,
-                        r.status,
-                        r.request_type,
-                        json.dumps(r.metadata) if r.metadata else "{}",
-                        # Use naive UTC datetime to match TIMESTAMP column
-                        datetime.fromtimestamp(r.timestamp, tz=timezone.utc).replace(tzinfo=None),
-                    )
-                    for r in records
-                ],
+        await conn.executemany(
+            """
+            INSERT INTO usage_records (
+                tenant_id, user_id, request_id,
+                service_id, assistant_id, model, provider,
+                input_tokens, output_tokens,
+                input_cost_cents, output_cost_cents,
+                latency_ms, first_token_ms, status,
+                request_type, metadata, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
             )
+            """,
+            [
+                (
+                    r.tenant_id,
+                    r.user_id,
+                    r.request_id or str(uuid.uuid4()),
+                    r.service_id or None,
+                    r.assistant_id or None,
+                    r.model,
+                    r.provider or None,
+                    r.input_tokens,
+                    r.output_tokens,
+                    r.input_cost_cents,
+                    r.output_cost_cents,
+                    r.latency_ms,
+                    r.first_token_ms,
+                    r.status,
+                    r.request_type,
+                    json.dumps(r.metadata) if r.metadata else "{}",
+                    # Use naive UTC datetime to match TIMESTAMP column
+                    datetime.fromtimestamp(r.timestamp, tz=timezone.utc).replace(tzinfo=None),
+                )
+                for r in records
+            ],
+        )
 
-    async def _update_daily_aggregates(self, records: List[UsageRecord]) -> None:
+    async def _update_daily_aggregates(self, conn: "Connection", records: List[UsageRecord]) -> None:
         """Update daily aggregates table."""
-        if not self.database or not self.database._pool:
-            return
-
         # Group records by aggregation key
         aggregates: Dict[tuple, Dict[str, Any]] = {}
 
@@ -415,118 +411,170 @@ class UsageRecorder:
             agg["latency_sum"] += record.latency_ms
             agg["first_token_sum"] += record.first_token_ms
 
-        # Upsert aggregates
-        async with self.database._pool.acquire() as conn:
-            for key, agg in aggregates.items():
-                tenant_id, user_id, model, assistant_id, service_id, agg_date = key
+        for key, agg in aggregates.items():
+            tenant_id, user_id, model, assistant_id, service_id, agg_date = key
+            request_count = agg["request_count"]
+            avg_latency = agg["latency_sum"] // request_count if request_count > 0 else 0
+            avg_first_token = agg["first_token_sum"] // request_count if request_count > 0 else 0
 
-                await conn.execute(
-                    """
-                    INSERT INTO usage_daily_aggregates (
-                        tenant_id, user_id, model, assistant_id, service_id, date,
-                        request_count, success_count, error_count,
-                        total_input_tokens, total_output_tokens, total_cost_cents,
-                        avg_latency_ms, avg_first_token_ms
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-                    )
-                    ON CONFLICT (tenant_id, user_id, model, assistant_id, service_id, date)
-                    DO UPDATE SET
-                        request_count = usage_daily_aggregates.request_count + EXCLUDED.request_count,
-                        success_count = usage_daily_aggregates.success_count + EXCLUDED.success_count,
-                        error_count = usage_daily_aggregates.error_count + EXCLUDED.error_count,
-                        total_input_tokens = usage_daily_aggregates.total_input_tokens + EXCLUDED.total_input_tokens,
-                        total_output_tokens = usage_daily_aggregates.total_output_tokens + EXCLUDED.total_output_tokens,
-                        total_cost_cents = usage_daily_aggregates.total_cost_cents + EXCLUDED.total_cost_cents,
-                        avg_latency_ms = (
-                            (usage_daily_aggregates.avg_latency_ms * usage_daily_aggregates.request_count +
-                             EXCLUDED.avg_latency_ms * EXCLUDED.request_count) /
-                            NULLIF(usage_daily_aggregates.request_count + EXCLUDED.request_count, 0)
-                        ),
-                        avg_first_token_ms = (
-                            (usage_daily_aggregates.avg_first_token_ms * usage_daily_aggregates.request_count +
-                             EXCLUDED.avg_first_token_ms * EXCLUDED.request_count) /
-                            NULLIF(usage_daily_aggregates.request_count + EXCLUDED.request_count, 0)
-                        ),
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    tenant_id,
-                    user_id or '',
-                    model or '',
-                    assistant_id or '',
-                    service_id or '',
-                    agg_date,
-                    agg["request_count"],
-                    agg["success_count"],
-                    agg["error_count"],
-                    agg["total_input_tokens"],
-                    agg["total_output_tokens"],
-                    agg["total_cost_cents"],
-                    agg["latency_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
-                    agg["first_token_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
+            updated_id = await conn.fetchval(
+                """
+                UPDATE usage_daily_aggregates
+                SET
+                    request_count = request_count + $7,
+                    success_count = success_count + $8,
+                    error_count = error_count + $9,
+                    total_input_tokens = total_input_tokens + $10,
+                    total_output_tokens = total_output_tokens + $11,
+                    total_cost_cents = total_cost_cents + $12,
+                    avg_latency_ms = (
+                        (avg_latency_ms * request_count + $13 * $7) /
+                        NULLIF(request_count + $7, 0)
+                    )::integer,
+                    avg_first_token_ms = (
+                        (avg_first_token_ms * request_count + $14 * $7) /
+                        NULLIF(request_count + $7, 0)
+                    )::integer,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tenant_id = $1
+                  AND COALESCE(user_id, '') = $2
+                  AND COALESCE(model, '') = $3
+                  AND COALESCE(assistant_id, '') = $4
+                  AND COALESCE(service_id, '') = $5
+                  AND date = $6
+                RETURNING id
+                """,
+                tenant_id,
+                user_id or "",
+                model or "",
+                assistant_id or "",
+                service_id or "",
+                agg_date,
+                request_count,
+                agg["success_count"],
+                agg["error_count"],
+                agg["total_input_tokens"],
+                agg["total_output_tokens"],
+                agg["total_cost_cents"],
+                avg_latency,
+                avg_first_token,
+            )
+            if updated_id:
+                continue
+
+            await conn.execute(
+                """
+                INSERT INTO usage_daily_aggregates (
+                    tenant_id, user_id, model, assistant_id, service_id, date,
+                    request_count, success_count, error_count,
+                    total_input_tokens, total_output_tokens, total_cost_cents,
+                    avg_latency_ms, avg_first_token_ms
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
                 )
+                """,
+                tenant_id,
+                user_id or "",
+                model or "",
+                assistant_id or "",
+                service_id or "",
+                agg_date,
+                request_count,
+                agg["success_count"],
+                agg["error_count"],
+                agg["total_input_tokens"],
+                agg["total_output_tokens"],
+                agg["total_cost_cents"],
+                avg_latency,
+                avg_first_token,
+            )
 
-    async def _update_hourly_aggregates(self, records: List[UsageRecord]) -> None:
+    async def _update_hourly_aggregates(self, conn: "Connection", records: List[UsageRecord]) -> None:
         """Update hourly aggregates table."""
-        if not self.database or not self.database._pool:
-            return
-
         aggregates = group_records_by_hour(records)
 
-        async with self.database._pool.acquire() as conn:
-            for key, agg in aggregates.items():
-                tenant_id, user_id, model, assistant_id, service_id, bucket_start = key
-                bucket_date = bucket_start.date()
+        for key, agg in aggregates.items():
+            tenant_id, user_id, model, assistant_id, service_id, bucket_start = key
+            bucket_date = bucket_start.date()
+            request_count = agg["request_count"]
+            avg_latency = agg["latency_sum"] // request_count if request_count > 0 else 0
+            avg_first_token = agg["first_token_sum"] // request_count if request_count > 0 else 0
 
-                # Use empty string instead of NULL for proper UNIQUE constraint matching
-                # The constraint uq_usage_hourly_aggregates_dimensions requires non-NULL values
-                await conn.execute(
-                    """
-                    INSERT INTO usage_hourly_aggregates (
-                        tenant_id, user_id, model, assistant_id, service_id,
-                        bucket_start, date,
-                        request_count, success_count, error_count,
-                        total_input_tokens, total_output_tokens, total_cost_cents,
-                        avg_latency_ms, avg_first_token_ms
-                    ) VALUES (
-                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
-                    )
-                    ON CONFLICT (tenant_id, user_id, model, assistant_id, service_id, bucket_start)
-                    DO UPDATE SET
-                        request_count = usage_hourly_aggregates.request_count + EXCLUDED.request_count,
-                        success_count = usage_hourly_aggregates.success_count + EXCLUDED.success_count,
-                        error_count = usage_hourly_aggregates.error_count + EXCLUDED.error_count,
-                        total_input_tokens = usage_hourly_aggregates.total_input_tokens + EXCLUDED.total_input_tokens,
-                        total_output_tokens = usage_hourly_aggregates.total_output_tokens + EXCLUDED.total_output_tokens,
-                        total_cost_cents = usage_hourly_aggregates.total_cost_cents + EXCLUDED.total_cost_cents,
-                        avg_latency_ms = (
-                            (usage_hourly_aggregates.avg_latency_ms * usage_hourly_aggregates.request_count +
-                             EXCLUDED.avg_latency_ms * EXCLUDED.request_count) /
-                            NULLIF(usage_hourly_aggregates.request_count + EXCLUDED.request_count, 0)
-                        ),
-                        avg_first_token_ms = (
-                            (usage_hourly_aggregates.avg_first_token_ms * usage_hourly_aggregates.request_count +
-                             EXCLUDED.avg_first_token_ms * EXCLUDED.request_count) /
-                            NULLIF(usage_hourly_aggregates.request_count + EXCLUDED.request_count, 0)
-                        ),
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    tenant_id,
-                    user_id or '',  # Use empty string instead of None
-                    model or '',
-                    assistant_id or '',
-                    service_id or '',
-                    bucket_start,
-                    bucket_date,
-                    agg["request_count"],
-                    agg["success_count"],
-                    agg["error_count"],
-                    agg["total_input_tokens"],
-                    agg["total_output_tokens"],
-                    agg["total_cost_cents"],
-                    agg["latency_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
-                    agg["first_token_sum"] // agg["request_count"] if agg["request_count"] > 0 else 0,
+            updated_id = await conn.fetchval(
+                """
+                UPDATE usage_hourly_aggregates
+                SET
+                    request_count = request_count + $8,
+                    success_count = success_count + $9,
+                    error_count = error_count + $10,
+                    total_input_tokens = total_input_tokens + $11,
+                    total_output_tokens = total_output_tokens + $12,
+                    total_cost_cents = total_cost_cents + $13,
+                    avg_latency_ms = (
+                        (avg_latency_ms * request_count + $14 * $8) /
+                        NULLIF(request_count + $8, 0)
+                    )::integer,
+                    avg_first_token_ms = (
+                        (avg_first_token_ms * request_count + $15 * $8) /
+                        NULLIF(request_count + $8, 0)
+                    )::integer,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE tenant_id = $1
+                  AND COALESCE(user_id, '') = $2
+                  AND COALESCE(model, '') = $3
+                  AND COALESCE(assistant_id, '') = $4
+                  AND COALESCE(service_id, '') = $5
+                  AND bucket_start = $6
+                  AND date = $7
+                RETURNING id
+                """,
+                tenant_id,
+                user_id or "",
+                model or "",
+                assistant_id or "",
+                service_id or "",
+                bucket_start,
+                bucket_date,
+                request_count,
+                agg["success_count"],
+                agg["error_count"],
+                agg["total_input_tokens"],
+                agg["total_output_tokens"],
+                agg["total_cost_cents"],
+                avg_latency,
+                avg_first_token,
+            )
+            if updated_id:
+                continue
+
+            await conn.execute(
+                """
+                INSERT INTO usage_hourly_aggregates (
+                    tenant_id, user_id, model, assistant_id, service_id,
+                    bucket_start, date,
+                    request_count, success_count, error_count,
+                    total_input_tokens, total_output_tokens, total_cost_cents,
+                    avg_latency_ms, avg_first_token_ms
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
                 )
+                """,
+                tenant_id,
+                user_id or "",
+                model or "",
+                assistant_id or "",
+                service_id or "",
+                bucket_start,
+                bucket_date,
+                request_count,
+                agg["success_count"],
+                agg["error_count"],
+                agg["total_input_tokens"],
+                agg["total_output_tokens"],
+                agg["total_cost_cents"],
+                avg_latency,
+                avg_first_token,
+            )
 
     # ============ Query Methods ============
 
