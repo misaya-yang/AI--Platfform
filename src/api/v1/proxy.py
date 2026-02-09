@@ -341,6 +341,7 @@ async def transparent_proxy_handler(
     path: str,
     request: Request,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
+    config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
     rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
@@ -355,6 +356,22 @@ async def transparent_proxy_handler(
     4. 构建代理请求
     5. 执行代理并返回响应
     """
+    if path == "_health":
+        return await proxy_service_health(
+            service_name=service_name,
+            proxy=proxy,
+        )
+    if path == "_selftest":
+        return await proxy_service_selftest(
+            service_name=service_name,
+            request=request,
+            proxy=proxy,
+            config_loader=config_loader,
+            user=user,
+            auth=auth,
+            rate_limiter=rate_limiter,
+        )
+
     # Performance timing
     t_start = time.perf_counter()
     t_auth_done = t_start  # User context already resolved via Depends
@@ -457,6 +474,7 @@ async def transparent_proxy_root_handler(
     service_name: str,
     request: Request,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
+    config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
     rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
@@ -467,6 +485,7 @@ async def transparent_proxy_root_handler(
         path="",
         request=request,
         proxy=proxy,
+        config_loader=config_loader,
         user=user,
         auth=auth,
         rate_limiter=rate_limiter,
@@ -587,11 +606,12 @@ async def proxy_service_selftest(
         )
 
     # 1) Basic upstream auth/route check (assistants list)
+    # LangGraph /assistants is POST in current Agent Server API.
     list_request = ProxyRequest(
         service_name=service_name,
-        path="assistants",
-        method="GET",
-        body=None,
+        path="assistants/search",
+        method="POST",
+        body=json.dumps({}).encode("utf-8"),
         query_params={},
         context=context,
         stream=False,

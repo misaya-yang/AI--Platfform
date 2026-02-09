@@ -66,6 +66,15 @@ interface ServiceConfigResponse {
   };
 }
 
+function normalizeUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\/$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
 async function getServiceConfig(serviceId: string): Promise<ServiceConfigResponse> {
   const { data } = await api.get(`/api/v1/config/services/${serviceId}/config`);
   return data;
@@ -164,11 +173,18 @@ export function ServiceConfigDialog({
   useEffect(() => {
     if (!serviceDetail) return;
     const cc = (serviceDetail.connector_config || {}) as Record<string, unknown>;
+    const baseUrl = normalizeUrl(String(cc.base_url || ""));
+    const upstreamUrl = normalizeUrl(String(cc.upstream_url || ""));
+    const proxyMode = String(cc.proxy_mode || serviceDetail.metadata?.proxy_mode || "");
+    const deploymentUrl =
+      baseUrl && upstreamUrl && baseUrl !== upstreamUrl && proxyMode === "transparent"
+        ? baseUrl
+        : (upstreamUrl || baseUrl);
     setBasicForm({
       name: serviceDetail.name || "",
       description: serviceDetail.description || "",
       status: serviceDetail.status || "active",
-      deployment_url: String(cc.base_url || ""),
+      deployment_url: deploymentUrl,
       graph_id: String(cc.graph_id || cc.assistant_id || ""),
       session_enabled: Boolean(serviceDetail.session_enabled ?? true),
     });
@@ -231,6 +247,7 @@ export function ServiceConfigDialog({
 
   const handleSaveBasic = () => {
     setBasicError(null);
+    const deploymentUrl = normalizeUrl(basicForm.deployment_url);
 
     const patch: Record<string, unknown> = {
       name: basicForm.name,
@@ -242,7 +259,8 @@ export function ServiceConfigDialog({
     if (serviceDetail?.metadata?.adapter_type === "langgraph") {
       patch.connector_config = {
         ...(serviceDetail.connector_config || {}),
-        base_url: basicForm.deployment_url,
+        base_url: deploymentUrl,
+        upstream_url: deploymentUrl,
         graph_id: basicForm.graph_id,
         assistant_id: basicForm.graph_id,
       };
@@ -689,9 +707,6 @@ export function ServiceConfigDialog({
     </Dialog>
   );
 }
-
-
-
 
 
 

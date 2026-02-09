@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -374,6 +375,7 @@ class TransparentProxy:
                     client=client,
                     method=request.method,
                     url=upstream_url,
+                    upstream_base=upstream_base,
                     headers=headers,
                     body=body,
                     params=request.query_params,
@@ -441,6 +443,20 @@ class TransparentProxy:
         except (json.JSONDecodeError, UnicodeDecodeError):
             # 非 JSON 请求体，原样返回
             return body
+
+    @staticmethod
+    def _replace_assistant_id(body: Optional[bytes], assistant_id: str) -> Optional[bytes]:
+        """强制替换请求体中的 assistant_id（用于重试自愈）。"""
+        if not body:
+            return body
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return body
+        if not isinstance(data, dict):
+            return body
+        data["assistant_id"] = assistant_id
+        return json.dumps(data).encode("utf-8")
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -517,6 +533,166 @@ class TransparentProxy:
             return json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
+
+    @staticmethod
+    def _is_run_operation_path(path: str) -> bool:
+        normalized = TransparentProxy._normalize_path(path).lower()
+        return "/runs" in normalized
+
+    @staticmethod
+    def _extract_error_detail(body: bytes) -> str:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return body.decode("utf-8", errors="ignore")
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+            if detail is not None:
+                return str(detail)
+        return str(payload)
+
+    @staticmethod
+    def _extract_assistant_records(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ("items", "assistants", "data", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _build_graph_candidates(self, config: ProxyServiceConfig) -> List[str]:
+        candidates: List[str] = []
+
+        def _add(value: Optional[str]) -> None:
+            if not value:
+                return
+            normalized = str(value).strip()
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+
+        _add(config.graph_id)
+        _add(config.assistant_id)
+        _add(config.service_name)
+        _add(config.service_id)
+
+        for token in re.split(r"[^A-Za-z0-9]+", config.service_id or ""):
+            if not token or token.isdigit():
+                continue
+            _add(token)
+
+        return candidates
+
+    async def _resolve_assistant_retry_candidate(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        config: ProxyServiceConfig,
+        upstream_base: str,
+        headers: Dict[str, str],
+    ) -> Optional[str]:
+        """
+        基于上游 assistants/search 结果选择可用 assistant_id（只做无损自动修复）。
+        """
+        probe_url = self._build_upstream_url(config, "assistants/search", upstream_base)
+        try:
+            response = await client.post(
+                probe_url,
+                headers=headers,
+                json={},
+            )
+        except Exception as exc:
+            logger.debug(f"[Proxy] assistant retry probe failed: {exc}")
+            return None
+
+        if response.status_code >= 400:
+            logger.debug(f"[Proxy] assistant retry probe status={response.status_code}")
+            return None
+
+        records = self._extract_assistant_records(self._parse_json_body(response.content))
+        if not records:
+            return None
+
+        graph_map = {
+            str(item.get("graph_id")).strip().lower(): str(item.get("graph_id")).strip()
+            for item in records
+            if item.get("graph_id")
+        }
+        assistant_map = {
+            str(item.get("assistant_id")).strip().lower(): str(item.get("assistant_id")).strip()
+            for item in records
+            if item.get("assistant_id")
+        }
+
+        for candidate in self._build_graph_candidates(config):
+            key = candidate.strip().lower()
+            resolved = graph_map.get(key) or assistant_map.get(key)
+            if resolved:
+                return resolved
+
+        return None
+
+    async def _retry_on_invalid_assistant(
+        self,
+        *,
+        response: httpx.Response,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        body: Optional[bytes],
+        params: Dict[str, Any],
+        path: str,
+        config: ProxyServiceConfig,
+        upstream_base: str,
+    ) -> Tuple[httpx.Response, Optional[bytes]]:
+        if response.status_code != 422 or not self._is_run_operation_path(path):
+            return response, body
+
+        detail = self._extract_error_detail(response.content)
+        if "Invalid assistant" not in detail:
+            return response, body
+
+        retry_assistant = await self._resolve_assistant_retry_candidate(
+            client=client,
+            config=config,
+            upstream_base=upstream_base,
+            headers=headers,
+        )
+        if not retry_assistant:
+            return response, body
+
+        current_assistant = (
+            str((self._parse_json_body(body) or {}).get("assistant_id") or config.assistant_id or "")
+            .strip()
+        )
+        if retry_assistant == current_assistant:
+            return response, body
+
+        retry_body = self._replace_assistant_id(body, retry_assistant)
+        if retry_body == body:
+            return response, body
+
+        logger.warning(
+            "[Proxy] Auto-healing invalid assistant for service %s: %s -> %s",
+            config.service_id,
+            current_assistant or "<empty>",
+            retry_assistant,
+        )
+
+        retry_response = await client.request(
+            method=method,
+            url=url,
+            headers=headers,
+            content=retry_body,
+            params=params,
+        )
+
+        # Keep graph_id untouched; retry target can be either graph name or assistant UUID.
+        config.assistant_id = retry_assistant
+
+        return retry_response, retry_body
 
     @staticmethod
     def _extract_error_metadata(payload: Any) -> Dict[str, str]:
@@ -643,6 +819,7 @@ class TransparentProxy:
         client: httpx.AsyncClient,
         method: str,
         url: str,
+        upstream_base: str,
         headers: Dict[str, str],
         body: Optional[bytes],
         params: Dict[str, Any],
@@ -658,6 +835,18 @@ class TransparentProxy:
             headers=headers,
             content=body,
             params=params,
+        )
+        response, body = await self._retry_on_invalid_assistant(
+            response=response,
+            client=client,
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            params=params,
+            path=path,
+            config=config,
+            upstream_base=upstream_base,
         )
 
         duration_ms = (time.perf_counter() - request_started) * 1000
@@ -964,14 +1153,25 @@ class TransparentProxy:
             upstream_base = self._select_upstream(config)
             client = await self._get_client(config)
 
-            # 尝试访问健康检查端点
-            health_url = upstream_base.rstrip("/") + "/health"
-            response = await client.get(health_url, timeout=5.0)
+            base = upstream_base.rstrip("/")
+            probes: List[Tuple[str, str, Optional[Dict[str, Any]]]] = [
+                ("GET", f"{base}/health", None),
+                # LangGraph agent server commonly exposes /docs and assistants APIs.
+                ("GET", f"{base}/docs", None),
+                ("POST", f"{base}/assistants/search", {}),
+            ]
 
-            if response.status_code < 400:
-                return True, "OK"
-            else:
-                return False, f"Health check failed: {response.status_code}"
+            last_status: Optional[int] = None
+            for method, url, payload in probes:
+                if method == "POST":
+                    response = await client.post(url, json=payload, timeout=5.0)
+                else:
+                    response = await client.get(url, timeout=5.0)
+                last_status = response.status_code
+                if response.status_code < 400:
+                    return True, "OK"
+
+            return False, f"Health check failed: {last_status}"
 
         except Exception as e:
             return False, f"Health check error: {e}"

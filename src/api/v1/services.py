@@ -50,6 +50,63 @@ _SENSITIVE_CONNECTOR_FIELDS = {
 }
 
 
+def _normalize_url(url: object) -> Optional[str]:
+    """Normalize connector URL values for stable comparisons and persistence."""
+    if url is None:
+        return None
+    value = str(url).strip()
+    if not value:
+        return None
+    return value.rstrip("/")
+
+
+def _normalize_langgraph_connector_config(definition: dict) -> None:
+    """
+    Keep LangGraph connector URL fields in sync.
+
+    Historical payloads can diverge (`base_url` updated, `upstream_url` stale),
+    which breaks transparent proxy routing. We normalize to one canonical URL.
+    """
+    connector_config = definition.get("connector_config")
+    if not isinstance(connector_config, dict):
+        return
+
+    metadata = definition.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    service_type = definition.get("service_type")
+    service_type_value = service_type.value if hasattr(service_type, "value") else str(service_type or "")
+    adapter_type = str(metadata.get("adapter_type") or connector_config.get("adapter_type") or "")
+    proxy_mode = str(connector_config.get("proxy_mode") or metadata.get("proxy_mode") or "")
+    graph_id = connector_config.get("graph_id")
+    assistant_id = connector_config.get("assistant_id")
+
+    is_langgraph = (
+        service_type_value == "langgraph"
+        or adapter_type == "langgraph"
+        or (proxy_mode == "transparent" and bool(graph_id or assistant_id))
+    )
+    if not is_langgraph:
+        return
+
+    base_url = _normalize_url(connector_config.get("base_url"))
+    upstream_url = _normalize_url(connector_config.get("upstream_url"))
+
+    if base_url and upstream_url and base_url != upstream_url and proxy_mode == "transparent":
+        # In transparent proxy mode, UI edits typically target deployment URL (base_url).
+        # Treat base_url as the user intent and heal stale upstream_url.
+        upstream_url = base_url
+
+    canonical_url = upstream_url or base_url
+    if canonical_url:
+        connector_config["base_url"] = canonical_url
+        connector_config["upstream_url"] = canonical_url
+
+    if graph_id and not assistant_id:
+        connector_config["assistant_id"] = graph_id
+    elif assistant_id and not graph_id:
+        connector_config["graph_id"] = assistant_id
+
+
 def _mask_sensitive_config(config: dict) -> dict:
     """脱敏敏感配置字段"""
     if not config:
@@ -135,7 +192,13 @@ async def register_service(
     # 权限：需要 service:manage 或 admin
     request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
     try:
-        service = registry._service_from_dict(definition)
+        normalized_definition = dict(definition)
+        if isinstance(definition.get("connector_config"), dict):
+            normalized_definition["connector_config"] = dict(definition["connector_config"])
+        if isinstance(definition.get("metadata"), dict):
+            normalized_definition["metadata"] = dict(definition["metadata"])
+        _normalize_langgraph_connector_config(normalized_definition)
+        service = registry._service_from_dict(normalized_definition)
         await registry.register(service)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -256,6 +319,8 @@ async def update_service(
     base = _service_to_dict(service)
     for k, v in filtered.items():
         base[k] = v
+
+    _normalize_langgraph_connector_config(base)
 
     try:
         updated = registry._service_from_dict(base)

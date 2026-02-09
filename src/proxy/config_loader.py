@@ -20,6 +20,16 @@ from ..core.observability.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _normalize_url(url: Any) -> str:
+    """Normalize URL values for consistent routing decisions."""
+    if url is None:
+        return ""
+    value = str(url).strip()
+    if not value:
+        return ""
+    return value.rstrip("/")
+
+
 @dataclass
 class ProxyServiceConfig:
     """代理服务配置"""
@@ -33,6 +43,7 @@ class ProxyServiceConfig:
     
     # 可选配置
     assistant_id: Optional[str] = None  # LangGraph assistant_id
+    graph_id: Optional[str] = None  # LangGraph graph_id (graph name)
     path_rewrite: Optional[str] = None  # 路径重写前缀，如 /api/v1
     strip_prefix: bool = True  # 是否去除 /proxy/{service_name} 前缀
     
@@ -184,12 +195,23 @@ class ProxyConfigLoader:
         service_config = get_json_field("service_config")
         metadata = get_json_field("metadata")
         
-        # 提取上游 URL
-        upstream_url = (
-            connector_config.get("upstream_url")
-            or connector_config.get("base_url")
-            or ""
-        )
+        # 提取并规范化上游 URL
+        base_url = _normalize_url(connector_config.get("base_url"))
+        upstream_url = _normalize_url(connector_config.get("upstream_url"))
+        proxy_mode = str(connector_config.get("proxy_mode") or "")
+
+        # 修复历史不一致数据：base_url 与 upstream_url 偏离导致代理走错目标。
+        if base_url and upstream_url and base_url != upstream_url and proxy_mode == "transparent":
+            logger.warning(
+                "Detected mismatched LangGraph proxy URLs for service %s; "
+                "using base_url as canonical target (base=%s, upstream=%s)",
+                row_dict.get("service_id", ""),
+                base_url,
+                upstream_url,
+            )
+            upstream_url = base_url
+
+        upstream_url = upstream_url or base_url
         
         # 提取多实例 URL
         upstream_urls = connector_config.get("upstream_urls") or []
@@ -198,6 +220,12 @@ class ProxyConfigLoader:
             urls_str = connector_config["instance_urls"]
             if isinstance(urls_str, str):
                 upstream_urls = [u.strip() for u in urls_str.split(",") if u.strip()]
+        normalized_urls: List[str] = []
+        for url in upstream_urls:
+            normalized = _normalize_url(url)
+            if normalized:
+                normalized_urls.append(normalized)
+        upstream_urls = normalized_urls
         
         # 提取限流配置
         rate_limit = service_config.get("rate_limit") or {}
@@ -208,6 +236,7 @@ class ProxyConfigLoader:
             upstream_url=upstream_url,
             upstream_urls=upstream_urls,
             assistant_id=connector_config.get("assistant_id"),
+            graph_id=connector_config.get("graph_id"),
             path_rewrite=connector_config.get("path_rewrite"),
             strip_prefix=connector_config.get("strip_prefix", True),
             timeout_connect=connector_config.get("timeout_connect", 5.0),
@@ -271,4 +300,3 @@ class ProxyConfigLoader:
         except Exception as e:
             logger.error(f"Failed to list proxy services: {e}")
             return []
-
