@@ -135,19 +135,16 @@ function DatasetCard({
       key: "view",
       label: t("knowledge.datasets.viewDetail"),
       icon: <EyeOutlined />,
-      onClick: () => onViewDetail(),
     },
     {
       key: "edit",
       label: t("knowledge.datasets.editConfig"),
       icon: <EditOutlined />,
-      onClick: () => onEdit(),
     },
     {
       key: "test",
       label: t("knowledge.datasets.hitTest"),
       icon: <ExperimentOutlined />,
-      onClick: () => onHitTest(),
     },
     { type: "divider" },
     {
@@ -155,9 +152,20 @@ function DatasetCard({
       label: t("knowledge.datasets.deleteKB"),
       icon: <DeleteOutlined />,
       danger: true,
-      onClick: () => onDelete(),
     },
   ];
+
+  const menuActions: Record<string, () => void> = {
+    view: onViewDetail,
+    edit: onEdit,
+    test: onHitTest,
+    delete: onDelete,
+  };
+
+  const handleMenuClick: MenuProps["onClick"] = ({ key, domEvent }) => {
+    domEvent.stopPropagation();
+    menuActions[String(key)]?.();
+  };
 
   const kbTypeColor = getKBTypeColor(dataset.kb_type);
   const docCount = dataset.statistics?.document_count ?? 0;
@@ -211,12 +219,13 @@ function DatasetCard({
           </Tag>
 
           <Dropdown
-            menu={{ items: menuItems }}
+            menu={{ items: menuItems, onClick: handleMenuClick }}
             trigger={["click"]}
             placement="bottomRight"
           >
             <div
               onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
               style={{
                 width: 28,
                 height: 28,
@@ -506,6 +515,14 @@ export function KnowledgeDatasetsPage() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deletingDataset, setDeletingDataset] = useState<Dataset | null>(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+
+  const resetDeleteModal = () => {
+    setDeleteModalOpen(false);
+    setDeletingDataset(null);
+    setDeletePassword("");
+  };
 
   // 过滤后的数据集
   const filteredDatasets = useMemo(() => {
@@ -539,15 +556,23 @@ export function KnowledgeDatasetsPage() {
 
   // 删除操作
   const handleDelete = async () => {
-    if (!deletingDataset) return;
+    if (!deletingDataset || deleteSubmitting) return;
+    if (!deletePassword) {
+      message.warning(t("knowledge.datasets.deletePasswordRequired"));
+      return;
+    }
+    setDeleteSubmitting(true);
     try {
-      await deleteDataset(deletingDataset.dataset_id);
+      await deleteDataset(deletingDataset.dataset_id, {
+        password: deletePassword,
+      });
       await qc.invalidateQueries({ queryKey: ["kb-datasets"] });
       message.success(t("knowledge.datasets.deleteSuccess"));
-      setDeleteModalOpen(false);
-      setDeletingDataset(null);
+      resetDeleteModal();
     } catch (e) {
       message.error(t("knowledge.datasets.deleteFailed") + ": " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setDeleteSubmitting(false);
     }
   };
 
@@ -705,6 +730,7 @@ export function KnowledgeDatasetsPage() {
                 }
                 onDelete={() => {
                   setDeletingDataset(dataset);
+                  setDeletePassword("");
                   setDeleteModalOpen(true);
                 }}
               />
@@ -723,14 +749,24 @@ export function KnowledgeDatasetsPage() {
         }
         open={deleteModalOpen}
         onCancel={() => {
-          setDeleteModalOpen(false);
-          setDeletingDataset(null);
+          if (deleteSubmitting) {
+            return;
+          }
+          resetDeleteModal();
         }}
         onOk={handleDelete}
+        confirmLoading={deleteSubmitting}
+        maskClosable={!deleteSubmitting}
+        keyboard={!deleteSubmitting}
         okText={t("knowledge.datasets.deleteConfirm")}
         cancelText={t("common.cancel")}
         okButtonProps={{
           danger: true,
+          disabled: !deletePassword || deleteSubmitting,
+          loading: deleteSubmitting,
+        }}
+        cancelButtonProps={{
+          disabled: deleteSubmitting,
         }}
       >
         <div style={{ padding: "12px 0" }}>
@@ -741,6 +777,24 @@ export function KnowledgeDatasetsPage() {
           <Text type="secondary" style={{ fontSize: 13 }}>
             {t("knowledge.datasets.deleteWarning")}
           </Text>
+          <div style={{ marginTop: 12 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {t("knowledge.datasets.deletePasswordLabel")}
+            </Text>
+            <Input.Password
+              value={deletePassword}
+              onChange={(e) => setDeletePassword(e.target.value)}
+              placeholder={t("knowledge.datasets.deletePasswordPlaceholder")}
+              autoComplete="current-password"
+              disabled={deleteSubmitting}
+              onPressEnter={() => {
+                if (!deleteSubmitting && deletePassword) {
+                  void handleDelete();
+                }
+              }}
+              style={{ marginTop: 6 }}
+            />
+          </div>
         </div>
       </Modal>
     </div>

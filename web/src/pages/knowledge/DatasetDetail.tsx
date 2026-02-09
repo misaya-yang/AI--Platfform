@@ -254,6 +254,7 @@ export function KnowledgeDatasetDetailPage() {
   // Delete confirmation
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
 
   // Retrieval testing
   const [query, setQuery] = useState("");
@@ -1003,16 +1004,31 @@ export function KnowledgeDatasetDetailPage() {
   }
 
   async function handleDeleteDataset() {
-    if (!datasetId) return;
+    if (!datasetId || deleting) return;
+    if (!deletePassword) {
+      toast.warning(t("knowledge.detail.deletePasswordRequired"));
+      return;
+    }
+
     setDeleting(true);
     try {
-      await deleteDataset(datasetId);
+      await deleteDataset(datasetId, { password: deletePassword });
       await qc.invalidateQueries({ queryKey: ["kb-datasets"] });
       nav("/knowledge");
+    } catch (e) {
+      toast.error(
+        t("knowledge.datasets.deleteFailed"),
+        e instanceof Error ? e.message : String(e),
+      );
     } finally {
       setDeleting(false);
     }
   }
+
+  const closeDeleteDialog = () => {
+    setDeleteConfirmOpen(false);
+    setDeletePassword("");
+  };
 
   async function runHitTest() {
     if (!datasetId || !query.trim()) return;
@@ -1251,7 +1267,10 @@ export function KnowledgeDatasetDetailPage() {
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     className="text-red-600 focus:text-red-600 cursor-pointer"
-                    onClick={() => setDeleteConfirmOpen(true)}
+                    onClick={() => {
+                      setDeletePassword("");
+                      setDeleteConfirmOpen(true);
+                    }}
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
                     {t("knowledge.detail.deleteKB")}
@@ -4285,19 +4304,63 @@ for chunk in results.get("chunks", []):
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+      <Dialog
+        open={deleteConfirmOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            setDeleteConfirmOpen(true);
+            return;
+          }
+          if (deleting) {
+            return;
+          }
+          closeDeleteDialog();
+        }}
+      >
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle className="text-red-600">{t("knowledge.detail.deleteConfirmTitle")}</DialogTitle>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            {t("knowledge.detail.deleteConfirmText", { name: dataset?.name })}
-          </p>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {t("knowledge.detail.deleteConfirmText", { name: dataset?.name })}
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="delete-kb-password">{t("knowledge.detail.deletePasswordLabel")}</Label>
+              <Input
+                id="delete-kb-password"
+                type="password"
+                autoComplete="current-password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                placeholder={t("knowledge.detail.deletePasswordPlaceholder")}
+                disabled={deleting}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && deletePassword && !deleting) {
+                    void handleDeleteDataset();
+                  }
+                }}
+              />
+            </div>
+          </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (deleting) {
+                  return;
+                }
+                closeDeleteDialog();
+              }}
+              disabled={deleting}
+            >
               {t("knowledge.detail.cancel")}
             </Button>
-            <Button variant="destructive" onClick={handleDeleteDataset} disabled={deleting}>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteDataset}
+              disabled={deleting || !deletePassword}
+            >
               {deleting ? t("knowledge.detail.deleting") : t("knowledge.detail.confirmDelete")}
             </Button>
           </DialogFooter>

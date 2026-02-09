@@ -71,6 +71,14 @@ class DatasetPermissionGrantSchema(BaseModel):
     permission: str  # owner|editor|viewer
 
 
+class DatasetDeleteSchema(BaseModel):
+    """Knowledge dataset delete confirmation payload."""
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(..., min_length=1, max_length=128)
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
 # ============================================================
 # Process Rule Schemas (Dify-style)
 # ============================================================

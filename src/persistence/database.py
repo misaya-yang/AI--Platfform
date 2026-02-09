@@ -1022,11 +1022,15 @@ class DatabaseStorage:
                 INSERT INTO datasets (
                     dataset_id, name, description, tenant_id, visibility,
                     embedding_provider, embedding_model, embedding_dimension,
-                    embedding_config, index_config, collection_name, created_by
+                    embedding_config, index_config, collection_name,
+                    is_deleted, deleted_at, deleted_by, delete_reason,
+                    created_by
                 ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8,
-                    $9, $10, $11, $12
+                    $9, $10, $11,
+                    $12, $13, $14, $15,
+                    $16
                 )
                 ON CONFLICT (dataset_id) DO UPDATE SET
                     name = EXCLUDED.name,
@@ -1039,6 +1043,10 @@ class DatabaseStorage:
                     embedding_config = EXCLUDED.embedding_config,
                     index_config = EXCLUDED.index_config,
                     collection_name = EXCLUDED.collection_name,
+                    is_deleted = FALSE,
+                    deleted_at = NULL,
+                    deleted_by = NULL,
+                    delete_reason = NULL,
                     created_by = EXCLUDED.created_by,
                     updated_at = NOW()
                 """,
@@ -1053,6 +1061,10 @@ class DatabaseStorage:
                 json.dumps(dataset.get("embedding_config", {})),
                 json.dumps(dataset.get("index_config", {})),
                 dataset.get("collection_name"),
+                bool(dataset.get("is_deleted", False)),
+                dataset.get("deleted_at"),
+                dataset.get("deleted_by"),
+                dataset.get("delete_reason"),
                 dataset.get("created_by"),
             )
 
@@ -1077,7 +1089,7 @@ class DatabaseStorage:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM datasets WHERE dataset_id = $1", dataset_id
+                "SELECT * FROM datasets WHERE dataset_id = $1 AND is_deleted = FALSE", dataset_id
             )
             return self._row_to_dict(row) if row else None
 
@@ -1092,7 +1104,7 @@ class DatabaseStorage:
         if not self._pool:
             return []
 
-        query = "SELECT * FROM datasets WHERE 1=1"
+        query = "SELECT * FROM datasets WHERE is_deleted = FALSE"
         params: List[Any] = []
         param_idx = 1
 
@@ -1118,17 +1130,56 @@ class DatabaseStorage:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
-    async def delete_dataset(self, dataset_id: str) -> bool:
-        """删除 Dataset（级联删除文档/片段/权限）"""
+    async def delete_dataset(
+        self,
+        dataset_id: str,
+        deleted_by: Optional[str] = None,
+        delete_reason: Optional[str] = None,
+    ) -> bool:
+        """软删除 Dataset，并清理关联数据。"""
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM datasets WHERE dataset_id = $1", dataset_id
-            )
-            if result.startswith("DELETE "):
-                return int(result.split()[-1]) > 0
-            return False
+            async with conn.transaction():
+                target = await conn.fetchrow(
+                    """
+                    SELECT dataset_id
+                    FROM datasets
+                    WHERE dataset_id = $1
+                      AND is_deleted = FALSE
+                    FOR UPDATE
+                    """,
+                    dataset_id,
+                )
+                if not target:
+                    return False
+
+                await conn.execute(
+                    """
+                    UPDATE datasets
+                    SET is_deleted = TRUE,
+                        deleted_at = NOW(),
+                        deleted_by = $2,
+                        delete_reason = $3,
+                        updated_at = NOW()
+                    WHERE dataset_id = $1
+                    """,
+                    dataset_id,
+                    deleted_by,
+                    delete_reason,
+                )
+
+                # Keep dataset record for audit/compliance, remove active payload data.
+                await conn.execute("DELETE FROM confluence_space_bindings WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM version_retention_policies WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM dataset_keyword_tables WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM dataset_process_rules WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM dataset_queries WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM child_chunks WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM dataset_permissions WHERE dataset_id = $1", dataset_id)
+                await conn.execute("DELETE FROM documents WHERE dataset_id = $1", dataset_id)
+
+            return True
 
     async def get_datasets_statistics_batch(
         self, dataset_ids: List[str]
@@ -1148,6 +1199,7 @@ class DatabaseStorage:
                 LEFT JOIN documents doc ON d.dataset_id = doc.dataset_id
                 LEFT JOIN segments seg ON d.dataset_id = seg.dataset_id
                 WHERE d.dataset_id = ANY($1)
+                  AND d.is_deleted = FALSE
                 GROUP BY d.dataset_id
             """
             rows = await conn.fetch(query, dataset_ids)

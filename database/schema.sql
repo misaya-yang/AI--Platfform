@@ -320,6 +320,11 @@ CREATE TABLE IF NOT EXISTS datasets (
     collection_name VARCHAR(255),
     -- KBMS enhancement (from 002_kbms_enhancements)
     kb_type VARCHAR(50) NOT NULL DEFAULT 'document',
+    -- Soft delete fields
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_at TIMESTAMPTZ,
+    deleted_by VARCHAR(255),
+    delete_reason TEXT,
     created_by VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1496,6 +1501,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_datasets_tenant_id ON datasets(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_datasets_visibility ON datasets(visibility);
+CREATE INDEX IF NOT EXISTS idx_datasets_active_created_at ON datasets(created_at DESC) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_datasets_active_tenant_visibility ON datasets(tenant_id, visibility, created_at DESC) WHERE is_deleted = FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_documents_dataset_id ON documents(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status);

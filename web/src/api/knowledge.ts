@@ -50,8 +50,15 @@ export async function updateDataset(datasetId: string, patch: Partial<Dataset>) 
   return data;
 }
 
-export async function deleteDataset(datasetId: string) {
-  const { data } = await api.delete(`/api/v1/knowledge/datasets/${datasetId}`);
+export interface DeleteDatasetPayload {
+  password: string;
+  reason?: string;
+}
+
+export async function deleteDataset(datasetId: string, payload: DeleteDatasetPayload) {
+  const { data } = await api.delete(`/api/v1/knowledge/datasets/${datasetId}`, {
+    data: payload,
+  });
   return data;
 }
 

@@ -23,6 +23,7 @@ from ..schemas.knowledge import (
     ChunkPreviewRequestSchema,
     ChunkPreviewResponseSchema,
     DatasetCreateSchema,
+    DatasetDeleteSchema,
     DatasetPermissionGrantSchema,
     DatasetUpdateSchema,
     DocumentArchiveSchema,
@@ -108,11 +109,17 @@ async def update_dataset(
 @router.delete("/knowledge/datasets/{dataset_id}")
 async def delete_dataset(
     dataset_id: str,
+    payload: DatasetDeleteSchema = Body(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
     try:
-        ok = await svc.delete_dataset(user, dataset_id)
+        ok = await svc.delete_dataset(
+            user,
+            dataset_id,
+            password=payload.password,
+            reason=payload.reason,
+        )
         return {"status": "success" if ok else "not_found", "dataset_id": dataset_id}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))

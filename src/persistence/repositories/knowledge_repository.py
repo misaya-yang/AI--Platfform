@@ -36,7 +36,12 @@ class KnowledgeRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def delete_dataset(self, dataset_id: str) -> bool:
+    async def delete_dataset(
+        self,
+        dataset_id: str,
+        deleted_by: Optional[str] = None,
+        delete_reason: Optional[str] = None,
+    ) -> bool:
         raise NotImplementedError
 
     # ========= Permissions =========
@@ -164,8 +169,17 @@ class DatabaseKnowledgeRepository(KnowledgeRepository):
             tenant_id=tenant_id, include_public=include_public, limit=limit, offset=offset
         )
 
-    async def delete_dataset(self, dataset_id: str) -> bool:
-        return await self.database.delete_dataset(dataset_id)
+    async def delete_dataset(
+        self,
+        dataset_id: str,
+        deleted_by: Optional[str] = None,
+        delete_reason: Optional[str] = None,
+    ) -> bool:
+        return await self.database.delete_dataset(
+            dataset_id,
+            deleted_by=deleted_by,
+            delete_reason=delete_reason,
+        )
 
     async def grant_dataset_permission(
         self, dataset_id: str, subject_type: str, subject_id: str, permission: str
@@ -268,4 +282,3 @@ class DatabaseKnowledgeRepository(KnowledgeRepository):
 
     async def delete_segment(self, segment_id: str) -> bool:
         return await self.database.delete_segment(segment_id)
-

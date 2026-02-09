@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import httpx
 
 from ...config.settings import Settings
+from ...core.auth.password import verify_password
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...core.observability.logging import get_logger
@@ -1147,15 +1148,64 @@ class KnowledgeService:
         await self.db.save_dataset(updated)
         return self._redact_dataset_secrets(await self._get_dataset_or_404(dataset_id))
 
-    async def delete_dataset(self, user: UserContext, dataset_id: str) -> bool:
+    async def delete_dataset(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        *,
+        password: str,
+        reason: Optional[str] = None,
+    ) -> bool:
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
+
+        if not user.is_authenticated:
+            raise PermissionDeniedError("Authentication required")
+
+        account = await self.db.get_user(user.user_id)
+        account_password_hash = str((account or {}).get("password_hash") or "")
+        if not account_password_hash:
+            raise PermissionDeniedError("Password confirmation requires account login")
+        if not verify_password(password, account_password_hash):
+            raise ValidationFailedError("Invalid password")
+
         collection = str(dataset.get("collection_name") or "")
         try:
             if collection:
                 await self.vector_store.delete_collection(collection_name=collection)
         except Exception:
-            pass
-        return await self.db.delete_dataset(dataset_id)
+            logger.warning(
+                "Failed to delete vector collection for dataset %s",
+                dataset_id,
+                exc_info=True,
+            )
+
+        deleted = await self.db.delete_dataset(
+            dataset_id,
+            deleted_by=user.user_id,
+            delete_reason=reason,
+        )
+        if deleted:
+            try:
+                await self.db.log_audit(
+                    event_type="knowledge.dataset",
+                    action="delete",
+                    status="success",
+                    user_id=user.user_id,
+                    tenant_id=user.tenant_id,
+                    resource_type="dataset",
+                    resource_id=dataset_id,
+                    request_summary={
+                        "delete_mode": "soft",
+                        "reason": reason or "",
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to write audit log for dataset deletion %s",
+                    dataset_id,
+                    exc_info=True,
+                )
+        return deleted
 
     async def list_dataset_permissions(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
         await self.require_dataset_access(user, dataset_id, required="owner")
