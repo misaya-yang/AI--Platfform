@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
@@ -32,6 +32,7 @@ class SecurityEventRecorder:
         service_id: Optional[str],
         event_type: str,
         event_date: Optional[date] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not self.database or not self.database._pool:
             return
@@ -42,6 +43,7 @@ class SecurityEventRecorder:
                 service_id=service_id,
                 event_type=event_type,
                 event_date=event_date,
+                metadata=metadata,
             )
         except Exception as exc:
             logger.debug(f"Failed to record security event: {exc}")

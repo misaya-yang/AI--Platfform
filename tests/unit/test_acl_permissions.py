@@ -20,6 +20,20 @@ from src.core.auth.user_resolver import UserContext
 from src.core.exceptions import AuthenticationRequiredError
 
 
+def _rbac_has_permission(subjects, permission: str) -> bool:
+    values = {str(item) for item in (subjects or []) if item is not None}
+    if "admin:*" in values:
+        return True
+    if permission in values:
+        return True
+    parts = permission.split(":")
+    for idx in range(len(parts) - 1, 0, -1):
+        wildcard = ":".join(parts[:idx]) + ":*"
+        if wildcard in values:
+            return True
+    return False
+
+
 # ============ 测试账号 Fixtures ============
 
 @pytest.fixture
@@ -843,7 +857,7 @@ class TestProxyServiceAuthorization:
     """透明代理服务级授权测试
 
     测试 check_service_authorization 函数的各种授权场景：
-    1. RBAC 权限检查 (service:invoke)
+    1. Capability 权限检查 (AgentInvoke)
     2. 服务级配置 (require_auth, allowed_roles, allowed_api_keys)
     3. 用户/API Key 级别的 allowed_services
     """
@@ -857,6 +871,7 @@ class TestProxyServiceAuthorization:
         request.app.state.settings.authentication.api_key.header_name = "X-API-Key"
         request.app.state.dispatcher = MagicMock()
         request.app.state.dispatcher.rbac = MagicMock()
+        request.app.state.dispatcher.rbac.has_permission.side_effect = _rbac_has_permission
         request.app.state.registry = MagicMock()
         request.app.state.database = MagicMock()
         request.app.state.database.enabled = True
@@ -888,30 +903,27 @@ class TestProxyServiceAuthorization:
 
     @pytest.mark.asyncio
     async def test_rbac_permission_required(self, mock_request, guest_user, mock_guest_auth_context):
-        """测试：缺少 service:invoke 权限应被拒绝"""
+        """测试：缺少 AgentInvoke capability 权限应被拒绝"""
         from src.api.v1.proxy import check_service_authorization
-        from src.core.exceptions import PermissionDeniedError
         from fastapi import HTTPException
-
-        # 模拟 RBAC 检查失败
-        mock_request.app.state.dispatcher.rbac.require.side_effect = PermissionDeniedError("service:invoke")
 
         with pytest.raises(HTTPException) as exc_info:
             await check_service_authorization(
                 mock_request, "test_service", guest_user, mock_guest_auth_context
             )
         assert exc_info.value.status_code == 403
-        assert "service:invoke" in exc_info.value.detail
+        assert exc_info.value.detail["required_capability"] == "AgentInvoke"
+        assert exc_info.value.detail["required_permission"] == "conversation:playground:access"
 
     @pytest.mark.asyncio
     async def test_service_require_auth_unauthenticated_denied(self, mock_request, guest_user, mock_guest_auth_context):
         """测试：require_auth=True 时未认证用户被拒绝"""
         from src.api.v1.proxy import check_service_authorization
-        from src.models.service import ServiceConfig, ServiceAuthConfig
         from fastapi import HTTPException
 
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
+        capability_guest_auth = mock_guest_auth_context.model_copy(
+            update={"roles": ["guest", "service:invoke"]}
+        )
 
         # 模拟服务配置：require_auth=True
         mock_service = MagicMock()
@@ -931,7 +943,7 @@ class TestProxyServiceAuthorization:
 
         with pytest.raises(HTTPException) as exc_info:
             await check_service_authorization(
-                mock_request, "test_service", guest_user, mock_guest_auth_context
+                mock_request, "test_service", guest_user, capability_guest_auth
             )
         assert exc_info.value.status_code == 403
         assert "authentication required" in exc_info.value.detail
@@ -941,9 +953,6 @@ class TestProxyServiceAuthorization:
         """测试：用户角色不在 allowed_roles 中被拒绝"""
         from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
-
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
 
         # 模拟服务配置：allowed_roles=["premium", "enterprise"]
         mock_service = MagicMock()
@@ -981,9 +990,6 @@ class TestProxyServiceAuthorization:
             permissions=[]
         )
 
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
-
         # 模拟服务配置：allowed_roles=["premium"]（admin 不在列表中）
         mock_service = MagicMock()
         mock_service.service_id = "test_service"
@@ -1013,9 +1019,6 @@ class TestProxyServiceAuthorization:
         from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
 
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
-
         # 无服务级配置
         mock_request.app.state.registry.get = AsyncMock(return_value=None)
 
@@ -1037,9 +1040,6 @@ class TestProxyServiceAuthorization:
         """测试：allowed_services=["*"] 允许所有服务"""
         from src.api.v1.proxy import check_service_authorization
 
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
-
         # 无服务级配置
         mock_request.app.state.registry.get = AsyncMock(return_value=None)
 
@@ -1055,12 +1055,9 @@ class TestProxyServiceAuthorization:
         )
 
     @pytest.mark.asyncio
-    async def test_public_service_accessible(self, mock_request, guest_user, mock_guest_auth_context):
-        """测试：public=True 的服务可被任何人访问"""
+    async def test_public_service_accessible(self, mock_request, user_alice, mock_auth_context):
+        """测试：public=True 的服务可被具备基础 capability 的用户访问"""
         from src.api.v1.proxy import check_service_authorization
-
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
 
         # 模拟服务配置：public=True
         mock_service = MagicMock()
@@ -1077,9 +1074,9 @@ class TestProxyServiceAuthorization:
         mock_request.app.state.database.get_tenant = AsyncMock(return_value=None)
         mock_request.state.api_key_info = None
 
-        # Guest 也应该可以访问公开服务
+        # 普通用户应当可以访问公开服务
         await check_service_authorization(
-            mock_request, "public_service", guest_user, mock_guest_auth_context
+            mock_request, "public_service", user_alice, mock_auth_context
         )
 
     @pytest.mark.asyncio
@@ -1087,9 +1084,6 @@ class TestProxyServiceAuthorization:
         """测试：租户级别的 allowed_services 限制"""
         from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
-
-        # RBAC 通过
-        mock_request.app.state.dispatcher.rbac.require.return_value = None
 
         # 无服务级配置
         mock_request.app.state.registry.get = AsyncMock(return_value=None)

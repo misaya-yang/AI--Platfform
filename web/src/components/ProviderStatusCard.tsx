@@ -200,6 +200,10 @@ function ProviderCard({
               display: "flex",
               alignItems: "center",
               gap: 4,
+              flexWrap: "nowrap",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
             }}
           >
             {configured && modelCount > 0 ? (

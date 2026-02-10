@@ -12,6 +12,7 @@ from .transparent_proxy import TransparentProxy, ProxyRequest, ProxyResponse
 from .config_loader import ProxyConfigLoader, ProxyServiceConfig
 from .billing_interceptor import BillingInterceptor, UsageData
 from .context_injector import ContextInjector, RequestContext
+from .response_cache import ResponseCache
 
 __all__ = [
     "TransparentProxy",
@@ -23,5 +24,5 @@ __all__ = [
     "UsageData",
     "ContextInjector",
     "RequestContext",
+    "ResponseCache",
 ]
-

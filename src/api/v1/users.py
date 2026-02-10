@@ -63,6 +63,18 @@ class UserUpdate(BaseModel):
     department: Optional[str] = Field(None, max_length=50, description="Department: cs, sales, tech, admin")
     roles: Optional[List[str]] = None
     extra_permissions: Optional[List[str]] = Field(None, description="Extra permissions (directly assigned, not through roles)")
+    service_access_mode: Optional[str] = Field(
+        None,
+        description="Service access mode: all | allowlist",
+    )
+    allowed_services: Optional[List[str]] = Field(
+        None,
+        description="Allowed service IDs/names when allowlist mode is enabled",
+    )
+    denied_services: Optional[List[str]] = Field(
+        None,
+        description="Denied service IDs/names (takes precedence)",
+    )
     status: Optional[str] = None
     tier: Optional[str] = None
 
@@ -73,6 +85,15 @@ class UserUpdate(BaseModel):
             if v not in allowed:
                 raise ValueError(f"Department must be one of: {', '.join(allowed)}")
         return v
+
+    @validator("service_access_mode")
+    def validate_service_access_mode(cls, v):
+        if v is None:
+            return v
+        normalized = str(v).strip().lower()
+        if normalized not in {"all", "allowlist"}:
+            raise ValueError("service_access_mode must be one of: all, allowlist")
+        return normalized
 
 
 class ProfileUpdate(BaseModel):
@@ -89,6 +110,9 @@ class UserResponse(BaseModel):
     department: Optional[str] = None
     roles: List[str] = []
     extra_permissions: List[str] = []
+    service_access_mode: str = "all"
+    allowed_services: List[str] = []
+    denied_services: List[str] = []
     status: str = "active"
     tier: str = "normal"
     force_password_change: bool = True
@@ -102,6 +126,47 @@ class UserListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+def _normalize_service_list(values: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    if values is None:
+        return normalized
+    for value in values:
+        token = str(value or "").strip()
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
+def _extract_service_access_metadata(metadata: Any) -> Dict[str, Any]:
+    payload = metadata if isinstance(metadata, dict) else {}
+    service_access = payload.get("service_access")
+    service_access = service_access if isinstance(service_access, dict) else {}
+
+    mode = str(service_access.get("mode") or "").strip().lower()
+    if mode not in {"all", "allowlist"}:
+        mode = "allowlist" if service_access.get("allowed_services") else "all"
+
+    allowed_services = _normalize_service_list(service_access.get("allowed_services"))
+    denied_services = _normalize_service_list(service_access.get("denied_services"))
+
+    return {
+        "service_access_mode": mode,
+        "allowed_services": allowed_services,
+        "denied_services": denied_services,
+    }
+
+
+def _build_user_response_payload(
+    user: Dict[str, Any],
+    *,
+    extra_permissions: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    payload = {k: v for k, v in user.items() if k in UserResponse.__fields__}
+    payload["extra_permissions"] = extra_permissions or []
+    payload.update(_extract_service_access_metadata(user.get("metadata")))
+    return payload
 
 
 # ============================================================
@@ -135,7 +200,7 @@ async def list_users(
     )
 
     return UserListResponse(
-        users=[UserResponse(**{k: v for k, v in u.items() if k in UserResponse.__fields__}) for u in users],
+        users=[UserResponse(**_build_user_response_payload(u)) for u in users],
         total=total,
         page=page,
         page_size=page_size
@@ -209,6 +274,9 @@ async def create_user(
         department=body.department,
         username=user_id,
         roles=body.roles,
+        service_access_mode="all",
+        allowed_services=[],
+        denied_services=[],
         status="active",
         tier="normal",
         force_password_change=True,
@@ -243,8 +311,7 @@ async def get_user(
     extra_perms = await db.get_user_extra_permissions(user_id)
     extra_perm_codes = [p.get("permission_code") for p in extra_perms]
 
-    response_data = {k: v for k, v in user.items() if k in UserResponse.__fields__}
-    response_data["extra_permissions"] = extra_perm_codes
+    response_data = _build_user_response_payload(user, extra_permissions=extra_perm_codes)
     return UserResponse(**response_data)
 
 
@@ -271,8 +338,36 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Build update dict (exclude extra_permissions as it's handled separately)
-    update_data = body.dict(exclude_unset=True, exclude={"extra_permissions"})
+    # Build update dict (exclude extra_permissions + service access fields as they are handled separately)
+    update_data = body.dict(
+        exclude_unset=True,
+        exclude={"extra_permissions", "service_access_mode", "allowed_services", "denied_services"},
+    )
+
+    service_policy_updated = (
+        body.service_access_mode is not None
+        or body.allowed_services is not None
+        or body.denied_services is not None
+    )
+    if service_policy_updated:
+        metadata = user.get("metadata")
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        service_access = metadata.get("service_access")
+        service_access = dict(service_access) if isinstance(service_access, dict) else {}
+
+        if body.service_access_mode is not None:
+            service_access["mode"] = body.service_access_mode
+        if body.allowed_services is not None:
+            service_access["allowed_services"] = _normalize_service_list(body.allowed_services)
+        if body.denied_services is not None:
+            service_access["denied_services"] = _normalize_service_list(body.denied_services)
+
+        if "mode" not in service_access:
+            service_access["mode"] = "allowlist" if service_access.get("allowed_services") else "all"
+
+        metadata["service_access"] = service_access
+        update_data["metadata"] = metadata
+
     if update_data:
         await db.update_user(user_id, update_data)
 
@@ -290,8 +385,10 @@ async def update_user(
     extra_perms = await db.get_user_extra_permissions(user_id)
     extra_perm_codes = [p.get("permission_code") for p in extra_perms]
 
-    response_data = {k: v for k, v in updated_user.items() if k in UserResponse.__fields__}
-    response_data["extra_permissions"] = extra_perm_codes
+    response_data = _build_user_response_payload(
+        updated_user,
+        extra_permissions=extra_perm_codes,
+    )
     return UserResponse(**response_data)
 
 

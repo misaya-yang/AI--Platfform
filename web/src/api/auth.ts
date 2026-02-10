@@ -40,6 +40,7 @@ export interface CurrentUserResponse {
   department: string | null;
   roles: string[];
   permissions: string[];
+  effective_permissions: string[];
   tier: string;
   force_password_change: boolean;
 }

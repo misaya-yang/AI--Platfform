@@ -23,6 +23,8 @@ export const LAYOUT = {
   // Grid columns
   KPI_COLUMNS: 5,         // Number of KPI cards
   PROVIDER_COLUMNS: 5,    // Number of provider cards per row
+  FIVE_COL_MIN_ITEM_WIDTH: 210, // Prevent cards from over-shrinking on narrow screens
+  DASHBOARD_MIN_CONTENT_WIDTH: 1180, // Trigger horizontal scroll before text is crushed
 
   // Breakpoints for responsive
   BREAKPOINTS: {
@@ -99,7 +101,8 @@ export const gridStyles = {
   // Responsive 5-column that stacks on mobile
   fiveColumnResponsive: {
     display: "grid" as const,
-    gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+    gridTemplateColumns: `repeat(${LAYOUT.KPI_COLUMNS}, minmax(${LAYOUT.FIVE_COL_MIN_ITEM_WIDTH}px, 1fr))`,
+    minWidth: `${LAYOUT.KPI_COLUMNS * LAYOUT.FIVE_COL_MIN_ITEM_WIDTH + (LAYOUT.KPI_COLUMNS - 1) * LAYOUT.GRID_GAP}px`,
     gap: LAYOUT.GRID_GAP,
   },
 };

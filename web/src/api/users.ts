@@ -12,6 +12,9 @@ export interface UserResponse {
   department: string | null;  // 部门 - 由管理员分配
   roles: string[];
   extra_permissions: string[];  // 额外权限 - 直接分配，非角色
+  service_access_mode: "all" | "allowlist";
+  allowed_services: string[];
+  denied_services: string[];
   status: string;
   tier: string;
   force_password_change: boolean;
@@ -38,6 +41,9 @@ export interface UserUpdateRequest {
   department?: string;  // 部门 - 由管理员分配
   roles?: string[];
   extra_permissions?: string[];  // 额外权限 - 直接分配，非角色
+  service_access_mode?: "all" | "allowlist";
+  allowed_services?: string[];
+  denied_services?: string[];
   status?: string;
   tier?: string;
 }

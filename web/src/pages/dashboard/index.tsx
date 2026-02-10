@@ -15,6 +15,10 @@ function DashboardContent() {
   const colors = getColors(darkMode);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
+  const effectiveDashboardWidth = Math.max(
+    containerWidth,
+    LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH
+  );
 
   useEffect(() => {
     const updateWidth = () => {
@@ -43,22 +47,28 @@ function DashboardContent() {
         background: colors.pageBg,
       }}
     >
-      {/* Header with controls */}
-      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
-        <DashboardHeader />
-      </div>
+      <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
+        {/* Header with controls */}
+        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
+          <DashboardHeader />
+        </div>
 
-      {/* KPI Summary Cards */}
-      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
-        <KPICards />
-      </div>
+        {/* KPI Summary Cards */}
+        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: LAYOUT.SECTION_GAP }}>
+          <KPICards />
+        </div>
 
-      {/* Provider Status */}
-      <ProviderStatusCard />
+        {/* Provider Status */}
+        <ProviderStatusCard />
 
-      {/* Draggable Panel Grid */}
-      <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING - LAYOUT.GRID_GAP}px` }}>
-        <DashboardLayout width={containerWidth - (LAYOUT.PAGE_PADDING * 2) + (LAYOUT.GRID_GAP * 2)} />
+        {/* Draggable Panel Grid */}
+        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING - LAYOUT.GRID_GAP}px` }}>
+          <DashboardLayout
+            width={
+              effectiveDashboardWidth - (LAYOUT.PAGE_PADDING * 2) + (LAYOUT.GRID_GAP * 2)
+            }
+          />
+        </div>
       </div>
     </div>
   );

@@ -239,6 +239,13 @@ class RequestMetrics:
         "Total number of rate limit triggers",
         labels=["dimension", "service_id"],
     ))
+
+    # 限流决策（允许/拒绝）
+    rate_limit_decisions_total: Counter = field(default_factory=lambda: Counter(
+        "gateway_rate_limit_decision_total",
+        "Total number of rate limit decisions",
+        labels=["dimension", "service_id", "result"],
+    ))
     
     # 熔断器状态
     circuit_breaker_state: Gauge = field(default_factory=lambda: Gauge(
@@ -288,6 +295,19 @@ class RequestMetrics:
     def record_rate_limit(self, dimension: str, service_id: str = "") -> None:
         """记录限流触发"""
         self.rate_limit_triggered.inc(dimension=dimension, service_id=service_id)
+
+    def record_rate_limit_decision(
+        self,
+        dimension: str,
+        service_id: str = "",
+        result: str = "allowed",
+    ) -> None:
+        """记录限流决策结果（allowed/blocked）。"""
+        self.rate_limit_decisions_total.inc(
+            dimension=dimension,
+            service_id=service_id,
+            result=result,
+        )
     
     def update_circuit_breaker(self, service_id: str, state: str) -> None:
         """更新熔断器状态"""
@@ -315,6 +335,7 @@ class RequestMetrics:
             },
             "rate_limits": {
                 "total": sum(self.rate_limit_triggered._values.values()),
+                "decisions_total": sum(self.rate_limit_decisions_total._values.values()),
             },
         }
 
@@ -426,4 +447,3 @@ class MetricsCollector:
 def get_metrics() -> MetricsCollector:
     """获取指标收集器单例"""
     return MetricsCollector()
-

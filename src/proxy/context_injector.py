@@ -26,6 +26,7 @@ class RequestContext:
     
     # 用户信息
     user_id: str = ""
+    api_key_id: str = ""
     tenant_id: str = ""
     user_tier: str = "anonymous"
     is_authenticated: bool = False

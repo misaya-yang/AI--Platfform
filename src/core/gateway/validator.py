@@ -6,6 +6,7 @@ from jsonschema import ValidationError as JSONSchemaValidationError
 from jsonschema import validate as jsonschema_validate
 
 from ..auth.rbac import RBAC
+from ..auth.permissions import Capability, require_capability
 from ..exceptions import (
     AuthenticationRequiredError,
     InvalidContentTypeError,
@@ -32,7 +33,12 @@ class RequestValidator:
         self._validate_service_auth(request, service, roles)
 
         # 全局 RBAC
-        self.rbac.require(roles, "service:invoke")
+        require_capability(
+            rbac=self.rbac,
+            roles=roles,
+            permissions=None,
+            capability=Capability.AGENT_INVOKE,
+        )
 
     def _validate_service_auth(
         self, request: UnifiedRequest, service: ServiceDefinition, roles: List[str]

@@ -35,7 +35,9 @@ import {
   listRoles,
   listPermissions,
 } from "@/api/users";
+import { listServices } from "@/api/gateway";
 import type { UserResponse, RoleResponse, PermissionResponse } from "@/api/users";
+import type { ServiceDefinition } from "@/types/gateway";
 import { colors } from "@/theme/themeConfig";
 
 const buildDepartmentOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
@@ -50,9 +52,18 @@ const buildStatusOptions = (t: (key: string, options?: Record<string, unknown>) 
   { value: "disabled", label: t("users.status.disabled"), color: "#ef4444" },
 ];
 
-const buildCategoryMeta = (t: (key: string, options?: Record<string, unknown>) => string) => ({
+type PermissionCategoryMeta = {
+  icon: string;
+  color: string;
+  label: string;
+};
+
+const buildCategoryMeta = (
+  t: (key: string, options?: Record<string, unknown>) => string
+): Record<string, PermissionCategoryMeta> => ({
   console: { icon: "🖥️", color: "#3b82f6", label: t("users.permissions.categories.console") },
   conversation: { icon: "💬", color: "#10b981", label: t("users.permissions.categories.conversation") },
+  service: { icon: "🧭", color: "#6366f1", label: "服务" },
   knowledge: { icon: "📚", color: "#f59e0b", label: t("users.permissions.categories.knowledge") },
   user: { icon: "👤", color: "#8b5cf6", label: t("users.permissions.categories.user") },
   role: { icon: "🔐", color: "#ec4899", label: t("users.permissions.categories.role") },
@@ -73,8 +84,10 @@ export function UserEditPage() {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [roles, setRoles] = useState<RoleResponse[]>([]);
   const [permissions, setPermissions] = useState<PermissionResponse[]>([]);
+  const [services, setServices] = useState<ServiceDefinition[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [servicesLoading, setServicesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Form states
@@ -83,6 +96,9 @@ export function UserEditPage() {
   const [formStatus, setFormStatus] = useState("active");
   const [formRoles, setFormRoles] = useState<string[]>([]);
   const [formExtraPermissions, setFormExtraPermissions] = useState<string[]>([]);
+  const [serviceAccessMode, setServiceAccessMode] = useState<"all" | "allowlist">("all");
+  const [formAllowedServices, setFormAllowedServices] = useState<string[]>([]);
+  const [formDeniedServices, setFormDeniedServices] = useState<string[]>([]);
 
   // UI states
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(["console"]));
@@ -91,6 +107,8 @@ export function UserEditPage() {
   // Permissions check
   const canEdit = hasPermission("user:edit");
   const canViewRoles = hasPermission("role:list");
+  const canViewServices =
+    hasPermission("console:services:view") || hasPermission("service:view") || hasPermission("admin:*");
 
   // Load data
   useEffect(() => {
@@ -98,17 +116,22 @@ export function UserEditPage() {
 
     const loadData = async () => {
       setIsLoading(true);
+      setServicesLoading(true);
       setError(null);
       try {
-        const [userData, rolesData, permsData] = await Promise.all([
+        const [userData, rolesData, permsData, servicesData] = await Promise.all([
           getUser(userId),
           canViewRoles ? listRoles() : Promise.resolve({ roles: [] }),
           canViewRoles ? listPermissions() : Promise.resolve({ permissions: [] }),
+          canViewServices ? listServices() : Promise.resolve([] as ServiceDefinition[]),
         ]);
 
         setUser(userData);
         setRoles(rolesData.roles);
         setPermissions(permsData.permissions);
+        setServices(
+          servicesData.filter((svc) => Boolean(svc.service_id) && svc.service_id !== "assistant")
+        );
 
         // Initialize form
         setFormDisplayName(userData.display_name || "");
@@ -116,16 +139,20 @@ export function UserEditPage() {
         setFormStatus(userData.status);
         setFormRoles(userData.roles);
         setFormExtraPermissions(userData.extra_permissions || []);
+        setServiceAccessMode(userData.service_access_mode || "all");
+        setFormAllowedServices(userData.allowed_services || []);
+        setFormDeniedServices(userData.denied_services || []);
       } catch (err) {
         console.error("Failed to load user:", err);
         setError(t("users.edit.loadFailed"));
       } finally {
         setIsLoading(false);
+        setServicesLoading(false);
       }
     };
 
     loadData();
-  }, [userId, canViewRoles]);
+  }, [userId, canViewRoles, canViewServices]);
 
   // Track changes
   useEffect(() => {
@@ -135,9 +162,22 @@ export function UserEditPage() {
       formDepartment !== (user.department || "") ||
       formStatus !== user.status ||
       JSON.stringify([...formRoles].sort()) !== JSON.stringify([...user.roles].sort()) ||
-      JSON.stringify([...formExtraPermissions].sort()) !== JSON.stringify([...(user.extra_permissions || [])].sort());
+      JSON.stringify([...formExtraPermissions].sort()) !== JSON.stringify([...(user.extra_permissions || [])].sort()) ||
+      serviceAccessMode !== (user.service_access_mode || "all") ||
+      JSON.stringify([...formAllowedServices].sort()) !== JSON.stringify([...(user.allowed_services || [])].sort()) ||
+      JSON.stringify([...formDeniedServices].sort()) !== JSON.stringify([...(user.denied_services || [])].sort());
     setHasChanges(changed);
-  }, [user, formDisplayName, formDepartment, formStatus, formRoles, formExtraPermissions]);
+  }, [
+    user,
+    formDisplayName,
+    formDepartment,
+    formStatus,
+    formRoles,
+    formExtraPermissions,
+    serviceAccessMode,
+    formAllowedServices,
+    formDeniedServices,
+  ]);
 
   // Group permissions by category
   const permissionsByCategory = useMemo(() => {
@@ -175,17 +215,44 @@ export function UserEditPage() {
     });
   };
 
+  const toggleAllowedService = (serviceId: string) => {
+    setFormAllowedServices((prev) => (
+      prev.includes(serviceId)
+        ? prev.filter((item) => item !== serviceId)
+        : [...prev, serviceId]
+    ));
+    setFormDeniedServices((prev) => prev.filter((item) => item !== serviceId));
+  };
+
+  const toggleDeniedService = (serviceId: string) => {
+    setFormDeniedServices((prev) => (
+      prev.includes(serviceId)
+        ? prev.filter((item) => item !== serviceId)
+        : [...prev, serviceId]
+    ));
+    setFormAllowedServices((prev) => prev.filter((item) => item !== serviceId));
+  };
+
   // Handle save
   const handleSave = async () => {
     if (!userId || !canEdit) return;
     setIsSaving(true);
     try {
+      const servicePolicyPatch = canViewServices
+        ? {
+            service_access_mode: serviceAccessMode,
+            allowed_services: formAllowedServices,
+            denied_services: formDeniedServices,
+          }
+        : {};
+
       await updateUser(userId, {
         display_name: formDisplayName,
         department: formDepartment || undefined,
         status: formStatus,
         roles: formRoles,
         extra_permissions: formExtraPermissions,
+        ...servicePolicyPatch,
       });
       message.success(t("users.edit.saved"));
       // Reload user data
@@ -487,11 +554,125 @@ export function UserEditPage() {
             )}
           </motion.div>
 
+          {/* Service access policy card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.25 }}
+            className="edit-card rounded-2xl p-6"
+            style={{
+              background: darkMode ? colors.neutral[800] : "#ffffff",
+              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
+            }}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
+                background: "#6366f115",
+              }}>
+                <TeamOutlined style={{ fontSize: 18, color: "#6366f1" }} />
+              </div>
+              <div>
+                <h3 className="font-semibold">Agent 服务访问</h3>
+                <p className="text-xs text-muted-foreground">
+                  为该用户配置服务白名单和拒绝名单，API 与 Playground 共用同一策略
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="space-y-2">
+                <Label>访问模式</Label>
+                <Select
+                  value={serviceAccessMode}
+                  onValueChange={(value) => setServiceAccessMode(value as "all" | "allowlist")}
+                  disabled={!canEdit || !canViewServices}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部服务（可叠加拒绝名单）</SelectItem>
+                    <SelectItem value="allowlist">仅白名单服务</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>策略说明</Label>
+                <div
+                  className="rounded-lg px-3 py-2 text-xs"
+                  style={{
+                    background: darkMode ? "rgba(99, 102, 241, 0.14)" : "rgba(99, 102, 241, 0.08)",
+                    color: darkMode ? "#c7d2fe" : "#3730a3",
+                  }}
+                >
+                  {serviceAccessMode === "allowlist"
+                    ? "当前为白名单模式：仅“允许”勾选的服务可调用；拒绝名单优先级更高。"
+                    : "当前为全量模式：默认可调用所有服务；可通过拒绝名单精确禁用。"}
+                </div>
+              </div>
+            </div>
+
+            {!canViewServices ? (
+              <div className="text-sm text-muted-foreground">当前账号无权读取服务列表</div>
+            ) : servicesLoading ? (
+              <div className="text-sm text-muted-foreground">加载服务列表中...</div>
+            ) : services.length === 0 ? (
+              <div className="text-sm text-muted-foreground">暂无可配置服务</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {services.map((svc) => {
+                  const serviceId = svc.service_id;
+                  const inAllowlist = formAllowedServices.includes(serviceId);
+                  const inDenylist = formDeniedServices.includes(serviceId);
+                  const allowDisabled = !canEdit || serviceAccessMode !== "allowlist";
+                  return (
+                    <div
+                      key={serviceId}
+                      className="rounded-xl px-3 py-3"
+                      style={{
+                        border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
+                        background: darkMode ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.01)",
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{svc.name || serviceId}</p>
+                          <p className="text-xs text-muted-foreground truncate">{serviceId}</p>
+                        </div>
+                        <Badge variant="outline" className="text-[10px]">
+                          {(svc.service_type || "service").toString()}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 flex items-center gap-4 text-xs">
+                        <label className="inline-flex items-center gap-2">
+                          <Checkbox
+                            checked={inAllowlist}
+                            disabled={allowDisabled}
+                            onCheckedChange={() => toggleAllowedService(serviceId)}
+                          />
+                          <span className={allowDisabled ? "text-muted-foreground" : ""}>允许</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2">
+                          <Checkbox
+                            checked={inDenylist}
+                            disabled={!canEdit}
+                            onCheckedChange={() => toggleDeniedService(serviceId)}
+                          />
+                          <span style={{ color: inDenylist ? "#ef4444" : undefined }}>拒绝</span>
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+
           {/* Extra permissions card */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.3 }}
+            transition={{ delay: 0.35 }}
             className="edit-card rounded-2xl p-6"
             style={{
               background: darkMode ? colors.neutral[800] : "#ffffff",
@@ -675,6 +856,9 @@ export function UserEditPage() {
                       setFormStatus(user.status);
                       setFormRoles(user.roles);
                       setFormExtraPermissions(user.extra_permissions || []);
+                      setServiceAccessMode(user.service_access_mode || "all");
+                      setFormAllowedServices(user.allowed_services || []);
+                      setFormDeniedServices(user.denied_services || []);
                     }
                   }}
                 >

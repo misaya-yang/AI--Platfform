@@ -1,11 +1,24 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dataclasses import asdict
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
-from ..deps import AuthContext, get_auth_context, get_registry
+from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
+from ...core.auth.permissions import (
+    Capability,
+    build_permission_denied_detail,
+    check_capability,
+)
+from ...core.auth.service_access import (
+    ServiceAccessPolicy,
+    evaluate_service_access,
+    normalize_service_scope,
+    service_access_policy_from_metadata,
+    service_scope_matches,
+)
+from ...core.auth.user_resolver import UserContext
 from ...models.enums import ServiceType
 from ...services.registry.service_registry import ServiceRegistry
 
@@ -50,6 +63,35 @@ _SENSITIVE_CONNECTOR_FIELDS = {
 }
 
 
+def _current_trace_id(request: Request) -> str:
+    request_id = getattr(request.state, "request_id", "")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    trace_id = getattr(request.state, "trace_id", "")
+    if isinstance(trace_id, str):
+        return trace_id
+    return ""
+
+
+def _require_capability(request: Request, auth: AuthContext, capability: Capability) -> None:
+    decision = check_capability(
+        rbac=request.app.state.dispatcher.rbac,
+        roles=auth.roles,
+        permissions=auth.permissions,
+        capability=capability,
+    )
+    if decision.allowed:
+        return
+
+    raise HTTPException(
+        status_code=403,
+        detail=build_permission_denied_detail(
+            capability=capability,
+            trace_id=_current_trace_id(request),
+        ),
+    )
+
+
 def _normalize_url(url: object) -> Optional[str]:
     """Normalize connector URL values for stable comparisons and persistence."""
     if url is None:
@@ -58,6 +100,75 @@ def _normalize_url(url: object) -> Optional[str]:
     if not value:
         return None
     return value.rstrip("/")
+
+
+def _normalize_candidates(values: Sequence[str]) -> List[str]:
+    normalized: List[str] = []
+    for value in values:
+        token = str(value or "").strip().lower()
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
+def _service_visible_with_scopes(
+    *,
+    aliases: Sequence[str],
+    allowed_sources: Sequence[Tuple[str, List[str]]],
+    user_policy: ServiceAccessPolicy,
+    is_admin: bool,
+) -> bool:
+    normalized_aliases = _normalize_candidates(aliases)
+    if not normalized_aliases:
+        return False
+
+    for _, allowed in allowed_sources:
+        if service_scope_matches(allowed, normalized_aliases):
+            continue
+        return False
+
+    if is_admin:
+        return True
+
+    permitted, _ = evaluate_service_access(user_policy, normalized_aliases)
+    return permitted
+
+
+async def _load_access_constraints(
+    request: Request,
+    user: UserContext,
+) -> Tuple[List[Tuple[str, List[str]]], ServiceAccessPolicy]:
+    allowed_sources: List[Tuple[str, List[str]]] = []
+    user_policy = ServiceAccessPolicy()
+
+    db = getattr(request.app.state, "database", None)
+    if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
+        return allowed_sources, user_policy
+
+    api_key_info = getattr(request.state, "api_key_info", None)
+    if api_key_info:
+        api_allowed = normalize_service_scope(api_key_info.get("allowed_services"))
+        if api_allowed:
+            allowed_sources.append(("api_key", api_allowed))
+
+    if user.tenant_id:
+        try:
+            tenant = await db.get_tenant(user.tenant_id)
+            if tenant:
+                tenant_allowed = normalize_service_scope(tenant.get("allowed_services"))
+                if tenant_allowed:
+                    allowed_sources.append(("tenant", tenant_allowed))
+        except Exception:
+            pass
+
+    try:
+        user_record = await db.get_user(user.user_id)
+        if user_record:
+            user_policy = service_access_policy_from_metadata(user_record.get("metadata"))
+    except Exception:
+        pass
+
+    return allowed_sources, user_policy
 
 
 def _normalize_langgraph_connector_config(definition: dict) -> None:
@@ -189,8 +300,8 @@ async def register_service(
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    # 权限：需要 service:manage 或 admin
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
+    # 权限：ServiceConfigWrite capability
+    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
     try:
         normalized_definition = dict(definition)
         if isinstance(definition.get("connector_config"), dict):
@@ -212,62 +323,83 @@ async def list_services(
     tags: Optional[List[str]] = Query(default=None),
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
-    """列出服务（需要 service:view 权限）
+    """列出服务（需要 ServiceListRead capability）
 
     返回所有服务，包括：
     - 虚拟服务（AI 助手）：内置多功能助手
     - LangGraph 服务：外部 LangGraph Agent
     - 代理服务：LLM API 代理
     """
-    # 权限检查：需要 service:view 权限
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:view")
+    # 权限检查：ServiceListRead capability（兼容 legacy alias）
+    _require_capability(request, auth, Capability.SERVICE_LIST_READ)
+
+    is_admin = "admin" in auth.roles
+    allowed_sources, user_policy = await _load_access_constraints(request, user)
 
     # 构建虚拟服务列表（内置服务，不在数据库中）
     virtual_services = []
 
     # AI 助手虚拟服务
-    assistant_service = getattr(request.app.state, "assistant_service", None)
     if service_type is None or service_type == "assistant":
-        virtual_services.append({
-            "service_id": "assistant",
-            "name": "AI 助手",
-            "description": "内置多功能 AI 助手，支持知识库检索、网页搜索、工具调用、图像生成",
-            "version": "2.0.0",
-            "service_type": "assistant",
-            "supported_modes": ["chat", "stream"],
-            "accepted_content_types": ["application/json"],
-            "output_content_types": ["application/json", "text/event-stream"],
-            "status": "active" if assistant_service else "unavailable",
-            "tags": ["builtin", "assistant", "rag", "tools"],
-            "metadata": {
-                "is_virtual": True,
-                "endpoint": "/api/v1/assistant",
-                "features": ["chat", "stream", "rag", "web_search", "tools", "image_generation"],
-            },
-        })
+        assistant_aliases = ["assistant", "ai 助手", "ai assistant"]
+        if _service_visible_with_scopes(
+            aliases=assistant_aliases,
+            allowed_sources=allowed_sources,
+            user_policy=user_policy,
+            is_admin=is_admin,
+        ):
+            assistant_service = getattr(request.app.state, "assistant_service", None)
+            virtual_services.append({
+                "service_id": "assistant",
+                "name": "AI 助手",
+                "description": "内置多功能 AI 助手，支持知识库检索、网页搜索、工具调用、图像生成",
+                "version": "2.0.0",
+                "service_type": "assistant",
+                "supported_modes": ["chat", "stream"],
+                "accepted_content_types": ["application/json"],
+                "output_content_types": ["application/json", "text/event-stream"],
+                "status": "active" if assistant_service else "unavailable",
+                "tags": ["builtin", "assistant", "rag", "tools"],
+                "metadata": {
+                    "is_virtual": True,
+                    "endpoint": "/api/v1/assistant",
+                    "features": ["chat", "stream", "rag", "web_search", "tools", "image_generation"],
+                },
+            })
 
     # 从数据库获取注册的服务
     st = ServiceType(service_type) if service_type and service_type not in ["assistant"] else None
     db_services = await registry.list(service_type=st, tags=tags)
 
     # 转换数据库服务为字典
-    db_service_list = [
-        {
-            "service_id": s.service_id,
-            "name": s.name,
-            "description": s.description,
-            "version": s.version,
-            "service_type": s.service_type,
-            "supported_modes": s.supported_modes,
-            "accepted_content_types": s.accepted_content_types,
-            "output_content_types": s.output_content_types,
-            "status": s.status,
-            "tags": s.tags,
-            "metadata": s.metadata,
-        }
-        for s in db_services
-    ]
+    db_service_list = []
+    for s in db_services:
+        aliases = [s.service_id, s.name]
+        if not _service_visible_with_scopes(
+            aliases=aliases,
+            allowed_sources=allowed_sources,
+            user_policy=user_policy,
+            is_admin=is_admin,
+        ):
+            continue
+
+        db_service_list.append(
+            {
+                "service_id": s.service_id,
+                "name": s.name,
+                "description": s.description,
+                "version": s.version,
+                "service_type": s.service_type,
+                "supported_modes": s.supported_modes,
+                "accepted_content_types": s.accepted_content_types,
+                "output_content_types": s.output_content_types,
+                "status": s.status,
+                "tags": s.tags,
+                "metadata": s.metadata,
+            }
+        )
 
     # 合并虚拟服务和数据库服务（虚拟服务在前）
     return virtual_services + db_service_list
@@ -279,17 +411,27 @@ async def get_service(
     request: Request,
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
+    user: UserContext = Depends(get_user_context),
 ):
-    """获取服务详情（需要 service:view 权限，非管理员脱敏敏感字段）"""
-    # 权限检查：需要 service:view 权限
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:view")
+    """获取服务详情（需要 ServiceListRead capability，非管理员脱敏敏感字段）"""
+    # 权限检查：ServiceListRead capability（兼容 legacy alias）
+    _require_capability(request, auth, Capability.SERVICE_LIST_READ)
 
     service = await registry.get(service_id)
     if not service:
         raise HTTPException(status_code=404, detail="service not found")
 
-    # 非管理员需要脱敏敏感配置
     is_admin = "admin" in auth.roles
+    allowed_sources, user_policy = await _load_access_constraints(request, user)
+    if not _service_visible_with_scopes(
+        aliases=[service.service_id, service.name],
+        allowed_sources=allowed_sources,
+        user_policy=user_policy,
+        is_admin=is_admin,
+    ):
+        raise HTTPException(status_code=403, detail="service not accessible")
+
+    # 非管理员需要脱敏敏感配置
     return _service_to_dict(service, mask_secrets=not is_admin)
 
 @router.put("/services/{service_id}")
@@ -300,8 +442,8 @@ async def update_service(
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    # 权限：需要 service:manage 或 admin
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
+    # 权限：ServiceConfigWrite capability
+    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
 
     service = await registry.get(service_id)
     if not service:
@@ -338,8 +480,8 @@ async def delete_service(
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    # 权限：需要 service:manage 或 admin
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
+    # 权限：ServiceConfigWrite capability
+    _require_capability(request, auth, Capability.SERVICE_CONFIG_WRITE)
 
     deleted = False
     if hasattr(registry.storage, "delete"):
@@ -359,9 +501,11 @@ async def delete_service(
 @router.get("/services/{service_id}/schema")
 async def get_service_schema(
     service_id: str,
+    request: Request,
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
 ):
+    _require_capability(request, auth, Capability.SERVICE_LIST_READ)
     service = await registry.get(service_id)
     if not service:
         raise HTTPException(status_code=404, detail="service not found")

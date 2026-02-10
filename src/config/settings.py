@@ -65,11 +65,52 @@ class AuthenticationSettings(BaseModel):
 class RBACSettings(BaseModel):
     roles: Dict[str, List[str]] = Field(
         default_factory=lambda: {
-            # Anonymous/guest users. Keep minimal permissions; per-service auth
-            # config should still be used to require authenticated roles where needed.
-            "guest": ["service:invoke"],
-            "user": ["service:invoke", "task:read"],
-            "developer": ["service:invoke", "task:read", "service:manage", "knowledge:manage"],
+            # Keep fallback roles aligned with DB-backed RBAC defaults.
+            # When DB is unavailable these mappings remain capability-compatible.
+            "guest": ["console:dashboard:view"],
+            "user": [
+                "console:dashboard:view",
+                "conversation:playground:access",
+                "conversation:thread:create",
+            ],
+            "manager": [
+                "console:dashboard:view",
+                "console:services:view",
+                "console:settings:view",
+                "conversation:playground:access",
+                "conversation:thread:create",
+                "conversation:thread:delete",
+                "knowledge:dataset:create",
+                "knowledge:dataset:edit",
+                "knowledge:dataset:view",
+                "user:list",
+            ],
+            "cs_staff": [
+                "console:dashboard:view",
+                "conversation:playground:access",
+                "conversation:thread:create",
+                "conversation:thread:delete",
+                "knowledge:dataset:view",
+            ],
+            "sales_staff": [
+                "console:dashboard:view",
+                "conversation:playground:access",
+                "conversation:thread:create",
+                "conversation:thread:delete",
+                "knowledge:dataset:view",
+            ],
+            "developer": [
+                "console:dashboard:view",
+                "console:services:view",
+                "console:services:edit",
+                "console:settings:view",
+                "conversation:playground:access",
+                "conversation:thread:create",
+                "conversation:thread:delete",
+                "knowledge:dataset:create",
+                "knowledge:dataset:edit",
+                "knowledge:dataset:view",
+            ],
             "admin": ["admin:*"],
         }
     )

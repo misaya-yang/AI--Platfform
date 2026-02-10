@@ -60,9 +60,13 @@ class ProxyServiceConfig:
     forward_auth: bool = True  # 是否转发原始 Authorization 头
 
     # 限流配置
-    rate_limit_enabled: bool = True
+    rate_limit_enabled: bool = False
     rate_limit_requests: int = 100
     rate_limit_window: int = 60
+
+    # 响应缓存配置
+    cache_enabled: bool = False
+    cache_ttl: int = 300
 
     # 负载均衡
     load_balance_strategy: str = "round_robin"  # round_robin | least_connections | random
@@ -233,6 +237,7 @@ class ProxyConfigLoader:
 
         # 提取限流配置
         rate_limit = service_config.get("rate_limit") or {}
+        cache_config = service_config.get("cache") or {}
 
         def _pick_identity(*keys: str) -> Optional[str]:
             for key in keys:
@@ -272,9 +277,11 @@ class ProxyConfigLoader:
             timeout_pool=connector_config.get("timeout_pool", 60.0),
             auth_token=connector_config.get("auth_token"),
             forward_auth=connector_config.get("forward_auth", True),
-            rate_limit_enabled=rate_limit.get("enabled", True),
+            rate_limit_enabled=rate_limit.get("enabled", False),
             rate_limit_requests=rate_limit.get("requests", 100),
             rate_limit_window=rate_limit.get("window", 60),
+            cache_enabled=cache_config.get("enabled", False),
+            cache_ttl=cache_config.get("ttl", 300),
             load_balance_strategy=connector_config.get("load_balance_strategy", "round_robin"),
             metadata=metadata,
             enabled=row_dict.get("status") == "active",

@@ -1,11 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
-import { getHealth, listServices, getProvidersHealth } from "@/api/gateway";
+import {
+  getHealth,
+  listProxyServices,
+  listServices,
+  getProvidersHealth,
+} from "@/api/gateway";
 
 export function useServices() {
   return useQuery({
     queryKey: ["services"],
     queryFn: listServices,
     staleTime: 30000, // 30秒内不重新请求，避免重复调用
+  });
+}
+
+export function usePlaygroundServices() {
+  return useQuery({
+    queryKey: ["playground-services"],
+    queryFn: listProxyServices,
+    staleTime: 30000,
   });
 }
 
@@ -26,4 +39,3 @@ export function useProvidersHealth() {
     refetchInterval: 60000, // 每分钟刷新
   });
 }
-

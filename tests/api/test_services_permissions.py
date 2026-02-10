@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi import HTTPException
+
+from src.api.deps import AuthContext
+from src.api.v1.services import list_services, register_service
+from src.config.settings import Settings
+from src.core.auth.rbac import RBAC
+from src.core.auth.user_resolver import UserContext
+
+
+def _make_request(request_id: str = "req-services-001") -> SimpleNamespace:
+    settings = Settings()
+    request = SimpleNamespace()
+    request.app = SimpleNamespace()
+    request.app.state = SimpleNamespace()
+    request.app.state.dispatcher = SimpleNamespace(
+        rbac=RBAC(role_permissions=settings.rbac.roles)
+    )
+    request.app.state.assistant_service = None
+    request.state = SimpleNamespace(request_id=request_id)
+    return request
+
+
+@pytest.mark.asyncio
+async def test_list_services_requires_service_list_read_capability() -> None:
+    request = _make_request()
+    registry = SimpleNamespace(list=AsyncMock(return_value=[]))
+
+    with pytest.raises(HTTPException) as exc:
+        await list_services(
+            request=request,
+            service_type=None,
+            tags=None,
+            registry=registry,
+            auth=AuthContext(user_id="u1", tenant_id="t1", roles=["user"], permissions=[]),
+            user=UserContext(
+                user_id="u1",
+                tenant_id="t1",
+                tier="normal",
+                is_authenticated=True,
+                roles=["user"],
+                ip="127.0.0.1",
+            ),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail["required_capability"] == "ServiceListRead"
+    assert exc.value.detail["required_permission"] == "console:services:view"
+
+
+@pytest.mark.asyncio
+async def test_list_services_accepts_manager_role() -> None:
+    request = _make_request()
+    registry = SimpleNamespace(list=AsyncMock(return_value=[]))
+
+    result = await list_services(
+        request=request,
+        service_type=None,
+        tags=None,
+        registry=registry,
+        auth=AuthContext(user_id="manager_1", tenant_id="t1", roles=["manager"], permissions=[]),
+        user=UserContext(
+            user_id="manager_1",
+            tenant_id="t1",
+            tier="normal",
+            is_authenticated=True,
+            roles=["manager"],
+            ip="127.0.0.1",
+        ),
+    )
+
+    assert isinstance(result, list)
+    assert any(item.get("service_id") == "assistant" for item in result)
+
+
+@pytest.mark.asyncio
+async def test_register_service_accepts_legacy_service_manage_alias() -> None:
+    request = _make_request()
+    registry = MagicMock()
+    registry._service_from_dict.return_value = SimpleNamespace(service_id="svc_legacy")
+    registry.register = AsyncMock()
+
+    result = await register_service(
+        request=request,
+        definition={"service_id": "svc_legacy", "name": "Legacy Service"},
+        registry=registry,
+        auth=AuthContext(
+            user_id="dev_1",
+            tenant_id="t1",
+            roles=["service:manage"],
+            permissions=[],
+        ),
+    )
+
+    assert result["status"] == "registered"
+    assert result["service_id"] == "svc_legacy"

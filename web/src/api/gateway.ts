@@ -3,6 +3,7 @@ import type {
   HealthStatus,
   ServiceDefinition,
   ServiceDetail,
+  ServiceUiPreferences,
   Task,
   UnifiedRequest,
   UnifiedResponse,
@@ -11,6 +12,35 @@ import type {
 export async function listServices() {
   const { data } = await api.get<ServiceDefinition[]>("/api/v1/services");
   return data;
+}
+
+export interface ProxyServiceSummary {
+  service_id: string;
+  name: string;
+  enabled: boolean;
+  service_type?: string;
+  metadata?: {
+    ui_preferences?: ServiceUiPreferences;
+    adapter_type?: string;
+  };
+}
+
+export async function listProxyServices(): Promise<ProxyServiceSummary[]> {
+  const { data } = await api.get<{
+    services: Array<{
+      service_id: string;
+      service_name: string;
+      enabled: boolean;
+    }>;
+  }>("/api/v1/proxy");
+
+  return (data.services || []).map((service) => ({
+    service_id: service.service_id,
+    name: service.service_name || service.service_id,
+    enabled: Boolean(service.enabled),
+    service_type: undefined,
+    metadata: {},
+  }));
 }
 
 export async function getHealth() {

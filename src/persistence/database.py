@@ -3173,12 +3173,17 @@ class DatabaseStorage:
         service_id: Optional[str],
         event_type: str,
         event_date: Optional[date] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record a security event into daily aggregates."""
         if not self._pool:
             return
         if event_date is None:
             event_date = datetime.utcnow().date()
+
+        # Current aggregate table does not persist metadata columns.
+        # Keep parameter for forward compatibility and structured callsites.
+        _ = metadata
 
         async with self._pool.acquire() as conn:
             await conn.execute(

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useServices } from "@/hooks/useServices";
+import { usePlaygroundServices } from "@/hooks/useServices";
 import { invokeService } from "@/api/gateway";
 import {
   createSession,
@@ -411,7 +411,7 @@ function convertToolCallsFromMetadata(toolCalls?: SessionMessageToolCall[]): Too
 
 export function PlaygroundPage() {
   const { t } = useTranslation();
-  const servicesQuery = useServices();
+  const servicesQuery = usePlaygroundServices();
   // 过滤掉内置的 "AI助手" 服务 (service_id: "assistant")
   // 该服务应该只在 AI助手 页面使用，不应该出现在智能对话的服务选择器中
   const services = (servicesQuery.data || []).filter(

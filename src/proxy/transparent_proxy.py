@@ -25,6 +25,7 @@ import httpx
 from .billing_interceptor import BillingInterceptor, StreamProcessor
 from .config_loader import ProxyConfigLoader, ProxyServiceConfig
 from .context_injector import ContextInjector, RequestContext
+from .response_cache import ResponseCache
 from ..core.observability.logging import get_logger
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
@@ -157,6 +158,7 @@ class TransparentProxy:
         config_loader: ProxyConfigLoader,
         context_injector: Optional[ContextInjector] = None,
         billing_interceptor: Optional[BillingInterceptor] = None,
+        response_cache: Optional[ResponseCache] = None,
         default_timeout: float = 60.0,
     ):
         """
@@ -171,6 +173,7 @@ class TransparentProxy:
         self.config_loader = config_loader
         self.context_injector = context_injector or ContextInjector()
         self.billing_interceptor = billing_interceptor
+        self.response_cache = response_cache or ResponseCache(database=config_loader.database)
         self.default_timeout = default_timeout
 
         # HTTP 客户端池（按服务维护）
@@ -911,6 +914,33 @@ class TransparentProxy:
     ) -> ProxyResponse:
         """执行普通（非流式）代理请求"""
         request_started = time.perf_counter()
+
+        cache_status = "BYPASS"
+        cache_hash: Optional[str] = None
+        if self.response_cache:
+            cache_status, cache_hash, cached_response = await self.response_cache.get_cached_response(
+                config=config,
+                context=context,
+                method=method,
+                path=path,
+                body=body,
+                query_params=params,
+                stream=False,
+            )
+            if cached_response:
+                cached_headers = self._filter_response_headers(dict(cached_response.headers))
+                cached_headers["X-Gateway-Cache"] = "HIT"
+                logger.info(
+                    f"[ProxyCache] HIT service={config.service_id} path={self._normalize_path(path)} "
+                    f"user={context.user_id or 'anonymous'}"
+                )
+                return ProxyResponse(
+                    status_code=cached_response.status_code,
+                    headers=cached_headers,
+                    body=cached_response.body,
+                    is_streaming=False,
+                )
+
         response = await client.request(
             method=method,
             url=url,
@@ -935,6 +965,7 @@ class TransparentProxy:
 
         # 提取响应头（过滤 hop-by-hop 头）
         response_headers = self._filter_response_headers(dict(response.headers))
+        response_headers["X-Gateway-Cache"] = cache_status
 
         # 非流式路径也需要做 usage 统计（例如 /runs/wait）。
         await self._record_non_stream_usage(
@@ -948,6 +979,21 @@ class TransparentProxy:
             duration_ms=duration_ms,
             status_code=response.status_code,
         )
+
+        if self.response_cache and cache_status == "MISS":
+            await self.response_cache.save_response(
+                cache_hash=cache_hash,
+                config=config,
+                context=context,
+                method=method,
+                path=path,
+                body=body,
+                query_params=params,
+                response_status=response.status_code,
+                response_headers=response_headers,
+                response_body=response.content,
+                stream=False,
+            )
 
         # 错误透传：原样返回上游的 4xx/5xx 响应，不用网关错误覆盖
         # 这样前端可以获取到原始的业务错误信息
@@ -1034,6 +1080,7 @@ class TransparentProxy:
 
         response_content_type = response.headers.get("content-type", "")
         response_headers = self._filter_response_headers(dict(response.headers))
+        response_headers["X-Gateway-Cache"] = "BYPASS"
 
         # 错误透传：4xx/5xx 错误原样返回，不覆盖
         if response.status_code >= 400:
@@ -1119,6 +1166,7 @@ class TransparentProxy:
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",  # 禁用 nginx 缓冲
+                "X-Gateway-Cache": "BYPASS",
             },
             stream=stream_generator(),
             is_streaming=True,

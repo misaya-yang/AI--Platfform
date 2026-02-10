@@ -7,7 +7,12 @@ from fastapi import HTTPException
 
 from src.api.deps import get_auth_context
 from src.api.v1.users import ProfileUpdate, update_user_profile
-from src.config.settings import Settings, AuthenticationSettings, AuthJWTSettings
+from src.config.settings import (
+    Settings,
+    AuthenticationSettings,
+    AuthJWTSettings,
+    AuthAPIKeySettings,
+)
 from src.core.auth.rbac import RBAC
 from src.core.auth.user_resolver import UserContext
 from src.core.exceptions import AuthError
@@ -38,6 +43,15 @@ def _make_settings() -> Settings:
             secret=TEST_JWT_SECRET,
             algorithms=[TEST_JWT_ALGORITHM],
         )
+    )
+    return settings
+
+
+def _make_api_key_settings() -> Settings:
+    settings = Settings()
+    settings.authentication = AuthenticationSettings(
+        jwt=AuthJWTSettings(enabled=False, secret=TEST_JWT_SECRET, algorithms=[TEST_JWT_ALGORITHM]),
+        api_key=AuthAPIKeySettings(enabled=True, header_name="X-API-Key"),
     )
     return settings
 
@@ -95,6 +109,33 @@ async def test_auth_context_revoked_token_denied():
 
     with pytest.raises(AuthError):
         await get_auth_context(request, settings)
+
+
+@pytest.mark.asyncio
+async def test_auth_context_api_key_merges_db_permissions():
+    class FakeDB:
+        enabled = True
+
+        async def get_api_key(self, key_hash: str):
+            return {
+                "key_hash": key_hash,
+                "user_id": "api_user_1",
+                "tenant_id": "tenant_1",
+                "roles": ["user"],
+            }
+
+        async def get_user_permissions(self, user_id: str):
+            return ["conversation:playground:access"]
+
+    request = SimpleNamespace()
+    request.headers = {"X-API-Key": "gw_test_key"}
+    request.app = SimpleNamespace()
+    request.app.state = SimpleNamespace(database=FakeDB(), redis=None)
+    request.state = SimpleNamespace(api_key_info=None, api_key_hash=None)
+
+    ctx = await get_auth_context(request, _make_api_key_settings())
+    assert "conversation:playground:access" in ctx.permissions
+    assert "conversation:playground:access" in ctx.roles
 
 
 @pytest.mark.asyncio

@@ -100,6 +100,7 @@ class CurrentUserResponse(BaseModel):
     department: Optional[str]
     roles: List[str]
     permissions: List[str]
+    effective_permissions: List[str] = Field(default_factory=list)
     tier: str
     force_password_change: bool
 
@@ -119,6 +120,37 @@ def _get_client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _compute_effective_permissions(
+    request: Request,
+    roles: Optional[List[str]],
+    explicit_permissions: Optional[List[str]],
+) -> List[str]:
+    """Build a de-duplicated permission view for frontend governance UI."""
+    effective: List[str] = []
+
+    for perm in explicit_permissions or []:
+        value = str(perm or "").strip()
+        if value and value not in effective:
+            effective.append(value)
+
+    for role in roles or []:
+        token = str(role or "").strip()
+        if ":" in token and token not in effective:
+            effective.append(token)
+
+    dispatcher = getattr(request.app.state, "dispatcher", None)
+    rbac = getattr(dispatcher, "rbac", None)
+    if rbac and hasattr(rbac, "permissions_for_roles"):
+        try:
+            for perm in rbac.permissions_for_roles(roles or []):
+                if perm not in effective:
+                    effective.append(perm)
+        except Exception:
+            pass
+
+    return effective
 
 
 # ============================================================
@@ -432,25 +464,44 @@ async def get_current_user(
         user_data = await db.get_user(user.user_id)
         if user_data:
             permissions = await db.get_user_permissions(user.user_id)
+            roles = user_data.get("roles", user.roles or [])
+            effective_permissions = _compute_effective_permissions(
+                request=request,
+                roles=roles,
+                explicit_permissions=permissions,
+            )
             return CurrentUserResponse(
                 user_id=user_data.get("user_id", user.user_id),
                 email=user_data.get("email"),
                 display_name=user_data.get("display_name"),
                 department=user_data.get("department"),
-                roles=user_data.get("roles", user.roles or []),
+                roles=roles,
                 permissions=permissions,
+                effective_permissions=effective_permissions,
                 tier=user_data.get("tier", user.tier),
                 force_password_change=user_data.get("force_password_change", False),
             )
 
     # Fallback to context info if DB unavailable
+    fallback_permissions: List[str] = []
+    fallback_roles = user.roles or []
+    for token in fallback_roles:
+        value = str(token or "").strip()
+        if ":" in value and value not in fallback_permissions:
+            fallback_permissions.append(value)
+
     return CurrentUserResponse(
         user_id=user.user_id,
         email=None,
         display_name=None,
         department=None,
-        roles=user.roles or [],
-        permissions=[],
+        roles=fallback_roles,
+        permissions=fallback_permissions,
+        effective_permissions=_compute_effective_permissions(
+            request=request,
+            roles=fallback_roles,
+            explicit_permissions=fallback_permissions,
+        ),
         tier=user.tier,
         force_password_change=False,
     )

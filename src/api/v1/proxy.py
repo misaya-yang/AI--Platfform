@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -25,18 +25,31 @@ from ..deps import (
     AuthContext,
 )
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError
+from ...core.auth.permissions import (
+    Capability,
+    build_permission_denied_detail,
+    check_capability,
+)
+from ...core.auth.service_access import (
+    ServiceAccessPolicy,
+    evaluate_service_access,
+    normalize_service_scope,
+    service_access_policy_from_metadata,
+    service_scope_matches,
+)
 from ...core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimiter,
     RateLimitContext,
     RateLimitHeaders,
 )
 from ...core.observability.logging import get_logger
+from ...core.observability.metrics import get_metrics
 from ...core.utils import estimate_tokens
 from ...proxy import (
     TransparentProxy,
     ProxyRequest,
     ProxyConfigLoader,
+    ProxyServiceConfig,
     RequestContext,
 )
 from ...services.billing import get_quota_service
@@ -53,6 +66,7 @@ async def _record_security_event(
     tenant_id: str,
     user_id: str,
     service_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
         from ...services.metrics import get_security_event_recorder
@@ -63,8 +77,39 @@ async def _record_security_event(
             user_id=user_id or None,
             service_id=service_id,
             event_type=event_type,
+            metadata=metadata,
         )
     except Exception:
+        pass
+
+
+def _current_trace_id(request: Request) -> str:
+    request_id = getattr(request.state, "request_id", "")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    trace_id = getattr(request.state, "trace_id", "")
+    if isinstance(trace_id, str):
+        return trace_id
+    return ""
+
+
+def _record_rate_limit_decision(dimension: str, service_name: str, allowed: bool) -> None:
+    try:
+        metrics = get_metrics()
+        result = "allowed" if allowed else "blocked"
+        if hasattr(metrics.request_metrics, "record_rate_limit_decision"):
+            metrics.request_metrics.record_rate_limit_decision(
+                dimension=dimension,
+                service_id=service_name,
+                result=result,
+            )
+        if not allowed:
+            metrics.request_metrics.record_rate_limit(
+                dimension=dimension,
+                service_id=service_name,
+            )
+    except Exception:
+        # Metrics must not break proxy path.
         pass
 
 
@@ -97,13 +142,7 @@ def get_proxy_config_loader(request: Request) -> ProxyConfigLoader:
 
 
 def _normalize_allowed_services(value: Any) -> List[str]:
-    if not value:
-        return []
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [str(v) for v in value if v]
-    return []
+    return normalize_service_scope(value)
 
 
 def _normalize_allowed_models(value: Any) -> List[str]:
@@ -376,11 +415,119 @@ async def _resolve_service_definition(registry, service_name: str):
 
 
 def _service_allowed(allowed: List[str], candidates: set) -> bool:
-    if not allowed:
-        return True
-    if "*" in allowed:
-        return True
-    return any(name in allowed for name in candidates)
+    return service_scope_matches(allowed, list(candidates))
+
+
+async def _load_service_access_constraints(
+    request: Request,
+    user: UserContext,
+) -> Tuple[List[Tuple[str, List[str]]], ServiceAccessPolicy]:
+    """Collect API key / tenant / user-level service access constraints."""
+    allowed_sources: List[Tuple[str, List[str]]] = []
+    user_policy = ServiceAccessPolicy()
+
+    db = getattr(request.app.state, "database", None)
+    if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
+        return allowed_sources, user_policy
+
+    api_key_info = getattr(request.state, "api_key_info", None)
+    if api_key_info:
+        api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
+        if api_allowed:
+            allowed_sources.append(("api_key", api_allowed))
+
+    if user.tenant_id:
+        try:
+            tenant = await db.get_tenant(user.tenant_id)
+            if tenant:
+                tenant_allowed = _normalize_allowed_services(tenant.get("allowed_services"))
+                if tenant_allowed:
+                    allowed_sources.append(("tenant", tenant_allowed))
+        except Exception as exc:
+            logger.warning(
+                "[ProxyAuth] Failed to load tenant allowed_services for tenant %s: %s",
+                user.tenant_id,
+                exc,
+            )
+
+    if user.user_id:
+        try:
+            user_record = await db.get_user(user.user_id)
+            if user_record:
+                user_policy = service_access_policy_from_metadata(user_record.get("metadata"))
+        except Exception as exc:
+            logger.warning(
+                "[ProxyAuth] Failed to load user service access policy for user %s: %s",
+                user.user_id,
+                exc,
+            )
+
+    return allowed_sources, user_policy
+
+
+async def _enforce_service_access_constraints(
+    request: Request,
+    service_name: str,
+    service_aliases: set,
+    user: UserContext,
+    auth: AuthContext,
+) -> None:
+    allowed_sources, user_policy = await _load_service_access_constraints(request, user)
+
+    for source, allowed in allowed_sources:
+        if _service_allowed(allowed, service_aliases):
+            continue
+        logger.warning(
+            f"[ProxyAuth] Service {service_name} blocked by {source} allowed_services for user {user.user_id}"
+        )
+        await _record_security_event(
+            event_type="auth_failed",
+            tenant_id=auth.tenant_id or user.tenant_id,
+            user_id=user.user_id,
+            service_id=service_name,
+            metadata={
+                "permission_check": {
+                    "scope_source": source,
+                    "scope": allowed,
+                    "service_aliases": sorted(service_aliases),
+                }
+            },
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission denied: service {service_name} not in allowed services",
+        )
+
+    if "admin" in auth.roles:
+        return
+
+    permitted, reason = evaluate_service_access(user_policy, list(service_aliases))
+    if permitted:
+        return
+
+    logger.warning(
+        f"[ProxyAuth] Service {service_name} blocked by user service_access policy for user {user.user_id}: {reason}"
+    )
+    await _record_security_event(
+        event_type="auth_failed",
+        tenant_id=auth.tenant_id or user.tenant_id,
+        user_id=user.user_id,
+        service_id=service_name,
+        metadata={
+            "permission_check": {
+                "scope_source": "user_policy",
+                "reason": reason,
+                "policy_mode": user_policy.mode.value,
+                "allowed_services": list(user_policy.allowed_services),
+                "denied_services": list(user_policy.denied_services),
+                "service_aliases": sorted(service_aliases),
+            }
+        },
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=f"Permission denied: service {service_name} blocked by user policy",
+    )
 
 
 async def check_service_authorization(
@@ -393,24 +540,44 @@ async def check_service_authorization(
     检查用户对服务的访问权限
 
     验证顺序:
-    1. 基本 RBAC 权限 (service:invoke)
+    1. 基础 capability 权限 (AgentInvoke)
     2. 服务级别认证配置 (allowed_roles, public)
     3. 用户/API Key 级别 allowed_services (如果配置)
     """
-    # 1. RBAC 权限检查: 需要 service:invoke 权限
-    try:
-        request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
-    except PermissionDeniedError:
+    # 1. Capability 检查（兼容 canonical + legacy alias）
+    decision = check_capability(
+        rbac=request.app.state.dispatcher.rbac,
+        roles=auth.roles,
+        permissions=auth.permissions,
+        capability=Capability.AGENT_INVOKE,
+    )
+    if not decision.allowed:
+        trace_id = _current_trace_id(request)
         await _record_security_event(
             event_type="auth_failed",
             tenant_id=auth.tenant_id or user.tenant_id,
             user_id=user.user_id,
             service_id=service_name,
+            metadata={
+                "permission_check": {
+                    "required_capability": Capability.AGENT_INVOKE.value,
+                    "required_permission": decision.required_permission,
+                    "accepted_permissions": list(decision.accepted_permissions),
+                    "trace_id": trace_id,
+                }
+            },
         )
         logger.warning(
-            f"[ProxyAuth] User {user.user_id} lacks service:invoke permission for {service_name}"
+            f"[ProxyAuth] User {user.user_id} lacks {decision.required_permission} "
+            f"for {service_name} trace={trace_id}"
         )
-        raise HTTPException(status_code=403, detail="Permission denied: service:invoke required")
+        raise HTTPException(
+            status_code=403,
+            detail=build_permission_denied_detail(
+                capability=Capability.AGENT_INVOKE,
+                trace_id=trace_id,
+            ),
+        )
 
     # 2. 服务级别认证配置检查
     registry = getattr(request.app.state, "registry", None)
@@ -500,45 +667,14 @@ async def check_service_authorization(
                                 detail=f"Permission denied: API key not allowed for service {service_name}",
                             )
 
-    # 3. 用户/API Key 级别 allowed_services 检查
-    db = getattr(request.app.state, "database", None)
-    if db and getattr(db, "enabled", False) and user.is_authenticated:
-        try:
-            allowed_sets: List[List[str]] = []
-
-            api_key_info = getattr(request.state, "api_key_info", None)
-            if api_key_info:
-                api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
-                if api_allowed:
-                    allowed_sets.append(api_allowed)
-
-            if user.tenant_id:
-                tenant = await db.get_tenant(user.tenant_id)
-                if tenant:
-                    tenant_allowed = _normalize_allowed_services(tenant.get("allowed_services"))
-                    if tenant_allowed:
-                        allowed_sets.append(tenant_allowed)
-
-            for allowed in allowed_sets:
-                if not _service_allowed(allowed, service_aliases):
-                    logger.warning(
-                        f"[ProxyAuth] Service {service_name} not in allowed_services for user {user.user_id}"
-                    )
-                    await _record_security_event(
-                        event_type="auth_failed",
-                        tenant_id=auth.tenant_id or user.tenant_id,
-                        user_id=user.user_id,
-                        service_id=getattr(service, "service_id", None) or service_name,
-                    )
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"Permission denied: service {service_name} not in allowed services",
-                    )
-        except HTTPException:
-            raise
-        except Exception:
-            # 如果方法不存在或查询失败，继续（不阻止访问）
-            pass
+    # 3. 用户/API Key/租户级访问约束
+    await _enforce_service_access_constraints(
+        request=request,
+        service_name=service_name,
+        service_aliases=service_aliases,
+        user=user,
+        auth=auth,
+    )
 
 
 async def check_proxy_rate_limit(
@@ -546,9 +682,52 @@ async def check_proxy_rate_limit(
     rate_limiter: Optional[MultiDimensionRateLimiter],
     service_name: str,
     operation: str = "proxy",
+    service_config: Optional[ProxyServiceConfig] = None,
 ) -> None:
     """检查代理限流"""
     if not rate_limiter:
+        return
+
+    service_limit_enabled = bool(
+        service_config
+        and service_config.rate_limit_enabled
+        and int(service_config.rate_limit_requests or 0) > 0
+        and int(service_config.rate_limit_window or 0) > 0
+    )
+
+    if service_limit_enabled:
+        # Service-level limit has higher priority than global multi-dimension policies.
+        tenant_scope = (user.tenant_id or "public").strip() or "public"
+        subject = (user.user_id or user.ip or "anonymous").strip() or "anonymous"
+        safe_operation = str(operation or "proxy").strip() or "proxy"
+        key = f"ratelimit:service:{service_name}:{tenant_scope}:{subject}:{safe_operation}"
+        result = await rate_limiter.check_custom_limit(
+            key=key,
+            limit=int(service_config.rate_limit_requests),
+            window=int(service_config.rate_limit_window),
+            dimension=f"service:{service_name}",
+        )
+        _record_rate_limit_decision(result.dimension or "service", service_name, result.allowed)
+        if not result.allowed:
+            await _record_security_event(
+                event_type="rate_limited",
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                service_id=service_name,
+                metadata={
+                    "permission_check": {
+                        "dimension": result.dimension,
+                        "limit": result.limit,
+                        "remaining": result.remaining,
+                        "retry_after": result.retry_after,
+                    }
+                },
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=RateLimitHeaders.build_exceeded_response(result),
+                headers=RateLimitHeaders.build(result),
+            )
         return
 
     context = RateLimitContext.from_user_context(
@@ -558,6 +737,7 @@ async def check_proxy_rate_limit(
     )
 
     result = await rate_limiter.check(context)
+    _record_rate_limit_decision(result.dimension or "composite", service_name, result.allowed)
     if not result.allowed:
         await _record_security_event(
             event_type="rate_limited",
@@ -639,26 +819,35 @@ async def transparent_proxy_handler(
     # 2. 检测操作类型（用于限流）
     operation = TransparentProxy.detect_operation_type(request.method, path)
 
-    # 3. 限流检查
-    await check_proxy_rate_limit(user, rate_limiter, service_name, operation)
+    # 3. 读取服务配置（用于限流覆盖、默认模型、策略判定）
+    service_config = await config_loader.get_config(service_name)
+    t_config = time.perf_counter()
+
+    # 4. 限流检查
+    await check_proxy_rate_limit(
+        user=user,
+        rate_limiter=rate_limiter,
+        service_name=service_name,
+        operation=operation,
+        service_config=service_config,
+    )
     t_rate_limit = time.perf_counter()
 
-    # 3. 提取请求上下文
+    # 5. 提取请求上下文
     context = _build_request_context(request, user)
     t_context = time.perf_counter()
 
-    # 4. 读取请求体
+    # 6. 读取请求体
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     t_body = time.perf_counter()
 
-    # 5. 读取服务配置（用于默认模型、策略判定）
-    service_config = await config_loader.get_config(service_name)
+    # 7. 解析请求模型并应用服务默认值
     request_payload = _decode_json_body(body)
     requested_model = extract_model(request_payload)
     if not requested_model and service_config:
         requested_model = service_config.default_model
 
-    # 6. API Key 模型白名单
+    # 8. API Key 模型白名单
     await _enforce_model_allowlist(
         request=request,
         service_name=service_name,
@@ -667,7 +856,7 @@ async def transparent_proxy_handler(
         model=requested_model,
     )
 
-    # 7. 配额策略预检查（可触发拒绝/降级/告警）
+    # 9. 配额策略预检查（可触发拒绝/降级/告警）
     body, effective_model = await _apply_quota_policy(
         request=request,
         user=user,
@@ -682,10 +871,10 @@ async def transparent_proxy_handler(
         request.state.effective_model = effective_model
     t_policy = time.perf_counter()
 
-    # 8. 检查是否期望流式响应
+    # 10. 检查是否期望流式响应
     wants_stream = _wants_streaming(request, path)
 
-    # 9. 构建代理请求
+    # 11. 构建代理请求
     proxy_request = ProxyRequest(
         service_name=service_name,
         path=path,
@@ -701,7 +890,8 @@ async def transparent_proxy_handler(
     logger.info(
         f"[ProxyRoute][TIMING] {request.method} /proxy/{service_name}/{path} "
         f"auth_check={((t_auth_check - t_auth_done) * 1000):.1f}ms "
-        f"rate_limit={((t_rate_limit - t_auth_check) * 1000):.1f}ms "
+        f"config={((t_config - t_auth_check) * 1000):.1f}ms "
+        f"rate_limit={((t_rate_limit - t_config) * 1000):.1f}ms "
         f"context={((t_context - t_rate_limit) * 1000):.1f}ms "
         f"body_read={((t_body - t_context) * 1000):.1f}ms "
         f"policy={((t_policy - t_body) * 1000):.1f}ms "
@@ -795,18 +985,49 @@ async def list_proxy_services(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """列出可用的代理服务"""
-    # 权限检查：需要 service:invoke 权限才能查看服务列表
-    try:
-        request.app.state.dispatcher.rbac.require(auth.roles, "service:invoke")
-    except PermissionDeniedError:
-        raise HTTPException(status_code=403, detail="Permission denied: service:invoke required")
+    # 权限检查：需要 AgentInvoke capability（兼容 legacy alias）
+    decision = check_capability(
+        rbac=request.app.state.dispatcher.rbac,
+        roles=auth.roles,
+        permissions=auth.permissions,
+        capability=Capability.AGENT_INVOKE,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=build_permission_denied_detail(
+                capability=Capability.AGENT_INVOKE,
+                trace_id=_current_trace_id(request),
+            ),
+        )
 
     services = await config_loader.list_services()
     is_admin = "admin" in auth.roles
+    allowed_sources, user_policy = await _load_service_access_constraints(request, user)
 
-    # 非管理员只能看到基本信息，管理员可以看到完整信息
-    return {
-        "services": [
+    visible_services: List[Dict[str, Any]] = []
+    for svc in services:
+        aliases = {
+            str(getattr(svc, "service_id", "") or "").strip(),
+            str(getattr(svc, "service_name", "") or "").strip(),
+        }
+        aliases = {alias for alias in aliases if alias}
+
+        blocked = False
+        for _, allowed in allowed_sources:
+            if _service_allowed(allowed, aliases):
+                continue
+            blocked = True
+            break
+        if blocked:
+            continue
+
+        if not is_admin:
+            permitted, _ = evaluate_service_access(user_policy, list(aliases))
+            if not permitted:
+                continue
+
+        visible_services.append(
             {
                 "service_id": svc.service_id,
                 "service_name": svc.service_name,
@@ -815,9 +1036,12 @@ async def list_proxy_services(
                 "assistant_id": svc.assistant_id if is_admin else None,
                 "enabled": svc.enabled,
             }
-            for svc in services
-        ],
-        "count": len(services),
+        )
+
+    # 非管理员只能看到基本信息，管理员可以看到完整信息
+    return {
+        "services": visible_services,
+        "count": len(visible_services),
     }
 
 
@@ -860,7 +1084,14 @@ async def proxy_service_selftest(
     if "admin" not in auth.roles:
         raise HTTPException(status_code=403, detail="Admin access required for selftest endpoint")
 
-    await check_proxy_rate_limit(user, rate_limiter, service_name, operation="proxy_selftest")
+    config = await config_loader.get_config(service_name)
+    await check_proxy_rate_limit(
+        user=user,
+        rate_limiter=rate_limiter,
+        service_name=service_name,
+        operation="proxy_selftest",
+        service_config=config,
+    )
 
     context = _build_request_context(request, user)
     auth_present = any(k.lower() == "authorization" for k in request.headers.keys())
@@ -870,7 +1101,6 @@ async def proxy_service_selftest(
         "auth_header_present": auth_present,
     }
 
-    config = await config_loader.get_config(service_name)
     if config:
         # 脱敏处理：只显示部分信息，避免暴露敏感配置
         masked_assistant_id = (
@@ -992,9 +1222,11 @@ def _build_request_context(request: Request, user: UserContext) -> RequestContex
     request_id = getattr(request.state, "request_id", "")
     trace_id = getattr(request.state, "trace_id", "")
     span_id = getattr(request.state, "span_id", "")
+    api_key_id = str(getattr(request.state, "api_key_hash", "") or "")
 
     return RequestContext(
         user_id=user.user_id,
+        api_key_id=api_key_id,
         tenant_id=user.tenant_id,
         user_tier=user.tier,
         is_authenticated=user.is_authenticated,

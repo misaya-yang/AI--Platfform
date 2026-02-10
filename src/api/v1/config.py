@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...core.auth.permissions import (
+    Capability,
+    build_permission_denied_detail,
+    check_capability,
+)
 from ...core.observability.logging import get_logger
 from ..deps import AuthContext, get_auth_context, get_settings
 
@@ -54,8 +59,14 @@ class AuthConfigUpdate(BaseModel):
 class ApiKeyCreate(BaseModel):
     """创建 API Key"""
     name: str
+    description: Optional[str] = None
     tenant_id: Optional[str] = None
+    user_id: Optional[str] = None
     roles: List[str] = ["user"]
+    permissions: List[str] = []
+    allowed_services: List[str] = []
+    allowed_models: List[str] = []
+    tier: str = "normal"
 
 
 # ===== 运行时配置存储 =====
@@ -86,8 +97,22 @@ async def create_langgraph_service(
 ):
     """快速注册 LangGraph 服务（支持透明代理模式）"""
     registry = request.app.state.registry
-    # 权限：需要 service:manage 或 admin
-    request.app.state.dispatcher.rbac.require(auth.roles, "service:manage")
+    # 权限：ServiceConfigWrite capability（兼容 legacy alias）
+    decision = check_capability(
+        rbac=request.app.state.dispatcher.rbac,
+        roles=auth.roles,
+        permissions=auth.permissions,
+        capability=Capability.SERVICE_CONFIG_WRITE,
+    )
+    if not decision.allowed:
+        trace_id = str(getattr(request.state, "request_id", "") or "")
+        raise HTTPException(
+            status_code=403,
+            detail=build_permission_denied_detail(
+                capability=Capability.SERVICE_CONFIG_WRITE,
+                trace_id=trace_id,
+            ),
+        )
 
     # 构建连接器配置
     connector_config = {
@@ -263,8 +288,14 @@ async def create_api_key(
             await db.save_api_key(
                 key_hash=key_hash,
                 name=body.name,
+                description=body.description,
                 tenant_id=body.tenant_id or "default",
+                user_id=body.user_id or None,
                 roles=body.roles,
+                permissions=body.permissions,
+                allowed_services=body.allowed_services,
+                allowed_models=body.allowed_models,
+                tier=body.tier,
             )
         except Exception as e:
             logger.error(f"Failed to save API key: {e}", exc_info=True)
@@ -274,7 +305,13 @@ async def create_api_key(
         _runtime_config["api_keys"].append({
             "key_hash": key_hash,
             "name": body.name,
+            "description": body.description,
+            "user_id": body.user_id,
             "roles": body.roles,
+            "permissions": body.permissions,
+            "allowed_services": body.allowed_services,
+            "allowed_models": body.allowed_models,
+            "tier": body.tier,
         })
         _runtime_config["auth"]["api_keys"].append(api_key)
 

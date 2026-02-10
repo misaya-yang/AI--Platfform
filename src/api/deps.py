@@ -292,6 +292,7 @@ async def get_user_context(
                 key_info = await db.get_api_key(key_hash)
                 if key_info:
                     roles = _normalize_roles(key_info.get("roles"))
+                    key_permissions = _normalize_roles(key_info.get("permissions"))
                     tenant_id = str(key_info.get("tenant_id") or "")
                     user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(api_key)
                     tier = str(key_info.get("tier") or "normal")
@@ -299,6 +300,11 @@ async def get_user_context(
                     # Cache API key metadata for downstream auth decisions (e.g., allowed_services).
                     request.state.api_key_info = key_info
                     request.state.api_key_hash = key_hash
+                    request.state.api_key_permissions = key_permissions
+
+                    for perm in key_permissions:
+                        if perm not in roles:
+                            roles.append(perm)
 
                     # Merge permissions from DB (consistent with JWT path)
                     try:
@@ -461,9 +467,34 @@ async def get_auth_context(
                 key_info = await db.get_api_key(key_hash)
             if key_info:
                 roles = _normalize_roles(key_info.get("roles"))
+                key_permissions = _normalize_roles(key_info.get("permissions"))
                 tenant_id = str(key_info.get("tenant_id") or "")
                 user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(key)
-                ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=[])
+                permissions = []
+
+                for perm in key_permissions:
+                    if perm not in permissions:
+                        permissions.append(perm)
+                    if perm not in roles:
+                        roles.append(perm)
+                try:
+                    db_permissions = await db.get_user_permissions(user_id)
+                    for perm in db_permissions:
+                        if perm not in permissions:
+                            permissions.append(perm)
+                        if perm not in roles:
+                            roles.append(perm)
+                except Exception as e:
+                    logger.warning(
+                        f"[AUTH] Failed to fetch DB permissions in auth_context for API key user {user_id}: {e}"
+                    )
+
+                ctx = AuthContext(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    roles=roles,
+                    permissions=permissions,
+                )
                 request.state.auth = ctx
                 return ctx
 

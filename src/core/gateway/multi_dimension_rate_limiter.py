@@ -191,6 +191,24 @@ class MultiDimensionRateLimiter:
                 return result
         
         return RateLimitResult(allowed=True)
+
+    async def check_custom_limit(
+        self,
+        *,
+        key: str,
+        limit: int,
+        window: int,
+        dimension: str,
+    ) -> RateLimitResult:
+        """Check a custom explicit limit rule (used by service-level overrides)."""
+        safe_limit = max(int(limit or 0), 1)
+        safe_window = max(int(window or 0), 1)
+        return await self._sliding_window_check(
+            key=key,
+            limit=safe_limit,
+            window=safe_window,
+            dimension=dimension,
+        )
     
     async def _check_global(self, context: RateLimitContext) -> RateLimitResult:
         """检查全局限流"""
@@ -413,7 +431,6 @@ class RateLimitHeaders:
                 "retry_after": result.retry_after,
             }
         }
-
 
 
 
