@@ -75,6 +75,25 @@ function normalizeUrl(value: string): string {
   return trimmed.replace(/\/+$/, "");
 }
 
+function detectLangGraphService(serviceDetail?: ServiceDetail): boolean {
+  if (!serviceDetail) return false;
+
+  const metadata = (serviceDetail.metadata || {}) as Record<string, unknown>;
+  const connector = (serviceDetail.connector_config || {}) as Record<string, unknown>;
+  const serviceType = String(serviceDetail.service_type || "").toLowerCase();
+  const adapterType = String(metadata.adapter_type || connector.adapter_type || "").toLowerCase();
+  const proxyMode = String(connector.proxy_mode || metadata.proxy_mode || "").toLowerCase();
+  const hasAssistantIdentity = Boolean(
+    String(connector.graph_id || "").trim() || String(connector.assistant_id || "").trim()
+  );
+
+  return (
+    serviceType === "langgraph" ||
+    adapterType === "langgraph" ||
+    (proxyMode === "transparent" && hasAssistantIdentity)
+  );
+}
+
 async function getServiceConfig(serviceId: string): Promise<ServiceConfigResponse> {
   const { data } = await api.get(`/api/v1/config/services/${serviceId}/config`);
   return data;
@@ -116,6 +135,7 @@ export function ServiceConfigDialog({
 
   const config = configQuery.data?.config;
   const serviceDetail: ServiceDetail | undefined = serviceQuery.data;
+  const isLangGraphService = detectLangGraphService(serviceDetail);
 
   // 表单状态
   const [rateLimitForm, setRateLimitForm] = useState({
@@ -256,13 +276,24 @@ export function ServiceConfigDialog({
       session_enabled: basicForm.session_enabled,
     };
 
-    if (serviceDetail?.metadata?.adapter_type === "langgraph") {
+    if (isLangGraphService) {
+      const graphId = String(basicForm.graph_id || "").trim();
+      if (!graphId) {
+        setBasicError(t("services.configDialog.basic.graphIdRequired"));
+        return;
+      }
+
       patch.connector_config = {
         ...(serviceDetail.connector_config || {}),
         base_url: deploymentUrl,
         upstream_url: deploymentUrl,
-        graph_id: basicForm.graph_id,
-        assistant_id: basicForm.graph_id,
+        graph_id: graphId,
+        assistant_id: graphId,
+      };
+      patch.metadata = {
+        ...((serviceDetail.metadata || {}) as Record<string, unknown>),
+        adapter_type: "langgraph",
+        proxy_mode: "transparent",
       };
     }
 
@@ -328,7 +359,7 @@ export function ServiceConfigDialog({
                   />
                 </div>
 
-                {serviceDetail?.metadata?.adapter_type === "langgraph" && (
+                {isLangGraphService && (
                   <>
                     <Separator />
                     <div className="grid grid-cols-2 gap-4">
@@ -707,6 +738,4 @@ export function ServiceConfigDialog({
     </Dialog>
   );
 }
-
-
 

@@ -183,7 +183,11 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
         return
 
     metadata = definition.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
+    if isinstance(metadata, dict):
+        metadata = dict(metadata)
+    else:
+        metadata = {}
+    definition["metadata"] = metadata
     service_type = definition.get("service_type")
     service_type_value = service_type.value if hasattr(service_type, "value") else str(service_type or "")
     adapter_type = str(metadata.get("adapter_type") or connector_config.get("adapter_type") or "")
@@ -198,6 +202,10 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
     )
     if not is_langgraph:
         return
+
+    metadata["adapter_type"] = "langgraph"
+    if proxy_mode:
+        metadata["proxy_mode"] = proxy_mode
 
     base_url = _normalize_url(connector_config.get("base_url"))
     upstream_url = _normalize_url(connector_config.get("upstream_url"))
@@ -248,14 +256,31 @@ def _service_to_dict(service, mask_secrets: bool = False) -> dict:
     if mask_secrets:
         connector_config = _mask_sensitive_config(connector_config)
 
+    service_type_value = (
+        service.service_type.value
+        if hasattr(service.service_type, "value")
+        else service.service_type
+    )
+    metadata = dict(service.metadata or {})
+    if str(service_type_value) == "langgraph":
+        adapter_type = str(
+            metadata.get("adapter_type") or connector_config.get("adapter_type") or ""
+        ).strip()
+        if not adapter_type:
+            metadata["adapter_type"] = "langgraph"
+
+        proxy_mode = str(
+            metadata.get("proxy_mode") or connector_config.get("proxy_mode") or ""
+        ).strip()
+        if proxy_mode and not metadata.get("proxy_mode"):
+            metadata["proxy_mode"] = proxy_mode
+
     data = {
         "service_id": service.service_id,
         "name": service.name,
         "description": service.description,
         "version": service.version,
-        "service_type": service.service_type.value
-        if hasattr(service.service_type, "value")
-        else service.service_type,
+        "service_type": service_type_value,
         "supported_modes": [
             m.value if hasattr(m, "value") else m for m in (service.supported_modes or [])
         ],
@@ -285,7 +310,7 @@ def _service_to_dict(service, mask_secrets: bool = False) -> dict:
         "concurrency_limit": service.concurrency_limit,
         "status": service.status,
         "tags": service.tags or [],
-        "metadata": service.metadata or {},
+        "metadata": metadata,
         "async_config": service.async_config,
     }
     if getattr(service, "service_config", None):

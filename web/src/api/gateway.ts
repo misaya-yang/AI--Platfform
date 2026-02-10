@@ -22,6 +22,7 @@ export interface ProxyServiceSummary {
   metadata?: {
     ui_preferences?: ServiceUiPreferences;
     adapter_type?: string;
+    proxy_mode?: string;
   };
 }
 
@@ -31,6 +32,12 @@ export async function listProxyServices(): Promise<ProxyServiceSummary[]> {
       service_id: string;
       service_name: string;
       enabled: boolean;
+      service_type?: string;
+      metadata?: {
+        ui_preferences?: ServiceUiPreferences;
+        adapter_type?: string;
+        proxy_mode?: string;
+      };
     }>;
   }>("/api/v1/proxy");
 
@@ -38,8 +45,8 @@ export async function listProxyServices(): Promise<ProxyServiceSummary[]> {
     service_id: service.service_id,
     name: service.service_name || service.service_id,
     enabled: Boolean(service.enabled),
-    service_type: undefined,
-    metadata: {},
+    service_type: service.service_type || "proxy",
+    metadata: service.metadata || {},
   }));
 }
 

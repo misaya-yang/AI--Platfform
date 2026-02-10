@@ -1027,10 +1027,34 @@ async def list_proxy_services(
             if not permitted:
                 continue
 
+        raw_metadata = svc.metadata if isinstance(svc.metadata, dict) else {}
+        adapter_type = str(raw_metadata.get("adapter_type") or "").strip().lower()
+        inferred_service_type = str(raw_metadata.get("service_type") or "").strip().lower()
+        if not inferred_service_type:
+            if adapter_type == "langgraph" or bool((svc.assistant_id or "").strip() or (svc.graph_id or "").strip()):
+                inferred_service_type = "langgraph"
+            else:
+                inferred_service_type = "proxy"
+
+        safe_metadata: Dict[str, Any] = {}
+        effective_adapter_type = adapter_type or ("langgraph" if inferred_service_type == "langgraph" else "")
+        if effective_adapter_type:
+            safe_metadata["adapter_type"] = effective_adapter_type
+        proxy_mode = str(raw_metadata.get("proxy_mode") or "").strip().lower()
+        if not proxy_mode and inferred_service_type == "langgraph":
+            proxy_mode = "transparent"
+        if proxy_mode:
+            safe_metadata["proxy_mode"] = proxy_mode
+        ui_preferences = raw_metadata.get("ui_preferences")
+        if isinstance(ui_preferences, dict):
+            safe_metadata["ui_preferences"] = dict(ui_preferences)
+
         visible_services.append(
             {
                 "service_id": svc.service_id,
                 "service_name": svc.service_name,
+                "service_type": inferred_service_type,
+                "metadata": safe_metadata,
                 # 仅管理员可见完整 URL
                 "upstream_url": svc.upstream_url if is_admin else None,
                 "assistant_id": svc.assistant_id if is_admin else None,

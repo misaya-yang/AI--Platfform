@@ -787,10 +787,12 @@ export function PlaygroundPage() {
     }
     // 获取认证 token（动态获取避免 stale closure）
     const token = useAuthStore.getState().token;
-    const isLangGraphService =
+    const isTransparentProxyService = Boolean(activeService) && (
       activeService?.service_type === "langgraph" ||
-      activeService?.metadata?.adapter_type === "langgraph";
-    const useTransparentProxy = Boolean(isLangGraphService);
+      activeService?.metadata?.adapter_type === "langgraph" ||
+      activeService?.metadata?.proxy_mode === "transparent"
+    );
+    const useTransparentProxy = isTransparentProxyService;
     const text = inputs.find((i) => i.type === "text")?.data || "";
     if (!text) return;
     const inputText = String(text);

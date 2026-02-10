@@ -2585,6 +2585,7 @@
         "langgraphUrlPlaceholder": "http://localhost:2024",
         "graphId": "Graph ID",
         "graphIdPlaceholder": "agent",
+        "graphIdRequired": "Graph ID is required for LangGraph services",
         "sessionEnabled": "Enable Sessions",
         "sessionHint": "Maintain session context on the server",
         "save": "Save Basic Settings"
