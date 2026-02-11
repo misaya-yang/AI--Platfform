@@ -2478,6 +2478,7 @@ Please use this web search context to inform your response when relevant."""
         )
 
         if domain_policy:
+            content = domain_policy.sanitize_answer(content)
             issues = domain_policy.validate_answer(content)
             if issues:
                 context_text = self._format_context(
@@ -2495,6 +2496,7 @@ Please use this web search context to inform your response when relevant."""
                     max_tokens=config.max_tokens,
                     issues=issues,
                 )
+                repaired = domain_policy.sanitize_answer(repaired)
                 if not domain_policy.validate_answer(repaired):
                     content = repaired
 

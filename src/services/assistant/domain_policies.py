@@ -105,6 +105,10 @@ class ImamPolicy:
             re.compile(politics, re.IGNORECASE),
         ]
 
+    @staticmethod
+    def _normalize_ws(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip().lower()
+
     def scenario_rules(self) -> str:
         """Generate compact scenario rules for the system prompt."""
         rules = [
@@ -120,6 +124,9 @@ class ImamPolicy:
             "Avoid interfaith comparisons/criticism and political content.",
             # Citations
             "Provide citations after each paragraph and a sources list at the end.",
+            # Advisory deduplication
+            "Use consultation reminder exactly once by ending with the fixed closing phrase.",
+            "Do NOT add any extra advisory blocks such as 'Important Note' that repeats the same scholar-consultation reminder.",
             f'End with the fixed closing phrase: "{self.config.closing_phrase}"',
         ]
         return "<imam_rules>\n- " + "\n- ".join(rules) + "\n</imam_rules>"
@@ -241,8 +248,21 @@ class ImamPolicy:
             issues.append("empty_answer")
             return issues
 
-        if self.config.closing_phrase not in answer:
+        normalized_answer = self._normalize_ws(answer)
+        normalized_closing = self._normalize_ws(self.config.closing_phrase)
+
+        closing_occurrences = normalized_answer.count(normalized_closing)
+        if closing_occurrences == 0:
             issues.append("missing_closing_phrase")
+        elif closing_occurrences > 1:
+            issues.append("duplicate_closing_phrase")
+
+        # Keep consultation advisory only once (the required closing phrase).
+        # If "qualified Islamic scholar" appears more than once, the answer usually
+        # contains an extra advisory paragraph (e.g. "Important Note") that should be removed.
+        scholar_mentions = normalized_answer.count("qualified islamic scholar")
+        if scholar_mentions > 1:
+            issues.append("duplicate_consultation_reminder")
 
         # Require citations markers in content and a sources section
         has_citation_marker = bool(re.search(r"\[[0-9]+\]", answer)) or bool(
@@ -267,11 +287,57 @@ class ImamPolicy:
             )
         if "missing_closing_phrase" in issues:
             repairs.append(f'Append the exact closing phrase: "{self.config.closing_phrase}".')
+        if "duplicate_closing_phrase" in issues or "duplicate_consultation_reminder" in issues:
+            repairs.append(
+                "Remove repeated advisory/disclaimer text. Keep only one consultation reminder by using "
+                "the fixed closing phrase exactly once at the very end. Do not include an extra 'Important Note' "
+                "that repeats the same reminder."
+            )
         if not repairs:
             repairs.append(
                 "Ensure the response follows Imam requirements and uses only provided context."
             )
         return " ".join(repairs)
+
+    def sanitize_answer(self, answer: str) -> str:
+        """
+        Normalize advisory content to avoid duplicated reminders.
+
+        - Remove standalone "Important Note" advisory blocks that repeat scholar-consultation guidance.
+        - Ensure the fixed closing phrase appears exactly once at the end.
+        """
+        if not answer or not answer.strip():
+            return answer
+
+        text = answer.strip()
+        closing = self.config.closing_phrase.strip()
+
+        # Remove redundant advisory paragraphs that duplicate the closing phrase intent.
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        kept: list[str] = []
+        for para in paragraphs:
+            normalized = self._normalize_ws(para)
+            is_duplicate_advisory = (
+                "qualified islamic scholar" in normalized
+                and (
+                    "important note" in normalized
+                    or "this answer addresses the general islamic principle" in normalized
+                )
+            )
+            if is_duplicate_advisory:
+                continue
+            kept.append(para)
+
+        body = "\n\n".join(kept).strip()
+
+        # Remove all existing closing-phrase occurrences, then append exactly once.
+        closing_pattern = re.compile(re.escape(closing), re.IGNORECASE)
+        body = closing_pattern.sub("", body).strip()
+        body = re.sub(r"\n{3,}", "\n\n", body)
+
+        if body:
+            return f"{body}\n\n{closing}"
+        return closing
 
     def _build_decline(self, reason_text: str) -> str:
         return f"{reason_text}\n\n{self.config.closing_phrase}"
