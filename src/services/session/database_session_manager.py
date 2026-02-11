@@ -265,15 +265,13 @@ class DatabaseSessionManager:
         if not session:
             return False
 
-        session.metadata.update(metadata)
-        session.updated_at = datetime.utcnow()
+        # 原子更新 metadata，避免 save_session 覆盖 history
+        result = await self.database.update_session_metadata(session_id, metadata)
+        if not result:
+            return False
 
-        # 保存到数据库
-        await self._save_to_db(session)
-
-        # 更新缓存
-        await self._cache_session(session)
-
+        # 清除缓存，避免并发情况下写回过期 history
+        await self._remove_from_cache(session_id)
         return True
 
     async def update_config(
@@ -286,20 +284,13 @@ class DatabaseSessionManager:
         if not session:
             return False
 
-        # 确保 session.config 是字典类型
-        existing_config = getattr(session, "config", None)
-        if existing_config is None or not isinstance(existing_config, dict):
-            existing_config = {}
-        existing_config.update(config)
-        session.config = existing_config
-        session.updated_at = datetime.utcnow()
+        # 原子更新 config，避免 save_session 覆盖 history
+        result = await self.database.update_session_config(session_id, config)
+        if not result:
+            return False
 
-        # 保存到数据库
-        await self._save_to_db(session)
-
-        # 更新缓存
-        await self._cache_session(session)
-
+        # 清除缓存，避免并发情况下写回过期 history
+        await self._remove_from_cache(session_id)
         return True
 
     async def extend_ttl(

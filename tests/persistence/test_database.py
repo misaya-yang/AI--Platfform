@@ -186,3 +186,45 @@ class TestAppendSessionMessage:
         result = await db.append_session_message("session-789", {"role": "user"})
 
         assert result is False
+
+
+class TestUpdateSessionPatchFields:
+    """测试 session config/metadata 原子 patch 方法"""
+
+    @pytest.mark.asyncio
+    async def test_update_session_metadata_atomic_patch(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_pool = AsyncMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+
+        result = await db.update_session_metadata("session-123", {"title": "new title"})
+
+        assert result is True
+        call_args = mock_conn.execute.call_args
+        assert "metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_update_session_config_atomic_patch(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_pool = AsyncMock()
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+
+        result = await db.update_session_config("session-456", {"selected_datasets": ["kb_1"]})
+
+        assert result is True
+        call_args = mock_conn.execute.call_args
+        assert "config = COALESCE(config, '{}'::jsonb) || $2::jsonb" in call_args[0][0]

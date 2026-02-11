@@ -1018,6 +1018,44 @@ class DatabaseStorage:
                 session_id,
             )
 
+    async def update_session_metadata(self, session_id: str, metadata: dict[str, Any]) -> bool:
+        """原子更新会话 metadata，避免覆盖 history。"""
+        if not self._pool:
+            return False
+        if not metadata:
+            return True
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE sessions
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                    updated_at = NOW()
+                WHERE session_id = $1
+            """,
+                session_id,
+                json.dumps(metadata),
+            )
+            return result == "UPDATE 1"
+
+    async def update_session_config(self, session_id: str, config: dict[str, Any]) -> bool:
+        """原子更新会话 config，避免覆盖 history。"""
+        if not self._pool:
+            return False
+        if not config:
+            return True
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE sessions
+                SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
+                    updated_at = NOW()
+                WHERE session_id = $1
+            """,
+                session_id,
+                json.dumps(config),
+            )
+            return result == "UPDATE 1"
+
     async def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if not self._pool:
