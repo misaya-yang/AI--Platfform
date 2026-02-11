@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 
@@ -34,24 +33,26 @@ if TYPE_CHECKING:
 
 
 # Type alias for cache entries: (QueryIntent, timestamp)
-CacheEntry = Tuple["QueryIntent", float]
+CacheEntry = tuple["QueryIntent", float]
 
 logger = get_logger(__name__)
 
 
 class QueryType(str, Enum):
     """Query type classification."""
-    FACTUAL = "factual"           # Questions with definitive answers
+
+    FACTUAL = "factual"  # Questions with definitive answers
     CONVERSATIONAL = "conversational"  # Greetings, small talk
-    CREATIVE = "creative"         # Creative writing, brainstorming
-    ANALYTICAL = "analytical"     # Analysis, comparison, evaluation
+    CREATIVE = "creative"  # Creative writing, brainstorming
+    ANALYTICAL = "analytical"  # Analysis, comparison, evaluation
 
 
 class RetrievalDecision(str, Enum):
     """Retrieval decision types."""
-    SKIP = "skip"           # Don't retrieve - model can answer
-    RETRIEVE = "retrieve"   # Retrieve from KB
-    UNCERTAIN = "uncertain" # Not sure - default to retrieve
+
+    SKIP = "skip"  # Don't retrieve - model can answer
+    RETRIEVE = "retrieve"  # Retrieve from KB
+    UNCERTAIN = "uncertain"  # Not sure - default to retrieve
 
 
 @dataclass
@@ -61,6 +62,7 @@ class QueryIntent:
 
     Provides rich context for intelligent routing decisions.
     """
+
     # Core decision
     requires_kb_search: bool
     decision: RetrievalDecision
@@ -68,19 +70,19 @@ class QueryIntent:
 
     # Query characteristics
     query_type: QueryType
-    domain: str                     # general_ai, company_specific, personal, etc.
-    complexity: float               # 0-1 complexity score
+    domain: str  # general_ai, company_specific, personal, etc.
+    complexity: float  # 0-1 complexity score
 
     # Retrieval strategy (if needed)
-    retrieval_strategy: str         # semantic, keyword, hybrid, none
-    suggested_queries: List[str] = field(default_factory=list)
+    retrieval_strategy: str  # semantic, keyword, hybrid, none
+    suggested_queries: list[str] = field(default_factory=list)
 
     # Metadata
     confidence: float = 0.0
     analysis_time_ms: float = 0.0
-    tier_used: str = "unknown"      # fast_rule, llm, default
+    tier_used: str = "unknown"  # fast_rule, llm, default
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "requires_kb_search": self.requires_kb_search,
@@ -148,13 +150,13 @@ class QueryIntentAnalyzer:
         self.cache_ttl = cache_ttl
         self.cache_max_size = cache_max_size
         # Instance-level cache with TTL support: {cache_key: (QueryIntent, timestamp)}
-        self._cache: Dict[str, CacheEntry] = {}
+        self._cache: dict[str, CacheEntry] = {}
 
     async def analyze(
         self,
         query: str,
-        available_datasets: Optional[List[str]] = None,
-        user_context: Optional[Dict[str, Any]] = None,
+        available_datasets: list[str] | None = None,
+        user_context: dict[str, Any] | None = None,
     ) -> QueryIntent:
         """
         Analyze query intent and decide on retrieval.
@@ -186,9 +188,7 @@ class QueryIntentAnalyzer:
 
         # Tier 2: LLM analysis (if enabled and model available)
         if self.enable_llm_tier and self.model_registry:
-            llm_result = await self._llm_analyze(
-                query, available_datasets or [], user_context
-            )
+            llm_result = await self._llm_analyze(query, available_datasets or [], user_context)
             if llm_result is not None:
                 llm_result.analysis_time_ms = (time.time() - start_time) * 1000
                 logger.debug(
@@ -200,12 +200,10 @@ class QueryIntentAnalyzer:
         # Tier 3: Default - conservative
         default_result = self._default_decision(query)
         default_result.analysis_time_ms = (time.time() - start_time) * 1000
-        logger.debug(
-            f"[INTENT] Tier 3 default: {default_result.decision.value}"
-        )
+        logger.debug(f"[INTENT] Tier 3 default: {default_result.decision.value}")
         return default_result
 
-    def _fast_check(self, query: str) -> Optional[QueryIntent]:
+    def _fast_check(self, query: str) -> QueryIntent | None:
         """
         Tier 1: Fast rule-based check.
 
@@ -232,9 +230,16 @@ class QueryIntentAnalyzer:
 
         # 2. System capability questions - no KB needed
         capability_patterns = [
-            "你能做什么", "你的功能", "你支持什么", "你会什么",
-            "你是谁", "你叫什么", "你的名字", "介绍一下你自己",
-            "怎么使用你", "如何使用你",
+            "你能做什么",
+            "你的功能",
+            "你支持什么",
+            "你会什么",
+            "你是谁",
+            "你叫什么",
+            "你的名字",
+            "介绍一下你自己",
+            "怎么使用你",
+            "如何使用你",
         ]
         if any(p in query_lower for p in capability_patterns):
             return QueryIntent(
@@ -255,23 +260,66 @@ class QueryIntentAnalyzer:
         # reduce LLM calls and improve latency.
         general_ai_keywords = [
             # Core ML/DL concepts
-            "机器学习", "深度学习", "神经网络", "transformer", "attention",
-            "bert", "gpt", "llm", "大模型", "大语言模型",
+            "机器学习",
+            "深度学习",
+            "神经网络",
+            "transformer",
+            "attention",
+            "bert",
+            "gpt",
+            "llm",
+            "大模型",
+            "大语言模型",
             # Generative models
-            "flow matching", "diffusion", "扩散模型", "生成模型", "gan", "vae",
-            "sde", "ode", "score function", "denoising", "noise schedule",
+            "flow matching",
+            "diffusion",
+            "扩散模型",
+            "生成模型",
+            "gan",
+            "vae",
+            "sde",
+            "ode",
+            "score function",
+            "denoising",
+            "noise schedule",
             # Embeddings and retrieval
-            "embedding", "向量", "词向量", "rag", "检索增强",
+            "embedding",
+            "向量",
+            "词向量",
+            "rag",
+            "检索增强",
             # Agents
-            "agent", "智能体", "multi-agent",
+            "agent",
+            "智能体",
+            "multi-agent",
             # Math/Stats concepts common in ML
-            "概率", "分布", "采样", "梯度", "损失函数", "优化",
-            "马尔可夫", "蒙特卡洛", "变分", "贝叶斯",
+            "概率",
+            "分布",
+            "采样",
+            "梯度",
+            "损失函数",
+            "优化",
+            "马尔可夫",
+            "蒙特卡洛",
+            "变分",
+            "贝叶斯",
             # Common architectures
-            "cnn", "rnn", "lstm", "resnet", "unet",
+            "cnn",
+            "rnn",
+            "lstm",
+            "resnet",
+            "unet",
         ]
 
-        explanation_patterns = ["什么是", "解释一下", "介绍一下", "讲解一下", "原理", "为什么", "如何理解"]
+        explanation_patterns = [
+            "什么是",
+            "解释一下",
+            "介绍一下",
+            "讲解一下",
+            "原理",
+            "为什么",
+            "如何理解",
+        ]
         is_explanation = any(p in query_lower for p in explanation_patterns)
         has_ai_keyword = any(kw in query_lower for kw in general_ai_keywords)
 
@@ -290,8 +338,16 @@ class QueryIntentAnalyzer:
 
         # 4. Enterprise-specific - definitely need KB
         enterprise_keywords = [
-            "我们公司", "公司的", "内部", "产品", "服务",
-            "政策", "流程", "文档", "客户", "订单",
+            "我们公司",
+            "公司的",
+            "内部",
+            "产品",
+            "服务",
+            "政策",
+            "流程",
+            "文档",
+            "客户",
+            "订单",
         ]
         if any(kw in query_lower for kw in enterprise_keywords):
             return QueryIntent(
@@ -313,9 +369,9 @@ class QueryIntentAnalyzer:
     async def _llm_analyze(
         self,
         query: str,
-        available_datasets: List[str],
-        user_context: Optional[Dict[str, Any]],
-    ) -> Optional[QueryIntent]:
+        available_datasets: list[str],
+        user_context: dict[str, Any] | None,
+    ) -> QueryIntent | None:
         """
         Tier 2: LLM-based analysis.
 
@@ -341,7 +397,7 @@ class QueryIntentAnalyzer:
             )
 
             # Parse response
-            content = response.content if hasattr(response, 'content') else str(response)
+            content = response.content if hasattr(response, "content") else str(response)
             result = self._parse_llm_response(content, query)
 
             # Cache result with TTL
@@ -353,7 +409,7 @@ class QueryIntentAnalyzer:
             logger.warning(f"LLM intent analysis failed: {e}")
             return None
 
-    def _get_from_cache(self, cache_key: str) -> Optional[QueryIntent]:
+    def _get_from_cache(self, cache_key: str) -> QueryIntent | None:
         """
         Get from cache with TTL check.
 
@@ -400,7 +456,8 @@ class QueryIntentAnalyzer:
         Returns number of entries evicted.
         """
         expired_keys = [
-            key for key, (_, timestamp) in self._cache.items()
+            key
+            for key, (_, timestamp) in self._cache.items()
             if current_time - timestamp > self.cache_ttl
         ]
 
@@ -424,7 +481,7 @@ class QueryIntentAnalyzer:
         # Sort by timestamp and remove oldest
         sorted_entries = sorted(
             self._cache.items(),
-            key=lambda x: x[1][1]  # Sort by timestamp
+            key=lambda x: x[1][1],  # Sort by timestamp
         )
 
         for key, _ in sorted_entries[:evict_count]:
@@ -435,7 +492,7 @@ class QueryIntentAnalyzer:
     def _build_analysis_prompt(
         self,
         query: str,
-        available_datasets: List[str],
+        available_datasets: list[str],
     ) -> str:
         """Build prompt for LLM analysis."""
         datasets_str = ", ".join(available_datasets) if available_datasets else "无"
@@ -481,14 +538,14 @@ JSON 格式:
         # Default on parse failure
         return self._default_decision(query)
 
-    def _extract_json(self, text: str) -> Optional[str]:
+    def _extract_json(self, text: str) -> str | None:
         """
         Extract JSON object from text, handling nested braces.
 
         Uses brace counting to find matching pairs.
         """
         # Find the first '{'
-        start_idx = text.find('{')
+        start_idx = text.find("{")
         if start_idx == -1:
             return None
 
@@ -502,7 +559,7 @@ JSON 格式:
                 escape_next = False
                 continue
 
-            if char == '\\' and in_string:
+            if char == "\\" and in_string:
                 escape_next = True
                 continue
 
@@ -513,12 +570,12 @@ JSON 格式:
             if in_string:
                 continue
 
-            if char == '{':
+            if char == "{":
                 brace_count += 1
-            elif char == '}':
+            elif char == "}":
                 brace_count -= 1
                 if brace_count == 0:
-                    return text[start_idx:i + 1]
+                    return text[start_idx : i + 1]
 
         # No matching closing brace found
         return None
@@ -542,7 +599,7 @@ JSON 格式:
             tier_used="default",
         )
 
-    def _get_cache_key(self, query: str, datasets: List[str]) -> str:
+    def _get_cache_key(self, query: str, datasets: list[str]) -> str:
         """Generate cache key."""
         content = f"{query}|{','.join(sorted(datasets))}"
         return hashlib.md5(content.encode()).hexdigest()
@@ -559,7 +616,7 @@ JSON 格式:
         return count
 
     @property
-    def cache_stats(self) -> Dict[str, Any]:
+    def cache_stats(self) -> dict[str, Any]:
         """
         Get cache statistics for observability.
 
@@ -567,7 +624,8 @@ JSON 格式:
         """
         current_time = time.time()
         expired_count = sum(
-            1 for _, (_, timestamp) in self._cache.items()
+            1
+            for _, (_, timestamp) in self._cache.items()
             if current_time - timestamp > self.cache_ttl
         )
 
@@ -583,6 +641,7 @@ JSON 格式:
 # =============================================================================
 # Factory Function
 # =============================================================================
+
 
 def create_query_intent_analyzer(
     model_registry: Any = None,

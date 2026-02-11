@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
 """Test Auto Finance FAQs page image sync"""
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     from src.config.settings import Settings
@@ -67,10 +69,7 @@ async def main():
     client = ConfluenceClient(credentials)
 
     page_id = auto_finance_page["page_id"]
-    attachments = await client.get_page_image_attachments(
-        page_id=page_id,
-        embeddable_only=True
-    )
+    attachments = await client.get_page_image_attachments(page_id=page_id, embeddable_only=True)
     print(f"Image attachments: {len(attachments)}")
     for att in attachments:
         print(f"  - {att.filename} ({att.media_type}, {att.file_size} bytes)")
@@ -84,6 +83,7 @@ async def main():
 
         print("\n=== Testing VLM description ===")
         from src.services.knowledge.vlm_service import DashScopeVLMService
+
         vlm = DashScopeVLMService(
             api_key=settings.knowledge.dashscope.api_key,
             model="qwen-vl-max",
@@ -102,6 +102,7 @@ async def main():
     await client.close()
     await db.close()
     print("\nDone!")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

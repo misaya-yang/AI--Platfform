@@ -11,20 +11,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from ..deps import (
-    get_user_context,
-    get_auth_context,
-    get_rate_limiter,
-    AuthContext,
-)
-from ...core.auth.user_resolver import UserContext
 from ...core.auth.permissions import (
     Capability,
     build_permission_denied_detail,
@@ -37,6 +31,7 @@ from ...core.auth.service_access import (
     service_access_policy_from_metadata,
     service_scope_matches,
 )
+from ...core.auth.user_resolver import UserContext
 from ...core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimiter,
     RateLimitContext,
@@ -46,15 +41,21 @@ from ...core.observability.logging import get_logger
 from ...core.observability.metrics import get_metrics
 from ...core.utils import estimate_tokens
 from ...proxy import (
-    TransparentProxy,
-    ProxyRequest,
     ProxyConfigLoader,
+    ProxyRequest,
     ProxyServiceConfig,
     RequestContext,
+    TransparentProxy,
 )
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy, QuotaStatus
 from ...services.metrics.usage_parser import extract_model
+from ..deps import (
+    AuthContext,
+    get_auth_context,
+    get_rate_limiter,
+    get_user_context,
+)
 
 logger = get_logger(__name__)
 
@@ -65,8 +66,8 @@ async def _record_security_event(
     event_type: str,
     tenant_id: str,
     user_id: str,
-    service_id: Optional[str],
-    metadata: Optional[Dict[str, Any]] = None,
+    service_id: str | None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     try:
         from ...services.metrics import get_security_event_recorder
@@ -141,11 +142,11 @@ def get_proxy_config_loader(request: Request) -> ProxyConfigLoader:
 # ============ 权限和限流检查 ============
 
 
-def _normalize_allowed_services(value: Any) -> List[str]:
+def _normalize_allowed_services(value: Any) -> list[str]:
     return normalize_service_scope(value)
 
 
-def _normalize_allowed_models(value: Any) -> List[str]:
+def _normalize_allowed_models(value: Any) -> list[str]:
     if not value:
         return []
     if isinstance(value, str):
@@ -155,7 +156,7 @@ def _normalize_allowed_models(value: Any) -> List[str]:
     return []
 
 
-def _is_model_allowed(allowed_models: List[str], model: str) -> bool:
+def _is_model_allowed(allowed_models: list[str], model: str) -> bool:
     if not allowed_models:
         return True
     normalized_model = (model or "").strip().lower()
@@ -243,7 +244,7 @@ def _override_model_in_request_payload(payload: Any, model: str) -> Any:
     return updated
 
 
-def _decode_json_body(body: Optional[bytes]) -> Optional[Any]:
+def _decode_json_body(body: bytes | None) -> Any | None:
     if not body:
         return None
     try:
@@ -252,7 +253,7 @@ def _decode_json_body(body: Optional[bytes]) -> Optional[Any]:
         return None
 
 
-def _encode_json_body(payload: Any) -> Optional[bytes]:
+def _encode_json_body(payload: Any) -> bytes | None:
     if payload is None:
         return None
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -272,7 +273,7 @@ async def _enforce_model_allowlist(
     service_name: str,
     user: UserContext,
     auth: AuthContext,
-    model: Optional[str],
+    model: str | None,
 ) -> None:
     api_key_info = getattr(request.state, "api_key_info", None)
     if not api_key_info:
@@ -304,9 +305,9 @@ async def _apply_quota_policy(
     service_name: str,
     operation: str,
     path: str,
-    body: Optional[bytes],
-    model_hint: Optional[str],
-) -> tuple[Optional[bytes], Optional[str]]:
+    body: bytes | None,
+    model_hint: str | None,
+) -> tuple[bytes | None, str | None]:
     """
     Enforce quota governance policy before proxying.
 
@@ -382,7 +383,7 @@ async def _apply_quota_policy(
                 body = _encode_json_body(payload)
             final_model = downgraded_model
         elif check.overage_strategy == OverageStrategy.ALLOW_BUT_ALERT:
-            try:
+            with contextlib.suppress(Exception):
                 await quota_service.create_alert(
                     tenant_id=auth.tenant_id or user.tenant_id or "default",
                     user_id=user.user_id or "anonymous",
@@ -392,8 +393,6 @@ async def _apply_quota_policy(
                     limit_value=check.daily_tokens_limit or 0,
                     message=check.message,
                 )
-            except Exception:
-                pass
 
     return body, final_model
 
@@ -414,16 +413,16 @@ async def _resolve_service_definition(registry, service_name: str):
     return None
 
 
-def _service_allowed(allowed: List[str], candidates: set) -> bool:
+def _service_allowed(allowed: list[str], candidates: set) -> bool:
     return service_scope_matches(allowed, list(candidates))
 
 
 async def _load_service_access_constraints(
     request: Request,
     user: UserContext,
-) -> Tuple[List[Tuple[str, List[str]]], ServiceAccessPolicy]:
+) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy]:
     """Collect API key / tenant / user-level service access constraints."""
-    allowed_sources: List[Tuple[str, List[str]]] = []
+    allowed_sources: list[tuple[str, list[str]]] = []
     user_policy = ServiceAccessPolicy()
 
     db = getattr(request.app.state, "database", None)
@@ -679,10 +678,10 @@ async def check_service_authorization(
 
 async def check_proxy_rate_limit(
     user: UserContext,
-    rate_limiter: Optional[MultiDimensionRateLimiter],
+    rate_limiter: MultiDimensionRateLimiter | None,
     service_name: str,
     operation: str = "proxy",
-    service_config: Optional[ProxyServiceConfig] = None,
+    service_config: ProxyServiceConfig | None = None,
 ) -> None:
     """检查代理限流"""
     if not rate_limiter:
@@ -761,10 +760,10 @@ async def check_proxy_rate_limit(
     summary="透明代理",
     description="""
     透明代理路由，将请求转发至目标服务。
-    
+
     - `service_name`: 服务名称（对应数据库中的 service_id 或 name）
     - `path`: 请求路径（将被转发至上游服务）
-    
+
     支持：
     - 所有 HTTP 方法
     - SSE 流式响应（自动检测）
@@ -780,7 +779,7 @@ async def transparent_proxy_handler(
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
-    rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
+    rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
 ):
     """
     透明代理主处理函数
@@ -955,7 +954,7 @@ async def transparent_proxy_root_handler(
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
-    rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
+    rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
 ):
     """处理根路径请求"""
     return await transparent_proxy_handler(
@@ -1005,7 +1004,7 @@ async def list_proxy_services(
     is_admin = "admin" in auth.roles
     allowed_sources, user_policy = await _load_service_access_constraints(request, user)
 
-    visible_services: List[Dict[str, Any]] = []
+    visible_services: list[dict[str, Any]] = []
     for svc in services:
         aliases = {
             str(getattr(svc, "service_id", "") or "").strip(),
@@ -1031,13 +1030,17 @@ async def list_proxy_services(
         adapter_type = str(raw_metadata.get("adapter_type") or "").strip().lower()
         inferred_service_type = str(raw_metadata.get("service_type") or "").strip().lower()
         if not inferred_service_type:
-            if adapter_type == "langgraph" or bool((svc.assistant_id or "").strip() or (svc.graph_id or "").strip()):
+            if adapter_type == "langgraph" or bool(
+                (svc.assistant_id or "").strip() or (svc.graph_id or "").strip()
+            ):
                 inferred_service_type = "langgraph"
             else:
                 inferred_service_type = "proxy"
 
-        safe_metadata: Dict[str, Any] = {}
-        effective_adapter_type = adapter_type or ("langgraph" if inferred_service_type == "langgraph" else "")
+        safe_metadata: dict[str, Any] = {}
+        effective_adapter_type = adapter_type or (
+            "langgraph" if inferred_service_type == "langgraph" else ""
+        )
         if effective_adapter_type:
             safe_metadata["adapter_type"] = effective_adapter_type
         proxy_mode = str(raw_metadata.get("proxy_mode") or "").strip().lower()
@@ -1102,7 +1105,7 @@ async def proxy_service_selftest(
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
-    rate_limiter: Optional[MultiDimensionRateLimiter] = Depends(get_rate_limiter),
+    rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
 ):
     # 权限检查：仅管理员可访问 _selftest 端点
     if "admin" not in auth.roles:
@@ -1118,9 +1121,9 @@ async def proxy_service_selftest(
     )
 
     context = _build_request_context(request, user)
-    auth_present = any(k.lower() == "authorization" for k in request.headers.keys())
+    auth_present = any(k.lower() == "authorization" for k in request.headers)
 
-    result: Dict[str, Any] = {
+    result: dict[str, Any] = {
         "service": service_name,
         "auth_header_present": auth_present,
     }
@@ -1211,10 +1214,8 @@ async def proxy_service_selftest(
         finally:
             # 显式关闭流，避免连接泄露
             if aiter and hasattr(aiter, "aclose"):
-                try:
+                with contextlib.suppress(Exception):
                     await aiter.aclose()
-                except Exception:
-                    pass
     else:
         result["stream"] = {
             "ok": False,
@@ -1285,7 +1286,4 @@ def _wants_streaming(request: Request, path: str) -> bool:
             return True
 
     # 检查查询参数
-    if request.query_params.get("stream") in ("true", "1", "yes"):
-        return True
-
-    return False
+    return request.query_params.get("stream") in ("true", "1", "yes")

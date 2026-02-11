@@ -9,11 +9,10 @@ Handles:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
-from .aggregation_task import AggregationTask, QuotaResetTask
 from ...persistence.database import DatabaseStorage
+from .aggregation_task import AggregationTask, QuotaResetTask
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +57,16 @@ class UsageScheduler:
         self.cleanup_minute = cleanup_minute
         self.quota_check_interval = quota_check_interval
 
-        self._aggregation_task: Optional[AggregationTask] = None
-        self._quota_reset_task: Optional[QuotaResetTask] = None
+        self._aggregation_task: AggregationTask | None = None
+        self._quota_reset_task: QuotaResetTask | None = None
 
         self._running = False
         self._tasks: list[asyncio.Task] = []
 
         # Track last run times
-        self._last_aggregation_date: Optional[datetime] = None
-        self._last_cleanup_date: Optional[datetime] = None
-        self._last_quota_check: Optional[datetime] = None
+        self._last_aggregation_date: datetime | None = None
+        self._last_cleanup_date: datetime | None = None
+        self._last_quota_check: datetime | None = None
 
     async def start(self) -> None:
         """Start the scheduler."""
@@ -162,10 +161,7 @@ class UsageScheduler:
             return False
 
         # Check if it's the right time
-        return (
-            now.hour == self.aggregation_hour
-            and now.minute >= self.aggregation_minute
-        )
+        return now.hour == self.aggregation_hour and now.minute >= self.aggregation_minute
 
     def _should_run_cleanup(self, now: datetime) -> bool:
         """Check if cleanup should run now."""
@@ -224,7 +220,7 @@ class UsageScheduler:
 
     # Manual trigger methods for API use
 
-    async def trigger_aggregation(self, target_date: Optional[datetime] = None) -> dict:
+    async def trigger_aggregation(self, target_date: datetime | None = None) -> dict:
         """
         Manually trigger aggregation for a specific date.
 
@@ -251,9 +247,7 @@ class UsageScheduler:
 
         return await self._aggregation_task.cleanup_old_records()
 
-    async def trigger_quota_reset(
-        self, reset_type: str = "daily"
-    ) -> dict:
+    async def trigger_quota_reset(self, reset_type: str = "daily") -> dict:
         """
         Manually trigger quota reset.
 
@@ -279,14 +273,18 @@ class UsageScheduler:
             "aggregation_time": f"{self.aggregation_hour:02d}:{self.aggregation_minute:02d} UTC",
             "cleanup_time": f"{self.cleanup_hour:02d}:{self.cleanup_minute:02d} UTC",
             "quota_check_interval_seconds": self.quota_check_interval,
-            "last_aggregation_date": str(self._last_aggregation_date) if self._last_aggregation_date else None,
+            "last_aggregation_date": str(self._last_aggregation_date)
+            if self._last_aggregation_date
+            else None,
             "last_cleanup_date": str(self._last_cleanup_date) if self._last_cleanup_date else None,
-            "last_quota_check": self._last_quota_check.isoformat() if self._last_quota_check else None,
+            "last_quota_check": self._last_quota_check.isoformat()
+            if self._last_quota_check
+            else None,
         }
 
 
 # Singleton
-_usage_scheduler: Optional[UsageScheduler] = None
+_usage_scheduler: UsageScheduler | None = None
 
 
 def init_usage_scheduler(
@@ -300,6 +298,6 @@ def init_usage_scheduler(
     return _usage_scheduler
 
 
-def get_usage_scheduler() -> Optional[UsageScheduler]:
+def get_usage_scheduler() -> UsageScheduler | None:
     """Get the usage scheduler singleton."""
     return _usage_scheduler

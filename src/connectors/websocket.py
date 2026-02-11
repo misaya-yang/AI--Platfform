@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import websockets
 
-from .base import BaseConnector
 from ..models.service import ServiceDefinition
+from .base import BaseConnector
 
 
 class WebSocketConnection:

@@ -13,39 +13,40 @@ Agent decides HOW to recover, guardrails define WHEN recovery is needed.
 from __future__ import annotations
 
 import asyncio
+import functools
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Generic
-import functools
+from typing import Any, Generic, TypeVar
 
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 class ErrorType(str, Enum):
     """Classification of errors for recovery strategy selection."""
 
-    TRANSIENT = "transient"           # Network, timeout - retry with backoff
-    RATE_LIMIT = "rate_limit"         # API rate limit - wait and retry
-    QUALITY_VIOLATION = "quality"     # Guardrail violation - self-repair
-    VALIDATION_ERROR = "validation"   # Input/output validation - fix and retry
-    RESOURCE_ERROR = "resource"       # Memory, disk - reduce load
-    PERMANENT = "permanent"           # Unrecoverable - fail gracefully
+    TRANSIENT = "transient"  # Network, timeout - retry with backoff
+    RATE_LIMIT = "rate_limit"  # API rate limit - wait and retry
+    QUALITY_VIOLATION = "quality"  # Guardrail violation - self-repair
+    VALIDATION_ERROR = "validation"  # Input/output validation - fix and retry
+    RESOURCE_ERROR = "resource"  # Memory, disk - reduce load
+    PERMANENT = "permanent"  # Unrecoverable - fail gracefully
 
 
 class RecoveryStrategy(str, Enum):
     """Recovery strategies the Agent can use."""
 
-    RETRY = "retry"                   # Simple retry
-    RETRY_WITH_BACKOFF = "backoff"    # Exponential backoff
-    SELF_REPAIR = "repair"            # Agent fixes the issue
-    REDUCE_COMPLEXITY = "simplify"    # Reduce task complexity
-    FALLBACK = "fallback"             # Use alternative approach
-    FAIL_GRACEFULLY = "fail"          # Give up with good error message
+    RETRY = "retry"  # Simple retry
+    RETRY_WITH_BACKOFF = "backoff"  # Exponential backoff
+    SELF_REPAIR = "repair"  # Agent fixes the issue
+    REDUCE_COMPLEXITY = "simplify"  # Reduce task complexity
+    FALLBACK = "fallback"  # Use alternative approach
+    FAIL_GRACEFULLY = "fail"  # Give up with good error message
 
 
 @dataclass
@@ -54,13 +55,13 @@ class ErrorContext:
 
     error_type: ErrorType
     message: str
-    original_error: Optional[Exception] = None
+    original_error: Exception | None = None
     attempt_number: int = 1
     max_attempts: int = 3
     timestamp: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "error_type": self.error_type.value,
@@ -77,9 +78,9 @@ class RecoveryResult(Generic[T]):
     """Result of a recovery attempt."""
 
     success: bool
-    value: Optional[T] = None
-    error_context: Optional[ErrorContext] = None
-    strategy_used: Optional[RecoveryStrategy] = None
+    value: T | None = None
+    error_context: ErrorContext | None = None
+    strategy_used: RecoveryStrategy | None = None
     total_attempts: int = 0
 
 
@@ -130,8 +131,8 @@ class ErrorRecoveryManager:
         self,
         operation: Callable[..., Any],
         *args,
-        error_classifier: Optional[Callable[[Exception], ErrorType]] = None,
-        recovery_handlers: Optional[Dict[ErrorType, Callable]] = None,
+        error_classifier: Callable[[Exception], ErrorType] | None = None,
+        recovery_handlers: dict[ErrorType, Callable] | None = None,
         **kwargs,
     ) -> RecoveryResult:
         """
@@ -149,7 +150,7 @@ class ErrorRecoveryManager:
         error_classifier = error_classifier or self._default_error_classifier
         recovery_handlers = recovery_handlers or {}
         attempt = 0
-        last_error: Optional[ErrorContext] = None
+        last_error: ErrorContext | None = None
 
         while attempt < self.max_retries:
             attempt += 1
@@ -172,8 +173,7 @@ class ErrorRecoveryManager:
                 )
 
                 logger.warning(
-                    f"Error on attempt {attempt}/{self.max_retries}: "
-                    f"{error_type.value} - {e}"
+                    f"Error on attempt {attempt}/{self.max_retries}: {error_type.value} - {e}"
                 )
 
                 # Check for custom handler
@@ -314,7 +314,7 @@ class ErrorRecoveryManager:
 def with_recovery(
     max_retries: int = 3,
     base_delay: float = 1.0,
-    error_classifier: Optional[Callable[[Exception], ErrorType]] = None,
+    error_classifier: Callable[[Exception], ErrorType] | None = None,
 ):
     """
     Decorator for automatic error recovery.
@@ -324,6 +324,7 @@ def with_recovery(
         async def my_operation():
             ...
     """
+
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -339,15 +340,15 @@ def with_recovery(
             )
             if result.success:
                 return result.value
-            raise result.error_context.original_error or Exception(
-                result.error_context.message
-            )
+            raise result.error_context.original_error or Exception(result.error_context.message)
+
         return wrapper
+
     return decorator
 
 
 # Module-level convenience instance
-_default_manager: Optional[ErrorRecoveryManager] = None
+_default_manager: ErrorRecoveryManager | None = None
 
 
 def get_error_recovery_manager() -> ErrorRecoveryManager:

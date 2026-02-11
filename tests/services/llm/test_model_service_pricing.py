@@ -5,9 +5,10 @@ Tests that model create/update operations properly sync pricing
 to the model_pricing table for usage recording.
 """
 
-import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.services.llm.model_service import ModelService
 
@@ -119,13 +120,17 @@ class TestModelServicePricingSync:
             assert result["model_id"] == "gpt-4o"
 
     @pytest.mark.asyncio
-    async def test_pricing_sync_failure_does_not_block_create(self, model_service, mock_db, sample_model_row):
+    async def test_pricing_sync_failure_does_not_block_create(
+        self, model_service, mock_db, sample_model_row
+    ):
         """Test that pricing sync failure doesn't prevent model creation."""
         mock_db.fetchrow.return_value = sample_model_row
 
         with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
             mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock(side_effect=Exception("Pricing sync failed"))
+            mock_pricing_svc.update_pricing = AsyncMock(
+                side_effect=Exception("Pricing sync failed")
+            )
             mock_get_pricing.return_value = mock_pricing_svc
 
             # Should not raise, model should still be created
@@ -140,13 +145,17 @@ class TestModelServicePricingSync:
             assert result["model_id"] == "gpt-4o"
 
     @pytest.mark.asyncio
-    async def test_pricing_sync_failure_does_not_block_update(self, model_service, mock_db, sample_model_row):
+    async def test_pricing_sync_failure_does_not_block_update(
+        self, model_service, mock_db, sample_model_row
+    ):
         """Test that pricing sync failure doesn't prevent model update."""
         mock_db.fetchrow.return_value = sample_model_row
 
         with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
             mock_pricing_svc = MagicMock()
-            mock_pricing_svc.update_pricing = AsyncMock(side_effect=Exception("Pricing sync failed"))
+            mock_pricing_svc.update_pricing = AsyncMock(
+                side_effect=Exception("Pricing sync failed")
+            )
             mock_get_pricing.return_value = mock_pricing_svc
 
             # Should not raise, model should still be updated
@@ -160,7 +169,9 @@ class TestModelServicePricingSync:
             assert result["model_id"] == "gpt-4o"
 
     @pytest.mark.asyncio
-    async def test_update_model_no_changes_skips_pricing_sync(self, model_service, mock_db, sample_model_row):
+    async def test_update_model_no_changes_skips_pricing_sync(
+        self, model_service, mock_db, sample_model_row
+    ):
         """Test that update with no changes doesn't trigger pricing sync."""
         # get_model returns the existing model
         mock_db.fetchrow.return_value = sample_model_row
@@ -233,7 +244,7 @@ class TestModelServicePricingValues:
             mock_pricing_svc.update_pricing = AsyncMock()
             mock_get_pricing.return_value = mock_pricing_svc
 
-            result = await model_service.create_model(
+            await model_service.create_model(
                 tenant_id="test-tenant",
                 model_id="free-model",
                 provider_id="local",
@@ -273,7 +284,7 @@ class TestModelServicePricingValues:
             mock_pricing_svc.update_pricing = AsyncMock()
             mock_get_pricing.return_value = mock_pricing_svc
 
-            result = await model_service.create_model(
+            await model_service.create_model(
                 tenant_id="test-tenant",
                 model_id="precise-model",
                 provider_id="custom",

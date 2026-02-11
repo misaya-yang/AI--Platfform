@@ -13,13 +13,14 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
-from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...persistence.redis import RedisStorage
@@ -38,6 +39,7 @@ WINDOW_MINUTES = 5  # Sliding window size for rate calculations
 @dataclass
 class RealtimeSnapshot:
     """Real-time metrics snapshot for dashboard"""
+
     # Throughput
     rps: float = 0.0
     rps_1m: float = 0.0
@@ -57,7 +59,7 @@ class RealtimeSnapshot:
     # Users & Sessions
     active_users: int = 0
     total_threads: int = 0
-    threads_by_user: Dict[str, int] = field(default_factory=dict)
+    threads_by_user: dict[str, int] = field(default_factory=dict)
 
     # Queue & Capacity
     queue_depth: int = 0
@@ -77,7 +79,7 @@ class RealtimeSnapshot:
     # Timestamp
     timestamp: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "rps": round(self.rps, 2),
             "rps_1m": round(self.rps_1m, 2),
@@ -96,17 +98,17 @@ class RealtimeSnapshot:
             "users": {
                 "active": self.active_users,
                 "threads_total": self.total_threads,
-                "threads_by_user": dict(sorted(
-                    self.threads_by_user.items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:10]),  # Top 10 users
+                "threads_by_user": dict(
+                    sorted(self.threads_by_user.items(), key=lambda x: x[1], reverse=True)[:10]
+                ),  # Top 10 users
             },
             "capacity": {
                 "queue_depth": self.queue_depth,
                 "concurrent": self.concurrent_requests,
                 "max_concurrent": self.max_concurrent,
-                "utilization": round(self.concurrent_requests / max(self.max_concurrent, 1) * 100, 1),
+                "utilization": round(
+                    self.concurrent_requests / max(self.max_concurrent, 1) * 100, 1
+                ),
             },
             "tokens": {
                 "total": self.total_tokens,
@@ -129,17 +131,17 @@ class RealtimeMetricsService:
     Uses Redis sorted sets for time-based sliding windows.
     """
 
-    def __init__(self, redis: Optional["RedisStorage"] = None):
+    def __init__(self, redis: RedisStorage | None = None):
         self.redis = redis
-        self._subscribers: Set[Callable] = set()
-        self._broadcast_task: Optional[asyncio.Task] = None
+        self._subscribers: set[Callable] = set()
+        self._broadcast_task: asyncio.Task | None = None
         self._running = False
 
         # In-memory concurrent tracking
         self._concurrent_requests = 0
         self._max_concurrent = 100
 
-    def set_redis(self, redis: "RedisStorage") -> None:
+    def set_redis(self, redis: RedisStorage) -> None:
         """Set or update Redis storage"""
         self.redis = redis
 
@@ -149,9 +151,7 @@ class RealtimeMetricsService:
             return
 
         self._running = True
-        self._broadcast_task = asyncio.create_task(
-            self._broadcast_loop(interval_seconds)
-        )
+        self._broadcast_task = asyncio.create_task(self._broadcast_loop(interval_seconds))
         logger.info(f"Real-time metrics broadcast started (interval={interval_seconds}s)")
 
     async def stop_broadcast(self) -> None:
@@ -159,10 +159,8 @@ class RealtimeMetricsService:
         self._running = False
         if self._broadcast_task:
             self._broadcast_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._broadcast_task
-            except asyncio.CancelledError:
-                pass
         logger.info("Real-time metrics broadcast stopped")
 
     def subscribe(self, callback: Callable) -> None:
@@ -294,9 +292,7 @@ class RealtimeMetricsService:
         except Exception as e:
             logger.debug(f"Failed to update queue depth: {e}")
 
-    async def record_token_usage(
-        self, input_tokens: int, output_tokens: int
-    ) -> None:
+    async def record_token_usage(self, input_tokens: int, output_tokens: int) -> None:
         """Record token usage for real-time metrics.
 
         This updates the daily token counters in Redis for real-time dashboard.
@@ -358,8 +354,8 @@ class RealtimeMetricsService:
 
             # Calculate error rates
             total_1m = len([d for d in window_data if now - d["time"] <= 60])
-            errors_4xx = await client.zcount(f"metrics:rt:errors_4xx", now - 60, now)
-            errors_5xx = await client.zcount(f"metrics:rt:errors_5xx", now - 60, now)
+            errors_4xx = await client.zcount("metrics:rt:errors_4xx", now - 60, now)
+            errors_5xx = await client.zcount("metrics:rt:errors_5xx", now - 60, now)
 
             if total_1m > 0:
                 snapshot.error_rate = ((errors_4xx + errors_5xx) / total_1m) * 100
@@ -367,9 +363,7 @@ class RealtimeMetricsService:
                 snapshot.error_rate_5xx = (errors_5xx / total_1m) * 100
 
             # Get active users
-            active_users = await client.zrangebyscore(
-                "metrics:rt:active_users", now - 300, now
-            )
+            active_users = await client.zrangebyscore("metrics:rt:active_users", now - 300, now)
             snapshot.active_users = len(active_users)
 
             # Get threads by user
@@ -424,10 +418,7 @@ class RealtimeMetricsService:
 
                 # 获取最近5分钟的请求数据
                 window_data = await client.zrangebyscore(
-                    "metrics:rt:requests_window",
-                    cutoff_5m,
-                    now,
-                    withscores=True
+                    "metrics:rt:requests_window", cutoff_5m, now, withscores=True
                 )
 
                 # 从窗口估算 tokens (使用请求数 * 平均 token)
@@ -442,15 +433,11 @@ class RealtimeMetricsService:
                 else:
                     # 回退到简单计算
                     elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
-                    snapshot.tokens_per_minute = round(
-                        snapshot.total_tokens / elapsed_minutes, 1
-                    )
+                    snapshot.tokens_per_minute = round(snapshot.total_tokens / elapsed_minutes, 1)
             except Exception:
                 # 发生错误时回退到简单计算
                 elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
-                snapshot.tokens_per_minute = round(
-                    snapshot.total_tokens / elapsed_minutes, 1
-                )
+                snapshot.tokens_per_minute = round(snapshot.total_tokens / elapsed_minutes, 1)
 
             snapshot.total_runs = total_runs
             snapshot.run_success_rate = round(
@@ -465,7 +452,7 @@ class RealtimeMetricsService:
 
         return snapshot
 
-    async def _get_window_data(self, now: float) -> List[Dict[str, Any]]:
+    async def _get_window_data(self, now: float) -> list[dict[str, Any]]:
         """Get request data from sliding window"""
         if not self.redis or not self.redis._client:
             return []
@@ -475,7 +462,7 @@ class RealtimeMetricsService:
             entries = await self.redis._client.zrangebyscore(
                 "metrics:rt:requests_window",
                 now - 300,  # Last 5 minutes
-                now
+                now,
             )
 
             data = []
@@ -483,11 +470,13 @@ class RealtimeMetricsService:
                 try:
                     parts = entry.split(":")
                     if len(parts) >= 3:
-                        data.append({
-                            "time": float(parts[0]),
-                            "status": int(parts[1]),
-                            "latency": float(parts[2]),
-                        })
+                        data.append(
+                            {
+                                "time": float(parts[0]),
+                                "status": int(parts[1]),
+                                "latency": float(parts[2]),
+                            }
+                        )
                 except (ValueError, IndexError):
                     continue
 
@@ -498,17 +487,14 @@ class RealtimeMetricsService:
             return []
 
     def _calculate_rps(
-        self,
-        window_data: List[Dict[str, Any]],
-        now: float,
-        window_seconds: int
+        self, window_data: list[dict[str, Any]], now: float, window_seconds: int
     ) -> float:
         """Calculate RPS for a given window"""
         cutoff = now - window_seconds
         count = len([d for d in window_data if d["time"] >= cutoff])
         return count / window_seconds if window_seconds > 0 else 0.0
 
-    async def get_user_metrics(self, user_id: str) -> Dict[str, Any]:
+    async def get_user_metrics(self, user_id: str) -> dict[str, Any]:
         """Get metrics for a specific user (multi-tenant support)"""
         if not self.redis or not self.redis._client:
             return {}
@@ -545,7 +531,7 @@ class RealtimeMetricsService:
 
 
 # Global singleton
-_realtime_service: Optional[RealtimeMetricsService] = None
+_realtime_service: RealtimeMetricsService | None = None
 
 
 def get_realtime_metrics() -> RealtimeMetricsService:
@@ -556,7 +542,7 @@ def get_realtime_metrics() -> RealtimeMetricsService:
     return _realtime_service
 
 
-def init_realtime_metrics(redis: "RedisStorage") -> RealtimeMetricsService:
+def init_realtime_metrics(redis: RedisStorage) -> RealtimeMetricsService:
     """Initialize the global RealtimeMetricsService with Redis"""
     global _realtime_service
     if _realtime_service is None:

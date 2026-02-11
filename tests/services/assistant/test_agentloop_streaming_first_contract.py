@@ -8,11 +8,12 @@ required by the Assistant UI (Manus-style task/tool/artifact visualization).
 from __future__ import annotations
 
 import base64
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from unittest.mock import AsyncMock
 
 
 @dataclass
@@ -22,7 +23,7 @@ class MockUserContext:
     tier: str = "normal"
     is_authenticated: bool = True
     ip: str = "127.0.0.1"
-    roles: Optional[List[str]] = None
+    roles: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.roles is None:
@@ -36,7 +37,7 @@ class FakeModelInfo:
 class FakeModelRegistry:
     """A minimal ModelRegistry stub for AgentLoop.chat_stream."""
 
-    def __init__(self, scripted: List[List[Dict[str, Any]]]):
+    def __init__(self, scripted: list[list[dict[str, Any]]]):
         """
         scripted: list of iterations; each iteration is a list of deltas.
 
@@ -47,7 +48,7 @@ class FakeModelRegistry:
         """
         self._scripted = scripted
         self._call_index = 0
-        self.last_messages: Optional[List[Dict[str, Any]]] = None
+        self.last_messages: list[dict[str, Any]] | None = None
 
     def get_model(self, model_id: str) -> Any:
         return FakeModelInfo()
@@ -73,7 +74,7 @@ class FakeToolDef:
     def __init__(self, name: str):
         self.name = name
 
-    def to_openai_schema(self) -> Dict[str, Any]:
+    def to_openai_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -85,16 +86,18 @@ class FakeToolDef:
 
 
 class FakeToolInvoker:
-    def __init__(self, results_by_name: Dict[str, Dict[str, Any]]):
+    def __init__(self, results_by_name: dict[str, dict[str, Any]]):
         self._results = results_by_name
 
-    def get_tool_definitions(self, context: Any, tool_names: Optional[List[str]] = None) -> List[Any]:
+    def get_tool_definitions(self, context: Any, tool_names: list[str] | None = None) -> list[Any]:
         names = list(self._results.keys())
         if tool_names:
             names = [n for n in names if n in tool_names]
         return [FakeToolDef(n) for n in names]
 
-    async def invoke(self, tool_name: str, arguments: Dict[str, Any], context: Any, cancel_event: Any = None) -> Any:
+    async def invoke(
+        self, tool_name: str, arguments: dict[str, Any], context: Any, cancel_event: Any = None
+    ) -> Any:
         from src.services.assistant.tools.tool_registry import ToolCallResult
 
         payload = self._results.get(tool_name) or {}
@@ -205,7 +208,7 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     tool_calls = [
         {
             "id": "tc_1",
-            "function": {"name": "generate_image", "arguments": "{\"prompt\":\"cat\"}"},
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
         }
     ]
     model = FakeModelRegistry(
@@ -286,11 +289,14 @@ async def test_streaming_first_kb_web_panel_events() -> None:
     tool_calls = [
         {
             "id": "kb_1",
-            "function": {"name": "search_knowledge_base", "arguments": "{\"query\":\"x\",\"dataset_ids\":[\"d1\"]}"},
+            "function": {
+                "name": "search_knowledge_base",
+                "arguments": '{"query":"x","dataset_ids":["d1"]}',
+            },
         },
         {
             "id": "web_1",
-            "function": {"name": "search_web", "arguments": "{\"query\":\"y\",\"max_results\":1}"},
+            "function": {"name": "search_web", "arguments": '{"query":"y","max_results":1}'},
         },
     ]
     model = FakeModelRegistry(

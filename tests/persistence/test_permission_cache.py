@@ -3,8 +3,8 @@ Tests for permission cache memory safety.
 
 Ensures permission cache doesn't grow unbounded.
 """
+
 import pytest
-import asyncio
 
 
 class TestPermissionCache:

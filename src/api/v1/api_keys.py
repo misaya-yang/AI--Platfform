@@ -3,15 +3,15 @@ API Key 管理接口
 """
 
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..deps import get_user_context
 from ...core.auth.user_resolver import UserContext
 from ...persistence.database import DatabaseStorage
 from ...services.auth.api_key_service import APIKeyService
+from ..deps import get_user_context
 
 router = APIRouter(prefix="/api-keys", tags=["API Keys"])
 
@@ -41,32 +41,32 @@ async def require_authenticated_user(
 
 # ============ Request/Response Schemas ============
 
+
 class CreateAPIKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="API Key 名称")
-    description: Optional[str] = Field(None, max_length=500, description="描述")
-    scopes: Optional[List[str]] = Field(
-        default=["knowledge:read", "knowledge:write"],
-        description="权限范围"
+    description: str | None = Field(None, max_length=500, description="描述")
+    scopes: list[str] | None = Field(
+        default=["knowledge:read", "knowledge:write"], description="权限范围"
     )
-    tier: Optional[str] = Field(default="normal", description="层级")
-    expires_at: Optional[datetime] = Field(None, description="过期时间，不填则永不过期")
+    tier: str | None = Field(default="normal", description="层级")
+    expires_at: datetime | None = Field(None, description="过期时间，不填则永不过期")
 
 
 class APIKeyResponse(BaseModel):
     key_id: str
-    key_prefix: Optional[str] = None
+    key_prefix: str | None = None
     name: str
-    description: Optional[str] = None
-    user_id: Optional[str] = None
-    derived_user_id: Optional[str] = None
-    scopes: Optional[List[str]] = None
-    roles: Optional[List[str]] = None
-    tier: Optional[str] = None
-    rate_limit: Optional[Any] = None
+    description: str | None = None
+    user_id: str | None = None
+    derived_user_id: str | None = None
+    scopes: list[str] | None = None
+    roles: list[str] | None = None
+    tier: str | None = None
+    rate_limit: Any | None = None
     is_active: bool
     created_at: datetime
-    last_used_at: Optional[datetime] = None
-    expires_at: Optional[datetime] = None
+    last_used_at: datetime | None = None
+    expires_at: datetime | None = None
     use_count: int = 0
 
     class Config:
@@ -79,6 +79,7 @@ class CreateAPIKeyResponse(APIKeyResponse):
 
 
 # ============ Endpoints ============
+
 
 @router.post("", response_model=CreateAPIKeyResponse)
 async def create_api_key(
@@ -106,7 +107,7 @@ async def create_api_key(
     return result
 
 
-@router.get("", response_model=List[APIKeyResponse])
+@router.get("", response_model=list[APIKeyResponse])
 async def list_api_keys(
     include_inactive: bool = False,
     db: DatabaseStorage = Depends(get_database),

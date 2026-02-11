@@ -7,14 +7,14 @@ These schemas provide a clean, minimal API surface for knowledge base operations
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ============================================================
 # Request Schemas
 # ============================================================
+
 
 class KBSearchRequest(BaseModel):
     """
@@ -29,6 +29,7 @@ class KBSearchRequest(BaseModel):
             "top_k": 5
         }
     """
+
     model_config = ConfigDict(extra="forbid")
 
     # Required
@@ -39,46 +40,43 @@ class KBSearchRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=50, description="Number of results to return")
     mode: Literal["auto", "hybrid", "dense", "bm25"] = Field(
         default="auto",
-        description="Retrieval mode. 'auto' selects best mode based on query characteristics"
+        description="Retrieval mode. 'auto' selects best mode based on query characteristics",
     )
 
     # Advanced options
     rerank: bool = Field(
-        default=False,
-        description="Enable cross-encoder reranking for improved relevance"
+        default=False, description="Enable cross-encoder reranking for improved relevance"
     )
     mmr: bool = Field(default=False, description="Enable MMR for result diversity")
-    score_threshold: Optional[float] = Field(
+    score_threshold: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
-        description="Minimum score threshold (0.0-1.0). Results below this are filtered out."
+        description="Minimum score threshold (0.0-1.0). Results below this are filtered out.",
     )
 
     # Multimodal options
     include_images: bool = Field(default=True, description="Include image segments in results")
     include_associated_images: bool = Field(
-        default=True,
-        description="Attach associated images to text segments"
+        default=True, description="Attach associated images to text segments"
     )
 
     # Filter options
-    document_id: Optional[str] = Field(default=None, description="Filter to specific document")
-    content_type_filter: Optional[Literal["text", "image"]] = Field(
-        default=None,
-        description="Filter by content type"
+    document_id: str | None = Field(default=None, description="Filter to specific document")
+    content_type_filter: Literal["text", "image"] | None = Field(
+        default=None, description="Filter by content type"
     )
 
     # Cross-modal search (Phase 2)
-    query_image_url: Optional[str] = Field(
+    query_image_url: str | None = Field(
         default=None,
         description="URL of image to use as query (for image-to-text search). "
-                    "When provided, searches for text/images similar to this image."
+        "When provided, searches for text/images similar to this image.",
     )
     cross_modal: bool = Field(
         default=True,
         description="Enable cross-modal retrieval (text queries can find images and vice versa). "
-                    "Requires unified multimodal embedding model."
+        "Requires unified multimodal embedding model.",
     )
 
 
@@ -93,26 +91,24 @@ class KBMultiSearchRequest(BaseModel):
             "top_k": 5
         }
     """
+
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., description="Natural language search query")
-    dataset_ids: List[str] = Field(
-        ...,
-        min_length=1,
-        max_length=10,
-        description="List of dataset IDs to search (max 10)"
+    dataset_ids: list[str] = Field(
+        ..., min_length=1, max_length=10, description="List of dataset IDs to search (max 10)"
     )
 
     top_k: int = Field(default=5, ge=1, le=50, description="Total results to return after merging")
     mode: Literal["auto", "hybrid", "dense", "bm25"] = Field(default="auto")
     rerank: bool = Field(default=True, description="Enable reranking (SOTA default)")
     mmr: bool = Field(default=False)
-    score_threshold: Optional[float] = Field(default=0.3, ge=0.0, le=1.0)
+    score_threshold: float | None = Field(default=0.3, ge=0.0, le=1.0)
 
     # Merge strategy - RRF is best for multi-source fusion
     merge_strategy: Literal["score", "round_robin", "rrf"] = Field(
         default="rrf",
-        description="How to merge results from multiple datasets. RRF (Reciprocal Rank Fusion) is recommended."
+        description="How to merge results from multiple datasets. RRF (Reciprocal Rank Fusion) is recommended.",
     )
 
 
@@ -131,16 +127,15 @@ class KBImageSearchRequest(BaseModel):
             "top_k": 5
         }
     """
+
     model_config = ConfigDict(extra="forbid")
 
     # Query image (one of these required)
-    image_url: Optional[str] = Field(
-        default=None,
-        description="URL of image to search for. Must be accessible by the server."
+    image_url: str | None = Field(
+        default=None, description="URL of image to search for. Must be accessible by the server."
     )
-    image_base64: Optional[str] = Field(
-        default=None,
-        description="Base64-encoded image data (alternative to image_url)"
+    image_base64: str | None = Field(
+        default=None, description="Base64-encoded image data (alternative to image_url)"
     )
 
     # Dataset
@@ -149,24 +144,22 @@ class KBImageSearchRequest(BaseModel):
     # Options
     top_k: int = Field(default=5, ge=1, le=50, description="Number of results")
     include_text_results: bool = Field(
-        default=True,
-        description="Include text segments in results (cross-modal)"
+        default=True, description="Include text segments in results (cross-modal)"
     )
     include_image_results: bool = Field(
-        default=True,
-        description="Include image segments in results (visual similarity)"
+        default=True, description="Include image segments in results (visual similarity)"
     )
-    score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    score_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
     # Optional text context for hybrid image+text query
-    text_context: Optional[str] = Field(
-        default=None,
-        description="Optional text to combine with image for hybrid query"
+    text_context: str | None = Field(
+        default=None, description="Optional text to combine with image for hybrid query"
     )
 
 
 class KBListDatasetsRequest(BaseModel):
     """Request to list available datasets."""
+
     model_config = ConfigDict(extra="forbid")
 
     include_stats: bool = Field(default=False, description="Include document/segment counts")
@@ -176,18 +169,21 @@ class KBListDatasetsRequest(BaseModel):
 # Response Schemas
 # ============================================================
 
+
 class KBAssociatedImage(BaseModel):
     """Associated image attached to a text segment."""
+
     image_segment_id: str
     storage_url: str
     filename: str = ""
-    vlm_description: Optional[str] = None
+    vlm_description: str | None = None
     proximity_score: float = Field(default=1.0, description="Relevance to parent text (0-1)")
     media_type: str = "image/png"
 
 
 class KBSearchResult(BaseModel):
     """Single search result optimized for agent consumption."""
+
     model_config = ConfigDict(extra="ignore")
 
     # Core fields
@@ -203,17 +199,16 @@ class KBSearchResult(BaseModel):
     content_type: Literal["text", "image"] = Field(default="text")
 
     # Metadata
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     # Image-specific fields (for image segments)
-    image_url: Optional[str] = Field(default=None, description="Storage URL for image segments")
-    vlm_description: Optional[str] = Field(
-        default=None,
-        description="VLM-generated description for images"
+    image_url: str | None = Field(default=None, description="Storage URL for image segments")
+    vlm_description: str | None = Field(
+        default=None, description="VLM-generated description for images"
     )
 
     # Associated images (for text segments with nearby images)
-    associated_images: List[KBAssociatedImage] = Field(default_factory=list)
+    associated_images: list[KBAssociatedImage] = Field(default_factory=list)
 
 
 class KBSearchResponse(BaseModel):
@@ -223,15 +218,15 @@ class KBSearchResponse(BaseModel):
     Includes both structured results and a pre-formatted context string
     ready for LLM consumption.
     """
+
     model_config = ConfigDict(extra="ignore")
 
     # Structured results for programmatic access
-    results: List[KBSearchResult] = Field(default_factory=list)
+    results: list[KBSearchResult] = Field(default_factory=list)
 
     # Pre-formatted context string for direct LLM injection
     formatted_context: str = Field(
-        default="",
-        description="Pre-formatted text ready for LLM context window"
+        default="", description="Pre-formatted text ready for LLM context window"
     )
 
     # Metadata
@@ -240,35 +235,37 @@ class KBSearchResponse(BaseModel):
     total_results: int = 0
 
     # Timing and debug info (optional)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class KBMultiSearchResponse(BaseModel):
     """Response for multi-dataset search."""
+
     model_config = ConfigDict(extra="ignore")
 
-    results: List[KBSearchResult] = Field(default_factory=list)
+    results: list[KBSearchResult] = Field(default_factory=list)
     formatted_context: str = ""
 
     query: str
-    dataset_ids: List[str]
+    dataset_ids: list[str]
     total_results: int = 0
 
     # Per-dataset result counts
-    results_per_dataset: Dict[str, int] = Field(default_factory=dict)
+    results_per_dataset: dict[str, int] = Field(default_factory=dict)
 
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class KBDatasetInfo(BaseModel):
     """Dataset information for listing."""
+
     dataset_id: str
     name: str
     description: str = ""
 
     # Stats (if requested)
-    document_count: Optional[int] = None
-    segment_count: Optional[int] = None
+    document_count: int | None = None
+    segment_count: int | None = None
 
     # Config summary
     embedding_provider: str = ""
@@ -277,7 +274,8 @@ class KBDatasetInfo(BaseModel):
 
 class KBListDatasetsResponse(BaseModel):
     """Response for listing available datasets."""
-    datasets: List[KBDatasetInfo] = Field(default_factory=list)
+
+    datasets: list[KBDatasetInfo] = Field(default_factory=list)
     total: int = 0
 
 
@@ -285,19 +283,21 @@ class KBListDatasetsResponse(BaseModel):
 # Tool Definition Schemas (for LangChain/OpenAI function calling)
 # ============================================================
 
+
 class KBToolDefinition(BaseModel):
     """
     Tool definition in OpenAI function calling format.
 
     Can be used to expose KB search as a tool to LLMs.
     """
+
     type: Literal["function"] = "function"
-    function: Dict[str, Any]
+    function: dict[str, Any]
 
 
 def get_kb_search_tool_definition(
     dataset_id: str,
-    dataset_name: Optional[str] = None,
+    dataset_name: str | None = None,
 ) -> KBToolDefinition:
     """
     Generate OpenAI function calling definition for KB search.
@@ -315,33 +315,28 @@ def get_kb_search_tool_definition(
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query"
-                    },
+                    "query": {"type": "string", "description": "Natural language search query"},
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results to return (default: 5)",
-                        "default": 5
-                    }
+                        "default": 5,
+                    },
                 },
-                "required": ["query"]
-            }
+                "required": ["query"],
+            },
         }
     )
 
 
 def get_multi_kb_search_tool_definition(
-    dataset_ids: List[str],
-    dataset_names: Optional[Dict[str, str]] = None,
+    dataset_ids: list[str],
+    dataset_names: dict[str, str] | None = None,
 ) -> KBToolDefinition:
     """
     Generate tool definition for searching multiple KBs.
     """
     names = dataset_names or {}
-    dataset_desc = ", ".join(
-        f"'{names.get(d, d)}' ({d})" for d in dataset_ids
-    )
+    dataset_desc = ", ".join(f"'{names.get(d, d)}' ({d})" for d in dataset_ids)
 
     return KBToolDefinition(
         function={
@@ -350,22 +345,19 @@ def get_multi_kb_search_tool_definition(
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query"
-                    },
+                    "query": {"type": "string", "description": "Natural language search query"},
                     "dataset_id": {
                         "type": "string",
-                        "description": f"Optional: specific dataset to search. If not provided, searches all datasets.",
-                        "enum": dataset_ids
+                        "description": "Optional: specific dataset to search. If not provided, searches all datasets.",
+                        "enum": dataset_ids,
                     },
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results to return (default: 5)",
-                        "default": 5
-                    }
+                        "default": 5,
+                    },
                 },
-                "required": ["query"]
-            }
+                "required": ["query"],
+            },
         }
     )

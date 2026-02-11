@@ -17,27 +17,28 @@ import json
 import random
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
-from .billing_interceptor import BillingInterceptor, StreamProcessor
-from .config_loader import ProxyConfigLoader, ProxyServiceConfig
-from .context_injector import ContextInjector, RequestContext
-from .response_cache import ResponseCache
 from ..core.observability.logging import get_logger
+from ..services.metrics.observability import (
+    classify_error_type,
+    ensure_duration_breakdown,
+    extract_duration_breakdown,
+)
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
     extract_provider,
     extract_token_usage,
 )
-from ..services.metrics.observability import (
-    classify_error_type,
-    ensure_duration_breakdown,
-    extract_duration_breakdown,
-)
+from .billing_interceptor import BillingInterceptor, StreamProcessor
+from .config_loader import ProxyConfigLoader, ProxyServiceConfig
+from .context_injector import ContextInjector, RequestContext
+from .response_cache import ResponseCache
 
 logger = get_logger(__name__)
 
@@ -112,13 +113,13 @@ class ProxyRequest:
     method: str = "GET"
 
     # 请求体
-    body: Optional[bytes] = None
+    body: bytes | None = None
 
     # 查询参数
-    query_params: Dict[str, Any] = field(default_factory=dict)
+    query_params: dict[str, Any] = field(default_factory=dict)
 
     # 请求上下文
-    context: Optional[RequestContext] = None
+    context: RequestContext | None = None
 
     # 是否期望流式响应
     stream: bool = False
@@ -129,17 +130,17 @@ class ProxyResponse:
     """代理响应"""
 
     status_code: int
-    headers: Dict[str, str]
-    body: Optional[bytes] = None
+    headers: dict[str, str]
+    body: bytes | None = None
 
     # 流式响应迭代器
-    stream: Optional[AsyncIterator[bytes]] = None
+    stream: AsyncIterator[bytes] | None = None
 
     # 是否是流式响应
     is_streaming: bool = False
 
     # 错误信息
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class TransparentProxy:
@@ -156,9 +157,9 @@ class TransparentProxy:
     def __init__(
         self,
         config_loader: ProxyConfigLoader,
-        context_injector: Optional[ContextInjector] = None,
-        billing_interceptor: Optional[BillingInterceptor] = None,
-        response_cache: Optional[ResponseCache] = None,
+        context_injector: ContextInjector | None = None,
+        billing_interceptor: BillingInterceptor | None = None,
+        response_cache: ResponseCache | None = None,
         default_timeout: float = 60.0,
     ):
         """
@@ -177,12 +178,12 @@ class TransparentProxy:
         self.default_timeout = default_timeout
 
         # HTTP 客户端池（按服务维护）
-        self._clients: Dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[str, httpx.AsyncClient] = {}
         self._client_lock = asyncio.Lock()
 
         # 负载均衡状态
-        self._lb_counters: Dict[str, int] = {}  # round-robin 计数器
-        self._lb_connections: Dict[str, Dict[str, int]] = {}  # 连接计数
+        self._lb_counters: dict[str, int] = {}  # round-robin 计数器
+        self._lb_connections: dict[str, dict[str, int]] = {}  # 连接计数
 
     async def close(self) -> None:
         """关闭所有 HTTP 客户端"""
@@ -410,10 +411,10 @@ class TransparentProxy:
 
     def _inject_assistant_id(
         self,
-        body: Optional[bytes],
+        body: bytes | None,
         path: str,
         assistant_id: str,
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """
         为 LangGraph 请求注入 assistant_id
 
@@ -453,7 +454,7 @@ class TransparentProxy:
             return body
 
     @staticmethod
-    def _replace_assistant_id(body: Optional[bytes], assistant_id: str) -> Optional[bytes]:
+    def _replace_assistant_id(body: bytes | None, assistant_id: str) -> bytes | None:
         """强制替换请求体中的 assistant_id（用于重试自愈）。"""
         if not body:
             return body
@@ -488,7 +489,7 @@ class TransparentProxy:
             return False
         return any(m in ("messages", "messages-tuple") for m in modes)
 
-    def _ensure_stream_defaults(self, body: Optional[bytes], path: str) -> Optional[bytes]:
+    def _ensure_stream_defaults(self, body: bytes | None, path: str) -> bytes | None:
         """
         为 LangGraph 流式请求设置默认参数
 
@@ -534,7 +535,7 @@ class TransparentProxy:
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
     @staticmethod
-    def _parse_json_body(body: Optional[bytes]) -> Optional[Any]:
+    def _parse_json_body(body: bytes | None) -> Any | None:
         if not body:
             return None
         try:
@@ -560,7 +561,7 @@ class TransparentProxy:
         return str(payload)
 
     @staticmethod
-    def _extract_assistant_records(payload: Any) -> List[Dict[str, Any]]:
+    def _extract_assistant_records(payload: Any) -> list[dict[str, Any]]:
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         if isinstance(payload, dict):
@@ -570,10 +571,10 @@ class TransparentProxy:
                     return [item for item in value if isinstance(item, dict)]
         return []
 
-    def _build_graph_candidates(self, config: ProxyServiceConfig) -> List[str]:
-        candidates: List[str] = []
+    def _build_graph_candidates(self, config: ProxyServiceConfig) -> list[str]:
+        candidates: list[str] = []
 
-        def _add(value: Optional[str]) -> None:
+        def _add(value: str | None) -> None:
             if not value:
                 return
             normalized = str(value).strip()
@@ -598,8 +599,8 @@ class TransparentProxy:
         client: httpx.AsyncClient,
         config: ProxyServiceConfig,
         upstream_base: str,
-        headers: Dict[str, str],
-    ) -> Optional[str]:
+        headers: dict[str, str],
+    ) -> str | None:
         """
         基于上游 assistants/search 结果选择可用 assistant_id（只做无损自动修复）。
         """
@@ -648,13 +649,13 @@ class TransparentProxy:
         client: httpx.AsyncClient,
         method: str,
         url: str,
-        headers: Dict[str, str],
-        body: Optional[bytes],
-        params: Dict[str, Any],
+        headers: dict[str, str],
+        body: bytes | None,
+        params: dict[str, Any],
         path: str,
         config: ProxyServiceConfig,
         upstream_base: str,
-    ) -> Tuple[httpx.Response, Optional[bytes]]:
+    ) -> tuple[httpx.Response, bytes | None]:
         if response.status_code != 422 or not self._is_run_operation_path(path):
             return response, body
 
@@ -702,7 +703,7 @@ class TransparentProxy:
         return retry_response, retry_body
 
     @staticmethod
-    def _extract_error_metadata(payload: Any) -> Dict[str, str]:
+    def _extract_error_metadata(payload: Any) -> dict[str, str]:
         if not isinstance(payload, dict):
             return {}
         error_payload = payload.get("__error__") or payload.get("error")
@@ -718,16 +719,16 @@ class TransparentProxy:
             error_type = "upstream_error"
             error_message = str(error_payload)
 
-        metadata: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+        metadata: dict[str, str] = {"upstream_error_type": error_type[:128]}
         if error_message:
             metadata["upstream_error_message"] = error_message[:512]
         return metadata
 
     @staticmethod
     def _build_trace_steps(
-        total_duration_ms: int, breakdown: Dict[str, int], status: str
-    ) -> List[Dict[str, Any]]:
-        steps: List[Dict[str, Any]] = [
+        total_duration_ms: int, breakdown: dict[str, int], status: str
+    ) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = [
             {
                 "name": "gateway.request_total",
                 "start_offset_ms": 0,
@@ -761,7 +762,7 @@ class TransparentProxy:
         self,
         response_body: bytes,
         response_content_type: str,
-        request_body: Optional[bytes],
+        request_body: bytes | None,
         config: ProxyServiceConfig,
         context: RequestContext,
         method: str,
@@ -817,7 +818,7 @@ class TransparentProxy:
         )
 
         request_type = f"proxy_{operation}"
-        metadata: Dict[str, Any] = {
+        metadata: dict[str, Any] = {
             "source": "transparent_proxy_non_stream",
             "path": self._normalize_path(path),
             "http_status": status_code,
@@ -826,7 +827,7 @@ class TransparentProxy:
         }
         metadata.update(self._extract_error_metadata(response_data))
 
-        extracted_breakdown: Dict[str, Any] = {}
+        extracted_breakdown: dict[str, Any] = {}
         if isinstance(request_data, dict):
             extracted_breakdown.update(extract_duration_breakdown(request_data))
         if isinstance(response_data, dict):
@@ -905,9 +906,9 @@ class TransparentProxy:
         method: str,
         url: str,
         upstream_base: str,
-        headers: Dict[str, str],
-        body: Optional[bytes],
-        params: Dict[str, Any],
+        headers: dict[str, str],
+        body: bytes | None,
+        params: dict[str, Any],
         path: str,
         config: ProxyServiceConfig,
         context: RequestContext,
@@ -916,9 +917,13 @@ class TransparentProxy:
         request_started = time.perf_counter()
 
         cache_status = "BYPASS"
-        cache_hash: Optional[str] = None
+        cache_hash: str | None = None
         if self.response_cache:
-            cache_status, cache_hash, cached_response = await self.response_cache.get_cached_response(
+            (
+                cache_status,
+                cache_hash,
+                cached_response,
+            ) = await self.response_cache.get_cached_response(
                 config=config,
                 context=context,
                 method=method,
@@ -1010,9 +1015,9 @@ class TransparentProxy:
         client: httpx.AsyncClient,
         method: str,
         url: str,
-        headers: Dict[str, str],
-        body: Optional[bytes],
-        params: Dict[str, Any],
+        headers: dict[str, str],
+        body: bytes | None,
+        params: dict[str, Any],
         config: ProxyServiceConfig,
         context: RequestContext,
         path: str,
@@ -1029,7 +1034,7 @@ class TransparentProxy:
         request_data = self._parse_json_body(body)
 
         # 创建流处理器（用于计费）
-        stream_processor: Optional[StreamProcessor] = None
+        stream_processor: StreamProcessor | None = None
         if self.billing_interceptor:
             assistant_id = config.assistant_id or extract_assistant_id(request_data) or ""
             operation = self.detect_operation_type(method, path)
@@ -1194,10 +1199,7 @@ class TransparentProxy:
                 return True
 
         # 检查路径中是否包含 "stream"（但要排除 "upstream" 等）
-        if "/stream" in path_lower:
-            return True
-
-        return False
+        return "/stream" in path_lower
 
     @staticmethod
     def detect_operation_type(method: str, path: str) -> str:
@@ -1247,7 +1249,7 @@ class TransparentProxy:
         # 默认为 proxy
         return "proxy"
 
-    def _filter_response_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
+    def _filter_response_headers(self, headers: dict[str, str]) -> dict[str, str]:
         """过滤响应头（移除 hop-by-hop 头）"""
         hop_by_hop = {
             "connection",
@@ -1262,7 +1264,7 @@ class TransparentProxy:
 
         return {k: v for k, v in headers.items() if k.lower() not in hop_by_hop}
 
-    async def health_check(self, service_name: str) -> Tuple[bool, str]:
+    async def health_check(self, service_name: str) -> tuple[bool, str]:
         """
         服务健康检查
 
@@ -1284,14 +1286,14 @@ class TransparentProxy:
             client = await self._get_client(config)
 
             base = upstream_base.rstrip("/")
-            probes: List[Tuple[str, str, Optional[Dict[str, Any]]]] = [
+            probes: list[tuple[str, str, dict[str, Any] | None]] = [
                 ("GET", f"{base}/health", None),
                 # LangGraph agent server commonly exposes /docs and assistants APIs.
                 ("GET", f"{base}/docs", None),
                 ("POST", f"{base}/assistants/search", {}),
             ]
 
-            last_status: Optional[int] = None
+            last_status: int | None = None
             for method, url, payload in probes:
                 if method == "POST":
                     response = await client.post(url, json=payload, timeout=5.0)

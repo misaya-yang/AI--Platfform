@@ -25,32 +25,30 @@ import logging
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ..deps import get_user_context, get_knowledge_service
+from ...core.auth.user_resolver import UserContext
+from ...services.assistant import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
+from ...services.assistant.assistant_service import RAGMode
+from ...services.knowledge.embedding import is_multimodal_embedding_model
+from ...services.storage import get_artifact_storage
+from ..deps import get_user_context
+from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
 from ..schemas.assistant import (
     AssistantChatRequest,
     AssistantChatResponse,
     AssistantConfigResponse,
     DatasetInfoResponse,
     DatasetsListResponse,
-    ModelInfoResponse,
-    ModelsListResponse,
+    GeneratedImage,
     ImageGenerationRequest,
     ImageGenerationResponse,
-    GeneratedImage,
+    ModelInfoResponse,
+    ModelsListResponse,
 )
-from ..schemas.artifacts import ArtifactInfo, ArtifactListResponse, ArtifactCreateRequest
-from ...core.auth.user_resolver import UserContext
-from ...services.storage import get_artifact_storage
-from ...services.assistant import AssistantService, AssistantConfig, ModelRegistry, ModelProvider
-from ...services.assistant.assistant_service import RAGMode
-from ...services.knowledge.embedding import is_multimodal_embedding_model
-
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
@@ -60,41 +58,47 @@ logger = logging.getLogger(__name__)
 # Session Management Schemas
 # =========================================================================
 
+
 class SessionCreateRequest(BaseModel):
     """Request to create a new assistant session."""
-    metadata: Optional[dict] = None  # Optional metadata like title
+
+    metadata: dict | None = None  # Optional metadata like title
 
 
 class SessionResponse(BaseModel):
     """Response with session info."""
+
     session_id: str
     user_id: str
     tenant_id: str
-    service_id: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    metadata: Optional[dict] = None
+    service_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    metadata: dict | None = None
     message_count: int = 0
 
 
 class SessionListResponse(BaseModel):
     """Response with list of sessions."""
-    sessions: List[SessionResponse]
+
+    sessions: list[SessionResponse]
     total: int
 
 
 class SessionHistoryMessage(BaseModel):
     """A message in session history."""
+
     role: str
     content: str
-    timestamp: Optional[str] = None
-    metadata: Optional[dict] = None
+    timestamp: str | None = None
+    metadata: dict | None = None
 
 
 class SessionHistoryResponse(BaseModel):
     """Response with session history."""
+
     session_id: str
-    messages: List[SessionHistoryMessage]
+    messages: list[SessionHistoryMessage]
     total: int
 
 
@@ -164,8 +168,7 @@ async def list_models(
 
     # Filter models based on user's access level
     accessible_models = [
-        m for m in all_models
-        if _user_can_access_model(user, m.access_level.value)
+        m for m in all_models if _user_can_access_model(user, m.access_level.value)
     ]
 
     return ModelsListResponse(
@@ -255,8 +258,7 @@ async def get_config(
     import os
 
     available_providers = [
-        p.value for p in ModelProvider
-        if model_registry.is_provider_configured(p)
+        p.value for p in ModelProvider if model_registry.is_provider_configured(p)
     ]
 
     kb_service = getattr(request.app.state, "knowledge_service", None)
@@ -281,19 +283,22 @@ async def get_config(
 # Tool Management Endpoints (Phase 2)
 # =========================================================================
 
+
 class ToolInfoResponse(BaseModel):
     """Tool information response."""
+
     name: str
     description: str
     category: str
     risk_level: str
-    when_to_use: Optional[str] = None
-    when_not_to_use: Optional[str] = None
+    when_to_use: str | None = None
+    when_not_to_use: str | None = None
 
 
 class ToolsListResponse(BaseModel):
     """Response for listing available tools."""
-    tools: List[ToolInfoResponse]
+
+    tools: list[ToolInfoResponse]
 
 
 @router.get("/tools", response_model=ToolsListResponse)
@@ -326,7 +331,9 @@ async def list_tools(
     )
 
 
-def _check_model_permission(user: UserContext, model_id: str, model_registry: ModelRegistry) -> None:
+def _check_model_permission(
+    user: UserContext, model_id: str, model_registry: ModelRegistry
+) -> None:
     """Check if user has permission to use the specified model."""
     model = model_registry.get_model(model_id)
     if model is None:
@@ -335,7 +342,7 @@ def _check_model_permission(user: UserContext, model_id: str, model_registry: Mo
     if not _user_can_access_model(user, model.access_level.value):
         raise HTTPException(
             status_code=403,
-            detail=f"Access denied: Model '{model_id}' requires {model.access_level.value} access level"
+            detail=f"Access denied: Model '{model_id}' requires {model.access_level.value} access level",
         )
 
 
@@ -392,7 +399,9 @@ async def chat(
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
-    history = [{"role": m.role, "content": m.content} for m in body.history] if body.history else None
+    history = (
+        [{"role": m.role, "content": m.content} for m in body.history] if body.history else None
+    )
 
     try:
         result = await assistant.chat(
@@ -484,7 +493,9 @@ async def chat_stream(
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
-    history = [{"role": m.role, "content": m.content} for m in body.history] if body.history else None
+    history = (
+        [{"role": m.role, "content": m.content} for m in body.history] if body.history else None
+    )
 
     async def event_generator():
         """Generate SSE events."""
@@ -528,6 +539,7 @@ async def chat_stream(
 # =========================================================================
 # Session Management Endpoints
 # =========================================================================
+
 
 def get_session_manager(request: Request):
     """Get session manager from app state."""
@@ -775,11 +787,13 @@ async def get_session_history(
 
 class TaskCancelRequest(BaseModel):
     """Request to cancel a running task."""
-    reason: Optional[str] = None
+
+    reason: str | None = None
 
 
 class TaskCancelResponse(BaseModel):
     """Response for task cancellation."""
+
     task_id: str
     session_id: str
     cancelled: bool
@@ -790,7 +804,7 @@ class TaskCancelResponse(BaseModel):
 async def cancel_task(
     task_id: str,
     request: Request,
-    body: Optional[TaskCancelRequest] = None,
+    body: TaskCancelRequest | None = None,
     user: UserContext = Depends(get_user_context),
 ) -> TaskCancelResponse:
     """
@@ -829,19 +843,24 @@ async def cancel_task(
     success = await task_manager.cancel_task(task_ctx.session_id, task_id)
 
     reason = body.reason if body else None
-    logger.info(f"Task cancellation requested: task_id={task_id}, user={user.user_id}, reason={reason}")
+    logger.info(
+        f"Task cancellation requested: task_id={task_id}, user={user.user_id}, reason={reason}"
+    )
 
     return TaskCancelResponse(
         task_id=task_id,
         session_id=task_ctx.session_id,
         cancelled=success,
-        message="Cancellation requested" if success else "Task already completed or not cancellable",
+        message="Cancellation requested"
+        if success
+        else "Task already completed or not cancellable",
     )
 
 
 # =========================================================================
 # Artifact Management Endpoints
 # =========================================================================
+
 
 @router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListResponse)
 async def list_session_artifacts(
@@ -1012,7 +1031,7 @@ async def create_artifact(
             "md": "text/markdown",
             "txt": "text/plain",
         }
-        mime_type = mime_type_map.get(body.format.lower(), "application/octet-stream")
+        mime_type_map.get(body.format.lower(), "application/octet-stream")
 
         # Create artifact
         artifact = await artifact_storage.create_artifact(
@@ -1134,6 +1153,7 @@ async def download_artifact(
         download_url = await artifact_storage.get_presigned_download_url(artifact)
         if download_url:
             from fastapi.responses import RedirectResponse
+
             return RedirectResponse(url=download_url)
 
         # Fallback: stream content directly
@@ -1159,6 +1179,7 @@ async def download_artifact(
 # =========================================================================
 # Image Generation Endpoint (Smart Routing)
 # =========================================================================
+
 
 @router.post("/generate-image", response_model=ImageGenerationResponse)
 async def generate_image(
@@ -1256,18 +1277,22 @@ async def generate_image(
 
         images = []
         for img in res.images:
-            mime_type = img.get('mime_type', 'image/png')
-            content_base64 = img.get('content_base64', '')
-            size_bytes = img.get('size_bytes', 0)
+            mime_type = img.get("mime_type", "image/png")
+            content_base64 = img.get("content_base64", "")
+            size_bytes = img.get("size_bytes", 0)
             data_url = f"data:{mime_type};base64,{content_base64}"
 
-            logger.debug(f"Image data: mime={mime_type}, base64_len={len(content_base64)}, size_bytes={size_bytes}")
+            logger.debug(
+                f"Image data: mime={mime_type}, base64_len={len(content_base64)}, size_bytes={size_bytes}"
+            )
 
-            images.append(GeneratedImage(
-                url=data_url,
-                width=width,
-                height=height,
-            ))
+            images.append(
+                GeneratedImage(
+                    url=data_url,
+                    width=width,
+                    height=height,
+                )
+            )
 
         return ImageGenerationResponse(
             success=True,
@@ -1294,24 +1319,26 @@ async def generate_image(
 
 class ContextMetricsResponse(BaseModel):
     """Response with context metrics for a session."""
+
     session_id: str
     request_count: int
     avg_tokens: int
     avg_utilization: float
     avg_compression_ratio: float
     avg_cache_hit_rate: float
-    total_tokens_used: Optional[int] = None
+    total_tokens_used: int | None = None
 
 
 class TenantMetricsResponse(BaseModel):
     """Response with aggregated tenant metrics."""
+
     tenant_id: str
     hours: int
     request_count: int
     unique_sessions: int
     total_tokens: int
-    avg_tokens_per_request: Optional[int] = None
-    avg_utilization: Optional[float] = None
+    avg_tokens_per_request: int | None = None
+    avg_utilization: float | None = None
 
 
 @router.get(
@@ -1374,5 +1401,7 @@ async def get_tenant_metrics(
         unique_sessions=stats.get("unique_sessions", 0),
         total_tokens=stats.get("total_tokens", 0),
         avg_tokens_per_request=stats.get("avg_tokens_per_request"),
-        avg_utilization=round(stats.get("avg_utilization", 0), 3) if stats.get("avg_utilization") else None,
+        avg_utilization=round(stats.get("avg_utilization", 0), 3)
+        if stats.get("avg_utilization")
+        else None,
     )

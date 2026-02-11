@@ -26,10 +26,9 @@ References:
 - https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from ..guardrails import DocumentType, QUALITY_THRESHOLDS, BANNED_PHRASES
-
+from ..guardrails import BANNED_PHRASES, QUALITY_THRESHOLDS, DocumentType
 
 # =============================================================================
 # Document Generation System Prompt
@@ -377,6 +376,7 @@ Provide the summary directly, formatted appropriately for the summary type:
 # Prompt Builder Functions
 # =============================================================================
 
+
 def _format_banned_phrases(count: int = 5) -> str:
     """Format banned phrases for display in prompts."""
     banned_display = ", ".join(f'"{p}"' for p in BANNED_PHRASES[:count])
@@ -387,7 +387,7 @@ def _format_banned_phrases(count: int = 5) -> str:
 
 def build_generation_prompt(
     doc_type: DocumentType,
-    custom_thresholds: Optional[Dict[str, Any]] = None,
+    custom_thresholds: dict[str, Any] | None = None,
 ) -> str:
     """
     Build document generation system prompt with guardrails.
@@ -415,8 +415,8 @@ def build_generation_prompt(
 
 def build_outline_prompt(
     request: str,
-    doc_type: Union[DocumentType, str],
-    custom_thresholds: Optional[Dict[str, Any]] = None,
+    doc_type: DocumentType | str,
+    custom_thresholds: dict[str, Any] | None = None,
 ) -> str:
     """
     Build outline generation prompt.
@@ -452,8 +452,8 @@ def build_outline_prompt(
 def build_section_prompt(
     doc_title: str,
     section_title: str,
-    outline: List[str],
-    completed_sections: List[str],
+    outline: list[str],
+    completed_sections: list[str],
     doc_type: DocumentType,
 ) -> str:
     """
@@ -484,7 +484,7 @@ def build_section_prompt(
 
 def build_repair_prompt(
     content: str,
-    issues: List[Dict[str, Any]],
+    issues: list[dict[str, Any]],
 ) -> str:
     """
     Build repair prompt for fixing quality issues.
@@ -560,7 +560,7 @@ def build_email_prompt(
     purpose: str,
     recipient: str,
     tone: str = "professional",
-    key_points: Optional[List[str]] = None,
+    key_points: list[str] | None = None,
 ) -> str:
     """
     Build email generation prompt.
@@ -574,7 +574,9 @@ def build_email_prompt(
     Returns:
         Formatted email prompt
     """
-    key_points_str = "\n".join(f"- {point}" for point in key_points) if key_points else "None specified"
+    key_points_str = (
+        "\n".join(f"- {point}" for point in key_points) if key_points else "None specified"
+    )
 
     return EMAIL_GENERATION_PROMPT.format(
         purpose=purpose,
@@ -588,7 +590,7 @@ def build_summary_prompt(
     content: str,
     summary_type: str = "executive",
     target_length: str = "200-300 words",
-    focus_areas: Optional[List[str]] = None,
+    focus_areas: list[str] | None = None,
 ) -> str:
     """
     Build summary generation prompt.

@@ -10,23 +10,19 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import jwt
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+import jwt
 import pytest
 
 from tests.conftest import (
-    TEST_JWT_SECRET,
     TEST_JWT_ALGORITHM,
+    TEST_JWT_SECRET,
     create_test_token,
 )
 
-
 # ============ Multi-Tenant Isolation Tests ============
+
 
 class TestMultiTenantIsolation:
     """多租户隔离测试"""
@@ -67,7 +63,7 @@ class TestMultiTenantIsolation:
         manager = AsyncMock()
 
         # 存储会话数据
-        sessions: Dict[str, Dict] = {}
+        sessions: dict[str, dict] = {}
 
         async def get_or_create(session_id, user_id, tenant_id, service_id=None):
             key = f"{user_id}_{tenant_id}_{session_id or 'new'}"
@@ -82,19 +78,21 @@ class TestMultiTenantIsolation:
             return MagicMock(**sessions[key])
 
         async def get(session_id):
-            for key, session in sessions.items():
+            for _key, session in sessions.items():
                 if session["session_id"] == session_id:
                     return MagicMock(**session)
             return None
 
         async def add_message(session_id, role, content, metadata=None):
-            for key, session in sessions.items():
+            for _key, session in sessions.items():
                 if session["session_id"] == session_id:
-                    session["messages"].append({
-                        "role": role,
-                        "content": content,
-                        "metadata": metadata,
-                    })
+                    session["messages"].append(
+                        {
+                            "role": role,
+                            "content": content,
+                            "metadata": metadata,
+                        }
+                    )
                     return
             raise ValueError(f"Session not found: {session_id}")
 
@@ -123,7 +121,7 @@ class TestMultiTenantIsolation:
     async def test_user_b_cannot_access_user_a_session(self, mock_session_manager):
         """User B 不能访问 User A 的会话"""
         # User A 创建会话
-        session_a = await mock_session_manager.get_or_create(
+        await mock_session_manager.get_or_create(
             session_id="session_user_a",
             user_id="user_a_001",
             tenant_id="tenant_alpha",
@@ -167,9 +165,7 @@ class TestMultiTenantIsolation:
             user_id="user_a_001",
             tenant_id="tenant_alpha",
         )
-        await mock_session_manager.add_message(
-            "session_a", "user", "Hello from User A"
-        )
+        await mock_session_manager.add_message("session_a", "user", "Hello from User A")
 
         # User B 的会话
         await mock_session_manager.get_or_create(
@@ -177,16 +173,14 @@ class TestMultiTenantIsolation:
             user_id="user_b_002",
             tenant_id="tenant_alpha",
         )
-        await mock_session_manager.add_message(
-            "session_b", "user", "Hello from User B"
-        )
+        await mock_session_manager.add_message("session_b", "user", "Hello from User B")
 
         # 验证消息隔离
         sessions = mock_session_manager._sessions
         session_a_msgs = None
         session_b_msgs = None
 
-        for key, session in sessions.items():
+        for _key, session in sessions.items():
             if session["session_id"] == "session_a":
                 session_a_msgs = session["messages"]
             elif session["session_id"] == "session_b":
@@ -209,12 +203,8 @@ class TestMultiTenantIsolation:
         )
 
         # 添加消息
-        await mock_session_manager.add_message(
-            "resume_session", "user", "First message"
-        )
-        await mock_session_manager.add_message(
-            "resume_session", "assistant", "First response"
-        )
+        await mock_session_manager.add_message("resume_session", "user", "First message")
+        await mock_session_manager.add_message("resume_session", "assistant", "First response")
 
         # 恢复会话
         session2 = await mock_session_manager.get_or_create(
@@ -251,7 +241,7 @@ class TestMultiTenantIsolation:
         # 获取会话历史
         sessions = mock_session_manager._sessions
         session_data = None
-        for key, session in sessions.items():
+        for _key, session in sessions.items():
             if session["session_id"] == session_id:
                 session_data = session
                 break
@@ -261,6 +251,7 @@ class TestMultiTenantIsolation:
 
 
 # ============ JWT-based User Identity Tests ============
+
 
 class TestJWTUserIdentity:
     """JWT 用户身份测试"""
@@ -287,9 +278,7 @@ class TestJWTUserIdentity:
         assert "tenant_id" in payload
         assert payload["tenant_id"] == "tenant_001"
 
-    def test_different_users_have_different_identities(
-        self, valid_jwt_user_a, valid_jwt_user_b
-    ):
+    def test_different_users_have_different_identities(self, valid_jwt_user_a, valid_jwt_user_b):
         """不同用户有不同身份"""
         payload_a = jwt.decode(
             valid_jwt_user_a,
@@ -306,6 +295,7 @@ class TestJWTUserIdentity:
 
 
 # ============ Request Context Isolation Tests ============
+
 
 class TestRequestContextIsolation:
     """请求上下文隔离测试"""
@@ -344,12 +334,15 @@ class TestRequestContextIsolation:
         headers = injector.build_headers(context)
 
         # 验证用户信息被注入到头中
-        assert "X-User-Id" in headers or "x-user-id" in headers.lower() if isinstance(headers, str) else any(
-            "user" in k.lower() for k in headers.keys()
+        assert (
+            "X-User-Id" in headers or "x-user-id" in headers.lower()
+            if isinstance(headers, str)
+            else any("user" in k.lower() for k in headers)
         )
 
 
 # ============ Cross-Tenant Access Prevention Tests ============
+
 
 class TestCrossTenantPrevention:
     """跨租户访问防护测试"""
@@ -358,6 +351,7 @@ class TestCrossTenantPrevention:
     def tenant_a_context(self):
         """Tenant A 的上下文"""
         from src.proxy.context_injector import RequestContext
+
         return RequestContext(
             user_id="user_a",
             tenant_id="tenant_a",
@@ -368,15 +362,14 @@ class TestCrossTenantPrevention:
     def tenant_b_context(self):
         """Tenant B 的上下文"""
         from src.proxy.context_injector import RequestContext
+
         return RequestContext(
             user_id="user_b",
             tenant_id="tenant_b",
             is_authenticated=True,
         )
 
-    def test_tenant_id_mismatch_should_fail(
-        self, tenant_a_context, tenant_b_context
-    ):
+    def test_tenant_id_mismatch_should_fail(self, tenant_a_context, tenant_b_context):
         """租户 ID 不匹配应该失败"""
         assert tenant_a_context.tenant_id != tenant_b_context.tenant_id
 

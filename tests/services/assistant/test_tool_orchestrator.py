@@ -11,25 +11,24 @@ Comprehensive tests for the ToolOrchestrator module including:
 """
 
 import asyncio
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from src.services.assistant.task_planner import (
+    ExecutionPlan,
+    PlannedTask,
+    TaskType,
+)
 from src.services.assistant.tool_orchestrator import (
     ToolExecutionResult,
     ToolOrchestrator,
     create_tool_orchestrator,
 )
-from src.services.assistant.task_planner import (
-    TaskType,
-    PlannedTask,
-    ExecutionPlan,
-)
 from src.services.assistant.working_memory import (
-    WorkingMemory,
     TaskStatus,
+    WorkingMemory,
 )
-
 
 # =============================================================================
 # Test Fixtures
@@ -350,9 +349,7 @@ class TestToolOrchestratorExecutePlan:
         assert results[2].task_id == "generate_1"
 
     @pytest.mark.asyncio
-    async def test_execute_parallel_plan(
-        self, mock_tool_registry, parallel_plan, working_memory
-    ):
+    async def test_execute_parallel_plan(self, mock_tool_registry, parallel_plan, working_memory):
         """Test executing a plan with parallel tasks."""
         mock_tool_registry.execute = AsyncMock(
             return_value=MagicMock(success=True, result={"data": "test"}, error=None)
@@ -375,9 +372,7 @@ class TestToolOrchestratorExecutePlan:
         assert compare_index > search_b_index
 
     @pytest.mark.asyncio
-    async def test_working_memory_updated(
-        self, orchestrator, simple_plan, working_memory
-    ):
+    async def test_working_memory_updated(self, orchestrator, simple_plan, working_memory):
         """Test that working memory is updated during execution."""
         async for _ in orchestrator.execute_plan(simple_plan, working_memory):
             pass
@@ -423,6 +418,7 @@ class TestToolOrchestratorExecutePlan:
     @pytest.mark.asyncio
     async def test_duration_tracking(self, mock_tool_registry, simple_plan, working_memory):
         """Test that execution duration is tracked."""
+
         # Add a small delay to make duration measurable
         async def slow_execute(request):
             await asyncio.sleep(0.05)  # 50ms
@@ -719,9 +715,7 @@ class TestToolOrchestratorResolveParams:
 
     def test_list_params_with_references(self, orchestrator):
         """Test resolving references in list parameters."""
-        params = {
-            "items": ["${task_1.result}", "static", "${task_2.result}"]
-        }
+        params = {"items": ["${task_1.result}", "static", "${task_2.result}"]}
         prior_results = {
             "task_1": ToolExecutionResult(
                 task_id="task_1", tool="search", success=True, result="first"
@@ -757,13 +751,7 @@ class TestToolOrchestratorResolveParams:
                 task_id="search_1",
                 tool="kb_search",
                 success=True,
-                result={
-                    "level1": {
-                        "level2": {
-                            "level3": "deep_value"
-                        }
-                    }
-                },
+                result={"level1": {"level2": {"level3": "deep_value"}}},
             )
         }
 
@@ -783,9 +771,7 @@ class TestToolOrchestratorErrorHandling:
     @pytest.mark.asyncio
     async def test_tool_execution_exception(self, mock_tool_registry, simple_plan, working_memory):
         """Test handling of exceptions during tool execution."""
-        mock_tool_registry.execute = AsyncMock(
-            side_effect=Exception("Unexpected error")
-        )
+        mock_tool_registry.execute = AsyncMock(side_effect=Exception("Unexpected error"))
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
@@ -819,7 +805,9 @@ class TestToolOrchestratorErrorHandling:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         tasks = [
-            PlannedTask(id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}")
+            PlannedTask(
+                id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}"
+            )
             for i in range(4)
         ]
         plan = ExecutionPlan(
@@ -844,7 +832,9 @@ class TestToolOrchestratorErrorHandling:
         plan = ExecutionPlan(
             goal="Empty group",
             tasks=[
-                PlannedTask(id="task_1", type=TaskType.RETRIEVE, tool="search", description="Task 1")
+                PlannedTask(
+                    id="task_1", type=TaskType.RETRIEVE, tool="search", description="Task 1"
+                )
             ],
             parallel_groups=[[], ["task_1"], []],  # Empty groups before and after
         )
@@ -867,7 +857,9 @@ class TestToolOrchestratorErrorHandling:
         plan = ExecutionPlan(
             goal="Missing task",
             tasks=[
-                PlannedTask(id="task_1", type=TaskType.RETRIEVE, tool="search", description="Task 1")
+                PlannedTask(
+                    id="task_1", type=TaskType.RETRIEVE, tool="search", description="Task 1"
+                )
             ],
             parallel_groups=[["task_1", "nonexistent_task"]],  # nonexistent_task not in tasks
         )
@@ -904,7 +896,9 @@ class TestToolOrchestratorConcurrency:
 
         # Create 50 parallel tasks
         tasks = [
-            PlannedTask(id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}")
+            PlannedTask(
+                id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}"
+            )
             for i in range(50)
         ]
         plan = ExecutionPlan(
@@ -939,8 +933,20 @@ class TestToolOrchestratorConcurrency:
 
         tasks = [
             PlannedTask(id="first", type=TaskType.RETRIEVE, tool="search", description="First"),
-            PlannedTask(id="second", type=TaskType.ANALYZE, tool="analyze", description="Second", dependencies={"first"}),
-            PlannedTask(id="third", type=TaskType.GENERATE, tool="generate", description="Third", dependencies={"second"}),
+            PlannedTask(
+                id="second",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Second",
+                dependencies={"first"},
+            ),
+            PlannedTask(
+                id="third",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Third",
+                dependencies={"second"},
+            ),
         ]
         plan = ExecutionPlan(
             goal="Sequential",
@@ -1068,6 +1074,7 @@ class TestToolOrchestratorIntegration:
     @pytest.mark.asyncio
     async def test_report_generation_workflow(self, mock_tool_registry):
         """Test a complete report generation workflow."""
+
         async def report_execute(request):
             result = MagicMock()
             result.success = True
@@ -1170,7 +1177,9 @@ class TestToolOrchestratorEdgeCases:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         tasks = [
-            PlannedTask(id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}")
+            PlannedTask(
+                id=f"task_{i}", type=TaskType.RETRIEVE, tool="search", description=f"Task {i}"
+            )
             for i in range(3)
         ]
         plan = ExecutionPlan(

@@ -1,5 +1,6 @@
-import pytest
 from types import SimpleNamespace
+
+import pytest
 from qdrant_client.http import models as qmodels
 
 from src.services.knowledge import vector_store

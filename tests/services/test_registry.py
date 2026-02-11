@@ -9,8 +9,8 @@
 
 import pytest
 
-from src.services.registry.service_registry import MemoryRegistryStorage, ServiceRegistry
 from src.models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from src.services.registry.service_registry import MemoryRegistryStorage, ServiceRegistry
 
 
 class TestServiceRegistry:

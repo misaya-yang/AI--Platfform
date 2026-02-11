@@ -26,18 +26,19 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .vlm_service import DashScopeVLMService
-    from .embedding import DashScopeMultimodalEmbedding
     from ...persistence.database import DatabaseStorage
+    from .embedding import DashScopeMultimodalEmbedding
+    from .vlm_service import DashScopeVLMService
 
 logger = logging.getLogger(__name__)
 
 
 class TaskStatus(str, Enum):
     """Processing task status."""
+
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -47,6 +48,7 @@ class TaskStatus(str, Enum):
 
 class TaskStage(str, Enum):
     """Processing stage for tracking progress."""
+
     QUEUED = "queued"
     DOWNLOADING = "downloading"
     VLM_DESCRIPTION = "vlm_description"
@@ -59,6 +61,7 @@ class TaskStage(str, Enum):
 @dataclass
 class ImageProcessingTask:
     """A single image processing task."""
+
     task_id: str
     user_id: str
     tenant_id: str
@@ -66,29 +69,29 @@ class ImageProcessingTask:
     storage_key: str
     filename: str
     content_type: str
-    file_size_bytes: Optional[int] = None
+    file_size_bytes: int | None = None
 
     # Status tracking
     status: TaskStatus = TaskStatus.PENDING
     stage: TaskStage = TaskStage.QUEUED
     progress: int = 0  # 0-100
     message: str = ""
-    error: Optional[str] = None
+    error: str | None = None
 
     # Results
-    vlm_description: Optional[str] = None
-    embedding_vector: Optional[List[float]] = None
-    segment_id: Optional[str] = None
+    vlm_description: str | None = None
+    embedding_vector: list[float] | None = None
+    segment_id: str | None = None
 
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
     # Metadata
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
         return {
             "task_id": self.task_id,
@@ -118,9 +121,9 @@ class ImageProcessingQueue:
 
     def __init__(
         self,
-        vlm_service: Optional["DashScopeVLMService"] = None,
-        embedding_service: Optional["DashScopeMultimodalEmbedding"] = None,
-        database: Optional["DatabaseStorage"] = None,
+        vlm_service: DashScopeVLMService | None = None,
+        embedding_service: DashScopeMultimodalEmbedding | None = None,
+        database: DatabaseStorage | None = None,
         max_workers: int = 3,
         max_queue_size: int = 100,
     ):
@@ -141,8 +144,8 @@ class ImageProcessingQueue:
 
         # Task queue and storage
         self._queue: asyncio.Queue[ImageProcessingTask] = asyncio.Queue(maxsize=max_queue_size)
-        self._tasks: Dict[str, ImageProcessingTask] = {}
-        self._workers: List[asyncio.Task] = []
+        self._tasks: dict[str, ImageProcessingTask] = {}
+        self._workers: list[asyncio.Task] = []
         self._running = False
         self._semaphore = asyncio.Semaphore(max_workers)
 
@@ -204,11 +207,11 @@ class ImageProcessingQueue:
 
         return task.task_id
 
-    def get_task(self, task_id: str) -> Optional[ImageProcessingTask]:
+    def get_task(self, task_id: str) -> ImageProcessingTask | None:
         """Get task by ID."""
         return self._tasks.get(task_id)
 
-    def get_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_status(self, task_id: str) -> dict[str, Any] | None:
         """Get task status as dictionary."""
         task = self._tasks.get(task_id)
         if task:
@@ -219,11 +222,12 @@ class ImageProcessingQueue:
         self,
         user_id: str,
         limit: int = 20,
-        status: Optional[TaskStatus] = None,
-    ) -> List[Dict[str, Any]]:
+        status: TaskStatus | None = None,
+    ) -> list[dict[str, Any]]:
         """Get tasks for a user."""
         user_tasks = [
-            t for t in self._tasks.values()
+            t
+            for t in self._tasks.values()
             if t.user_id == user_id and (status is None or t.status == status)
         ]
         # Sort by created_at descending
@@ -357,50 +361,51 @@ class ImageProcessingQueue:
 
             logger.error(f"Task {task.task_id} failed: {e}")
 
-    async def _download_image(self, storage_key: str) -> Optional[bytes]:
+    async def _download_image(self, storage_key: str) -> bytes | None:
         """
         Download image from storage.
-        
+
         Args:
             storage_key: Storage key (S3/OSS path or URL)
-        
+
         Returns:
             Image bytes or None if download failed
         """
         try:
             # Check if it's a URL (presigned URL from S3/OSS)
-            if storage_key.startswith(('http://', 'https://')):
+            if storage_key.startswith(("http://", "https://")):
                 import httpx
+
                 async with httpx.AsyncClient() as client:
                     response = await client.get(storage_key, timeout=30.0)
                     response.raise_for_status()
                     return response.content
-            
+
             # Otherwise, try to download from storage service
             # This requires image_storage_service to be available
             logger.warning(f"Cannot download from storage key {storage_key}: not implemented")
             return None
-            
+
         except Exception as e:
             logger.error(f"Failed to download image from {storage_key}: {e}")
             return None
-    
-    async def _create_image_segment(self, task: ImageProcessingTask) -> Optional[str]:
+
+    async def _create_image_segment(self, task: ImageProcessingTask) -> str | None:
         """
         Create an image segment in the database.
-        
+
         Args:
             task: Processing task with results
-        
+
         Returns:
             Segment ID or None if creation failed
         """
         if not self.database:
             return None
-        
+
         try:
             # Prepare segment data
-            segment_data = {
+            {
                 "document_id": task.document_id,
                 "content_type": "image",
                 "text": task.vlm_description or f"Image: {task.filename}",
@@ -413,17 +418,17 @@ class ImageProcessingQueue:
                     "has_vlm_description": bool(task.vlm_description),
                 },
             }
-            
+
             # Create segment in database
             # Note: This is a placeholder - actual implementation depends on database schema
             segment_id = f"seg_{uuid.uuid4().hex[:16]}"
-            
+
             # Store in database using appropriate method
             # await self.database.create_segment(segment_data)
-            
+
             logger.info(f"Created image segment {segment_id} for document {task.document_id}")
             return segment_id
-            
+
         except Exception as e:
             logger.error(f"Failed to create image segment: {e}", exc_info=True)
             return None
@@ -459,9 +464,9 @@ class ImageProcessingQueue:
 
 
 def create_image_processing_queue(
-    vlm_service: Optional["DashScopeVLMService"] = None,
-    embedding_service: Optional["DashScopeMultimodalEmbedding"] = None,
-    database: Optional["DatabaseStorage"] = None,
+    vlm_service: DashScopeVLMService | None = None,
+    embedding_service: DashScopeMultimodalEmbedding | None = None,
+    database: DatabaseStorage | None = None,
     max_workers: int = 3,
 ) -> ImageProcessingQueue:
     """
@@ -491,8 +496,8 @@ def create_processing_task(
     storage_key: str,
     filename: str,
     content_type: str,
-    file_size_bytes: Optional[int] = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    file_size_bytes: int | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> ImageProcessingTask:
     """
     Create a new processing task.

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
-from .base import BaseConnector
 from ..models.service import ServiceDefinition
+from .base import BaseConnector
 
 
 class HTTPConnector(BaseConnector):
@@ -29,9 +29,9 @@ class HTTPConnector(BaseConnector):
 
     # Default timeout settings
     DEFAULT_CONNECT_TIMEOUT = 3.0  # Fast connection establishment
-    DEFAULT_READ_TIMEOUT = 300.0   # Long for streaming
+    DEFAULT_READ_TIMEOUT = 300.0  # Long for streaming
     DEFAULT_WRITE_TIMEOUT = 60.0
-    DEFAULT_POOL_TIMEOUT = 10.0    # Fail fast if pool exhausted
+    DEFAULT_POOL_TIMEOUT = 10.0  # Fail fast if pool exhausted
 
     def __init__(self, service: ServiceDefinition):
         super().__init__(service)
@@ -53,7 +53,9 @@ class HTTPConnector(BaseConnector):
 
         # Connection pool limits - optimized for high concurrency
         max_connections = config.get("max_connections", self.DEFAULT_MAX_CONNECTIONS)
-        keepalive_connections = config.get("keepalive_connections", self.DEFAULT_KEEPALIVE_CONNECTIONS)
+        keepalive_connections = config.get(
+            "keepalive_connections", self.DEFAULT_KEEPALIVE_CONNECTIONS
+        )
         keepalive_expiry = config.get("keepalive_expiry", self.DEFAULT_KEEPALIVE_EXPIRY)
 
         limits = httpx.Limits(

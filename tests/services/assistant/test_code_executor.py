@@ -13,22 +13,21 @@ import base64
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from src.services.assistant.code_executor import (
-    ExecutionStatus,
+    MATPLOTLIB_SETUP,
     CodeExecutionConfig,
-    InputFile,
-    OutputFile,
-    KBDocument,
     CodeExecutionResult,
     CodeExecutorService,
-    MATPLOTLIB_SETUP,
+    ExecutionStatus,
+    InputFile,
+    KBDocument,
+    OutputFile,
     get_code_executor,
 )
-
 
 # =============================================================================
 # Data Class Tests
@@ -107,7 +106,9 @@ class TestInputFile:
         original_content = b"Binary content"
         encoded = base64.b64encode(original_content).decode("utf-8")
 
-        input_file = InputFile.from_base64("data.bin", encoded, mime_type="application/octet-stream")
+        input_file = InputFile.from_base64(
+            "data.bin", encoded, mime_type="application/octet-stream"
+        )
 
         assert input_file.filename == "data.bin"
         assert input_file.content == original_content
@@ -304,7 +305,10 @@ class TestDockerAvailability:
         # Should return cached value without calling Docker
         assert executor.is_docker_available() is True
 
-    @patch("src.services.assistant.code_executor.CodeExecutorService.docker_client", new_callable=PropertyMock)
+    @patch(
+        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
     def test_is_docker_available_when_docker_works(self, mock_client_prop):
         """Test Docker available when Docker is working."""
         mock_client = MagicMock()
@@ -317,7 +321,10 @@ class TestDockerAvailability:
         assert result is True
         mock_client.ping.assert_called()
 
-    @patch("src.services.assistant.code_executor.CodeExecutorService.docker_client", new_callable=PropertyMock)
+    @patch(
+        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
     def test_is_docker_available_when_docker_fails(self, mock_client_prop):
         """Test Docker not available when Docker fails."""
         mock_client = MagicMock()
@@ -329,7 +336,10 @@ class TestDockerAvailability:
 
         assert result is False
 
-    @patch("src.services.assistant.code_executor.CodeExecutorService.docker_client", new_callable=PropertyMock)
+    @patch(
+        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
     def test_is_docker_available_when_client_is_none(self, mock_client_prop):
         """Test Docker not available when client is None."""
         mock_client_prop.return_value = None
@@ -501,6 +511,7 @@ class TestOutputFileCollection:
             assert chart_file.mime_type == "image/png"
         finally:
             import shutil
+
             shutil.rmtree(workspace)
 
     @pytest.mark.asyncio
@@ -518,6 +529,7 @@ class TestOutputFileCollection:
             assert output_files == []
         finally:
             import shutil
+
             shutil.rmtree(workspace)
 
     @pytest.mark.asyncio
@@ -533,6 +545,7 @@ class TestOutputFileCollection:
             assert output_files == []
         finally:
             import shutil
+
             shutil.rmtree(workspace)
 
 
@@ -642,7 +655,7 @@ class TestExecuteWithMocks:
         executor = CodeExecutorService()
         input_files = [InputFile.from_text("data.txt", "test data")]
 
-        result = await executor.execute(
+        await executor.execute(
             code="print('hello')",
             input_files=input_files,
         )
@@ -659,6 +672,7 @@ class TestFactoryFunction:
         """Test that get_code_executor returns singleton."""
         # Reset global
         import src.services.assistant.code_executor as module
+
         module._code_executor = None
 
         executor1 = get_code_executor()
@@ -672,6 +686,7 @@ class TestFactoryFunction:
     def test_get_code_executor_with_config(self):
         """Test get_code_executor with custom config."""
         import src.services.assistant.code_executor as module
+
         module._code_executor = None
 
         config = CodeExecutionConfig(memory_limit="1g")

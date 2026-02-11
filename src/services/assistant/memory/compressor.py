@@ -32,8 +32,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Protocol, runtime_checkable
-
+from typing import Any, Protocol, runtime_checkable
 
 # =============================================================================
 # Preserve Patterns
@@ -41,15 +40,15 @@ from typing import Any, Dict, List, Protocol, runtime_checkable
 
 # Patterns for content that should be preserved during compression.
 # These structural elements carry more information density than prose.
-PRESERVE_PATTERNS: Dict[str, str] = {
+PRESERVE_PATTERNS: dict[str, str] = {
     "urls": r'https?://[^\s<>"{}|\\^`\[\]]+',
-    "code_blocks": r'```[\s\S]*?```',
-    "tables": r'\|[^\n]+\|[\n\r]+\|[-:| ]+\|[\s\S]*?(?=\n\n|\Z)',
-    "json": r'\{[\s\S]*?\}',
+    "code_blocks": r"```[\s\S]*?```",
+    "tables": r"\|[^\n]+\|[\n\r]+\|[-:| ]+\|[\s\S]*?(?=\n\n|\Z)",
+    "json": r"\{[\s\S]*?\}",
 }
 
 # Pattern for extracting artifact references
-ARTIFACT_PATTERN: str = r'artifact[_-]?(?:id)?[:\s]*([a-zA-Z0-9_-]+)'
+ARTIFACT_PATTERN: str = r"artifact[_-]?(?:id)?[:\s]*([a-zA-Z0-9_-]+)"
 
 # Maximum limits for preserved content to prevent memory bloat
 MAX_PRESERVED_URLS: int = 20
@@ -109,10 +108,10 @@ class CompressedContext:
     """
 
     summary: str
-    preserved_urls: List[str] = field(default_factory=list)
-    preserved_code_blocks: List[str] = field(default_factory=list)
-    key_artifacts: List[str] = field(default_factory=list)
-    recent_messages: List[Dict[str, Any]] = field(default_factory=list)
+    preserved_urls: list[str] = field(default_factory=list)
+    preserved_code_blocks: list[str] = field(default_factory=list)
+    key_artifacts: list[str] = field(default_factory=list)
+    recent_messages: list[dict[str, Any]] = field(default_factory=list)
     token_count: int = 0
 
 
@@ -153,7 +152,7 @@ class ContextCompressor:
 
     async def compress(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         target_tokens: int,
         preserve_recent: int = 6,
     ) -> CompressedContext:
@@ -233,9 +232,9 @@ class ContextCompressor:
 
     def _extract_all(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         pattern_name: str,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Extract all matches of a pattern from messages.
 
@@ -253,7 +252,7 @@ class ContextCompressor:
             return []
 
         pattern = PRESERVE_PATTERNS[pattern_name]
-        matches: List[str] = []
+        matches: list[str] = []
         seen: set[str] = set()
 
         for message in messages:
@@ -271,7 +270,7 @@ class ContextCompressor:
 
         return matches
 
-    def _extract_artifacts(self, messages: List[Dict[str, Any]]) -> List[str]:
+    def _extract_artifacts(self, messages: list[dict[str, Any]]) -> list[str]:
         """
         Extract artifact IDs/names from messages.
 
@@ -284,7 +283,7 @@ class ContextCompressor:
         Returns:
             List of unique artifact IDs/names
         """
-        artifacts: List[str] = []
+        artifacts: list[str] = []
         seen: set[str] = set()
 
         for message in messages:
@@ -301,7 +300,7 @@ class ContextCompressor:
 
         return artifacts
 
-    async def _generate_summary(self, messages: List[Dict[str, Any]]) -> str:
+    async def _generate_summary(self, messages: list[dict[str, Any]]) -> str:
         """
         Generate a concise summary of compressed messages using LLM.
 
@@ -318,7 +317,7 @@ class ContextCompressor:
             return ""
 
         # Build conversation text for summarization
-        conversation_parts: List[str] = []
+        conversation_parts: list[str] = []
         for message in messages:
             role = message.get("role", "unknown")
             content = self._get_message_content(message)
@@ -356,7 +355,7 @@ Summary:"""
             message_count = len(messages)
             return f"Previous conversation context ({message_count} messages compressed)."
 
-    def _count_tokens(self, messages: List[Dict[str, Any]]) -> int:
+    def _count_tokens(self, messages: list[dict[str, Any]]) -> int:
         """
         Estimate token count for a list of messages.
 
@@ -382,9 +381,9 @@ Summary:"""
     def _estimate_compressed_tokens(
         self,
         summary: str,
-        urls: List[str],
-        code_blocks: List[str],
-        recent_messages: List[Dict[str, Any]],
+        urls: list[str],
+        code_blocks: list[str],
+        recent_messages: list[dict[str, Any]],
     ) -> int:
         """
         Estimate total tokens after compression.
@@ -427,7 +426,7 @@ Summary:"""
         # Rough estimate: 4 characters per token
         return total_chars // 4
 
-    def _get_message_content(self, message: Dict[str, Any]) -> str:
+    def _get_message_content(self, message: dict[str, Any]) -> str:
         """
         Extract text content from a message.
 
@@ -447,7 +446,7 @@ Summary:"""
 
         # Handle complex content structures (e.g., list of content blocks)
         if isinstance(content, list):
-            text_parts: List[str] = []
+            text_parts: list[str] = []
             for item in content:
                 if isinstance(item, str):
                     text_parts.append(item)

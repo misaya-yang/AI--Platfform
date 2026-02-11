@@ -37,11 +37,10 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 
 from ...core.observability.logging import get_logger
 
@@ -64,10 +63,10 @@ class TaskType(str, Enum):
     - TRANSFORM: Format conversion, translation, and data manipulation
     """
 
-    RETRIEVE = "retrieve"      # KB search, web search, database queries
-    GENERATE = "generate"      # Text generation, image creation, document synthesis
-    ANALYZE = "analyze"        # Data analysis, comparison, summarization
-    TRANSFORM = "transform"    # Format conversion, translation, restructuring
+    RETRIEVE = "retrieve"  # KB search, web search, database queries
+    GENERATE = "generate"  # Text generation, image creation, document synthesis
+    ANALYZE = "analyze"  # Data analysis, comparison, summarization
+    TRANSFORM = "transform"  # Format conversion, translation, restructuring
 
 
 class IntentType(str, Enum):
@@ -150,8 +149,8 @@ class PlannedTask:
     type: TaskType
     tool: str
     description: str
-    parameters: Dict[str, Any] = field(default_factory=dict)
-    dependencies: Set[str] = field(default_factory=set)
+    parameters: dict[str, Any] = field(default_factory=dict)
+    dependencies: set[str] = field(default_factory=set)
     priority: int = 0
     estimated_duration_ms: int = 1000
 
@@ -162,7 +161,7 @@ class PlannedTask:
         elif not isinstance(self.dependencies, set):
             self.dependencies = set(self.dependencies)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Serialize task to dictionary.
 
@@ -181,7 +180,7 @@ class PlannedTask:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "PlannedTask":
+    def from_dict(cls, data: dict[str, Any]) -> PlannedTask:
         """
         Deserialize task from dictionary.
 
@@ -237,11 +236,11 @@ class ExecutionPlan:
     """
 
     goal: str
-    tasks: List[PlannedTask] = field(default_factory=list)
-    parallel_groups: List[List[str]] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    tasks: list[PlannedTask] = field(default_factory=list)
+    parallel_groups: list[list[str]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def get_task(self, task_id: str) -> Optional[PlannedTask]:
+    def get_task(self, task_id: str) -> PlannedTask | None:
         """
         Get a task by its ID.
 
@@ -256,7 +255,7 @@ class ExecutionPlan:
                 return task
         return None
 
-    def get_tasks_by_type(self, task_type: TaskType) -> List[PlannedTask]:
+    def get_tasks_by_type(self, task_type: TaskType) -> list[PlannedTask]:
         """
         Get all tasks of a specific type.
 
@@ -268,7 +267,7 @@ class ExecutionPlan:
         """
         return [t for t in self.tasks if t.type == task_type]
 
-    def get_root_tasks(self) -> List[PlannedTask]:
+    def get_root_tasks(self) -> list[PlannedTask]:
         """
         Get tasks with no dependencies (can start immediately).
 
@@ -277,7 +276,7 @@ class ExecutionPlan:
         """
         return [t for t in self.tasks if not t.dependencies]
 
-    def get_leaf_tasks(self) -> List[PlannedTask]:
+    def get_leaf_tasks(self) -> list[PlannedTask]:
         """
         Get tasks that no other task depends on (final outputs).
 
@@ -308,7 +307,7 @@ class ExecutionPlan:
             total += group_max
         return total
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Serialize plan to dictionary.
 
@@ -323,7 +322,7 @@ class ExecutionPlan:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ExecutionPlan":
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionPlan:
         """
         Deserialize plan from dictionary.
 
@@ -349,7 +348,7 @@ class CircularDependencyError(Exception):
         cycle: List of task IDs forming the cycle
     """
 
-    def __init__(self, cycle: List[str]):
+    def __init__(self, cycle: list[str]):
         self.cycle = cycle
         cycle_str = " -> ".join(cycle)
         super().__init__(f"Circular dependency detected: {cycle_str}")
@@ -377,8 +376,8 @@ class WorkflowPattern:
 
     name: str
     description: str
-    task_templates: List[Dict[str, Any]]
-    keywords: List[str] = field(default_factory=list)
+    task_templates: list[dict[str, Any]]
+    keywords: list[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -427,7 +426,7 @@ class TaskPlanner:
     """
 
     # Common workflow patterns as class attribute for pattern matching
-    WORKFLOW_PATTERNS: Dict[str, WorkflowPattern] = {
+    WORKFLOW_PATTERNS: dict[str, WorkflowPattern] = {
         "comparison": WorkflowPattern(
             name="comparison",
             description="Compare two or more items by gathering data and analyzing differences",
@@ -455,7 +454,16 @@ class TaskPlanner:
                     "dependencies": ["analyze_comparison"],
                 },
             ],
-            keywords=["compare", "comparison", "versus", "vs", "difference", "differences", "better", "which"],
+            keywords=[
+                "compare",
+                "comparison",
+                "versus",
+                "vs",
+                "difference",
+                "differences",
+                "better",
+                "which",
+            ],
         ),
         "report": WorkflowPattern(
             name="report",
@@ -548,7 +556,14 @@ class TaskPlanner:
                     "dependencies": [],  # Or ["retrieve_content"] if retrieval needed
                 },
             ],
-            keywords=["translate", "translation", "convert to", "in spanish", "in chinese", "in french"],
+            keywords=[
+                "translate",
+                "translation",
+                "convert to",
+                "in spanish",
+                "in chinese",
+                "in french",
+            ],
         ),
         "image_generation": WorkflowPattern(
             name="image_generation",
@@ -567,37 +582,94 @@ class TaskPlanner:
     }
 
     # Intent detection keywords for intelligent planning
-    INTENT_KEYWORDS: Dict[IntentType, List[str]] = {
+    INTENT_KEYWORDS: dict[IntentType, list[str]] = {
         IntentType.DOCUMENT_CREATION: [
-            "写", "生成", "制作", "创建", "做一个",
-            "ppt", "word", "excel", "文档", "报告", "演示",
-            "write", "create", "generate", "make", "produce",
+            "写",
+            "生成",
+            "制作",
+            "创建",
+            "做一个",
+            "ppt",
+            "word",
+            "excel",
+            "文档",
+            "报告",
+            "演示",
+            "write",
+            "create",
+            "generate",
+            "make",
+            "produce",
         ],
         IntentType.INFORMATION_QUERY: [
-            "什么是", "如何", "怎么", "为什么", "解释",
-            "查找", "搜索", "告诉我",
-            "what", "how", "why", "explain", "find", "search",
+            "什么是",
+            "如何",
+            "怎么",
+            "为什么",
+            "解释",
+            "查找",
+            "搜索",
+            "告诉我",
+            "what",
+            "how",
+            "why",
+            "explain",
+            "find",
+            "search",
         ],
         IntentType.DATA_ANALYSIS: [
-            "分析", "统计", "计算", "数据", "趋势",
-            "analyze", "statistics", "calculate", "data", "trend",
+            "分析",
+            "统计",
+            "计算",
+            "数据",
+            "趋势",
+            "analyze",
+            "statistics",
+            "calculate",
+            "data",
+            "trend",
         ],
         IntentType.COMPARISON: [
-            "比较", "对比", "区别", "差异", "哪个更",
-            "compare", "versus", "vs", "difference", "better",
+            "比较",
+            "对比",
+            "区别",
+            "差异",
+            "哪个更",
+            "compare",
+            "versus",
+            "vs",
+            "difference",
+            "better",
         ],
         IntentType.CREATIVE_WRITING: [
-            "写一篇", "创作", "编写", "撰写", "文章", "故事",
-            "write", "compose", "article", "story", "essay",
+            "写一篇",
+            "创作",
+            "编写",
+            "撰写",
+            "文章",
+            "故事",
+            "write",
+            "compose",
+            "article",
+            "story",
+            "essay",
         ],
         IntentType.CODE_EXECUTION: [
-            "运行", "执行", "代码", "脚本", "python",
-            "run", "execute", "code", "script", "program",
+            "运行",
+            "执行",
+            "代码",
+            "脚本",
+            "python",
+            "run",
+            "execute",
+            "code",
+            "script",
+            "program",
         ],
     }
 
     # Tool to TaskType mapping for automatic type inference
-    TOOL_TYPE_MAPPING: Dict[str, TaskType] = {
+    TOOL_TYPE_MAPPING: dict[str, TaskType] = {
         "kb_search": TaskType.RETRIEVE,
         "web_search": TaskType.RETRIEVE,
         "tavily_search": TaskType.RETRIEVE,
@@ -615,8 +687,8 @@ class TaskPlanner:
 
     def __init__(
         self,
-        model_client: Optional[Any] = None,
-        model_name: Optional[str] = None,
+        model_client: Any | None = None,
+        model_name: str | None = None,
     ):
         """
         Initialize the TaskPlanner.
@@ -632,8 +704,8 @@ class TaskPlanner:
     async def create_plan(
         self,
         user_request: str,
-        available_tools: Optional[Union[List[str], List[Dict[str, Any]]]] = None,
-        context: Optional[Dict[str, Any]] = None,
+        available_tools: list[str] | list[dict[str, Any]] | None = None,
+        context: dict[str, Any] | None = None,
         use_llm: bool = True,
     ) -> ExecutionPlan:
         """
@@ -664,7 +736,9 @@ class TaskPlanner:
             if isinstance(tool, str):
                 available_tool_names.append(tool)
             elif isinstance(tool, dict):
-                available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
+                available_tool_names.append(
+                    tool.get("function", {}).get("name", tool.get("name", "unknown"))
+                )
 
         # Step 1: Analyze user intent (Agent intelligence)
         intent_type, strategy, intent_metadata = self.analyze_intent(user_request)
@@ -692,7 +766,7 @@ class TaskPlanner:
             parallel_groups=parallel_groups,
             metadata={
                 "detected_pattern": detected_pattern.name if detected_pattern else None,
-                "tool_count": len(set(t.tool for t in tasks)),
+                "tool_count": len({t.tool for t in tasks}),
                 "task_count": len(tasks),
                 "parallel_group_count": len(parallel_groups),
                 # Agent intelligence: intent analysis results
@@ -709,7 +783,7 @@ class TaskPlanner:
 
         return plan
 
-    def _detect_pattern(self, user_request: str) -> Optional[WorkflowPattern]:
+    def _detect_pattern(self, user_request: str) -> WorkflowPattern | None:
         """
         Detect which workflow pattern matches the user request.
 
@@ -738,7 +812,7 @@ class TaskPlanner:
 
         return None
 
-    def analyze_intent(self, user_request: str) -> Tuple[IntentType, TaskStrategy, Dict[str, Any]]:
+    def analyze_intent(self, user_request: str) -> tuple[IntentType, TaskStrategy, dict[str, Any]]:
         """
         Analyze user intent to understand what they really want.
 
@@ -754,7 +828,7 @@ class TaskPlanner:
             Tuple of (IntentType, TaskStrategy, metadata dict)
         """
         request_lower = user_request.lower()
-        scores: Dict[IntentType, int] = {intent: 0 for intent in IntentType}
+        scores: dict[IntentType, int] = dict.fromkeys(IntentType, 0)
 
         # Score each intent type
         for intent_type, keywords in self.INTENT_KEYWORDS.items():
@@ -813,7 +887,7 @@ class TaskPlanner:
         self,
         intent: IntentType,
         user_request: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Extract metadata relevant to the detected intent.
 
@@ -824,7 +898,7 @@ class TaskPlanner:
         Returns:
             Dict with intent-specific metadata
         """
-        metadata: Dict[str, Any] = {"intent": intent.value}
+        metadata: dict[str, Any] = {"intent": intent.value}
         request_lower = user_request.lower()
 
         if intent == IntentType.DOCUMENT_CREATION:
@@ -848,10 +922,10 @@ class TaskPlanner:
     def _create_plan_rule_based(
         self,
         user_request: str,
-        available_tools: List[str],
-        context: Dict[str, Any],
-        pattern: Optional[WorkflowPattern],
-    ) -> List[PlannedTask]:
+        available_tools: list[str],
+        context: dict[str, Any],
+        pattern: WorkflowPattern | None,
+    ) -> list[PlannedTask]:
         """
         Create tasks using rule-based logic without LLM.
 
@@ -867,34 +941,36 @@ class TaskPlanner:
         Returns:
             List of PlannedTask objects
         """
-        tasks: List[PlannedTask] = []
+        tasks: list[PlannedTask] = []
 
         if pattern:
             # Apply pattern template
-            tasks = self._apply_pattern_template(
-                pattern, user_request, available_tools, context
-            )
+            tasks = self._apply_pattern_template(pattern, user_request, available_tools, context)
         else:
             # Default: single retrieval task if no pattern matches
             if "kb_search" in available_tools:
-                tasks.append(PlannedTask(
-                    id="search_1",
-                    type=TaskType.RETRIEVE,
-                    tool="kb_search",
-                    description=f"Search for: {user_request}",
-                    parameters={"query": user_request},
-                ))
+                tasks.append(
+                    PlannedTask(
+                        id="search_1",
+                        type=TaskType.RETRIEVE,
+                        tool="kb_search",
+                        description=f"Search for: {user_request}",
+                        parameters={"query": user_request},
+                    )
+                )
             elif available_tools:
                 # Use first available tool
                 tool = available_tools[0]
                 task_type = self.TOOL_TYPE_MAPPING.get(tool, TaskType.RETRIEVE)
-                tasks.append(PlannedTask(
-                    id="task_1",
-                    type=task_type,
-                    tool=tool,
-                    description=user_request,
-                    parameters={"input": user_request},
-                ))
+                tasks.append(
+                    PlannedTask(
+                        id="task_1",
+                        type=task_type,
+                        tool=tool,
+                        description=user_request,
+                        parameters={"input": user_request},
+                    )
+                )
 
         return tasks
 
@@ -902,9 +978,9 @@ class TaskPlanner:
         self,
         pattern: WorkflowPattern,
         user_request: str,
-        available_tools: List[str],
-        context: Dict[str, Any],
-    ) -> List[PlannedTask]:
+        available_tools: list[str],
+        context: dict[str, Any],
+    ) -> list[PlannedTask]:
         """
         Apply a workflow pattern template to generate tasks.
 
@@ -917,8 +993,8 @@ class TaskPlanner:
         Returns:
             List of PlannedTask objects from the pattern
         """
-        tasks: List[PlannedTask] = []
-        task_id_map: Dict[str, List[str]] = defaultdict(list)  # prefix -> actual ids
+        tasks: list[PlannedTask] = []
+        task_id_map: dict[str, list[str]] = defaultdict(list)  # prefix -> actual ids
 
         # Extract items to compare (for comparison pattern)
         items = self._extract_comparison_items(user_request) if pattern.name == "comparison" else []
@@ -927,7 +1003,7 @@ class TaskPlanner:
             # Check if this is a repeated task template
             if template.get("repeat_for") == "items" and items:
                 for i, item in enumerate(items):
-                    task_id = f"{template.get('id_prefix', 'task')}_{i+1}"
+                    task_id = f"{template.get('id_prefix', 'task')}_{i + 1}"
                     description = template.get("description_template", "").format(item=item)
 
                     # Check if tool is available
@@ -951,7 +1027,7 @@ class TaskPlanner:
             elif template.get("repeat_for") == "queries":
                 # For multi_search pattern - would need query extraction
                 # Simplified: create a single search task
-                task_id = template.get("id", f"task_{len(tasks)+1}")
+                task_id = template.get("id", f"task_{len(tasks) + 1}")
                 tool = template["tool"]
 
                 if tool not in available_tools and available_tools:
@@ -972,7 +1048,7 @@ class TaskPlanner:
 
             else:
                 # Regular single task
-                task_id = template.get("id", f"task_{len(tasks)+1}")
+                task_id = template.get("id", f"task_{len(tasks) + 1}")
                 tool = template["tool"]
 
                 if tool not in available_tools and available_tools:
@@ -998,7 +1074,7 @@ class TaskPlanner:
 
         return tasks
 
-    def _extract_comparison_items(self, request: str) -> List[str]:
+    def _extract_comparison_items(self, request: str) -> list[str]:
         """
         Extract items to compare from a comparison request.
 
@@ -1011,26 +1087,33 @@ class TaskPlanner:
         request_lower = request.lower()
 
         # Pattern: "compare X and Y"
-        match = re.search(r'compare\s+(.+?)\s+(?:and|vs|versus|with)\s+(.+?)(?:\s*[,.]|$)',
-                         request_lower, re.IGNORECASE)
+        match = re.search(
+            r"compare\s+(.+?)\s+(?:and|vs|versus|with)\s+(.+?)(?:\s*[,.]|$)",
+            request_lower,
+            re.IGNORECASE,
+        )
         if match:
             return [match.group(1).strip(), match.group(2).strip()]
 
         # Pattern: "X vs Y"
-        match = re.search(r'(\w+(?:\s+\w+)*)\s+(?:vs|versus)\s+(\w+(?:\s+\w+)*)',
-                         request_lower, re.IGNORECASE)
+        match = re.search(
+            r"(\w+(?:\s+\w+)*)\s+(?:vs|versus)\s+(\w+(?:\s+\w+)*)", request_lower, re.IGNORECASE
+        )
         if match:
             return [match.group(1).strip(), match.group(2).strip()]
 
         # Pattern: "difference between X and Y"
-        match = re.search(r'difference(?:s)?\s+between\s+(.+?)\s+and\s+(.+?)(?:\s*[,.]|$)',
-                         request_lower, re.IGNORECASE)
+        match = re.search(
+            r"difference(?:s)?\s+between\s+(.+?)\s+and\s+(.+?)(?:\s*[,.]|$)",
+            request_lower,
+            re.IGNORECASE,
+        )
         if match:
             return [match.group(1).strip(), match.group(2).strip()]
 
         return []
 
-    def _find_alternative_tool(self, tool: str, available_tools: List[str]) -> Optional[str]:
+    def _find_alternative_tool(self, tool: str, available_tools: list[str]) -> str | None:
         """
         Find an alternative tool when the specified tool is not available.
 
@@ -1055,10 +1138,10 @@ class TaskPlanner:
     async def _create_plan_with_llm(
         self,
         user_request: str,
-        available_tools: List[Any],
-        context: Dict[str, Any],
-        pattern: Optional[WorkflowPattern],
-    ) -> List[PlannedTask]:
+        available_tools: list[Any],
+        context: dict[str, Any],
+        pattern: WorkflowPattern | None,
+    ) -> list[PlannedTask]:
         """
         Create tasks using LLM for intelligent decomposition.
 
@@ -1075,22 +1158,22 @@ class TaskPlanner:
             List of PlannedTask objects
         """
         # Build prompt for task decomposition
-        prompt = self._build_decomposition_prompt(
-            user_request, available_tools, pattern
-        )
+        prompt = self._build_decomposition_prompt(user_request, available_tools, pattern)
 
         try:
             # Call LLM for task decomposition
             response = await self._call_llm(prompt)
-            
+
             # Extract tool names for validation
             available_tool_names = []
             for tool in available_tools:
                 if isinstance(tool, str):
                     available_tool_names.append(tool)
                 elif isinstance(tool, dict):
-                    available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
-            
+                    available_tool_names.append(
+                        tool.get("function", {}).get("name", tool.get("name", "unknown"))
+                    )
+
             tasks = self._parse_llm_response(response, available_tool_names)
 
             if tasks:
@@ -1111,8 +1194,10 @@ class TaskPlanner:
                 if isinstance(tool, str):
                     available_tool_names.append(tool)
                 elif isinstance(tool, dict):
-                    available_tool_names.append(tool.get("function", {}).get("name", tool.get("name", "unknown")))
-                    
+                    available_tool_names.append(
+                        tool.get("function", {}).get("name", tool.get("name", "unknown"))
+                    )
+
             return self._create_plan_rule_based(
                 user_request, available_tool_names, context, pattern
             )
@@ -1120,8 +1205,8 @@ class TaskPlanner:
     def _build_decomposition_prompt(
         self,
         user_request: str,
-        available_tools: List[Any],
-        pattern: Optional[WorkflowPattern],
+        available_tools: list[Any],
+        pattern: WorkflowPattern | None,
     ) -> str:
         """
         Build the prompt for LLM task decomposition.
@@ -1143,20 +1228,26 @@ class TaskPlanner:
                 name = tool.get("function", {}).get("name", tool.get("name", "unknown"))
                 desc = tool.get("function", {}).get("description", tool.get("description", ""))
                 # Extract parameters schema
-                params_schema = tool.get("function", {}).get("parameters", tool.get("parameters", {}))
-                
+                params_schema = tool.get("function", {}).get(
+                    "parameters", tool.get("parameters", {})
+                )
+
                 # Format parameters for prompt
                 params_desc = []
                 if "properties" in params_schema:
                     for param_name, param_info in params_schema["properties"].items():
-                        req = " (required)" if param_name in params_schema.get("required", []) else ""
+                        req = (
+                            " (required)" if param_name in params_schema.get("required", []) else ""
+                        )
                         p_desc = param_info.get("description", "")
                         params_desc.append(f"    - {param_name}: {p_desc}{req}")
-                
+
                 params_str = "\n".join(params_desc)
                 tool_descriptions.append(f"- {name}: {desc}\n  Parameters:\n{params_str}")
-        
-        tool_info = "\n".join(tool_descriptions) if tool_descriptions else "No specific tools required"
+
+        tool_info = (
+            "\n".join(tool_descriptions) if tool_descriptions else "No specific tools required"
+        )
 
         pattern_hint = ""
         if pattern:
@@ -1208,7 +1299,7 @@ Rules:
 
         # This is a simplified interface - actual implementation depends on client type
         # For Anthropic:
-        if hasattr(self.model_client, 'messages'):
+        if hasattr(self.model_client, "messages"):
             response = await self.model_client.messages.create(
                 model=self.model_name,
                 max_tokens=1024,
@@ -1217,7 +1308,7 @@ Rules:
             return response.content[0].text
 
         # For OpenAI-compatible:
-        if hasattr(self.model_client, 'chat'):
+        if hasattr(self.model_client, "chat"):
             response = await self.model_client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -1230,8 +1321,8 @@ Rules:
     def _parse_llm_response(
         self,
         response: str,
-        available_tools: List[str],
-    ) -> List[PlannedTask]:
+        available_tools: list[str],
+    ) -> list[PlannedTask]:
         """
         Parse LLM response into PlannedTask objects.
 
@@ -1242,15 +1333,15 @@ Rules:
         Returns:
             List of PlannedTask objects
         """
-        tasks: List[PlannedTask] = []
+        tasks: list[PlannedTask] = []
 
         # Extract JSON from response
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response)
+        json_match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
         if json_match:
             json_str = json_match.group(1)
         else:
             # Try to find JSON array directly
-            json_match = re.search(r'\[[\s\S]*\]', response)
+            json_match = re.search(r"\[[\s\S]*\]", response)
             if json_match:
                 json_str = json_match.group(0)
             else:
@@ -1270,7 +1361,7 @@ Rules:
                         tool = alt_tool
 
                 task = PlannedTask(
-                    id=item.get("id", f"task_{len(tasks)+1}"),
+                    id=item.get("id", f"task_{len(tasks) + 1}"),
                     type=task_type,
                     tool=tool,
                     description=item.get("description", ""),
@@ -1284,7 +1375,7 @@ Rules:
 
         return tasks
 
-    def analyze_dependencies(self, tasks: List[PlannedTask]) -> List[List[str]]:
+    def analyze_dependencies(self, tasks: list[PlannedTask]) -> list[list[str]]:
         """
         Analyze task dependencies and group tasks for parallel execution.
 
@@ -1341,23 +1432,22 @@ Rules:
                 task.dependencies -= invalid_deps
 
         # Calculate in-degree for each task
-        in_degree: Dict[str, int] = {t.id: len(t.dependencies) for t in tasks}
+        in_degree: dict[str, int] = {t.id: len(t.dependencies) for t in tasks}
 
         # Build reverse adjacency (who depends on whom)
-        dependents: Dict[str, List[str]] = defaultdict(list)
+        dependents: dict[str, list[str]] = defaultdict(list)
         for task in tasks:
             for dep in task.dependencies:
                 dependents[dep].append(task.id)
 
         # Kahn's algorithm for topological sort with level tracking
-        parallel_groups: List[List[str]] = []
+        parallel_groups: list[list[str]] = []
         processed = set()
 
         while len(processed) < len(tasks):
             # Find all tasks with no remaining dependencies
             current_group = [
-                tid for tid, degree in in_degree.items()
-                if degree == 0 and tid not in processed
+                tid for tid, degree in in_degree.items() if degree == 0 and tid not in processed
             ]
 
             if not current_group:
@@ -1381,9 +1471,9 @@ Rules:
 
     def _find_cycle(
         self,
-        task_map: Dict[str, PlannedTask],
-        remaining: Set[str],
-    ) -> List[str]:
+        task_map: dict[str, PlannedTask],
+        remaining: set[str],
+    ) -> list[str]:
         """
         Find a cycle in the remaining tasks using DFS.
 
@@ -1396,9 +1486,9 @@ Rules:
         """
         visited = set()
         rec_stack = set()
-        path: List[str] = []
+        path: list[str] = []
 
-        def dfs(node: str) -> Optional[List[str]]:
+        def dfs(node: str) -> list[str] | None:
             visited.add(node)
             rec_stack.add(node)
             path.append(node)
@@ -1428,7 +1518,7 @@ Rules:
 
         return list(remaining)[:3]  # Fallback if cycle not found
 
-    def validate_plan(self, plan: ExecutionPlan) -> Tuple[bool, List[str]]:
+    def validate_plan(self, plan: ExecutionPlan) -> tuple[bool, list[str]]:
         """
         Validate an execution plan for correctness.
 
@@ -1444,16 +1534,14 @@ Rules:
         Returns:
             Tuple of (is_valid, list of error messages)
         """
-        errors: List[str] = []
+        errors: list[str] = []
         task_ids = {t.id for t in plan.tasks}
 
         # Check dependencies exist
         for task in plan.tasks:
             invalid_deps = task.dependencies - task_ids
             if invalid_deps:
-                errors.append(
-                    f"Task {task.id} depends on non-existent tasks: {invalid_deps}"
-                )
+                errors.append(f"Task {task.id} depends on non-existent tasks: {invalid_deps}")
 
         # Check for circular dependencies
         try:
@@ -1483,8 +1571,8 @@ Rules:
 
 
 def create_task_planner(
-    model_client: Optional[Any] = None,
-    model_name: Optional[str] = None,
+    model_client: Any | None = None,
+    model_name: str | None = None,
 ) -> TaskPlanner:
     """
     Factory function to create a TaskPlanner instance.
@@ -1501,7 +1589,7 @@ def create_task_planner(
 
 def create_simple_plan(
     goal: str,
-    tasks: List[Dict[str, Any]],
+    tasks: list[dict[str, Any]],
 ) -> ExecutionPlan:
     """
     Create a simple execution plan from task dictionaries.

@@ -2,30 +2,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class SessionMessage:
     """会话消息"""
+
     role: str
     content: Any
     timestamp: datetime = field(default_factory=datetime.utcnow)
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass
 class Session:
     """会话数据"""
+
     session_id: str
     user_id: str
     tenant_id: str = ""
-    service_id: Optional[str] = None
+    service_id: str | None = None
     created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: Optional[datetime] = None
-    metadata: Optional[Dict[str, Any]] = None
-    history: List[SessionMessage] = field(default_factory=list)
-    state: Optional[Dict[str, Any]] = field(default_factory=dict)
-    config: Optional[Dict[str, Any]] = field(default_factory=dict)
+    updated_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+    history: list[SessionMessage] = field(default_factory=list)
+    state: dict[str, Any] | None = field(default_factory=dict)
+    config: dict[str, Any] | None = field(default_factory=dict)
     status: str = "active"
-    expires_at: Optional[datetime] = None
+    expires_at: datetime | None = None

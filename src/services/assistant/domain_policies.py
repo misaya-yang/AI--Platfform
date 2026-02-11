@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any
 
 from ..knowledge.constants import ISLAMIC_SYNONYMS
-
 
 _ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 
@@ -13,8 +13,8 @@ _ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\u
 @dataclass(frozen=True)
 class PolicyDecision:
     action: str  # "allow" | "decline"
-    response: Optional[str] = None
-    reason: Optional[str] = None
+    response: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class ImamPolicyConfig:
 class ImamPolicy:
     """Policy engine for Wahda AI Imam assistant."""
 
-    def __init__(self, config: Optional[ImamPolicyConfig] = None) -> None:
+    def __init__(self, config: ImamPolicyConfig | None = None) -> None:
         self.config = config or ImamPolicyConfig()
         self._islamic_terms = self._build_islamic_term_set()
         self._forbidden_patterns = self._build_forbidden_patterns()
@@ -53,11 +53,37 @@ class ImamPolicy:
     @staticmethod
     def _build_islamic_term_set() -> set[str]:
         base_terms = {
-            "islam", "muslim", "quran", "qur'an", "hadith", "sunnah",
-            "sharia", "fiqh", "aqeedah", "allah", "prophet", "muhammad",
-            "imam", "madhhab", "hanafi", "maliki", "shafii", "hanbali",
-            "ramadan", "zakat", "hajj", "umrah", "salah", "salat", "dua",
-            "dhikr", "tawhid", "iman", "sabr", "halal", "haram",
+            "islam",
+            "muslim",
+            "quran",
+            "qur'an",
+            "hadith",
+            "sunnah",
+            "sharia",
+            "fiqh",
+            "aqeedah",
+            "allah",
+            "prophet",
+            "muhammad",
+            "imam",
+            "madhhab",
+            "hanafi",
+            "maliki",
+            "shafii",
+            "hanbali",
+            "ramadan",
+            "zakat",
+            "hajj",
+            "umrah",
+            "salah",
+            "salat",
+            "dua",
+            "dhikr",
+            "tawhid",
+            "iman",
+            "sabr",
+            "halal",
+            "haram",
         }
         for term, synonyms in ISLAMIC_SYNONYMS.items():
             base_terms.add(term.lower())
@@ -66,12 +92,14 @@ class ImamPolicy:
         return base_terms
 
     @staticmethod
-    def _build_forbidden_patterns() -> List[re.Pattern[str]]:
+    def _build_forbidden_patterns() -> list[re.Pattern[str]]:
         interfaith = (
             r"(compare|comparison|versus|vs\.?|difference between)"
             r".*\b(christian|christianity|judaism|jewish|hindu|hinduism|buddhism|sikh|sikhism)\b"
         )
-        politics = r"\b(politic|election|government|parliament|president|prime minister|party|vote)\b"
+        politics = (
+            r"\b(politic|election|government|parliament|president|prime minister|party|vote)\b"
+        )
         return [
             re.compile(interfaith, re.IGNORECASE),
             re.compile(politics, re.IGNORECASE),
@@ -92,11 +120,11 @@ class ImamPolicy:
             "Avoid interfaith comparisons/criticism and political content.",
             # Citations
             "Provide citations after each paragraph and a sources list at the end.",
-            f"End with the fixed closing phrase: \"{self.config.closing_phrase}\"",
+            f'End with the fixed closing phrase: "{self.config.closing_phrase}"',
         ]
         return "<imam_rules>\n- " + "\n- ".join(rules) + "\n</imam_rules>"
 
-    def should_apply(self, dataset: Dict[str, Any]) -> bool:
+    def should_apply(self, dataset: dict[str, Any]) -> bool:
         name = str(dataset.get("name") or "").lower()
         if "imam" in name:
             return True
@@ -121,7 +149,7 @@ class ImamPolicy:
             return False
         return any(pattern.search(text) for pattern in self._forbidden_patterns)
 
-    def precheck_query(self, query: str) -> Optional[PolicyDecision]:
+    def precheck_query(self, query: str) -> PolicyDecision | None:
         if self._is_forbidden_query(query):
             return PolicyDecision(
                 action="decline",
@@ -133,8 +161,8 @@ class ImamPolicy:
     def precheck_context(
         self,
         query: str,
-        contexts: Iterable[Dict[str, Any]],
-    ) -> Optional[PolicyDecision]:
+        contexts: Iterable[dict[str, Any]],
+    ) -> PolicyDecision | None:
         """
         Retrieval-First confidence gating.
 
@@ -162,11 +190,7 @@ class ImamPolicy:
             )
 
         # Extract all chunks and their scores
-        all_chunks = [
-            chunk
-            for ctx in contexts_list
-            for chunk in ctx.get("chunks", [])
-        ]
+        all_chunks = [chunk for ctx in contexts_list for chunk in ctx.get("chunks", [])]
 
         if not all_chunks:
             return PolicyDecision(
@@ -211,8 +235,8 @@ class ImamPolicy:
             reason="low_confidence",
         )
 
-    def validate_answer(self, answer: str) -> List[str]:
-        issues: List[str] = []
+    def validate_answer(self, answer: str) -> list[str]:
+        issues: list[str] = []
         if not answer or not answer.strip():
             issues.append("empty_answer")
             return issues
@@ -235,14 +259,18 @@ class ImamPolicy:
 
         return issues
 
-    def build_repair_instructions(self, issues: List[str]) -> str:
+    def build_repair_instructions(self, issues: list[str]) -> str:
         repairs = []
         if "missing_citations" in issues or "missing_sources_section" in issues:
-            repairs.append("Add citations after each paragraph and include a **Sources:** list at the end ordered by authority.")
+            repairs.append(
+                "Add citations after each paragraph and include a **Sources:** list at the end ordered by authority."
+            )
         if "missing_closing_phrase" in issues:
             repairs.append(f'Append the exact closing phrase: "{self.config.closing_phrase}".')
         if not repairs:
-            repairs.append("Ensure the response follows Imam requirements and uses only provided context.")
+            repairs.append(
+                "Ensure the response follows Imam requirements and uses only provided context."
+            )
         return " ".join(repairs)
 
     def _build_decline(self, reason_text: str) -> str:
@@ -255,7 +283,7 @@ class DomainPolicyResolver:
     def __init__(self) -> None:
         self._imam_policy = ImamPolicy()
 
-    def resolve(self, datasets: Iterable[Dict[str, Any]]) -> Optional[ImamPolicy]:
+    def resolve(self, datasets: Iterable[dict[str, Any]]) -> ImamPolicy | None:
         for ds in datasets:
             if self._imam_policy.should_apply(ds):
                 return self._imam_policy

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
-
+from typing import Any
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -25,22 +26,23 @@ class VectorStoreError(RuntimeError):
 class VectorSearchHit:
     point_id: str
     score: float
-    payload: Dict[str, Any]
-    vector: Optional[List[float]] = None
+    payload: dict[str, Any]
+    vector: list[float] | None = None
 
 
 class VectorStoreConfig:
     """Configuration for VectorStore with adaptive batch sizes."""
+
     # Adaptive batch sizes based on document size
-    SMALL_BATCH_THRESHOLD = 50     # chunks <= 50
-    MEDIUM_BATCH_THRESHOLD = 200   # chunks <= 200
-    LARGE_BATCH_THRESHOLD = 500    # chunks <= 500
-    
+    SMALL_BATCH_THRESHOLD = 50  # chunks <= 50
+    MEDIUM_BATCH_THRESHOLD = 200  # chunks <= 200
+    LARGE_BATCH_THRESHOLD = 500  # chunks <= 500
+
     BATCH_SIZE_SMALL = 32
     BATCH_SIZE_MEDIUM = 16
     BATCH_SIZE_LARGE = 8
     BATCH_SIZE_XLARGE = 4
-    
+
     @classmethod
     def get_batch_size(cls, total_chunks: int) -> int:
         """Get optimal batch size based on total chunks."""
@@ -66,16 +68,14 @@ class VectorStore:
     def __init__(
         self,
         url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout_seconds: float = 30.0,
         prefer_grpc: bool = False,
         max_retries: int = 3,
         retry_base_delay: float = 0.5,
     ):
         if not HAS_QDRANT:
-            raise VectorStoreError(
-                "qdrant-client is not installed. Run: pip install qdrant-client"
-            )
+            raise VectorStoreError("qdrant-client is not installed. Run: pip install qdrant-client")
         self.url = url
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
@@ -100,7 +100,7 @@ class VectorStore:
     async def _call(self, coro_or_factory):
         is_factory = callable(coro_or_factory)
         retries = self.max_retries if is_factory else 1
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(retries):
             try:
                 coro = coro_or_factory() if is_factory else coro_or_factory
@@ -114,10 +114,12 @@ class VectorStore:
             except Exception as exc:
                 last_exc = exc
                 if attempt >= retries - 1:
-                    raise VectorStoreError(f"Qdrant request failed (url={self.url}): {exc}") from exc
+                    raise VectorStoreError(
+                        f"Qdrant request failed (url={self.url}): {exc}"
+                    ) from exc
 
             # Exponential backoff before retry
-            delay = self.retry_base_delay * (2 ** attempt)
+            delay = self.retry_base_delay * (2**attempt)
             await asyncio.sleep(delay)
 
         raise VectorStoreError(f"Qdrant request failed (url={self.url}): {last_exc}") from last_exc
@@ -126,7 +128,7 @@ class VectorStore:
         await self._client.close()
 
     def make_collection_name(
-        self, dataset_id: str, dimension: int, collection_name: Optional[str] = None
+        self, dataset_id: str, dimension: int, collection_name: str | None = None
     ) -> str:
         base = _sanitize_collection_name(dataset_id)
         return _sanitize_collection_name(collection_name or f"kb_{base}_{dimension}")
@@ -140,14 +142,16 @@ class VectorStore:
         self,
         dataset_id: str,
         dimension: int,
-        collection_name: Optional[str] = None,
+        collection_name: str | None = None,
         distance: str = "cosine",
     ) -> str:
         """Ensure a collection exists and matches the embedding dimension.
 
         Returns the actual collection name to use.
         """
-        desired = self.make_collection_name(dataset_id=dataset_id, dimension=dimension, collection_name=collection_name)
+        desired = self.make_collection_name(
+            dataset_id=dataset_id, dimension=dimension, collection_name=collection_name
+        )
 
         try:
             info = await self._call(lambda: self._client.get_collection(desired))
@@ -178,7 +182,7 @@ class VectorStore:
 
         # Payload indexes for fast filtering.
         for field_name in ("document_id", "segment_id"):
-            try:
+            with contextlib.suppress(Exception):
                 await self._call(
                     lambda: self._client.create_payload_index(
                         collection_name=actual,
@@ -186,17 +190,15 @@ class VectorStore:
                         field_schema=qmodels.PayloadSchemaType.KEYWORD,
                     )
                 )
-            except Exception:
-                pass
 
         return actual
 
-    async def upsert(
-        self, collection_name: str, points: Sequence[qmodels.PointStruct]
-    ) -> None:
+    async def upsert(self, collection_name: str, points: Sequence[qmodels.PointStruct]) -> None:
         if not points:
             return
-        await self._call(lambda: self._client.upsert(collection_name=collection_name, points=list(points)))
+        await self._call(
+            lambda: self._client.upsert(collection_name=collection_name, points=list(points))
+        )
 
     async def delete_points(self, collection_name: str, point_ids: Sequence[str]) -> None:
         ids = [pid for pid in point_ids if pid]
@@ -212,16 +214,16 @@ class VectorStore:
     async def search(
         self,
         collection_name: str,
-        query_vector: List[float],
+        query_vector: list[float],
         top_k: int = 5,
-        document_id: Optional[str] = None,
-        source_type: Optional[str] = None,
-        language: Optional[str] = None,
+        document_id: str | None = None,
+        source_type: str | None = None,
+        language: str | None = None,
         with_payload: bool = True,
         with_vectors: bool = False,
-        query_filter: Optional[qmodels.Filter] = None,
-        score_threshold: Optional[float] = None,
-    ) -> List[VectorSearchHit]:
+        query_filter: qmodels.Filter | None = None,
+        score_threshold: float | None = None,
+    ) -> list[VectorSearchHit]:
         conditions = []
         if document_id:
             conditions.append(
@@ -269,11 +271,11 @@ class VectorStore:
         )
         hits = list(getattr(resp, "points", None) or [])
 
-        results: List[VectorSearchHit] = []
+        results: list[VectorSearchHit] = []
         for p in hits:
             pid = str(p.id)
             payload = dict(p.payload or {})
-            vector: Optional[List[float]] = None
+            vector: list[float] | None = None
             if with_vectors:
                 vec = getattr(p, "vector", None)
                 if isinstance(vec, list):
@@ -290,7 +292,7 @@ class VectorStore:
 
     async def retrieve_vectors(
         self, collection_name: str, point_ids: Sequence[str]
-    ) -> Dict[str, List[float]]:
+    ) -> dict[str, list[float]]:
         ids = [pid for pid in (point_ids or []) if pid]
         if not ids:
             return {}
@@ -303,7 +305,7 @@ class VectorStore:
                 with_vectors=True,
             )
         )
-        vectors: Dict[str, List[float]] = {}
+        vectors: dict[str, list[float]] = {}
         for r in records or []:
             rid = str(getattr(r, "id", "") or "")
             vec = getattr(r, "vector", None)
@@ -320,12 +322,12 @@ class VectorStore:
     async def hybrid_search(
         self,
         collection_name: str,
-        query_vector: List[float],
+        query_vector: list[float],
         query_text: str,
         top_k: int = 5,
-        document_id: Optional[str] = None,
+        document_id: str | None = None,
         alpha: float = 0.75,
-    ) -> List[VectorSearchHit]:
+    ) -> list[VectorSearchHit]:
         """Hybrid search = vector candidates + lightweight lexical scoring.
 
         alpha controls the weight of vector similarity in the final score.
@@ -352,7 +354,7 @@ class VectorStore:
             hit = sum(1 for term in q_terms if term and term in t)
             return hit / max(len(q_terms), 1)
 
-        reranked: List[VectorSearchHit] = []
+        reranked: list[VectorSearchHit] = []
         for h in candidates:
             text = str(h.payload.get("text") or "")
             lex = lexical_score(text)
@@ -362,9 +364,7 @@ class VectorStore:
             payload["_vector_score"] = vector_score
             payload["_lexical_score"] = lex
             payload["_combined_score"] = combined
-            reranked.append(
-                VectorSearchHit(point_id=h.point_id, score=combined, payload=payload)
-            )
+            reranked.append(VectorSearchHit(point_id=h.point_id, score=combined, payload=payload))
 
         reranked.sort(key=lambda x: x.score, reverse=True)
         return reranked[: int(top_k)]

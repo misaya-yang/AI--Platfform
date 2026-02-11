@@ -8,16 +8,16 @@ Provides:
 - Export functionality
 """
 
+import csv
 from datetime import date, datetime, timedelta
 from io import StringIO
-import csv
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fastapi import APIRouter, Request, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ...api.deps import get_auth_context, AuthContext
+from ...api.deps import AuthContext, get_auth_context
 from ...services.metrics import compute_data_status, get_usage_recorder
 
 router = APIRouter(prefix="/usage", tags=["usage"])
@@ -40,7 +40,7 @@ class UsageSummaryResponse(BaseModel):
     end_date: str
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 class UsageBreakdownItem(BaseModel):
@@ -62,13 +62,13 @@ class UsageBreakdownResponse(BaseModel):
     """Usage breakdown response."""
 
     dimension: str
-    items: List[Dict[str, Any]]
+    items: list[dict[str, Any]]
     start_date: str
     end_date: str
     total_cost_usd: float
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 class UsageTimeSeriesPoint(BaseModel):
@@ -86,13 +86,13 @@ class UsageTimeSeriesPoint(BaseModel):
 class UsageTimeSeriesResponse(BaseModel):
     """Usage time series response."""
 
-    data: List[UsageTimeSeriesPoint]
+    data: list[UsageTimeSeriesPoint]
     start_date: str
     end_date: str
     granularity: str = "day"
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 class UserUsageResponse(BaseModel):
@@ -100,8 +100,8 @@ class UserUsageResponse(BaseModel):
 
     user_id: str
     summary: UsageSummaryResponse
-    top_models: List[Dict[str, Any]]
-    daily_trend: List[UsageTimeSeriesPoint]
+    top_models: list[dict[str, Any]]
+    daily_trend: list[UsageTimeSeriesPoint]
 
 
 class LatencyBreakdownPoint(BaseModel):
@@ -123,13 +123,13 @@ class LatencyBreakdownPoint(BaseModel):
 class LatencyBreakdownResponse(BaseModel):
     """Latency breakdown response."""
 
-    data: List[LatencyBreakdownPoint]
+    data: list[LatencyBreakdownPoint]
     start_date: str
     end_date: str
     granularity: str
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 class FailureBreakdownItem(BaseModel):
@@ -148,7 +148,7 @@ class FailureBreakdownResponse(BaseModel):
     """Failure breakdown response."""
 
     dimension: str
-    items: List[FailureBreakdownItem]
+    items: list[FailureBreakdownItem]
     start_date: str
     end_date: str
 
@@ -165,7 +165,7 @@ class RequestTraceResponse(BaseModel):
     provider: str
     model: str
     status: str
-    error_type: Optional[str] = None
+    error_type: str | None = None
     request_total_duration_ms: int
     first_token_latency_ms: int
     llm_inference_duration_ms: int
@@ -176,9 +176,9 @@ class RequestTraceResponse(BaseModel):
     output_tokens: int
     total_cost_usd: float
     sample_reason: str
-    trace_steps: List[Dict[str, Any]]
-    metadata: Dict[str, Any]
-    timestamp: Optional[str] = None
+    trace_steps: list[dict[str, Any]]
+    metadata: dict[str, Any]
+    timestamp: str | None = None
 
 
 # ============ API Endpoints ============
@@ -187,13 +187,13 @@ class RequestTraceResponse(BaseModel):
 @router.get("/summary", response_model=UsageSummaryResponse)
 async def get_usage_summary(
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    model: Optional[str] = Query(None, description="Filter by model"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
-    assistant_id: Optional[str] = Query(None, description="Filter by assistant ID"),
-    provider: Optional[str] = Query(None, description="Filter by provider"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    model: str | None = Query(None, description="Filter by model"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
+    assistant_id: str | None = Query(None, description="Filter by assistant ID"),
+    provider: str | None = Query(None, description="Filter by provider"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageSummaryResponse:
     """
@@ -245,10 +245,10 @@ async def get_usage_breakdown(
     dimension: str = Query(
         "model", description="Breakdown dimension: model, user, assistant, service"
     ),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
     limit: int = Query(20, ge=1, le=100, description="Maximum items to return"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageBreakdownResponse:
@@ -311,12 +311,12 @@ async def get_usage_breakdown(
 @router.get("/timeseries", response_model=UsageTimeSeriesResponse)
 async def get_usage_timeseries(
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    model: Optional[str] = Query(None, description="Filter by model"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
-    provider: Optional[str] = Query(None, description="Filter by provider"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    model: str | None = Query(None, description="Filter by model"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
+    provider: str | None = Query(None, description="Filter by provider"),
     granularity: str = Query("day", description="Granularity: hour, day"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UsageTimeSeriesResponse:
@@ -370,12 +370,12 @@ async def get_usage_timeseries(
 @router.get("/performance-breakdown", response_model=LatencyBreakdownResponse)
 async def get_performance_breakdown(
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    model: Optional[str] = Query(None, description="Filter by model"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
-    provider: Optional[str] = Query(None, description="Filter by provider"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    model: str | None = Query(None, description="Filter by model"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
+    provider: str | None = Query(None, description="Filter by provider"),
     granularity: str = Query("day", description="Granularity: hour, day"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> LatencyBreakdownResponse:
@@ -425,12 +425,12 @@ async def get_performance_breakdown(
 async def get_failure_breakdown(
     request: Request,
     dimension: str = Query("service", description="service | model | provider | user"),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    model: Optional[str] = Query(None, description="Filter by model"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
-    provider: Optional[str] = Query(None, description="Filter by provider"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    model: str | None = Query(None, description="Filter by model"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
+    provider: str | None = Query(None, description="Filter by provider"),
     limit: int = Query(50, ge=1, le=200),
     auth: AuthContext = Depends(get_auth_context),
 ) -> FailureBreakdownResponse:
@@ -463,20 +463,20 @@ async def get_failure_breakdown(
     )
 
 
-@router.get("/traces", response_model=List[RequestTraceResponse])
+@router.get("/traces", response_model=list[RequestTraceResponse])
 async def list_request_traces(
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    provider: Optional[str] = Query(None, description="Filter by provider"),
-    model: Optional[str] = Query(None, description="Filter by model"),
-    status: Optional[str] = Query(None, description="Filter by request status"),
-    error_type: Optional[str] = Query(None, description="Filter by error type"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    provider: str | None = Query(None, description="Filter by provider"),
+    model: str | None = Query(None, description="Filter by model"),
+    status: str | None = Query(None, description="Filter by request status"),
+    error_type: str | None = Query(None, description="Filter by error type"),
     limit: int = Query(100, ge=1, le=500),
     auth: AuthContext = Depends(get_auth_context),
-) -> List[RequestTraceResponse]:
+) -> list[RequestTraceResponse]:
     """List sampled traces."""
     recorder = get_usage_recorder()
     if not end_date:
@@ -517,8 +517,8 @@ async def get_request_trace(
 async def get_user_usage(
     user_id: str,
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> UserUsageResponse:
     """
@@ -586,8 +586,8 @@ async def get_user_usage(
 async def export_usage(
     request: Request,
     format: str = Query("csv", description="Export format: csv or json"),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
     dimension: str = Query("model", description="Breakdown dimension for export"),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -703,10 +703,10 @@ async def export_usage(
 @router.get("/models")
 async def get_model_usage(
     request: Request,
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get usage statistics by model.
 

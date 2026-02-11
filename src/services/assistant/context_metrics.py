@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Deque, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 
@@ -34,8 +34,9 @@ logger = get_logger(__name__)
 
 class MetricLayer(str, Enum):
     """Context layers for token tracking."""
-    STATIC_PREFIX = "static_prefix"      # System prompt, tools, guardrails
-    USER_CONTEXT = "user_context"        # User preferences, long-term memory
+
+    STATIC_PREFIX = "static_prefix"  # System prompt, tools, guardrails
+    USER_CONTEXT = "user_context"  # User preferences, long-term memory
     SESSION_CONTEXT = "session_context"  # Compressed history, working memory
     REQUEST_CONTEXT = "request_context"  # RAG results, current query
 
@@ -59,12 +60,13 @@ TOTAL_TOKEN_BUDGET = 8000  # Total context budget
 @dataclass
 class LayerMetrics:
     """Metrics for a single context layer."""
+
     layer: MetricLayer
     token_count: int = 0
     budget: int = 0
     utilization: float = 0.0  # token_count / budget
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "layer": self.layer.value,
@@ -77,6 +79,7 @@ class LayerMetrics:
 @dataclass
 class CompressionMetrics:
     """Metrics for context compression."""
+
     original_tokens: int = 0
     compressed_tokens: int = 0
     compression_ratio: float = 1.0  # original / compressed
@@ -85,7 +88,7 @@ class CompressionMetrics:
     preserved_code_blocks: int = 0
     summary_tokens: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "original_tokens": self.original_tokens,
@@ -101,12 +104,13 @@ class CompressionMetrics:
 @dataclass
 class CacheMetrics:
     """Metrics for KV-cache performance."""
-    cache_read_tokens: int = 0      # Tokens read from cache
+
+    cache_read_tokens: int = 0  # Tokens read from cache
     cache_creation_tokens: int = 0  # Tokens added to cache
-    hit_rate: float = 0.0           # cache_read / (cache_read + cache_creation)
+    hit_rate: float = 0.0  # cache_read / (cache_read + cache_creation)
     estimated_savings_usd: float = 0.0  # Cost savings from cache hits
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "cache_read_tokens": self.cache_read_tokens,
@@ -119,13 +123,14 @@ class CacheMetrics:
 @dataclass
 class MemoryMetrics:
     """Metrics for memory system usage."""
+
     long_term_loaded: bool = False
     session_loaded: bool = False
     working_memory_tasks: int = 0
     working_memory_restored: bool = False
     working_memory_persisted: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "long_term_loaded": self.long_term_loaded,
@@ -144,6 +149,7 @@ class ContextMetrics:
     Tracks token usage, compression, caching, and memory across
     all phases of the agent loop.
     """
+
     # Request identification
     request_id: str = ""
     session_id: str = ""
@@ -155,7 +161,7 @@ class ContextMetrics:
     total_duration_ms: float = 0.0
 
     # Token metrics per layer
-    layer_metrics: List[LayerMetrics] = field(default_factory=list)
+    layer_metrics: list[LayerMetrics] = field(default_factory=list)
 
     # Aggregate token metrics
     total_tokens: int = 0
@@ -172,14 +178,14 @@ class ContextMetrics:
     memory: MemoryMetrics = field(default_factory=MemoryMetrics)
 
     # Phase durations
-    phase_durations: Dict[str, float] = field(default_factory=dict)
+    phase_durations: dict[str, float] = field(default_factory=dict)
 
     def calculate_totals(self) -> None:
         """Calculate aggregate metrics from layer metrics."""
         self.total_tokens = sum(lm.token_count for lm in self.layer_metrics)
         self.utilization = self.total_tokens / max(1, self.budget_tokens)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "request_id": self.request_id,
@@ -195,12 +201,10 @@ class ContextMetrics:
             "compression": self.compression.to_dict(),
             "cache": self.cache.to_dict(),
             "memory": self.memory.to_dict(),
-            "phase_durations": {
-                k: round(v, 2) for k, v in self.phase_durations.items()
-            },
+            "phase_durations": {k: round(v, 2) for k, v in self.phase_durations.items()},
         }
 
-    def to_event_data(self) -> Dict[str, Any]:
+    def to_event_data(self) -> dict[str, Any]:
         """Convert to event data for frontend streaming."""
         return {
             "total_tokens": self.total_tokens,
@@ -243,7 +247,7 @@ class ContextMetricsCollector:
 
     def __init__(
         self,
-        database: Optional["DatabaseStorage"] = None,
+        database: DatabaseStorage | None = None,
         enable_persistence: bool = True,
     ):
         """
@@ -257,7 +261,7 @@ class ContextMetricsCollector:
         self.enable_persistence = enable_persistence and database is not None
         self._max_recent = 100  # Keep last N metrics in memory
         # Use deque with maxlen for O(1) append and automatic eviction
-        self._recent_metrics: Deque[ContextMetrics] = deque(maxlen=self._max_recent)
+        self._recent_metrics: deque[ContextMetrics] = deque(maxlen=self._max_recent)
 
     async def record(self, metrics: ContextMetrics) -> None:
         """
@@ -313,7 +317,7 @@ class ContextMetricsCollector:
         self,
         session_id: str,
         limit: int = 50,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get aggregated statistics for a session.
 
@@ -325,10 +329,7 @@ class ContextMetricsCollector:
             Aggregated statistics
         """
         # Filter recent metrics for this session
-        session_metrics = [
-            m for m in self._recent_metrics
-            if m.session_id == session_id
-        ][-limit:]
+        session_metrics = [m for m in self._recent_metrics if m.session_id == session_id][-limit:]
 
         if not session_metrics:
             return {
@@ -345,12 +346,10 @@ class ContextMetricsCollector:
             "request_count": len(session_metrics),
             "avg_tokens": sum(m.total_tokens for m in session_metrics) // len(session_metrics),
             "avg_utilization": sum(m.utilization for m in session_metrics) / len(session_metrics),
-            "avg_compression_ratio": sum(
-                m.compression.compression_ratio for m in session_metrics
-            ) / len(session_metrics),
-            "avg_cache_hit_rate": sum(
-                m.cache.hit_rate for m in session_metrics
-            ) / len(session_metrics),
+            "avg_compression_ratio": sum(m.compression.compression_ratio for m in session_metrics)
+            / len(session_metrics),
+            "avg_cache_hit_rate": sum(m.cache.hit_rate for m in session_metrics)
+            / len(session_metrics),
             "total_tokens_used": sum(m.total_tokens for m in session_metrics),
         }
 
@@ -358,7 +357,7 @@ class ContextMetricsCollector:
         self,
         tenant_id: str,
         hours: int = 24,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get aggregated statistics for a tenant over time.
 
@@ -373,7 +372,8 @@ class ContextMetricsCollector:
 
         # Filter recent metrics for this tenant
         tenant_metrics = [
-            m for m in self._recent_metrics
+            m
+            for m in self._recent_metrics
             if m.tenant_id == tenant_id and m.timestamp.timestamp() > cutoff
         ]
 
@@ -386,7 +386,7 @@ class ContextMetricsCollector:
                 "total_tokens": 0,
             }
 
-        unique_sessions = len(set(m.session_id for m in tenant_metrics))
+        unique_sessions = len({m.session_id for m in tenant_metrics})
 
         return {
             "tenant_id": tenant_id,
@@ -394,12 +394,9 @@ class ContextMetricsCollector:
             "request_count": len(tenant_metrics),
             "unique_sessions": unique_sessions,
             "total_tokens": sum(m.total_tokens for m in tenant_metrics),
-            "avg_tokens_per_request": sum(
-                m.total_tokens for m in tenant_metrics
-            ) // len(tenant_metrics),
-            "avg_utilization": sum(
-                m.utilization for m in tenant_metrics
-            ) / len(tenant_metrics),
+            "avg_tokens_per_request": sum(m.total_tokens for m in tenant_metrics)
+            // len(tenant_metrics),
+            "avg_utilization": sum(m.utilization for m in tenant_metrics) / len(tenant_metrics),
         }
 
 
@@ -443,14 +440,14 @@ class ContextMetricsBuilder:
             user_id=user_id,
         )
         self._start_time = time.time()
-        self._phase_start: Optional[float] = None
-        self._current_phase: Optional[str] = None
-        self._layer_tokens: Dict[MetricLayer, int] = {}
+        self._phase_start: float | None = None
+        self._current_phase: str | None = None
+        self._layer_tokens: dict[MetricLayer, int] = {}
 
     class _PhaseContext:
         """Context manager for tracking phase duration."""
 
-        def __init__(self, builder: "ContextMetricsBuilder", phase_name: str):
+        def __init__(self, builder: ContextMetricsBuilder, phase_name: str):
             self.builder = builder
             self.phase_name = phase_name
             self.start_time: float = 0
@@ -536,7 +533,9 @@ class ContextMetricsBuilder:
         hit_rate = cache_read / max(1, total)
 
         # Calculate savings: what it would have cost without cache
-        actual_cost = (cache_read * cost_per_1k_cached + cache_creation * cost_per_1k_uncached) / 1000
+        actual_cost = (
+            cache_read * cost_per_1k_cached + cache_creation * cost_per_1k_uncached
+        ) / 1000
         no_cache_cost = total * cost_per_1k_uncached / 1000
         savings = no_cache_cost - actual_cost
 
@@ -578,12 +577,14 @@ class ContextMetricsBuilder:
         for layer in MetricLayer:
             tokens = self._layer_tokens.get(layer, 0)
             budget = DEFAULT_TOKEN_BUDGETS.get(layer, 0)
-            self._metrics.layer_metrics.append(LayerMetrics(
-                layer=layer,
-                token_count=tokens,
-                budget=budget,
-                utilization=tokens / max(1, budget),
-            ))
+            self._metrics.layer_metrics.append(
+                LayerMetrics(
+                    layer=layer,
+                    token_count=tokens,
+                    budget=budget,
+                    utilization=tokens / max(1, budget),
+                )
+            )
 
         # Calculate totals
         self._metrics.calculate_totals()
@@ -596,7 +597,7 @@ class ContextMetricsBuilder:
 # =============================================================================
 
 
-_collector: Optional[ContextMetricsCollector] = None
+_collector: ContextMetricsCollector | None = None
 
 
 def get_context_metrics_collector() -> ContextMetricsCollector:
@@ -608,7 +609,7 @@ def get_context_metrics_collector() -> ContextMetricsCollector:
 
 
 def init_context_metrics_collector(
-    database: Optional["DatabaseStorage"] = None,
+    database: DatabaseStorage | None = None,
 ) -> ContextMetricsCollector:
     """Initialize the global context metrics collector."""
     global _collector

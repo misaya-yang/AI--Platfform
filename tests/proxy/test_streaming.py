@@ -13,17 +13,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import AsyncIterator, List
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, patch
 
-import pytest
 import httpx
+import pytest
 
-from src.proxy.transparent_proxy import TransparentProxy, ProxyRequest, ProxyResponse
+from src.proxy.billing_interceptor import BillingInterceptor, UsageData
 from src.proxy.config_loader import ProxyServiceConfig
 from src.proxy.context_injector import ContextInjector, RequestContext
-from src.proxy.billing_interceptor import BillingInterceptor, UsageData, StreamProcessor
-
+from src.proxy.transparent_proxy import ProxyRequest, TransparentProxy
 
 # ============ Mock Streaming Response ============
 
@@ -35,7 +34,7 @@ class MockStreamResponse:
         self,
         status_code: int = 200,
         headers: dict = None,
-        events: List[bytes] = None,
+        events: list[bytes] = None,
         delay: float = 0.01,
     ):
         self.status_code = status_code
@@ -124,7 +123,7 @@ class TestStreamingProxy:
         with patch.object(httpx.AsyncClient, "send", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = mock_response
 
-            request = ProxyRequest(
+            ProxyRequest(
                 service_name="langgraph",
                 path="/runs/stream",
                 method="POST",
@@ -263,7 +262,7 @@ class TestBillingInterceptor:
     @pytest.mark.asyncio
     async def test_stream_processor_extract_usage_from_updates_event(self):
         """测试从 LangGraph updates 事件中提取 usage_metadata"""
-        captured: List[UsageData] = []
+        captured: list[UsageData] = []
 
         async def callback(data: UsageData):
             captured.append(data)
@@ -319,7 +318,7 @@ class TestBillingInterceptor:
     @pytest.mark.asyncio
     async def test_stream_processor_finalize_records_error_without_usage(self):
         """测试 error 事件即使无 usage 也会记录请求。"""
-        captured: List[UsageData] = []
+        captured: list[UsageData] = []
 
         async def callback(data: UsageData):
             captured.append(data)

@@ -3,10 +3,8 @@ Tests for path traversal attack prevention in file uploads.
 
 Ensures that user_id and file_id validation prevents directory escape attacks.
 """
+
 import pytest
-import os
-import tempfile
-from pathlib import Path
 from fastapi import HTTPException
 
 
@@ -160,7 +158,7 @@ class TestPathConstruction:
 
     def test_user_path_within_uploads_dir(self):
         """User path should always be within uploads directory."""
-        from src.api.v1.files import get_user_uploads_path, get_uploads_path
+        from src.api.v1.files import get_uploads_path, get_user_uploads_path
 
         base = get_uploads_path()
         user_path = get_user_uploads_path("testuser123")

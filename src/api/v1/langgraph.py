@@ -3,7 +3,7 @@ LangGraph API 路由
 
 代理 LangGraph Server 官方 API：
 - Assistants: /assistants/*
-- Threads: /threads/*  
+- Threads: /threads/*
 - Runs: /threads/{thread_id}/runs/*, /runs/*
 - Store: /store/*
 """
@@ -11,14 +11,13 @@ LangGraph API 路由
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from ..deps import require_langgraph_proxy, get_user_context, get_rate_limiter
 from ...adapters.langgraph_proxy import (
     AssistantAccessDeniedError,
     AssistantNotFoundError,
@@ -34,64 +33,62 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitContext,
     RateLimitHeaders,
 )
-
+from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
 
 router = APIRouter(prefix="/langgraph", tags=["LangGraph"])
 
 
 # ============ Pydantic 模型 ============
 
+
 class AssistantCreate(BaseModel):
     graph_id: str
-    config: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    name: Optional[str] = None
+    config: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    name: str | None = None
 
 
 class ThreadCreate(BaseModel):
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
     if_exists: str = "do_nothing"
 
 
 class ThreadUpdate(BaseModel):
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
 class ThreadStateUpdate(BaseModel):
-    values: Dict[str, Any]
-    as_node: Optional[str] = None
+    values: dict[str, Any]
+    as_node: str | None = None
 
 
 class RunCreate(BaseModel):
     assistant_id: str
-    input: Dict[str, Any] = Field(default_factory=dict)
-    config: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    webhook: Optional[str] = None
-    interrupt_before: Optional[List[str]] = None
-    interrupt_after: Optional[List[str]] = None
-    stream_mode: Optional[List[str]] = None
+    input: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    webhook: str | None = None
+    interrupt_before: list[str] | None = None
+    interrupt_after: list[str] | None = None
+    stream_mode: list[str] | None = None
 
 
 class StoreItem(BaseModel):
-    namespace: List[str]
+    namespace: list[str]
     key: str
-    value: Dict[str, Any]
+    value: dict[str, Any]
 
 
 # ============ 异常处理 ============
 
+
 def handle_proxy_error(e: Exception):
     """处理代理层异常"""
-    if isinstance(e, ForbiddenError):
-        raise HTTPException(status_code=403, detail=str(e))
-    elif isinstance(e, AssistantAccessDeniedError):
+    if isinstance(e, (ForbiddenError, AssistantAccessDeniedError)):
         raise HTTPException(status_code=403, detail=str(e))
     elif isinstance(e, QuotaExceededError):
         raise HTTPException(status_code=429, detail=str(e))
-    elif isinstance(e, ThreadNotFoundError):
-        raise HTTPException(status_code=404, detail=str(e))
-    elif isinstance(e, AssistantNotFoundError):
+    elif isinstance(e, (ThreadNotFoundError, AssistantNotFoundError)):
         raise HTTPException(status_code=404, detail=str(e))
     elif isinstance(e, NoHealthyInstanceError):
         raise HTTPException(status_code=503, detail=str(e))
@@ -101,22 +98,23 @@ def handle_proxy_error(e: Exception):
 
 # ============ 限流检查 ============
 
+
 async def check_rate_limit(
     user: UserContext,
     rate_limiter: MultiDimensionRateLimiter,
-    assistant_id: Optional[str] = None,
-    operation: Optional[str] = None,
+    assistant_id: str | None = None,
+    operation: str | None = None,
 ):
     """检查限流"""
     if not rate_limiter:
         return
-    
+
     context = RateLimitContext.from_user_context(
         user=user,
         assistant_id=assistant_id,
         operation=operation,
     )
-    
+
     result = await rate_limiter.check(context)
     if not result.allowed:
         raise HTTPException(
@@ -127,6 +125,7 @@ async def check_rate_limit(
 
 
 # ============ Assistants API ============
+
 
 @router.get("/assistants")
 async def list_assistants(
@@ -176,6 +175,7 @@ async def create_assistant(
 
 # ============ Threads API ============
 
+
 @router.post("/threads")
 async def create_thread(
     data: ThreadCreate = None,
@@ -185,7 +185,7 @@ async def create_thread(
 ):
     """创建 Thread"""
     await check_rate_limit(user, rate_limiter, operation="thread_create")
-    
+
     try:
         return await proxy.create_thread(
             user=user,
@@ -239,7 +239,7 @@ async def delete_thread(
 
 @router.post("/threads/search")
 async def search_threads(
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
@@ -293,7 +293,7 @@ async def update_thread_state(
 async def get_thread_history(
     thread_id: str,
     limit: int = Query(10, ge=1, le=100),
-    before: Optional[str] = None,
+    before: str | None = None,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
 ):
@@ -311,6 +311,7 @@ async def get_thread_history(
 
 # ============ Runs API ============
 
+
 @router.post("/threads/{thread_id}/runs")
 async def create_run(
     thread_id: str,
@@ -321,11 +322,12 @@ async def create_run(
 ):
     """创建 Run"""
     await check_rate_limit(
-        user, rate_limiter,
+        user,
+        rate_limiter,
         assistant_id=data.assistant_id,
         operation="run_create",
     )
-    
+
     try:
         return await proxy.create_run(
             user=user,
@@ -352,11 +354,12 @@ async def create_run_wait(
 ):
     """创建 Run 并等待完成"""
     await check_rate_limit(
-        user, rate_limiter,
+        user,
+        rate_limiter,
         assistant_id=data.assistant_id,
         operation="run_create",
     )
-    
+
     try:
         return await proxy.create_run_wait(
             user=user,
@@ -380,11 +383,12 @@ async def stream_run(
 ):
     """流式执行 Run"""
     await check_rate_limit(
-        user, rate_limiter,
+        user,
+        rate_limiter,
         assistant_id=data.assistant_id,
         operation="run_create",
     )
-    
+
     async def event_generator():
         try:
             async for chunk in proxy.stream_run(
@@ -404,7 +408,7 @@ async def stream_run(
                 "event": "error",
                 "data": json.dumps({"error": str(e)}),
             }
-    
+
     return EventSourceResponse(event_generator())
 
 
@@ -460,6 +464,7 @@ async def cancel_run(
 
 # ============ Threadless Runs ============
 
+
 @router.post("/runs/stream")
 async def stream_stateless_run(
     data: RunCreate,
@@ -469,11 +474,12 @@ async def stream_stateless_run(
 ):
     """无 Thread 的流式 Run（一次性对话）"""
     await check_rate_limit(
-        user, rate_limiter,
+        user,
+        rate_limiter,
         assistant_id=data.assistant_id,
         operation="run_create",
     )
-    
+
     async def event_generator():
         try:
             async for chunk in proxy.stream_run(
@@ -493,7 +499,7 @@ async def stream_stateless_run(
                 "event": "error",
                 "data": json.dumps({"error": str(e)}),
             }
-    
+
     return EventSourceResponse(event_generator())
 
 
@@ -506,11 +512,12 @@ async def create_stateless_run(
 ):
     """无状态 Run（一次性对话）"""
     await check_rate_limit(
-        user, rate_limiter,
+        user,
+        rate_limiter,
         assistant_id=data.assistant_id,
         operation="run_create",
     )
-    
+
     try:
         return await proxy.create_stateless_run(
             user=user,
@@ -524,6 +531,7 @@ async def create_stateless_run(
 
 # ============ Store API ============
 
+
 @router.post("/store/items")
 async def store_put_item(
     data: StoreItem,
@@ -533,7 +541,7 @@ async def store_put_item(
 ):
     """写入记忆"""
     await check_rate_limit(user, rate_limiter, operation="store_write")
-    
+
     try:
         await proxy.store_put(user, data.namespace, data.key, data.value)
         return {"status": "ok"}
@@ -581,7 +589,7 @@ async def store_delete_item(
 
 @router.get("/store/namespaces")
 async def store_list_namespaces(
-    prefix: Optional[str] = Query(None, description="JSON encoded prefix list"),
+    prefix: str | None = Query(None, description="JSON encoded prefix list"),
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
 ):
@@ -596,6 +604,7 @@ async def store_list_namespaces(
 
 
 # ============ Passthrough (Full LangGraph API) ============
+
 
 @router.api_route(
     "/{full_path:path}",
@@ -642,6 +651,7 @@ async def passthrough(
     client = await proxy._get_client(instance)
 
     if wants_stream:
+
         async def gen():
             async with client.stream(
                 method,
@@ -676,16 +686,3 @@ async def passthrough(
         status_code=resp.status_code,
         media_type=content_type or None,
     )
-
-
-
-
-
-
-
-
-
-
-
-
-

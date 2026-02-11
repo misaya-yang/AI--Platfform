@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..core.observability.logging import get_logger
 
@@ -23,27 +23,27 @@ logger = get_logger(__name__)
 @dataclass
 class RequestContext:
     """请求上下文"""
-    
+
     # 用户信息
     user_id: str = ""
     api_key_id: str = ""
     tenant_id: str = ""
     user_tier: str = "anonymous"
     is_authenticated: bool = False
-    roles: List[str] = field(default_factory=list)
-    
+    roles: list[str] = field(default_factory=list)
+
     # 请求信息
     request_id: str = ""
     trace_id: str = ""
     span_id: str = ""
-    
+
     # 客户端信息
     client_ip: str = ""
     user_agent: str = ""
-    
+
     # 原始请求头（用于选择性转发）
-    original_headers: Dict[str, str] = field(default_factory=dict)
-    
+    original_headers: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self):
         if not self.request_id:
             self.request_id = str(uuid.uuid4())
@@ -54,13 +54,13 @@ class RequestContext:
 class ContextInjector:
     """
     上下文注入器
-    
+
     负责在转发请求时注入网关上下文信息。
     """
-    
+
     # 网关注入的头部前缀
     GW_HEADER_PREFIX = "X-GW-"
-    
+
     # 标准头部映射（网关内部格式）
     HEADER_MAPPINGS = {
         "user_id": "X-GW-User-ID",
@@ -82,7 +82,7 @@ class ContextInjector:
         "user_name": "X-User-Name",
         "user_permissions": "X-User-Permissions",
     }
-    
+
     # 需要转发的原始头部（白名单）
     FORWARD_HEADERS = {
         "authorization",
@@ -95,7 +95,7 @@ class ContextInjector:
         "x-trace-id",
         "x-correlation-id",
     }
-    
+
     # 禁止转发的头部（黑名单）
     BLOCKED_HEADERS = {
         "host",
@@ -113,22 +113,29 @@ class ContextInjector:
     # 敏感身份头部（客户端不允许传递，必须由网关强制覆盖）
     # 防止身份伪造攻击：攻击者可能发送 X-User-Id: admin 冒充管理员
     SENSITIVE_HEADERS = {
-        "x-user-id", "x-gw-user-id", "x-user-type", "x-user-tier",
-        "x-gw-user-roles", "x-gw-authenticated", "x-tenant-id", "x-gw-tenant-id",
-        "x-user-permissions", "x-user-name",
+        "x-user-id",
+        "x-gw-user-id",
+        "x-user-type",
+        "x-user-tier",
+        "x-gw-user-roles",
+        "x-gw-authenticated",
+        "x-tenant-id",
+        "x-gw-tenant-id",
+        "x-user-permissions",
+        "x-user-name",
     }
-    
+
     def __init__(
         self,
         inject_user_info: bool = True,
         inject_request_info: bool = True,
         forward_auth: bool = True,
         forward_all_headers: bool = False,
-        custom_headers: Optional[Dict[str, str]] = None,
+        custom_headers: dict[str, str] | None = None,
     ):
         """
         初始化上下文注入器
-        
+
         Args:
             inject_user_info: 是否注入用户信息
             inject_request_info: 是否注入请求追踪信息
@@ -140,38 +147,38 @@ class ContextInjector:
         self.forward_auth = forward_auth
         self.forward_all_headers = forward_all_headers
         self.custom_headers = custom_headers or {}
-    
+
     def build_headers(
         self,
         context: RequestContext,
-        service_auth_token: Optional[str] = None,
-        forward_all_headers: Optional[bool] = None,
-    ) -> Dict[str, str]:
+        service_auth_token: str | None = None,
+        forward_all_headers: bool | None = None,
+    ) -> dict[str, str]:
         """
         构建转发请求的头部
-        
+
         Args:
             context: 请求上下文
             service_auth_token: 服务内部认证 token（覆盖原始 Authorization）
-            
+
         Returns:
             构建好的请求头部字典
         """
-        headers: Dict[str, str] = {}
+        headers: dict[str, str] = {}
         if forward_all_headers is None:
             forward_all_headers = self.forward_all_headers
 
         def _header_exists(name: str) -> bool:
             name_lower = name.lower()
-            return any(k.lower() == name_lower for k in headers.keys())
+            return any(k.lower() == name_lower for k in headers)
 
-        def _set_if_missing(name: str, value: Optional[str]) -> None:
+        def _set_if_missing(name: str, value: str | None) -> None:
             if value is None:
                 return
             if not _header_exists(name):
                 headers[name] = value
 
-        def _force_set(name: str, value: Optional[str]) -> None:
+        def _force_set(name: str, value: str | None) -> None:
             """强制设置头部值（覆盖已有值），用于防止身份伪造"""
             if value is not None:
                 headers[name] = value
@@ -179,12 +186,16 @@ class ContextInjector:
         # 1. Forward original headers (transparent mode can pass all)
         # 记录原始请求头中的认证相关头部（脱敏处理）
         original_auth_headers = {
-            k: "[PRESENT]" if k.lower() in ("authorization", "x-api-key") else (v[:30] + "..." if len(v) > 30 else v)
+            k: "[PRESENT]"
+            if k.lower() in ("authorization", "x-api-key")
+            else (v[:30] + "..." if len(v) > 30 else v)
             for k, v in context.original_headers.items()
             if k.lower() in ("x-user-id", "x-user-type", "authorization", "x-api-key")
         }
         if original_auth_headers:
-            logger.info(f"[ContextInjector] Original auth headers from request: {original_auth_headers}")
+            logger.info(
+                f"[ContextInjector] Original auth headers from request: {original_auth_headers}"
+            )
 
         for name, value in context.original_headers.items():
             name_lower = name.lower()
@@ -216,7 +227,9 @@ class ContextInjector:
                     headers[name] = value
 
         # 2. 注入用户信息（使用 _force_set 强制覆盖，防止客户端伪造身份）
-        logger.info(f"[ContextInjector] inject_user_info={self.inject_user_info}, user_id={context.user_id}")
+        logger.info(
+            f"[ContextInjector] inject_user_info={self.inject_user_info}, user_id={context.user_id}"
+        )
         if self.inject_user_info:
             # 2a. 网关标准头部（X-GW- 前缀）- 强制覆盖
             if context.user_id:
@@ -251,7 +264,9 @@ class ContextInjector:
                     langgraph_user_id = f"anonymous-{hash_suffix}"
                 else:
                     langgraph_user_id = f"anonymous-{uuid.uuid4().hex[:8]}"
-                logger.info(f"[ContextInjector] Transformed user_id: {original_user_id} -> {langgraph_user_id}")
+                logger.info(
+                    f"[ContextInjector] Transformed user_id: {original_user_id} -> {langgraph_user_id}"
+                )
 
             # 2b. LangGraph 兼容头部 - 强制覆盖（防止身份伪造）
             _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_id"], langgraph_user_id)
@@ -262,7 +277,11 @@ class ContextInjector:
                 _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_tier"], context.user_tier)
 
             # X-User-Type: user/guest/anonymous - 强制覆盖
-            user_type = "user" if context.is_authenticated else ("guest" if context.user_id else "anonymous")
+            user_type = (
+                "user"
+                if context.is_authenticated
+                else ("guest" if context.user_id else "anonymous")
+            )
             _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_type"], user_type)
 
             # X-User-Name: 可选的用户名 - 强制覆盖
@@ -276,7 +295,7 @@ class ContextInjector:
             if "admin" in context.roles or context.user_tier == "admin":
                 permissions.extend(["admin", "delete"])
             _force_set(self.LANGGRAPH_HEADER_MAPPINGS["user_permissions"], ",".join(permissions))
-        
+
         # 3. 注入请求追踪信息
         if self.inject_request_info:
             _set_if_missing(self.HEADER_MAPPINGS["request_id"], context.request_id)
@@ -284,7 +303,7 @@ class ContextInjector:
                 _set_if_missing(self.HEADER_MAPPINGS["trace_id"], context.trace_id)
             if context.span_id:
                 _set_if_missing(self.HEADER_MAPPINGS["span_id"], context.span_id)
-        
+
         # 4. 客户端 IP（X-Forwarded-For）
         if context.client_ip:
             existing_xff = headers.get("X-Forwarded-For", "")
@@ -292,7 +311,7 @@ class ContextInjector:
                 headers["X-Forwarded-For"] = f"{existing_xff}, {context.client_ip}"
             else:
                 headers["X-Forwarded-For"] = context.client_ip
-        
+
         # 5. 服务内部认证 token
         if service_auth_token:
             # 支持多种认证方式：
@@ -307,7 +326,7 @@ class ContextInjector:
             else:
                 # 默认作为 X-Api-Key（LangGraph 兼容）
                 headers["X-Api-Key"] = service_auth_token
-        
+
         # 6. 自定义静态头部
         headers.update(self.custom_headers)
 
@@ -317,39 +336,48 @@ class ContextInjector:
 
         # 记录关键的认证头部（INFO 级别用于调试，敏感值脱敏）
         auth_headers = {
-            k: "[PRESENT]" if k.lower() in ("authorization", "x-api-key") else (v[:30] + "..." if len(v) > 30 else v)
+            k: "[PRESENT]"
+            if k.lower() in ("authorization", "x-api-key")
+            else (v[:30] + "..." if len(v) > 30 else v)
             for k, v in headers.items()
-            if k.lower() in ("x-user-id", "x-user-type", "x-user-name", "authorization", "x-api-key", "x-gw-user-id")
+            if k.lower()
+            in (
+                "x-user-id",
+                "x-user-type",
+                "x-user-name",
+                "authorization",
+                "x-api-key",
+                "x-gw-user-id",
+            )
         }
         if auth_headers:
             logger.info(f"[ContextInjector] Forwarding auth headers: {auth_headers}")
 
         return headers
-    
+
     @staticmethod
-    def extract_context_from_scope(scope: Dict[str, Any]) -> RequestContext:
+    def extract_context_from_scope(scope: dict[str, Any]) -> RequestContext:
         """
         从 ASGI scope 提取请求上下文
-        
+
         Args:
             scope: ASGI scope 字典
-            
+
         Returns:
             RequestContext 对象
         """
         # 从 scope["state"] 获取中间件注入的信息
         state = scope.get("state", {})
-        
+
         # 用户信息
         user_info = state.get("user_info", {})
-        
+
         # 原始请求头
         raw_headers = scope.get("headers", [])
         original_headers = {
-            name.decode("utf-8"): value.decode("utf-8")
-            for name, value in raw_headers
+            name.decode("utf-8"): value.decode("utf-8") for name, value in raw_headers
         }
-        
+
         # 客户端 IP
         client_ip = ""
         if xff := original_headers.get("x-forwarded-for"):
@@ -358,7 +386,7 @@ class ContextInjector:
             client_ip = real_ip
         elif client := scope.get("client"):
             client_ip = client[0]
-        
+
         return RequestContext(
             user_id=user_info.get("user_id", ""),
             tenant_id=user_info.get("tenant_id", ""),
@@ -372,29 +400,29 @@ class ContextInjector:
             user_agent=original_headers.get("user-agent", ""),
             original_headers=original_headers,
         )
-    
+
     @staticmethod
     def extract_context_from_request(request) -> RequestContext:
         """
         从 FastAPI Request 对象提取请求上下文
-        
+
         Args:
             request: FastAPI Request 对象
-            
+
         Returns:
             RequestContext 对象
         """
         # 从 request.state 获取信息
         state = request.state._state if hasattr(request.state, "_state") else {}
-        
+
         # 用户信息（可能来自 get_user_context 依赖）
         user_info = getattr(request.state, "user_info", {})
         if not user_info:
             user_info = state.get("user_info", {})
-        
+
         # 原始请求头
         original_headers = dict(request.headers)
-        
+
         # 客户端 IP
         client_ip = ""
         if xff := request.headers.get("x-forwarded-for"):
@@ -403,13 +431,23 @@ class ContextInjector:
             client_ip = real_ip
         elif request.client:
             client_ip = request.client.host
-        
+
         return RequestContext(
-            user_id=user_info.get("user_id", "") if isinstance(user_info, dict) else getattr(user_info, "user_id", ""),
-            tenant_id=user_info.get("tenant_id", "") if isinstance(user_info, dict) else getattr(user_info, "tenant_id", ""),
-            user_tier=user_info.get("tier", "anonymous") if isinstance(user_info, dict) else getattr(user_info, "tier", "anonymous"),
-            is_authenticated=user_info.get("is_authenticated", False) if isinstance(user_info, dict) else getattr(user_info, "is_authenticated", False),
-            roles=user_info.get("roles", []) if isinstance(user_info, dict) else getattr(user_info, "roles", []),
+            user_id=user_info.get("user_id", "")
+            if isinstance(user_info, dict)
+            else getattr(user_info, "user_id", ""),
+            tenant_id=user_info.get("tenant_id", "")
+            if isinstance(user_info, dict)
+            else getattr(user_info, "tenant_id", ""),
+            user_tier=user_info.get("tier", "anonymous")
+            if isinstance(user_info, dict)
+            else getattr(user_info, "tier", "anonymous"),
+            is_authenticated=user_info.get("is_authenticated", False)
+            if isinstance(user_info, dict)
+            else getattr(user_info, "is_authenticated", False),
+            roles=user_info.get("roles", [])
+            if isinstance(user_info, dict)
+            else getattr(user_info, "roles", []),
             request_id=getattr(request.state, "request_id", str(uuid.uuid4())),
             trace_id=getattr(request.state, "trace_id", ""),
             span_id=getattr(request.state, "span_id", ""),

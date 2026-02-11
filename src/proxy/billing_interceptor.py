@@ -12,23 +12,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Awaitable
+from typing import Any
 
 from ..core.observability.logging import get_logger
+from ..services.metrics.observability import (
+    classify_error_type,
+    ensure_duration_breakdown,
+    extract_duration_breakdown,
+)
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
     extract_provider,
     extract_token_usage,
-)
-from ..services.metrics.observability import (
-    classify_error_type,
-    ensure_duration_breakdown,
-    extract_duration_breakdown,
 )
 
 logger = get_logger(__name__)
@@ -65,12 +67,12 @@ class UsageData:
     retrieval_duration_ms: int = 0
     tool_call_duration_ms: int = 0
     agent_or_graph_overhead_ms: int = 0
-    tool_call_breakdown: Dict[str, int] = field(default_factory=dict)
-    error_type: Optional[str] = None
-    trace_steps: List[Dict[str, Any]] = field(default_factory=list)
+    tool_call_breakdown: dict[str, int] = field(default_factory=dict)
+    error_type: str | None = None
+    trace_steps: list[dict[str, Any]] = field(default_factory=list)
 
     # 原始元数据
-    raw_metadata: Dict[str, Any] = field(default_factory=dict)
+    raw_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.total_tokens == 0:
@@ -96,7 +98,7 @@ class BillingInterceptor:
 
     def __init__(
         self,
-        callback: Optional[BillingCallback] = None,
+        callback: BillingCallback | None = None,
         redis_client=None,
         realtime_metrics=None,  # 修复：添加实时指标服务
         buffer_size: int = 100,
@@ -119,11 +121,11 @@ class BillingInterceptor:
         self.flush_interval = flush_interval
 
         # 计费数据缓冲区
-        self._buffer: List[UsageData] = []
+        self._buffer: list[UsageData] = []
         self._buffer_lock = asyncio.Lock()
 
         # 后台刷新任务
-        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_task: asyncio.Task | None = None
         self._running = False
 
         # 统计
@@ -157,10 +159,8 @@ class BillingInterceptor:
 
         if self._flush_task:
             self._flush_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
-            except asyncio.CancelledError:
-                pass
 
         # 刷新剩余数据
         await self._flush_buffer()
@@ -286,7 +286,7 @@ class BillingInterceptor:
         request_type: str = "proxy_run_stream",
         model_hint: str = "",
         provider_hint: str = "",
-    ) -> "StreamProcessor":
+    ) -> StreamProcessor:
         """
         创建流处理器
 
@@ -353,10 +353,10 @@ class StreamProcessor:
         self._realtime_started = False  # 跟踪是否已开始实时指标记录
         self._request_complete_recorded = False
         self._status = "success"
-        self._error_metadata: Dict[str, Any] = {}
+        self._error_metadata: dict[str, Any] = {}
         self._first_chunk_offset_ms = 0
-        self._event_offsets_ms: Dict[str, int] = {}
-        self._duration_breakdown: Dict[str, Any] = {}
+        self._event_offsets_ms: dict[str, int] = {}
+        self._duration_breakdown: dict[str, Any] = {}
 
     async def process_chunk(self, chunk: bytes) -> bytes:
         """
@@ -440,12 +440,12 @@ class StreamProcessor:
         return normalized.startswith("proxy_run_") or normalized.startswith("run_")
 
     @staticmethod
-    def _extract_error_payload(data: Dict[str, Any]) -> Dict[str, str]:
+    def _extract_error_payload(data: dict[str, Any]) -> dict[str, str]:
         """从事件数据中抽取上游错误信息，统一元数据字段。"""
         if isinstance(data.get("error"), str) and data.get("error") and "message" in data:
             error_type = str(data.get("error"))
             error_message = str(data.get("message") or "")
-            payload: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+            payload: dict[str, str] = {"upstream_error_type": error_type[:128]}
             if error_message:
                 payload["upstream_error_message"] = error_message[:512]
             return payload
@@ -463,7 +463,7 @@ class StreamProcessor:
             error_type = "upstream_error"
             error_message = str(error_payload)
 
-        payload: Dict[str, str] = {"upstream_error_type": error_type[:128]}
+        payload: dict[str, str] = {"upstream_error_type": error_type[:128]}
         if error_message:
             payload["upstream_error_message"] = error_message[:512]
         return payload
@@ -554,9 +554,9 @@ class StreamProcessor:
             self._duration_breakdown[key] = max(current, parsed)
 
     def _build_trace_steps(
-        self, total_duration_ms: int, breakdown: Dict[str, int]
-    ) -> List[Dict[str, Any]]:
-        steps: List[Dict[str, Any]] = []
+        self, total_duration_ms: int, breakdown: dict[str, int]
+    ) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = []
         steps.append(
             {
                 "name": "gateway.request_total",
@@ -613,7 +613,7 @@ class StreamProcessor:
 
         return steps
 
-    async def _record_usage(self, usage: Dict[str, Any], raw_data: Dict[str, Any]) -> None:
+    async def _record_usage(self, usage: dict[str, Any], raw_data: dict[str, Any]) -> None:
         """记录 usage 数据"""
         self._usage_collected = True
 

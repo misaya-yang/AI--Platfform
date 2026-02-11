@@ -7,13 +7,13 @@
 - 适配器元数据
 """
 
+from src.adapters.base import ProtocolAdapter
 from src.adapters.registry import (
-    register_adapter_class,
     get_adapter,
     get_adapter_metadata,
     list_adapters,
+    register_adapter_class,
 )
-from src.adapters.base import ProtocolAdapter
 
 
 class TestAdapterRegistry:
@@ -24,6 +24,7 @@ class TestAdapterRegistry:
 
         class TestAdapter(ProtocolAdapter):
             """Test adapter"""
+
             pass
 
         register_adapter_class("test_adapter", TestAdapter)
@@ -36,6 +37,7 @@ class TestAdapterRegistry:
 
         class MetadataTestAdapter(ProtocolAdapter):
             """Metadata test adapter"""
+
             pass
 
         register_adapter_class("metadata_test_adapter", MetadataTestAdapter)
@@ -49,6 +51,7 @@ class TestAdapterRegistry:
 
         class ListTestAdapter(ProtocolAdapter):
             """List test adapter"""
+
             pass
 
         register_adapter_class("list_test_adapter", ListTestAdapter)

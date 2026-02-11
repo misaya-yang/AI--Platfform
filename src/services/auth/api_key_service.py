@@ -8,10 +8,10 @@ API Key 服务
 import hashlib
 import secrets
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Any
 
-from ...persistence.database import DatabaseStorage
 from ...core.observability.logging import get_logger
+from ...persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)
 
@@ -58,12 +58,12 @@ class APIKeyService:
         user_id: str,  # VARCHAR in existing schema
         tenant_id: str = "",
         description: str = "",
-        scopes: Optional[List[str]] = None,
-        roles: Optional[List[str]] = None,
+        scopes: list[str] | None = None,
+        roles: list[str] | None = None,
         tier: str = "normal",
-        rate_limit: Optional[Dict] = None,
-        expires_at: Optional[datetime] = None,
-    ) -> Dict[str, Any]:
+        rate_limit: dict | None = None,
+        expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """
         创建 API Key
 
@@ -91,8 +91,18 @@ class APIKeyService:
 
         row = await self.db.fetchrow(
             query,
-            key_id, key_hash, key_prefix, name, description,
-            str(user_id), tenant_id, scopes, roles, tier, rate_limit, expires_at,
+            key_id,
+            key_hash,
+            key_prefix,
+            name,
+            description,
+            str(user_id),
+            tenant_id,
+            scopes,
+            roles,
+            tier,
+            rate_limit,
+            expires_at,
         )
 
         result = dict(row)
@@ -104,7 +114,7 @@ class APIKeyService:
         logger.info(f"Created API key: {key_id} for user {user_id}")
         return result
 
-    async def validate_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+    async def validate_api_key(self, api_key: str) -> dict[str, Any] | None:
         """
         验证 API Key
 
@@ -167,10 +177,10 @@ class APIKeyService:
 
     async def list_api_keys(
         self,
-        user_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
         include_inactive: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 API Keys（不返回实际的 key）"""
         conditions = []
         params = []
@@ -206,7 +216,7 @@ class APIKeyService:
         rows = await self.db.fetch(query, *params)
         return [dict(row) for row in rows]
 
-    async def get_api_key(self, key_id: str) -> Optional[Dict[str, Any]]:
+    async def get_api_key(self, key_id: str) -> dict[str, Any] | None:
         """获取 API Key 详情（不返回实际的 key）"""
         query = """
             SELECT
@@ -222,7 +232,7 @@ class APIKeyService:
         row = await self.db.fetchrow(query, key_id)
         return dict(row) if row else None
 
-    async def revoke_api_key(self, key_id: str, user_id: Optional[str] = None) -> bool:
+    async def revoke_api_key(self, key_id: str, user_id: str | None = None) -> bool:
         """吊销 API Key（设置 enabled=FALSE）"""
         conditions = ["key_id = $1"]
         params = [key_id]
@@ -234,7 +244,7 @@ class APIKeyService:
         query = f"""
             UPDATE api_keys
             SET enabled = FALSE, updated_at = NOW()
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             RETURNING key_id
         """
 
@@ -244,7 +254,7 @@ class APIKeyService:
             return True
         return False
 
-    async def delete_api_key(self, key_id: str, user_id: Optional[str] = None) -> bool:
+    async def delete_api_key(self, key_id: str, user_id: str | None = None) -> bool:
         """删除 API Key"""
         conditions = ["key_id = $1"]
         params = [key_id]
@@ -255,7 +265,7 @@ class APIKeyService:
 
         query = f"""
             DELETE FROM api_keys
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             RETURNING key_id
         """
 

@@ -8,14 +8,13 @@ Tests:
 - Manual cleanup triggers
 """
 
-import asyncio
 import os
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+
 
 # We need to set environment variables before importing the module
 @pytest.fixture

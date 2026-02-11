@@ -12,18 +12,15 @@ Tests include:
 
 from __future__ import annotations
 
-import os
 import re
 import statistics
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from src.services.knowledge.chunking import (
     AutomaticChunker,
-    BaseChunker,
     Chunk,
     ChunkingConfig,
     ChunkingMode,
@@ -38,7 +35,6 @@ from src.services.knowledge.chunking import (
     process_document,
 )
 
-
 # ============ Test Data Directory ============
 
 TEST_DATA_DIR = Path(r"C:\database")
@@ -46,9 +42,11 @@ TEST_DATA_DIR = Path(r"C:\database")
 
 # ============ Quality Metrics ============
 
+
 @dataclass
 class ChunkQualityMetrics:
     """Metrics for evaluating chunk quality"""
+
     total_chunks: int
     mean_size: float
     median_size: float
@@ -56,7 +54,7 @@ class ChunkQualityMetrics:
     min_size: int
     max_size: int
     undersized_count: int  # < min_chunk_size
-    oversized_count: int   # > max_chunk_size
+    oversized_count: int  # > max_chunk_size
     total_chars: int
     coverage_ratio: float  # chars in chunks / original chars
     size_variance_coefficient: float  # std_dev / mean (lower is more uniform)
@@ -64,17 +62,25 @@ class ChunkQualityMetrics:
     @classmethod
     def compute(
         cls,
-        chunks: List[Chunk],
+        chunks: list[Chunk],
         original_text: str,
         min_size: int = 100,
         max_size: int = 1000,
-    ) -> "ChunkQualityMetrics":
+    ) -> ChunkQualityMetrics:
         """Compute quality metrics for a list of chunks"""
         if not chunks:
             return cls(
-                total_chunks=0, mean_size=0, median_size=0, std_dev=0,
-                min_size=0, max_size=0, undersized_count=0, oversized_count=0,
-                total_chars=0, coverage_ratio=0, size_variance_coefficient=0
+                total_chunks=0,
+                mean_size=0,
+                median_size=0,
+                std_dev=0,
+                min_size=0,
+                max_size=0,
+                undersized_count=0,
+                oversized_count=0,
+                total_chars=0,
+                coverage_ratio=0,
+                size_variance_coefficient=0,
             )
 
         sizes = [len(c.text) for c in chunks]
@@ -100,11 +106,11 @@ class ChunkQualityMetrics:
 def count_image_placeholders(text: str) -> int:
     """Count image placeholders in text"""
     patterns = [
-        r'\[Image\]',
-        r'\[图片\]',
-        r'!\[.*?\]\(.*?\)',
-        r'<img[^>]+>',
-        r'\[IMAGE:.*?\]',
+        r"\[Image\]",
+        r"\[图片\]",
+        r"!\[.*?\]\(.*?\)",
+        r"<img[^>]+>",
+        r"\[IMAGE:.*?\]",
     ]
     count = 0
     for pattern in patterns:
@@ -112,7 +118,7 @@ def count_image_placeholders(text: str) -> int:
     return count
 
 
-def get_pdf_text(pdf_path: Path) -> Optional[str]:
+def get_pdf_text(pdf_path: Path) -> str | None:
     """Extract text from PDF using PyMuPDF if available"""
     try:
         import fitz  # PyMuPDF
@@ -181,7 +187,8 @@ The results show significant improvements in:
 In conclusion, this document has demonstrated the effectiveness of the approach.
 """
 
-SAMPLE_PLAIN_TEXT = """
+SAMPLE_PLAIN_TEXT = (
+    """
 This is a plain text document without any headings or special formatting.
 It contains multiple paragraphs that should be chunked appropriately.
 
@@ -193,7 +200,9 @@ The regulatory framework includes multiple layers of oversight and reporting req
 
 Business operations involve complex workflows and decision-making processes.
 Effective management requires understanding of both strategic and operational aspects.
-""" * 10  # Repeat to make it longer
+"""
+    * 10
+)  # Repeat to make it longer
 
 SAMPLE_WITH_IMAGES = """
 # Product Overview
@@ -266,6 +275,7 @@ SAMPLE_CHINESE = """
 
 # ============ Unit Tests ============
 
+
 class TestChunkingConfig:
     """Test ChunkingConfig class"""
 
@@ -278,8 +288,8 @@ class TestChunkingConfig:
         assert config.chunk_size == 2000
         assert config.chunk_overlap == 300
         assert config.use_token_count is True
-        assert config.parent_chunk_size == 8000   # ~1500-2000 tokens
-        assert config.child_chunk_size == 2000    # ~400-500 tokens
+        assert config.parent_chunk_size == 8000  # ~1500-2000 tokens
+        assert config.child_chunk_size == 2000  # ~400-500 tokens
 
     def test_from_dict(self):
         """Test creating config from dictionary"""
@@ -563,7 +573,11 @@ class TestImageAwareChunking:
         )
         chunker = AutomaticChunker(config)
 
-        text = "Introduction text here. " * 5 + "[Image] Important diagram" + " Description after image. " * 5
+        text = (
+            "Introduction text here. " * 5
+            + "[Image] Important diagram"
+            + " Description after image. " * 5
+        )
         chunks = chunker.chunk(text)
 
         # Find chunk with image
@@ -588,7 +602,7 @@ class TestImageAwareChunking:
         chunks = chunker.chunk(SAMPLE_WITH_IMAGES)
 
         # Some chunks should be flagged as having images
-        image_chunks = [c for c in chunks if c.metadata.get("has_image")]
+        [c for c in chunks if c.metadata.get("has_image")]
         # Note: Only chunks created by _chunk_with_image_awareness get this flag
         # Structured documents use HeadingChunker instead
 
@@ -629,7 +643,9 @@ class TestChunkQualityMetrics:
         variable_metrics = ChunkQualityMetrics.compute(variable_chunks, "A" * 350, 50, 200)
 
         # Uniform should have lower variance coefficient
-        assert uniform_metrics.size_variance_coefficient < variable_metrics.size_variance_coefficient
+        assert (
+            uniform_metrics.size_variance_coefficient < variable_metrics.size_variance_coefficient
+        )
 
 
 class TestProcessDocument:
@@ -690,7 +706,12 @@ class TestEdgeCases:
         """Test handling of empty text"""
         config = ChunkingConfig()
 
-        for chunker_cls in [RecursiveChunker, HierarchicalChunker, HeadingChunker, AutomaticChunker]:
+        for chunker_cls in [
+            RecursiveChunker,
+            HierarchicalChunker,
+            HeadingChunker,
+            AutomaticChunker,
+        ]:
             chunker = chunker_cls(config)
             chunks = chunker.chunk("")
             assert chunks == []
@@ -743,15 +764,15 @@ class TestChunkerFactory:
 
 # ============ Integration Tests with Real PDFs ============
 
+
 @pytest.mark.skipif(
-    not TEST_DATA_DIR.exists(),
-    reason=f"Test data directory {TEST_DATA_DIR} not found"
+    not TEST_DATA_DIR.exists(), reason=f"Test data directory {TEST_DATA_DIR} not found"
 )
 class TestRealDocuments:
     """Integration tests using real PDF documents"""
 
     @pytest.fixture
-    def pdf_files(self) -> List[Path]:
+    def pdf_files(self) -> list[Path]:
         """Get list of PDF files in test directory"""
         if not TEST_DATA_DIR.exists():
             return []
@@ -761,14 +782,12 @@ class TestRealDocuments:
         """Test that PDF extraction is available"""
         try:
             import fitz
+
             assert True
         except ImportError:
             pytest.skip("PyMuPDF (fitz) not installed")
 
-    @pytest.mark.skipif(
-        not TEST_DATA_DIR.exists(),
-        reason="Test data directory not found"
-    )
+    @pytest.mark.skipif(not TEST_DATA_DIR.exists(), reason="Test data directory not found")
     def test_automatic_chunking_on_pdfs(self, pdf_files):
         """Test automatic chunking on real PDF documents"""
         try:
@@ -797,13 +816,15 @@ class TestRealDocuments:
             chunks = process_document(text, config)
             metrics = ChunkQualityMetrics.compute(chunks, text, 100, 600)
 
-            results.append({
-                "file": pdf_path.name,
-                "chunks": metrics.total_chunks,
-                "mean_size": metrics.mean_size,
-                "coverage": metrics.coverage_ratio,
-                "variance": metrics.size_variance_coefficient,
-            })
+            results.append(
+                {
+                    "file": pdf_path.name,
+                    "chunks": metrics.total_chunks,
+                    "mean_size": metrics.mean_size,
+                    "coverage": metrics.coverage_ratio,
+                    "variance": metrics.size_variance_coefficient,
+                }
+            )
 
             # Basic assertions
             assert metrics.total_chunks > 0, f"No chunks for {pdf_path.name}"
@@ -812,14 +833,13 @@ class TestRealDocuments:
         # Print summary
         print("\n=== PDF Chunking Results ===")
         for r in results:
-            print(f"{r['file']}: {r['chunks']} chunks, "
-                  f"mean={r['mean_size']:.0f}, "
-                  f"coverage={r['coverage']:.2f}")
+            print(
+                f"{r['file']}: {r['chunks']} chunks, "
+                f"mean={r['mean_size']:.0f}, "
+                f"coverage={r['coverage']:.2f}"
+            )
 
-    @pytest.mark.skipif(
-        not TEST_DATA_DIR.exists(),
-        reason="Test data directory not found"
-    )
+    @pytest.mark.skipif(not TEST_DATA_DIR.exists(), reason="Test data directory not found")
     def test_hierarchical_vs_recursive(self, pdf_files):
         """Compare hierarchical and recursive chunking on PDFs"""
         try:
@@ -866,10 +886,14 @@ class TestRealDocuments:
         r_metrics = ChunkQualityMetrics.compute(r_chunks, text, 100, 600)
 
         print(f"\n=== Comparison for {pdf_path.name} ===")
-        print(f"Hierarchical: {h_metrics.total_chunks} chunks (children), "
-              f"mean={h_metrics.mean_size:.0f}, var_coef={h_metrics.size_variance_coefficient:.2f}")
-        print(f"Recursive: {r_metrics.total_chunks} chunks, "
-              f"mean={r_metrics.mean_size:.0f}, var_coef={r_metrics.size_variance_coefficient:.2f}")
+        print(
+            f"Hierarchical: {h_metrics.total_chunks} chunks (children), "
+            f"mean={h_metrics.mean_size:.0f}, var_coef={h_metrics.size_variance_coefficient:.2f}"
+        )
+        print(
+            f"Recursive: {r_metrics.total_chunks} chunks, "
+            f"mean={r_metrics.mean_size:.0f}, var_coef={r_metrics.size_variance_coefficient:.2f}"
+        )
 
         # Both should have reasonable coverage
         assert h_metrics.coverage_ratio >= 0.5
@@ -877,6 +901,7 @@ class TestRealDocuments:
 
 
 # ============ Performance Benchmarks ============
+
 
 class TestPerformance:
     """Performance benchmarks for chunking"""

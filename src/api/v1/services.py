@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
+from collections.abc import Sequence
 from dataclasses import asdict
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
-from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 from ...core.auth.permissions import (
     Capability,
     build_permission_denied_detail,
@@ -21,7 +20,7 @@ from ...core.auth.service_access import (
 from ...core.auth.user_resolver import UserContext
 from ...models.enums import ServiceType
 from ...services.registry.service_registry import ServiceRegistry
-
+from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 
 router = APIRouter()
 
@@ -57,9 +56,17 @@ _SERVICE_MUTABLE_FIELDS = {
 
 # 敏感配置字段（需要脱敏）
 _SENSITIVE_CONNECTOR_FIELDS = {
-    "auth_token", "api_key", "api_secret", "password", "secret",
-    "access_token", "refresh_token", "private_key", "credentials",
-    "langsmith_api_key", "headers",
+    "auth_token",
+    "api_key",
+    "api_secret",
+    "password",
+    "secret",
+    "access_token",
+    "refresh_token",
+    "private_key",
+    "credentials",
+    "langsmith_api_key",
+    "headers",
 }
 
 
@@ -92,7 +99,7 @@ def _require_capability(request: Request, auth: AuthContext, capability: Capabil
     )
 
 
-def _normalize_url(url: object) -> Optional[str]:
+def _normalize_url(url: object) -> str | None:
     """Normalize connector URL values for stable comparisons and persistence."""
     if url is None:
         return None
@@ -102,8 +109,8 @@ def _normalize_url(url: object) -> Optional[str]:
     return value.rstrip("/")
 
 
-def _normalize_candidates(values: Sequence[str]) -> List[str]:
-    normalized: List[str] = []
+def _normalize_candidates(values: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
     for value in values:
         token = str(value or "").strip().lower()
         if token and token not in normalized:
@@ -114,7 +121,7 @@ def _normalize_candidates(values: Sequence[str]) -> List[str]:
 def _service_visible_with_scopes(
     *,
     aliases: Sequence[str],
-    allowed_sources: Sequence[Tuple[str, List[str]]],
+    allowed_sources: Sequence[tuple[str, list[str]]],
     user_policy: ServiceAccessPolicy,
     is_admin: bool,
 ) -> bool:
@@ -137,8 +144,8 @@ def _service_visible_with_scopes(
 async def _load_access_constraints(
     request: Request,
     user: UserContext,
-) -> Tuple[List[Tuple[str, List[str]]], ServiceAccessPolicy]:
-    allowed_sources: List[Tuple[str, List[str]]] = []
+) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy]:
+    allowed_sources: list[tuple[str, list[str]]] = []
     user_policy = ServiceAccessPolicy()
 
     db = getattr(request.app.state, "database", None)
@@ -183,13 +190,12 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
         return
 
     metadata = definition.get("metadata")
-    if isinstance(metadata, dict):
-        metadata = dict(metadata)
-    else:
-        metadata = {}
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
     definition["metadata"] = metadata
     service_type = definition.get("service_type")
-    service_type_value = service_type.value if hasattr(service_type, "value") else str(service_type or "")
+    service_type_value = (
+        service_type.value if hasattr(service_type, "value") else str(service_type or "")
+    )
     adapter_type = str(metadata.get("adapter_type") or connector_config.get("adapter_type") or "")
     proxy_mode = str(connector_config.get("proxy_mode") or metadata.get("proxy_mode") or "")
     graph_id = connector_config.get("graph_id")
@@ -291,12 +297,10 @@ def _service_to_dict(service, mask_secrets: bool = False) -> dict:
         "input_schema": service.input_schema or {},
         "output_schema": service.output_schema or {},
         "accepted_content_types": [
-            t.value if hasattr(t, "value") else t
-            for t in (service.accepted_content_types or [])
+            t.value if hasattr(t, "value") else t for t in (service.accepted_content_types or [])
         ],
         "output_content_types": [
-            t.value if hasattr(t, "value") else t
-            for t in (service.output_content_types or [])
+            t.value if hasattr(t, "value") else t for t in (service.output_content_types or [])
         ],
         "session_enabled": bool(service.session_enabled),
         "session_adapter": service.session_adapter,
@@ -344,8 +348,8 @@ async def register_service(
 @router.get("/services")
 async def list_services(
     request: Request,
-    service_type: Optional[str] = Query(default=None),
-    tags: Optional[List[str]] = Query(default=None),
+    service_type: str | None = Query(default=None),
+    tags: list[str] | None = Query(default=None),
     registry: ServiceRegistry = Depends(get_registry),
     auth: AuthContext = Depends(get_auth_context),
     user: UserContext = Depends(get_user_context),
@@ -376,23 +380,32 @@ async def list_services(
             is_admin=is_admin,
         ):
             assistant_service = getattr(request.app.state, "assistant_service", None)
-            virtual_services.append({
-                "service_id": "assistant",
-                "name": "AI 助手",
-                "description": "内置多功能 AI 助手，支持知识库检索、网页搜索、工具调用、图像生成",
-                "version": "2.0.0",
-                "service_type": "assistant",
-                "supported_modes": ["chat", "stream"],
-                "accepted_content_types": ["application/json"],
-                "output_content_types": ["application/json", "text/event-stream"],
-                "status": "active" if assistant_service else "unavailable",
-                "tags": ["builtin", "assistant", "rag", "tools"],
-                "metadata": {
-                    "is_virtual": True,
-                    "endpoint": "/api/v1/assistant",
-                    "features": ["chat", "stream", "rag", "web_search", "tools", "image_generation"],
-                },
-            })
+            virtual_services.append(
+                {
+                    "service_id": "assistant",
+                    "name": "AI 助手",
+                    "description": "内置多功能 AI 助手，支持知识库检索、网页搜索、工具调用、图像生成",
+                    "version": "2.0.0",
+                    "service_type": "assistant",
+                    "supported_modes": ["chat", "stream"],
+                    "accepted_content_types": ["application/json"],
+                    "output_content_types": ["application/json", "text/event-stream"],
+                    "status": "active" if assistant_service else "unavailable",
+                    "tags": ["builtin", "assistant", "rag", "tools"],
+                    "metadata": {
+                        "is_virtual": True,
+                        "endpoint": "/api/v1/assistant",
+                        "features": [
+                            "chat",
+                            "stream",
+                            "rag",
+                            "web_search",
+                            "tools",
+                            "image_generation",
+                        ],
+                    },
+                }
+            )
 
     # 从数据库获取注册的服务
     st = ServiceType(service_type) if service_type and service_type not in ["assistant"] else None
@@ -458,6 +471,7 @@ async def get_service(
 
     # 非管理员需要脱敏敏感配置
     return _service_to_dict(service, mask_secrets=not is_admin)
+
 
 @router.put("/services/{service_id}")
 async def update_service(

@@ -12,24 +12,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import httpx
+import pytest
 
-from src.proxy.transparent_proxy import (
-    TransparentProxy,
-    ProxyRequest,
-    ProxyResponse,
-    LANGGRAPH_ASSISTANT_PATHS,
-    LANGGRAPH_OPERATION_TYPES,
-)
 from src.proxy.config_loader import ProxyServiceConfig
 from src.proxy.context_injector import ContextInjector, RequestContext
-
+from src.proxy.transparent_proxy import (
+    LANGGRAPH_ASSISTANT_PATHS,
+    LANGGRAPH_OPERATION_TYPES,
+    ProxyRequest,
+    ProxyResponse,
+    TransparentProxy,
+)
 
 # ============ Proxy Request/Response Tests ============
 
@@ -173,7 +170,7 @@ class TestTransparentProxy:
     @pytest.mark.asyncio
     async def test_proxy_normal_request(self, transparent_proxy, mock_httpx_response):
         """测试普通 GET 请求代理"""
-        mock_response = mock_httpx_response(
+        mock_httpx_response(
             status_code=200,
             headers={"content-type": "application/json"},
             content=b'{"status": "ok"}',

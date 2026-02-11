@@ -22,11 +22,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Optional, NamedTuple
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import NamedTuple
 
 from ..core.observability.logging import get_logger
 
@@ -35,11 +36,15 @@ logger = get_logger(__name__)
 
 # ============ Configuration ============
 
+
 @dataclass
 class CleanupConfig:
     """File cleanup configuration."""
+
     # Storage path (from environment)
-    storage_path: Path = field(default_factory=lambda: Path(os.getenv("FILE_STORAGE_PATH", "./uploads")).expanduser())
+    storage_path: Path = field(
+        default_factory=lambda: Path(os.getenv("FILE_STORAGE_PATH", "./uploads")).expanduser()
+    )
 
     # TTL settings
     file_ttl_days: int = int(os.getenv("FILE_TTL_DAYS", "7"))  # Delete files older than X days
@@ -48,7 +53,9 @@ class CleanupConfig:
     user_quota_mb: int = int(os.getenv("FILE_USER_QUOTA_MB", "500"))  # 500 MB per user
 
     # Cleanup schedule
-    cleanup_interval_hours: int = int(os.getenv("FILE_CLEANUP_INTERVAL_HOURS", "6"))  # Run every 6 hours
+    cleanup_interval_hours: int = int(
+        os.getenv("FILE_CLEANUP_INTERVAL_HOURS", "6")
+    )  # Run every 6 hours
 
     # Enable/disable cleanup
     cleanup_enabled: bool = os.getenv("FILE_CLEANUP_ENABLED", "true").lower() == "true"
@@ -60,6 +67,7 @@ class CleanupConfig:
 
 class CleanupStats(NamedTuple):
     """Statistics from a cleanup run."""
+
     files_deleted: int
     bytes_freed: int
     users_cleaned: int
@@ -68,6 +76,7 @@ class CleanupStats(NamedTuple):
 
 
 # ============ Cleanup Service ============
+
 
 class FileCleanupService:
     """
@@ -80,9 +89,9 @@ class FileCleanupService:
     - Manual triggers: API endpoints for on-demand cleanup
     """
 
-    def __init__(self, config: Optional[CleanupConfig] = None):
+    def __init__(self, config: CleanupConfig | None = None):
         self.config = config or CleanupConfig()
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._running = False
 
     async def start(self) -> None:
@@ -108,10 +117,8 @@ class FileCleanupService:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
         logger.info("[FileCleanup] Stopped")
 
@@ -206,11 +213,13 @@ class FileCleanupService:
             if file_path.is_file():
                 stat = file_path.stat()
                 mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                files_with_stats.append({
-                    "path": file_path,
-                    "size": stat.st_size,
-                    "mtime": mtime,
-                })
+                files_with_stats.append(
+                    {
+                        "path": file_path,
+                        "size": stat.st_size,
+                        "mtime": mtime,
+                    }
+                )
                 total_size += stat.st_size
 
         # Sort by modification time (oldest first)
@@ -298,15 +307,19 @@ class FileCleanupService:
                         newest_file = mtime
 
             if user_files > 0:
-                users.append({
-                    "user_id": user_dir.name,
-                    "files": user_files,
-                    "size": user_size,
-                    "size_formatted": self._format_size(user_size),
-                    "quota_used_percent": round(user_size / (self.config.user_quota_mb * 1024 * 1024) * 100, 1),
-                    "oldest_file": oldest_file.isoformat() if oldest_file else None,
-                    "newest_file": newest_file.isoformat() if newest_file else None,
-                })
+                users.append(
+                    {
+                        "user_id": user_dir.name,
+                        "files": user_files,
+                        "size": user_size,
+                        "size_formatted": self._format_size(user_size),
+                        "quota_used_percent": round(
+                            user_size / (self.config.user_quota_mb * 1024 * 1024) * 100, 1
+                        ),
+                        "oldest_file": oldest_file.isoformat() if oldest_file else None,
+                        "newest_file": newest_file.isoformat() if newest_file else None,
+                    }
+                )
                 total_files += user_files
                 total_size += user_size
 
@@ -334,7 +347,7 @@ class FileCleanupService:
 
 # ============ Singleton Instance ============
 
-_cleanup_service: Optional[FileCleanupService] = None
+_cleanup_service: FileCleanupService | None = None
 
 
 def get_cleanup_service() -> FileCleanupService:

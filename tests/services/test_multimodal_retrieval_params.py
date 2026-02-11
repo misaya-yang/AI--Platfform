@@ -7,23 +7,22 @@ Ensures that:
 3. multimodal_rerank parameter is recognized (even if not fully implemented)
 """
 
-import pytest
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
 
 
 @dataclass
 class MockRetrieveResult:
     """Mock retrieve result for testing."""
+
     segment_id: str
     document_id: str
     score: float
     text: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     content_type: str = "text"
-    image_url: Optional[str] = None
-    vlm_description: Optional[str] = None
+    image_url: str | None = None
+    vlm_description: str | None = None
     associated_images: tuple = ()
 
 
@@ -77,8 +76,10 @@ class TestContentTypeFilter:
         """content_type_filter='text' should return only text segments."""
         content_type_filter = "text"
         filtered = [
-            r for r in self.all_results
-            if r.metadata.get("content_type", getattr(r, "content_type", "text")) == content_type_filter
+            r
+            for r in self.all_results
+            if r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            == content_type_filter
         ]
 
         assert len(filtered) == 2
@@ -90,8 +91,10 @@ class TestContentTypeFilter:
         """content_type_filter='image' should return only image segments."""
         content_type_filter = "image"
         filtered = [
-            r for r in self.all_results
-            if r.metadata.get("content_type", getattr(r, "content_type", "text")) == content_type_filter
+            r
+            for r in self.all_results
+            if r.metadata.get("content_type", getattr(r, "content_type", "text"))
+            == content_type_filter
         ]
 
         assert len(filtered) == 2
@@ -103,10 +106,7 @@ class TestContentTypeFilter:
         """No content_type_filter should return all results."""
         content_type_filter = None
         if content_type_filter and content_type_filter in ("text", "image"):
-            filtered = [
-                r for r in self.all_results
-                if r.content_type == content_type_filter
-            ]
+            filtered = [r for r in self.all_results if r.content_type == content_type_filter]
         else:
             filtered = self.all_results
 
@@ -116,10 +116,7 @@ class TestContentTypeFilter:
         """Invalid content_type_filter value should return all results."""
         content_type_filter = "invalid"
         if content_type_filter and content_type_filter in ("text", "image"):
-            filtered = [
-                r for r in self.all_results
-                if r.content_type == content_type_filter
-            ]
+            filtered = [r for r in self.all_results if r.content_type == content_type_filter]
         else:
             filtered = self.all_results
 
@@ -182,7 +179,7 @@ class TestMultimodalRerank:
     def test_multimodal_rerank_flag_recognized(self):
         """multimodal_rerank parameter should be recognized in metadata."""
         multimodal_rerank = True
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
 
         # Simulate the current implementation behavior
         if multimodal_rerank:
@@ -196,7 +193,7 @@ class TestMultimodalRerank:
     def test_multimodal_rerank_false_no_metadata(self):
         """multimodal_rerank=False should not add rerank metadata."""
         multimodal_rerank = False
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
 
         if multimodal_rerank:
             meta["multimodal_rerank"] = False
@@ -211,7 +208,7 @@ class TestRetrievalMetadata:
 
     def test_metadata_includes_filter_info(self):
         """Metadata should include content_type_filter when applied."""
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         content_type_filter = "text"
         filtered_count = 5
 
@@ -224,7 +221,7 @@ class TestRetrievalMetadata:
 
     def test_metadata_includes_multimodal_flag(self):
         """Metadata should indicate multimodal retrieval mode."""
-        meta: Dict[str, Any] = {}
+        meta: dict[str, Any] = {}
         include_images = True
 
         meta["multimodal"] = True

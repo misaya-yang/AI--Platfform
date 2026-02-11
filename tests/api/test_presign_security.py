@@ -8,21 +8,18 @@ Tests cover:
 4. Cross-tenant/cross-document attack prevention
 """
 
-import pytest
 import uuid
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 
 from src.api.v1.presign import (
-    _get_effective_tenant_id,
-    _validate_document_access,
-    _upload_sessions,
     _cleanup_expired_sessions,
-    get_presigned_upload_url,
-    confirm_upload,
+    _get_effective_tenant_id,
+    _upload_sessions,
+    _validate_document_access,
 )
 from src.core.auth.user_resolver import UserContext
 
@@ -167,7 +164,11 @@ class TestValidateDocumentAccess:
             return_value={"document_id": "doc123", "dataset_id": "ds123"}
         )
         mock_request.app.state.database.get_dataset = AsyncMock(
-            return_value={"dataset_id": "ds123", "tenant_id": "other_tenant", "visibility": "public"}
+            return_value={
+                "dataset_id": "ds123",
+                "tenant_id": "other_tenant",
+                "visibility": "public",
+            }
         )
 
         result = await _validate_document_access(mock_request, "doc123", authenticated_user)
@@ -180,7 +181,11 @@ class TestValidateDocumentAccess:
             return_value={"document_id": "doc123", "dataset_id": "ds123"}
         )
         mock_request.app.state.database.get_dataset = AsyncMock(
-            return_value={"dataset_id": "ds123", "tenant_id": "other_tenant", "visibility": "private"}
+            return_value={
+                "dataset_id": "ds123",
+                "tenant_id": "other_tenant",
+                "visibility": "private",
+            }
         )
 
         result = await _validate_document_access(mock_request, "doc123", admin_user)
@@ -206,7 +211,11 @@ class TestValidateDocumentAccess:
             return_value={"document_id": "doc123", "dataset_id": "ds123"}
         )
         mock_request.app.state.database.get_dataset = AsyncMock(
-            return_value={"dataset_id": "ds123", "tenant_id": "other_tenant", "visibility": "private"}
+            return_value={
+                "dataset_id": "ds123",
+                "tenant_id": "other_tenant",
+                "visibility": "private",
+            }
         )
         mock_request.app.state.database.get_dataset_permissions = AsyncMock(return_value=[])
 
@@ -223,7 +232,11 @@ class TestValidateDocumentAccess:
             return_value={"document_id": "doc123", "dataset_id": "ds123"}
         )
         mock_request.app.state.database.get_dataset = AsyncMock(
-            return_value={"dataset_id": "ds123", "tenant_id": "other_tenant", "visibility": "private"}
+            return_value={
+                "dataset_id": "ds123",
+                "tenant_id": "other_tenant",
+                "visibility": "private",
+            }
         )
         mock_request.app.state.database.get_dataset_permissions = AsyncMock(
             return_value=[{"subject_type": "user", "subject_id": "user123", "permission": "viewer"}]

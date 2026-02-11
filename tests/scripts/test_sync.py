@@ -1,12 +1,14 @@
-# -*- coding: utf-8 -*-
 """Test Confluence sync with image processing"""
+
 import asyncio
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 import httpx
 
 BASE_URL = "http://localhost:8080"
+
 
 async def main():
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -33,6 +35,7 @@ async def main():
                 resp = await client.post(f"{BASE_URL}/api/v1/confluence/bindings/{binding_id}/sync")
                 print(f"Sync response: {resp.status_code}")
                 print(f"Sync result: {resp.text[:500] if resp.text else 'empty'}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,21 +1,26 @@
-# -*- coding: utf-8 -*-
 """Test sync service with image processing"""
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
     from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
-    from src.services.knowledge.confluence.image_processor import ConfluenceImageProcessor
-    from src.services.knowledge.vector_store import VectorStore
     from src.services.knowledge.embedding import DashScopeEmbedding
+    from src.services.knowledge.vector_store import VectorStore
     from src.services.knowledge.vlm_service import DashScopeVLMService
-    from src.services.storage.image_storage import ImageStorageService, StorageConfig, StorageBackend
+    from src.services.storage.image_storage import (
+        ImageStorageService,
+        StorageBackend,
+        StorageConfig,
+    )
 
     settings = Settings()
 
@@ -34,8 +39,7 @@ async def main():
 
     # Initialize VLM service
     vlm_service = DashScopeVLMService(
-        api_key=settings.knowledge.dashscope.api_key,
-        model="qwen-vl-max"
+        api_key=settings.knowledge.dashscope.api_key, model="qwen-vl-max"
     )
 
     # Initialize storage service (S3)
@@ -81,10 +85,8 @@ async def main():
 
     # Get connection
     connections = await db.list_confluence_connections()
-    conn = None
     for c in connections:
         if c["connection_id"] == binding["connection_id"]:
-            conn = c
             break
 
     # Sync a specific page (Auto Finance FAQs)
@@ -100,7 +102,7 @@ async def main():
             tenant_id=binding.get("tenant_id"),
         )
 
-        print(f"\n=== Sync Result ===")
+        print("\n=== Sync Result ===")
         print(f"Status: {result.get('status')}")
         print(f"Document ID: {result.get('document_id')}")
         print(f"Segment count: {result.get('segment_count')}")
@@ -112,6 +114,7 @@ async def main():
     except Exception as e:
         print(f"Sync failed: {e}")
         import traceback
+
         traceback.print_exc()
 
     # Check image segments in database
@@ -133,6 +136,7 @@ async def main():
     await vector_store.close()
     await db.close()
     print("\n=== Test Complete ===")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

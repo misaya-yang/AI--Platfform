@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -27,13 +27,14 @@ logger = get_logger(__name__)
 @dataclass
 class TavilySearchResult:
     """Single search result from Tavily."""
+
     title: str
     url: str
     content: str
     score: float = 0.0
-    published_date: Optional[str] = None
+    published_date: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "url": self.url,
@@ -46,12 +47,13 @@ class TavilySearchResult:
 @dataclass
 class TavilySearchResponse:
     """Response from Tavily search API."""
+
     query: str
-    results: List[TavilySearchResult] = field(default_factory=list)
-    answer: Optional[str] = None
+    results: list[TavilySearchResult] = field(default_factory=list)
+    answer: str | None = None
     response_time: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query,
             "results": [r.to_dict() for r in self.results],
@@ -81,12 +83,12 @@ class TavilySearchTool:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         max_results: int = DEFAULT_MAX_RESULTS,
         search_depth: str = DEFAULT_SEARCH_DEPTH,
         include_answer: bool = True,
-        include_domains: Optional[List[str]] = None,
-        exclude_domains: Optional[List[str]] = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
     ):
         """
         Initialize TavilySearchTool.
@@ -117,9 +119,9 @@ class TavilySearchTool:
     async def search(
         self,
         query: str,
-        max_results: Optional[int] = None,
-        search_depth: Optional[str] = None,
-        include_answer: Optional[bool] = None,
+        max_results: int | None = None,
+        search_depth: str | None = None,
+        include_answer: bool | None = None,
         topic: str = "general",
     ) -> TavilySearchResponse:
         """
@@ -180,13 +182,15 @@ class TavilySearchTool:
         # Parse results
         results = []
         for item in data.get("results", []):
-            results.append(TavilySearchResult(
-                title=item.get("title", ""),
-                url=item.get("url", ""),
-                content=item.get("content", ""),
-                score=item.get("score", 0.0),
-                published_date=item.get("published_date"),
-            ))
+            results.append(
+                TavilySearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    content=item.get("content", ""),
+                    score=item.get("score", 0.0),
+                    published_date=item.get("published_date"),
+                )
+            )
 
         return TavilySearchResponse(
             query=query,
@@ -198,7 +202,7 @@ class TavilySearchTool:
     def format_for_context(
         self,
         response: TavilySearchResponse,
-        max_results: Optional[int] = None,
+        max_results: int | None = None,
         include_urls: bool = True,
     ) -> str:
         """
@@ -230,7 +234,7 @@ class TavilySearchTool:
 
         return "\n".join(parts)
 
-    def format_for_display(self, response: TavilySearchResponse) -> Dict[str, Any]:
+    def format_for_display(self, response: TavilySearchResponse) -> dict[str, Any]:
         """
         Format search results for frontend display.
 

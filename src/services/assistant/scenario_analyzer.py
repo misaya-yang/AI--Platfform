@@ -12,30 +12,32 @@ Designed to make the assistant "Manus-like" - an all-knowing problem solver.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 from .prompts.scenario_analysis_prompts import (
     SCENARIO_TYPES,
-    build_scenario_detection_prompt,
     build_analysis_prompt,
     build_document_analysis_prompt,
     build_document_qa_prompt,
     build_kb_enhanced_prompt,
+    build_scenario_detection_prompt,
 )
 
 if TYPE_CHECKING:
-    from ..knowledge.knowledge_service import KnowledgeService
+    pass
 
 logger = get_logger(__name__)
 
 
 class ScenarioType(str, Enum):
     """Scenario type enumeration."""
+
     CUSTOMER_SERVICE = "customer_service"
     SALES_CONSULTATION = "sales_consultation"
     TECHNICAL_SUPPORT = "technical_support"
@@ -47,6 +49,7 @@ class ScenarioType(str, Enum):
 
 class Urgency(str, Enum):
     """Urgency level enumeration."""
+
     URGENT = "urgent"
     NORMAL = "normal"
     LOW = "low"
@@ -55,16 +58,17 @@ class Urgency(str, Enum):
 @dataclass
 class ScenarioDetectionResult:
     """Result of scenario detection."""
+
     primary_scenario: ScenarioType
-    secondary_scenarios: List[ScenarioType] = field(default_factory=list)
-    entities: Dict[str, str] = field(default_factory=dict)
+    secondary_scenarios: list[ScenarioType] = field(default_factory=list)
+    entities: dict[str, str] = field(default_factory=dict)
     urgency: Urgency = Urgency.NORMAL
     requires_kb_search: bool = True
-    suggested_kb_queries: List[str] = field(default_factory=list)
+    suggested_kb_queries: list[str] = field(default_factory=list)
     confidence: float = 0.0
-    raw_response: Optional[str] = None
+    raw_response: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "primary_scenario": self.primary_scenario.value,
@@ -80,11 +84,12 @@ class ScenarioDetectionResult:
 @dataclass
 class AnalysisContext:
     """Context for analysis generation."""
+
     user_query: str
     scenario: ScenarioDetectionResult
     kb_context: str = ""
     document_content: str = ""
-    additional_context: Dict[str, Any] = field(default_factory=dict)
+    additional_context: dict[str, Any] = field(default_factory=dict)
 
 
 class ScenarioAnalyzer:
@@ -142,7 +147,7 @@ class ScenarioAnalyzer:
             ScenarioDetectionResult with detected scenario
         """
         query_lower = query.lower()
-        scores: Dict[str, float] = {}
+        scores: dict[str, float] = {}
 
         # Score each scenario based on keyword matches
         for scenario_code, scenario_info in SCENARIO_TYPES.items():
@@ -169,7 +174,9 @@ class ScenarioAnalyzer:
                 secondary_scenarios=secondary,
                 urgency=self._detect_urgency(query),
                 requires_kb_search=requires_kb,
-                suggested_kb_queries=self._generate_kb_queries(query, primary[0]) if requires_kb else [],
+                suggested_kb_queries=self._generate_kb_queries(query, primary[0])
+                if requires_kb
+                else [],
                 confidence=min(primary[1] * 2, 1.0),  # Scale confidence
             )
 
@@ -218,7 +225,7 @@ class ScenarioAnalyzer:
             logger.error(f"LLM scenario detection failed: {e}, falling back to fast detection")
             return self.detect_scenario_fast(query)
 
-    def _should_require_kb_search(self, query: str, scenario_type: Optional[str]) -> bool:
+    def _should_require_kb_search(self, query: str, scenario_type: str | None) -> bool:
         """
         Determine if knowledge base search is needed.
 
@@ -277,14 +284,11 @@ class ScenarioAnalyzer:
             r"(什么是|解释一下|介绍一下|讲解一下).*(embedding|向量|词向量|word2vec|sentence)",
             r"(什么是|解释一下|介绍一下|讲解一下).*(rag|检索增强|retrieval|向量数据库)",
             r"(什么是|解释一下|介绍一下|讲解一下).*(agent|智能体|multi-agent|多智能体)",
-
             # How it works questions
             r"(如何理解|原理是什么|怎么工作|怎么运作|工作原理).*(算法|模型|网络|架构)",
             r"(原理|机制|过程|步骤).*(训练|推理|生成|预测)",
-
             # Comparison questions about AI concepts
             r"(区别|不同|差异|比较).*(模型|算法|方法|架构)",
-
             # Programming/coding general knowledge
             r"(什么是|解释一下).*(python|javascript|typescript|java|c\+\+|rust|go语言)",
             r"(什么是|解释一下).*(api|rest|graphql|微服务|容器|docker|kubernetes)",
@@ -304,23 +308,18 @@ class ScenarioAnalyzer:
             # Company/organization references
             r"(我们公司|公司的|本公司|贵公司|集团|总部)",
             r"(内部|内网|私有|专有)",
-
             # Business processes and policies
             r"(流程|政策|制度|规范|标准|规定)",
             r"(审批|报销|请假|考勤|绩效)",
-
             # Products and services
             r"(产品|服务|套餐|方案|报价|定价)",
             r"(功能|特性|版本|更新|升级)",
-
             # Customer/order related
             r"(客户|订单|合同|账户|账号)",
             r"(购买|下单|付款|退款|售后)",
-
             # Documentation references
             r"(文档|手册|指南|教程|说明书)",
             r"(操作指南|使用说明|配置说明)",
-
             # Historical/contextual queries
             r"(之前|上次|历史|记录)",
         ]
@@ -335,22 +334,24 @@ class ScenarioAnalyzer:
 
         # Scenarios that typically need KB
         kb_required_scenarios = {
-            "customer_service",      # Customer issues need company policies
-            "sales_consultation",    # Sales needs product info
-            "technical_support",     # Support needs documentation
-            "product_inquiry",       # Product info from KB
-            "policy_inquiry",        # Policy definitely needs KB
+            "customer_service",  # Customer issues need company policies
+            "sales_consultation",  # Sales needs product info
+            "technical_support",  # Support needs documentation
+            "product_inquiry",  # Product info from KB
+            "policy_inquiry",  # Policy definitely needs KB
         }
 
         # Scenarios that might not need KB
         kb_optional_scenarios = {
-            "general_inquiry",       # General questions may use model knowledge
-            "data_analysis",         # Depends on whether it's about internal data
+            "general_inquiry",  # General questions may use model knowledge
+            "data_analysis",  # Depends on whether it's about internal data
         }
 
         if scenario_type in kb_required_scenarios:
             # But if it's a very short, simple query, might still skip
-            if len(query) < 30 and not any(kw in query_lower for kw in ["文档", "产品", "公司", "我们", "政策"]):
+            if len(query) < 30 and not any(
+                kw in query_lower for kw in ["文档", "产品", "公司", "我们", "政策"]
+            ):
                 # Short query without enterprise keywords - might be general
                 logger.debug(f"[KB SKIP] Short query in KB scenario: '{query}'")
                 return False
@@ -382,7 +383,7 @@ class ScenarioAnalyzer:
             return Urgency.LOW
         return Urgency.NORMAL
 
-    def _generate_kb_queries(self, query: str, scenario_type: str) -> List[str]:
+    def _generate_kb_queries(self, query: str, scenario_type: str) -> list[str]:
         """Generate suggested KB search queries based on scenario."""
         queries = [query]  # Original query is always included
 
@@ -411,12 +412,12 @@ class ScenarioAnalyzer:
     def _parse_detection_response(self, response: str) -> ScenarioDetectionResult:
         """Parse LLM detection response."""
         # Try to extract JSON from response
-        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        json_match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
             # Try to find JSON object directly
-            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+            json_match = re.search(r"\{[^{}]*\}", response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
             else:
@@ -439,10 +440,8 @@ class ScenarioAnalyzer:
             secondary = data.get("secondary_scenarios", [])
             secondary_scenarios = []
             for s in secondary:
-                try:
+                with contextlib.suppress(ValueError):
                     secondary_scenarios.append(ScenarioType(s))
-                except ValueError:
-                    pass
 
             urgency_str = data.get("urgency", "normal")
             try:
@@ -507,11 +506,11 @@ class ScenarioAnalyzer:
             kb_context=kb_context,
         )
 
-    def get_scenario_info(self, scenario_type: ScenarioType) -> Dict[str, Any]:
+    def get_scenario_info(self, scenario_type: ScenarioType) -> dict[str, Any]:
         """Get information about a scenario type."""
         return SCENARIO_TYPES.get(scenario_type.value, SCENARIO_TYPES["general_inquiry"])
 
-    def get_analysis_dimensions(self, scenario_type: ScenarioType) -> List[str]:
+    def get_analysis_dimensions(self, scenario_type: ScenarioType) -> list[str]:
         """Get analysis dimensions for a scenario type."""
         info = self.get_scenario_info(scenario_type)
         return info.get("analysis_dimensions", [])
@@ -520,6 +519,7 @@ class ScenarioAnalyzer:
 # =============================================================================
 # Document Analyzer
 # =============================================================================
+
 
 class DocumentAnalyzer:
     """
@@ -620,7 +620,7 @@ class DocumentAnalyzer:
 
         return response
 
-    def extract_structure(self, content: str) -> Dict[str, Any]:
+    def extract_structure(self, content: str) -> dict[str, Any]:
         """
         Extract document structure (lightweight, no LLM).
 
@@ -630,7 +630,7 @@ class DocumentAnalyzer:
         Returns:
             Structure information
         """
-        lines = content.split('\n')
+        lines = content.split("\n")
         structure = {
             "total_lines": len(lines),
             "total_chars": len(content),
@@ -642,22 +642,24 @@ class DocumentAnalyzer:
 
         # Detect headers (Markdown style)
         for i, line in enumerate(lines):
-            if line.startswith('#'):
+            if line.startswith("#"):
                 structure["has_headers"] = True
-                level = len(line) - len(line.lstrip('#'))
-                title = line.lstrip('#').strip()
-                structure["sections"].append({
-                    "level": level,
-                    "title": title,
-                    "line": i + 1,
-                })
+                level = len(line) - len(line.lstrip("#"))
+                title = line.lstrip("#").strip()
+                structure["sections"].append(
+                    {
+                        "level": level,
+                        "title": title,
+                        "line": i + 1,
+                    }
+                )
 
         # Detect lists
-        if any(line.strip().startswith(('-', '*', '1.', '2.')) for line in lines):
+        if any(line.strip().startswith(("-", "*", "1.", "2.")) for line in lines):
             structure["has_lists"] = True
 
         # Detect tables
-        if any('|' in line for line in lines):
+        if any("|" in line for line in lines):
             structure["has_tables"] = True
 
         return structure
@@ -666,6 +668,7 @@ class DocumentAnalyzer:
 # =============================================================================
 # Factory Functions
 # =============================================================================
+
 
 def create_scenario_analyzer(
     llm_client: Any = None,

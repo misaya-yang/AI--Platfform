@@ -8,13 +8,12 @@ Provides dashboard metrics including:
 - Time-series data with custom date range support
 """
 
-from datetime import datetime, date, timedelta
-from typing import List, Optional
+from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Request, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ...api.deps import get_auth_context, AuthContext
+from ...api.deps import AuthContext, get_auth_context
 from ...services.metrics import compute_data_status, get_metrics_recorder
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -38,7 +37,7 @@ class MetricsSummary(BaseModel):
     success_rate: float
     avg_latency_ms: int
     active_services: int
-    requests_by_hour: List[HourlyMetric]
+    requests_by_hour: list[HourlyMetric]
 
     # 延迟百分位数
     latency_p50: int = 0
@@ -75,7 +74,7 @@ class TimeSeriesResponse(BaseModel):
     granularity: str
     start: str
     end: str
-    data: List[TimeSeriesPoint]
+    data: list[TimeSeriesPoint]
 
 
 class TokenUsagePeriod(BaseModel):
@@ -94,7 +93,7 @@ class TokenUsageResponse(BaseModel):
     total_output_tokens: int
     total_tokens: int
     estimated_cost_usd: float
-    by_period: List[TokenUsagePeriod]
+    by_period: list[TokenUsagePeriod]
 
 
 class BreakdownItem(BaseModel):
@@ -109,7 +108,7 @@ class BreakdownResponse(BaseModel):
     """指标分解响应"""
 
     dimension: str
-    items: List[BreakdownItem]
+    items: list[BreakdownItem]
 
 
 class SecurityEventBreakdownItem(BaseModel):
@@ -125,12 +124,12 @@ class SecurityEventBreakdownResponse(BaseModel):
 
     dimension: str
     event_type: str
-    items: List[SecurityEventBreakdownItem]
+    items: list[SecurityEventBreakdownItem]
     start_date: str
     end_date: str
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 class SecurityEventTimeSeriesPoint(BaseModel):
@@ -145,12 +144,12 @@ class SecurityEventTimeSeriesResponse(BaseModel):
 
     dimension: str
     event_type: str
-    data: List[SecurityEventTimeSeriesPoint]
+    data: list[SecurityEventTimeSeriesPoint]
     start_date: str
     end_date: str
     data_status: str
     data_freshness_minutes: int
-    last_ingested_at: Optional[str] = None
+    last_ingested_at: str | None = None
 
 
 # ============ API Endpoints ============
@@ -192,9 +191,7 @@ async def get_metrics_summary(
     if database:
         try:
             services = await database.get_all_services()
-            active_services = len(
-                [s for s in services if s.get("status") == "healthy"]
-            )
+            active_services = len([s for s in services if s.get("status") == "healthy"])
         except Exception:
             active_services = 0
 
@@ -208,8 +205,7 @@ async def get_metrics_summary(
         avg_latency_ms=summary["avg_latency_ms"],
         active_services=active_services,
         requests_by_hour=[
-            HourlyMetric(hour=h["hour"], count=h["count"])
-            for h in summary["requests_by_hour"]
+            HourlyMetric(hour=h["hour"], count=h["count"]) for h in summary["requests_by_hour"]
         ],
         latency_p50=summary.get("latency_p50", 0),
         latency_p95=summary.get("latency_p95", 0),
@@ -229,14 +225,10 @@ async def get_metrics_summary(
 @router.get("/timeseries", response_model=TimeSeriesResponse)
 async def get_metrics_timeseries(
     request: Request,
-    metric: str = Query(
-        ..., description="Metric name: requests, tokens, latency, errors, runs"
-    ),
+    metric: str = Query(..., description="Metric name: requests, tokens, latency, errors, runs"),
     start: datetime = Query(..., description="Start datetime (ISO format)"),
     end: datetime = Query(..., description="End datetime (ISO format)"),
-    granularity: str = Query(
-        "hour", description="Granularity: minute, hour, day"
-    ),
+    granularity: str = Query("hour", description="Granularity: minute, hour, day"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> TimeSeriesResponse:
     """
@@ -315,10 +307,8 @@ async def get_metrics_timeseries(
 @router.get("/tokens", response_model=TokenUsageResponse)
 async def get_token_usage(
     request: Request,
-    start_date: Optional[date] = Query(
-        None, description="Start date (YYYY-MM-DD)"
-    ),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> TokenUsageResponse:
     """
@@ -386,13 +376,9 @@ async def get_token_usage(
 @router.get("/breakdown", response_model=BreakdownResponse)
 async def get_metrics_breakdown(
     request: Request,
-    dimension: str = Query(
-        ..., description="Dimension: assistant, service, user"
-    ),
+    dimension: str = Query(..., description="Dimension: assistant, service, user"),
     limit: int = Query(10, description="Max items to return"),
-    date_str: Optional[str] = Query(
-        None, description="Date (YYYY-MM-DD), defaults to today"
-    ),
+    date_str: str | None = Query(None, description="Date (YYYY-MM-DD), defaults to today"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> BreakdownResponse:
     """
@@ -423,9 +409,7 @@ async def get_metrics_breakdown(
             cursor = 0
             counts = {}
             while True:
-                cursor, keys = await redis._client.scan(
-                    cursor, match=pattern, count=100
-                )
+                cursor, keys = await redis._client.scan(cursor, match=pattern, count=100)
                 for key in keys:
                     value = int(await redis._client.get(key) or 0)
                     # 提取 ID
@@ -443,9 +427,7 @@ async def get_metrics_breakdown(
 
             # 排序并取 Top N
             total = sum(counts.values()) or 1
-            sorted_items = sorted(
-                counts.items(), key=lambda x: x[1], reverse=True
-            )[:limit]
+            sorted_items = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
 
             items = [
                 BreakdownItem(
@@ -467,8 +449,8 @@ async def get_security_event_breakdown(
     request: Request,
     dimension: str = Query("user", description="Dimension: user, service"),
     event_type: str = Query("auth_failed", description="Event type: auth_failed, rate_limited"),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(20, ge=1, le=100, description="Max items to return"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> SecurityEventBreakdownResponse:
@@ -489,7 +471,7 @@ async def get_security_event_breakdown(
         start_date = end_date - timedelta(days=30)
 
     db = getattr(request.app.state, "database", None)
-    items: List[SecurityEventBreakdownItem] = []
+    items: list[SecurityEventBreakdownItem] = []
     last_ingested_at = None
 
     tenant_id = auth.tenant_id or "public"
@@ -541,10 +523,10 @@ async def get_security_event_timeseries(
     request: Request,
     dimension: str = Query("user", description="Dimension: user, service"),
     event_type: str = Query("auth_failed", description="Event type: auth_failed, rate_limited"),
-    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
-    service_id: Optional[str] = Query(None, description="Filter by service ID"),
+    start_date: date | None = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: date | None = Query(None, description="End date (YYYY-MM-DD)"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
+    service_id: str | None = Query(None, description="Filter by service ID"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> SecurityEventTimeSeriesResponse:
     """Get security event time series."""
@@ -564,7 +546,7 @@ async def get_security_event_timeseries(
         start_date = end_date - timedelta(days=30)
 
     db = getattr(request.app.state, "database", None)
-    data: List[SecurityEventTimeSeriesPoint] = []
+    data: list[SecurityEventTimeSeriesPoint] = []
     last_ingested_at = None
 
     tenant_id = auth.tenant_id or "public"

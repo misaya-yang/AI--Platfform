@@ -4,18 +4,16 @@ LLM Provider Management API.
 REST endpoints for managing LLM providers.
 """
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ...core.auth.user_resolver import UserContext
+from ...services.llm.provider_service import ProviderService
 from ..deps import get_user_context
 from ..schemas.providers import (
     ProviderCreate,
-    ProviderUpdate,
     ProviderResponse,
+    ProviderUpdate,
 )
-from ...core.auth.user_resolver import UserContext
-from ...services.llm.provider_service import ProviderService
 
 router = APIRouter()
 

@@ -1,21 +1,25 @@
-# -*- coding: utf-8 -*-
 """Test image processing through the sync service directly"""
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
     from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
-    from src.services.knowledge.vector_store import VectorStore
-    from src.services.knowledge.embedding import DashScopeEmbedding
-    from src.services.knowledge.vlm_service import DashScopeVLMService
-    from src.services.storage.image_storage import ImageStorageService, StorageConfig, StorageBackend
     from src.services.knowledge.knowledge_service import KnowledgeService
+    from src.services.knowledge.vlm_service import DashScopeVLMService
+    from src.services.storage.image_storage import (
+        ImageStorageService,
+        StorageBackend,
+        StorageConfig,
+    )
 
     settings = Settings()
 
@@ -39,8 +43,7 @@ async def main():
 
     # VLM service
     vlm_service = DashScopeVLMService(
-        api_key=settings.knowledge.dashscope.api_key,
-        model="qwen-vl-max"
+        api_key=settings.knowledge.dashscope.api_key, model="qwen-vl-max"
     )
     print("  VLM service created")
 
@@ -111,20 +114,25 @@ async def main():
     except Exception as e:
         print(f"  Error: {e}")
         import traceback
+
         traceback.print_exc()
 
     # Check database for image segments
     print("\n=== 6. Checking database ===")
-    segments = await db._pool.fetch("""
+    segments = await db._pool.fetch(
+        """
         SELECT segment_id, image_filename, LEFT(text, 100) as preview
         FROM segments WHERE content_type = 'image' AND document_id = $1
-    """, document_id)
+    """,
+        document_id,
+    )
     print(f"  Image segments in DB: {len(segments)}")
     for s in segments:
         print(f"    - {s['image_filename']}")
 
     await db.close()
     print("\n=== Done ===")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

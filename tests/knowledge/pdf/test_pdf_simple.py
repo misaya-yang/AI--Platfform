@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """简化的PDF测试 - 分步骤"""
-import requests
+
 import time
+
+import requests
 
 API_BASE = "http://localhost:8080"
 EMAIL = "admin@hejazfs.com.au"
@@ -31,14 +33,14 @@ with open(PDF_PATH, "rb") as f:
         f"{API_BASE}/api/v1/knowledge/{DATASET_ID}/documents/upload",
         files=files,
         headers=headers,
-        timeout=60
+        timeout=60,
     )
 
 print(f"状态码: {resp.status_code}")
 if resp.status_code == 200:
     data = resp.json()
     doc_id = data.get("document_id")
-    print(f"✅ 上传成功")
+    print("✅ 上传成功")
     print(f"文档ID: {doc_id}")
     print(f"状态: {data.get('status')}")
 else:
@@ -51,20 +53,19 @@ print("=" * 60)
 for i in range(15):
     time.sleep(2)
     resp = requests.get(
-        f"{API_BASE}/api/v1/knowledge/{DATASET_ID}/documents/{doc_id}",
-        headers=headers
+        f"{API_BASE}/api/v1/knowledge/{DATASET_ID}/documents/{doc_id}", headers=headers
     )
     if resp.status_code == 200:
         data = resp.json()
         status = data.get("status")
         progress = data.get("progress", 0)
         error = data.get("error")
-        print(f"[{i*2}s] 状态: {status}, 进度: {progress}%", end="")
+        print(f"[{i * 2}s] 状态: {status}, 进度: {progress}%", end="")
         if error:
             print(f", 错误: {error}")
         else:
             print()
-        
+
         if status == "completed":
             print("\n✅ 处理完成!")
             break
@@ -80,14 +81,14 @@ print("=" * 60)
 resp = requests.get(
     f"{API_BASE}/api/v1/knowledge/{DATASET_ID}/segments",
     params={"document_id": doc_id},
-    headers=headers
+    headers=headers,
 )
 if resp.status_code == 200:
     segments = resp.json()
     print(f"✅ 共生成 {len(segments)} 个切片")
     if segments:
         seg = segments[0]
-        print(f"\n第一个切片:")
+        print("\n第一个切片:")
         print(f"  Token数: {seg.get('token_count')}")
         print(f"  内容前100字: {seg.get('content', '')[:100]}...")
 else:

@@ -6,11 +6,12 @@ Page-as-image processing for scanned PDFs using multimodal embedding.
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Tuple, List
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class ProcessingResult:
     processed_pages: int
     failed_pages: int
     segments_created: int = 0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class VisionPDFProcessor:
@@ -56,7 +57,7 @@ class VisionPDFProcessor:
             import fitz  # type: ignore
         return fitz
 
-    def _render_page(self, page: Any) -> Tuple[Optional[bytes], Optional[Tuple[int, int]]]:
+    def _render_page(self, page: Any) -> tuple[bytes | None, tuple[int, int] | None]:
         """Render a PDF page to PNG bytes, shrinking if needed to fit size limits."""
         fitz = self._get_fitz()
         dpi_candidates = [self.render_dpi, 150, 120]
@@ -85,8 +86,8 @@ class VisionPDFProcessor:
         document_id: str,
         dataset_id: str,
         collection: str,
-        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
-        storage_service: Optional[Any] = None,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+        storage_service: Any | None = None,
         tenant_id: str = "default",
     ) -> ProcessingResult:
         fitz = self._get_fitz()
@@ -101,8 +102,8 @@ class VisionPDFProcessor:
 
             from qdrant_client.http import models as qmodels
 
-            batch_images: List[bytes] = []
-            batch_meta: List[dict] = []
+            batch_images: list[bytes] = []
+            batch_meta: list[dict] = []
 
             async def flush_batch() -> None:
                 nonlocal segments_created
@@ -242,7 +243,5 @@ class VisionPDFProcessor:
             )
         finally:
             if doc is not None:
-                try:
+                with contextlib.suppress(Exception):
                     doc.close()
-                except Exception:
-                    pass

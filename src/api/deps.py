@@ -1,22 +1,21 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import logging
-import time
 import os
-from typing import List, Optional
+import time
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from ..adapters.langgraph_proxy import LangGraphProxy
 from ..config.settings import Settings
 from ..core.auth.api_key import verify_api_key
 from ..core.auth.jwt import decode_jwt_token
-from ..core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
+from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ..core.auth.user_resolver import UserContext
 from ..core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
-from ..adapters.langgraph_proxy import LangGraphProxy
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +23,8 @@ logger = logging.getLogger(__name__)
 class AuthContext(BaseModel):
     user_id: str = ""
     tenant_id: str = ""
-    roles: List[str] = ["guest"]
-    permissions: List[str] = []
+    roles: list[str] = ["guest"]
+    permissions: list[str] = []
 
 
 def get_settings(request: Request) -> Settings:
@@ -52,9 +51,10 @@ def get_health_monitor(request: Request):
     return request.app.state.health_monitor
 
 
-def get_langgraph_proxy(request: Request) -> Optional[LangGraphProxy]:
+def get_langgraph_proxy(request: Request) -> LangGraphProxy | None:
     """获取 LangGraph 代理"""
     return getattr(request.app.state, "langgraph_proxy", None)
+
 
 def get_knowledge_service(request: Request):
     """Get KnowledgeService (KBMS)."""
@@ -66,6 +66,7 @@ def get_knowledge_service(request: Request):
         )
     return svc
 
+
 def get_knowledge_worker(request: Request):
     """Get KnowledgeWorker (KBMS)."""
     worker = getattr(request.app.state, "knowledge_worker", None)
@@ -75,6 +76,7 @@ def get_knowledge_worker(request: Request):
             detail="Knowledge worker is not initialized (check GATEWAY_KNOWLEDGE__ENABLED).",
         )
     return worker
+
 
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:
     """获取 LangGraph 代理（若未初始化则返回 503）"""
@@ -98,7 +100,7 @@ def get_image_storage_service(request: Request):
     return svc
 
 
-def get_rate_limiter(request: Request) -> Optional[MultiDimensionRateLimiter]:
+def get_rate_limiter(request: Request) -> MultiDimensionRateLimiter | None:
     """获取多维度限流器"""
     return getattr(request.app.state, "multi_rate_limiter", None)
 
@@ -126,7 +128,7 @@ def _derive_api_key_user_id(api_key: str) -> str:
     return f"apikey:{digest[:16]}"
 
 
-def _normalize_roles(raw_roles) -> List[str]:
+def _normalize_roles(raw_roles) -> list[str]:
     if not raw_roles:
         return ["user"]
     if isinstance(raw_roles, str):
@@ -136,10 +138,10 @@ def _normalize_roles(raw_roles) -> List[str]:
     return ["user"]
 
 
-def _extract_service_id_from_path(path: str) -> Optional[str]:
+def _extract_service_id_from_path(path: str) -> str | None:
     for prefix in ("/api/v1/proxy/", "/proxy/"):
         if path.startswith(prefix):
-            remainder = path[len(prefix):]
+            remainder = path[len(prefix) :]
             if not remainder:
                 return None
             return remainder.split("/", 1)[0] or None
@@ -148,8 +150,8 @@ def _extract_service_id_from_path(path: str) -> Optional[str]:
 
 async def _record_auth_failure(
     request: Request,
-    user_id: Optional[str],
-    tenant_id: Optional[str],
+    user_id: str | None,
+    tenant_id: str | None,
 ) -> None:
     try:
         if getattr(request.state, "_auth_failure_recorded", False):
@@ -193,15 +195,19 @@ async def get_user_context(
 
     # If auth is disabled, treat as guest (secure default).
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
-        logger.debug(f"[AUTH][TIMING] auth_disabled total={((time.perf_counter() - t_start) * 1000):.1f}ms")
-        return _cache_and_return(UserContext(
-            user_id="guest",
-            tenant_id="public",
-            tier="anonymous",
-            is_authenticated=False,
-            ip=client_ip,
-            roles=["guest"],
-        ))
+        logger.debug(
+            f"[AUTH][TIMING] auth_disabled total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+        )
+        return _cache_and_return(
+            UserContext(
+                user_id="guest",
+                tenant_id="public",
+                tier="anonymous",
+                is_authenticated=False,
+                ip=client_ip,
+                roles=["guest"],
+            )
+        )
 
     # 1) JWT (Bearer)
     auth_header = request.headers.get("Authorization") or ""
@@ -273,14 +279,16 @@ async def get_user_context(
             f"db_perms={((t_db_done - t_db_start) * 1000):.1f}ms "
             f"total={((time.perf_counter() - t_start) * 1000):.1f}ms"
         )
-        return _cache_and_return(UserContext(
-            user_id=user_id,
-            tenant_id=tenant_id,
-            tier=tier,
-            is_authenticated=True,
-            ip=client_ip,
-            roles=roles,
-        ))
+        return _cache_and_return(
+            UserContext(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                tier=tier,
+                is_authenticated=True,
+                ip=client_ip,
+                roles=roles,
+            )
+        )
 
     # 2) API key
     if auth_cfg.api_key.enabled:
@@ -313,17 +321,23 @@ async def get_user_context(
                             if perm not in roles:
                                 roles.append(perm)
                     except Exception as e:
-                        logger.warning(f"[AUTH] Failed to fetch DB permissions for API key user {user_id}: {e}")
+                        logger.warning(
+                            f"[AUTH] Failed to fetch DB permissions for API key user {user_id}: {e}"
+                        )
 
-                    logger.info(f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms")
-                    return _cache_and_return(UserContext(
-                        user_id=user_id,
-                        tenant_id=tenant_id,
-                        tier=tier,
-                        is_authenticated=True,
-                        ip=client_ip,
-                        roles=roles,
-                    ))
+                    logger.info(
+                        f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+                    )
+                    return _cache_and_return(
+                        UserContext(
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            tier=tier,
+                            is_authenticated=True,
+                            ip=client_ip,
+                            roles=roles,
+                        )
+                    )
 
             # Fallback to static allowlist (env-configured keys)
             try:
@@ -331,35 +345,43 @@ async def get_user_context(
             except AuthError:
                 await _record_auth_failure(request, _derive_api_key_user_id(api_key), None)
                 raise
-            logger.info(f"[AUTH][TIMING] API_KEY_STATIC total={((time.perf_counter() - t_start) * 1000):.1f}ms")
-            
+            logger.info(
+                f"[AUTH][TIMING] API_KEY_STATIC total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+            )
+
             # Validate static role against whitelist for security
             ALLOWED_STATIC_ROLES = frozenset(["user", "admin", "operator", "developer"])
-            static_role = os.getenv("GATEWAY_AUTHENTICATION__API_KEY__STATIC_ROLE", "user").strip() or "user"
+            static_role = (
+                os.getenv("GATEWAY_AUTHENTICATION__API_KEY__STATIC_ROLE", "user").strip() or "user"
+            )
             if static_role not in ALLOWED_STATIC_ROLES:
                 logger.warning(f"Invalid static role '{static_role}', falling back to 'user'")
                 static_role = "user"
-            
-            return _cache_and_return(UserContext(
-                user_id=_derive_api_key_user_id(api_key),
-                tenant_id="",
-                tier="admin" if static_role == "admin" else "normal",
-                is_authenticated=True,
-                ip=client_ip,
-                roles=[static_role],
-            ))
+
+            return _cache_and_return(
+                UserContext(
+                    user_id=_derive_api_key_user_id(api_key),
+                    tenant_id="",
+                    tier="admin" if static_role == "admin" else "normal",
+                    is_authenticated=True,
+                    ip=client_ip,
+                    roles=[static_role],
+                )
+            )
 
     # 3) Anonymous (stable ID minted by middleware)
     anon_id = getattr(getattr(request, "state", None), "anonymous_id", None) or client_ip
     logger.debug(f"[AUTH][TIMING] anonymous total={((time.perf_counter() - t_start) * 1000):.1f}ms")
-    return _cache_and_return(UserContext(
-        user_id=f"anon:{anon_id}",
-        tenant_id="public",
-        tier="anonymous",
-        is_authenticated=False,
-        ip=client_ip,
-        roles=["guest"],
-    ))
+    return _cache_and_return(
+        UserContext(
+            user_id=f"anon:{anon_id}",
+            tenant_id="public",
+            tier="anonymous",
+            is_authenticated=False,
+            ip=client_ip,
+            roles=["guest"],
+        )
+    )
 
 
 async def get_auth_context(
@@ -381,8 +403,8 @@ async def get_auth_context(
         return ctx
 
     # Unauthenticated requests default to a guest role.
-    roles: List[str] = ["guest"]
-    permissions: List[str] = []
+    roles: list[str] = ["guest"]
+    permissions: list[str] = []
     user_id = ""
     tenant_id = ""
 
@@ -438,14 +460,18 @@ async def get_auth_context(
                     if perm not in permissions:
                         permissions.append(perm)
             except Exception as e:
-                logger.warning(f"[AUTH] Failed to fetch DB permissions in auth_context for user {user_id}: {e}")
+                logger.warning(
+                    f"[AUTH] Failed to fetch DB permissions in auth_context for user {user_id}: {e}"
+                )
 
         # Merge permissions into roles so RBAC can honor them directly.
         for perm in permissions:
             if perm not in roles:
                 roles.append(perm)
 
-        ctx = AuthContext(user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=permissions)
+        ctx = AuthContext(
+            user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=permissions
+        )
         request.state.auth = ctx
         return ctx
 
@@ -503,7 +529,9 @@ async def get_auth_context(
         except AuthError:
             await _record_auth_failure(request, _derive_api_key_user_id(key), tenant_id)
             raise
-        ctx = AuthContext(user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[])
+        ctx = AuthContext(
+            user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[]
+        )
         request.state.auth = ctx
         return ctx
 

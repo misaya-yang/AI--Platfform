@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -21,13 +21,13 @@ class ContentItemOutSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: ContentType
-    data: Optional[Any] = None
-    url: Optional[str] = None
-    mime_type: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    data: Any | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    metadata: dict[str, Any] | None = None
 
     @classmethod
-    def from_domain(cls, item: ContentItem) -> "ContentItemOutSchema":
+    def from_domain(cls, item: ContentItem) -> ContentItemOutSchema:
         return cls(
             type=item.type,
             data=_encode_data(item.data),
@@ -42,16 +42,16 @@ class UnifiedResponseSchema(BaseModel):
 
     request_id: str
     status: str
-    outputs: List[ContentItemOutSchema]
-    session_id: Optional[str] = None
-    task_id: Optional[str] = None
-    usage: Optional[Dict[str, Any]] = None
-    error: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
-    timestamp: Optional[datetime] = None
+    outputs: list[ContentItemOutSchema]
+    session_id: str | None = None
+    task_id: str | None = None
+    usage: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    timestamp: datetime | None = None
 
     @classmethod
-    def from_domain(cls, resp: UnifiedResponse) -> "UnifiedResponseSchema":
+    def from_domain(cls, resp: UnifiedResponse) -> UnifiedResponseSchema:
         return cls(
             request_id=resp.request_id,
             status=resp.status,
@@ -67,6 +67,7 @@ class UnifiedResponseSchema(BaseModel):
 
 class ToolCallSchema(BaseModel):
     """工具调用信息"""
+
     model_config = ConfigDict(extra="allow")
 
     tool_call_id: str
@@ -75,7 +76,7 @@ class ToolCallSchema(BaseModel):
     status: str = "pending"
 
     @classmethod
-    def from_domain(cls, tc: ToolCall) -> "ToolCallSchema":
+    def from_domain(cls, tc: ToolCall) -> ToolCallSchema:
         return cls(
             tool_call_id=tc.tool_call_id,
             name=tc.name,
@@ -92,11 +93,11 @@ class StreamChunkSchema(BaseModel):
     content: ContentItemOutSchema
     is_final: bool = False
     event_type: StreamEventType = StreamEventType.TEXT_DELTA
-    tool_call: Optional[ToolCallSchema] = None
-    metadata: Optional[Dict[str, Any]] = None
+    tool_call: ToolCallSchema | None = None
+    metadata: dict[str, Any] | None = None
 
     @classmethod
-    def from_domain(cls, chunk: StreamChunk) -> "StreamChunkSchema":
+    def from_domain(cls, chunk: StreamChunk) -> StreamChunkSchema:
         return cls(
             request_id=chunk.request_id,
             chunk_index=chunk.chunk_index,

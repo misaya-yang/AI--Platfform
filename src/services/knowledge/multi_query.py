@@ -14,10 +14,8 @@ Key features:
 from __future__ import annotations
 
 import re
-from typing import List
 
 from .constants import ISLAMIC_SYNONYMS
-
 
 # Re-export for backward compatibility
 __all__ = ["MultiQueryRetrieval", "ISLAMIC_SYNONYMS", "expand_query_islamic"]
@@ -30,7 +28,7 @@ class MultiQueryRetrieval:
         self,
         query: str,
         n: int = 3,
-    ) -> List[str]:
+    ) -> list[str]:
         """Generate query reformulations using rule-based expansion.
 
         Args:
@@ -52,7 +50,7 @@ class MultiQueryRetrieval:
 
         return queries[:n]
 
-    def _expand_islamic_terms(self, query: str) -> List[str]:
+    def _expand_islamic_terms(self, query: str) -> list[str]:
         """Expand query with Islamic terminology synonyms/transliterations."""
         expansions = []
         query_lower = query.lower()
@@ -60,14 +58,14 @@ class MultiQueryRetrieval:
 
         for word in words:
             # Strip common suffixes for matching
-            clean_word = re.sub(r'[?.!,;:\'"]+$', '', word)
+            clean_word = re.sub(r'[?.!,;:\'"]+$', "", word)
 
             if clean_word in ISLAMIC_SYNONYMS:
                 synonyms = ISLAMIC_SYNONYMS[clean_word]
                 for syn in synonyms[:2]:  # Take top 2 synonyms
                     # Use word-boundary replacement to avoid partial matches
                     expanded = re.sub(
-                        r'\b' + re.escape(clean_word) + r'\b', syn, query_lower, count=1
+                        r"\b" + re.escape(clean_word) + r"\b", syn, query_lower, count=1
                     )
                     if expanded != query_lower:
                         expansions.append(expanded)
@@ -76,16 +74,14 @@ class MultiQueryRetrieval:
         for term, synonyms in ISLAMIC_SYNONYMS.items():
             if term in query_lower and len(term) > 3:
                 for syn in synonyms[:1]:
-                    expanded = re.sub(
-                        r'\b' + re.escape(term) + r'\b', syn, query_lower, count=1
-                    )
+                    expanded = re.sub(r"\b" + re.escape(term) + r"\b", syn, query_lower, count=1)
                     if expanded != query_lower and expanded not in expansions:
                         expansions.append(expanded)
 
         return expansions
 
 
-def expand_query_islamic(query: str, max_queries: int = 3) -> List[str]:
+def expand_query_islamic(query: str, max_queries: int = 3) -> list[str]:
     """Convenience function for Islamic query expansion.
 
     Args:

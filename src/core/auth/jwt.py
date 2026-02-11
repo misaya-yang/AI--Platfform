@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import jwt
 
@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 def decode_jwt_token(
     token: str,
     secret: str,
-    algorithms: List[str],
-    audience: Optional[str] = None,
-    issuer: Optional[str] = None,
-) -> Dict[str, Any]:
+    algorithms: list[str],
+    audience: str | None = None,
+    issuer: str | None = None,
+) -> dict[str, Any]:
     """
     解码并验证 JWT token
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
 from ...models.enums import ContentType, StreamEventType
 from ...models.request import UnifiedRequest
@@ -18,7 +19,7 @@ from ...services.registry.service_registry import ServiceRegistry
 from ...services.session.session_manager import SessionManager
 from ...services.task.task_manager import TaskManager
 from ..auth.rbac import RBAC
-from ..exceptions import ServiceNotFoundError, RateLimitExceededError
+from ..exceptions import RateLimitExceededError, ServiceNotFoundError
 from ..utils import estimate_tokens
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
@@ -43,11 +44,11 @@ class GatewayDispatcher:
         self.rbac = rbac
         self.task_manager = task_manager
         self.session_manager = session_manager
-        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
-        self._semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
 
     def _inputs_to_text(self, request: UnifiedRequest) -> str:
-        parts: List[str] = []
+        parts: list[str] = []
         for item in request.inputs or []:
             try:
                 if getattr(item, "type", None) == ContentType.TEXT:
@@ -123,7 +124,7 @@ class GatewayDispatcher:
         payload: Any,
         input_text: str,
         output_text: str,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         extracted = extract_token_usage(payload) or {}
 
         input_raw = extracted.get("input_tokens") if "input_tokens" in extracted else None
@@ -195,7 +196,7 @@ class GatewayDispatcher:
             )
         return self._circuit_breakers[service.service_id]
 
-    def _get_semaphore(self, service: ServiceDefinition) -> Optional[asyncio.Semaphore]:
+    def _get_semaphore(self, service: ServiceDefinition) -> asyncio.Semaphore | None:
         limit = service.concurrency_limit
         if not limit:
             return None
@@ -220,8 +221,8 @@ class GatewayDispatcher:
     async def invoke(
         self,
         request: UnifiedRequest,
-        roles: List[str],
-        client_ip: Optional[str] = None,
+        roles: list[str],
+        client_ip: str | None = None,
     ) -> UnifiedResponse:
         import time
 
@@ -236,7 +237,7 @@ class GatewayDispatcher:
             raise
 
         # Session persistence (for chat history / multi-turn context)
-        session_id: Optional[str] = None
+        session_id: str | None = None
         if service.session_enabled:
             session = await self.session_manager.get_or_create(
                 request.session_id,
@@ -264,7 +265,7 @@ class GatewayDispatcher:
             return await do_call()
 
         async def with_retries() -> UnifiedResponse:
-            last_exc: Optional[Exception] = None
+            last_exc: Exception | None = None
             for attempt in range(service.max_retries):
                 try:
                     return await guarded()
@@ -289,7 +290,7 @@ class GatewayDispatcher:
             assistant_text = self._response_to_text(resp)
             if assistant_text:
                 # Build stats metadata for sync responses to persist in history.
-                stats: Dict[str, Any] = {}
+                stats: dict[str, Any] = {}
                 usage = resp.usage if isinstance(resp.usage, dict) else None
                 if usage:
                     stats.update(usage)
@@ -337,8 +338,8 @@ class GatewayDispatcher:
     async def stream(
         self,
         request: UnifiedRequest,
-        roles: List[str],
-        client_ip: Optional[str] = None,
+        roles: list[str],
+        client_ip: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         import time
 
@@ -377,7 +378,7 @@ class GatewayDispatcher:
                 service_id=service.service_id,
             )
         t_parallel = time.perf_counter()
-        session_id: Optional[str] = None
+        session_id: str | None = None
         if session:
             session_id = session.session_id
             request.session_id = session_id
@@ -408,13 +409,13 @@ class GatewayDispatcher:
 
         adapter = self.registry.get_adapter(service)
         first_chunk = True
-        t_first_chunk: Optional[float] = None
+        t_first_chunk: float | None = None
 
         # Collect tool calls and stats for session metadata
-        tool_calls_map: Dict[str, Dict] = {}  # tool_call_id -> {name, arguments, result}
-        usage_stats: Optional[Dict] = None
+        tool_calls_map: dict[str, dict] = {}  # tool_call_id -> {name, arguments, result}
+        usage_stats: dict | None = None
         stream_status = "success"
-        record_stats: Dict[str, Any] = {}
+        record_stats: dict[str, Any] = {}
 
         try:
             async for chunk in adapter.stream(request):
@@ -505,7 +506,7 @@ class GatewayDispatcher:
             t_end = time.perf_counter()
 
             # Build stats with usage and timing
-            stats: Dict = {}
+            stats: dict = {}
             if usage_stats:
                 stats.update(usage_stats)
 
@@ -572,7 +573,7 @@ class GatewayDispatcher:
 
             if session_id and service.session_enabled and acc_text.strip():
                 # Build metadata with tool calls and stats for session storage
-                metadata: Dict = {}
+                metadata: dict = {}
 
                 if tool_calls_map:
                     metadata["tool_calls"] = list(tool_calls_map.values())
@@ -582,7 +583,7 @@ class GatewayDispatcher:
 
                 # Reuse stats from stream_end event if available
                 # Otherwise recalculate (fallback for error cases)
-                final_stats: Dict = {}
+                final_stats: dict = {}
                 if usage_stats:
                     final_stats.update(usage_stats)
                     logger.debug(f"Usage stats: {usage_stats}")
@@ -638,8 +639,8 @@ class GatewayDispatcher:
     async def submit(
         self,
         request: UnifiedRequest,
-        roles: List[str],
-        client_ip: Optional[str] = None,
+        roles: list[str],
+        client_ip: str | None = None,
     ) -> str:
         service = await self._get_service(request.service_id)
         await self.validator.validate(request, service, roles)

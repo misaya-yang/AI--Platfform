@@ -9,33 +9,23 @@ This covers:
 - Integration into chat_stream with planning mode
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from typing import AsyncIterator, List, Dict, Any
 
+import pytest
+
+from src.core.auth.user_resolver import UserContext
 from src.services.assistant.assistant_service import (
-    AssistantService,
     AssistantConfig,
-    AssistantStreamEvent,
+    AssistantService,
     StreamEventType,
-    RetrievedContext,
 )
 from src.services.assistant.task_planner import (
     TaskPlanner,
-    ExecutionPlan,
-    PlannedTask,
-    TaskType,
 )
 from src.services.assistant.tool_orchestrator import (
-    ToolOrchestrator,
     ToolExecutionResult,
+    ToolOrchestrator,
 )
-from src.services.assistant.working_memory import (
-    WorkingMemory,
-    TaskStatus,
-)
-from src.core.auth.user_resolver import UserContext
-
 
 # =============================================================================
 # Fixtures
@@ -334,9 +324,7 @@ class TestExecuteWithPlanning:
                 events.append(event)
 
         # Should have an ERROR event
-        error_events = [
-            e for e in events if e.event_type == StreamEventType.ERROR.value
-        ]
+        error_events = [e for e in events if e.event_type == StreamEventType.ERROR.value]
         assert len(error_events) >= 1
         assert "Planning failed" in error_events[0].data["message"]
 
@@ -577,9 +565,7 @@ class TestChatStreamWithPlanning:
             ):
                 events.append(event)
 
-        status_events = [
-            e for e in events if e.event_type == StreamEventType.STATUS.value
-        ]
+        status_events = [e for e in events if e.event_type == StreamEventType.STATUS.value]
         assert any("confirm" in str(e.data).lower() for e in status_events)
 
 

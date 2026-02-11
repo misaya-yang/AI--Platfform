@@ -6,8 +6,22 @@ from src.services.metrics.usage_recorder import UsageRecord, group_records_by_ho
 def test_group_records_by_hour_aggregates_counts_and_tokens():
     now = datetime(2026, 1, 15, 10, 30, tzinfo=timezone.utc).timestamp()
     records = [
-        UsageRecord(tenant_id="t1", user_id="u1", model="gpt", input_tokens=10, output_tokens=5, timestamp=now),
-        UsageRecord(tenant_id="t1", user_id="u1", model="gpt", input_tokens=3, output_tokens=2, timestamp=now),
+        UsageRecord(
+            tenant_id="t1",
+            user_id="u1",
+            model="gpt",
+            input_tokens=10,
+            output_tokens=5,
+            timestamp=now,
+        ),
+        UsageRecord(
+            tenant_id="t1",
+            user_id="u1",
+            model="gpt",
+            input_tokens=3,
+            output_tokens=2,
+            timestamp=now,
+        ),
     ]
     aggregates = group_records_by_hour(records)
     assert len(aggregates) == 1

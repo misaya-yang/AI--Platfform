@@ -14,24 +14,19 @@ References:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     Any,
-    Callable,
-    Dict,
     Generic,
-    List,
-    Optional,
-    Type,
     TypeVar,
-    Union,
     get_type_hints,
 )
 
-from pydantic import BaseModel, ValidationError, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ...core.observability.logging import get_logger
 
@@ -42,25 +37,28 @@ T = TypeVar("T", bound=BaseModel)
 
 class OutputFormat(str, Enum):
     """Output format options."""
-    TEXT = "text"           # Plain text (default)
-    JSON = "json"           # JSON object
+
+    TEXT = "text"  # Plain text (default)
+    JSON = "json"  # JSON object
     JSON_SCHEMA = "json_schema"  # JSON with schema validation
-    MARKDOWN = "markdown"   # Markdown formatted
+    MARKDOWN = "markdown"  # Markdown formatted
 
 
 class RepairStrategy(str, Enum):
     """Strategies for repairing invalid output."""
-    NONE = "none"           # No repair, raise error
+
+    NONE = "none"  # No repair, raise error
     EXTRACT_JSON = "extract_json"  # Try to extract JSON from text
-    TRUNCATE = "truncate"   # Truncate to valid JSON
-    LLM_FIX = "llm_fix"     # Use LLM to fix the output
+    TRUNCATE = "truncate"  # Truncate to valid JSON
+    LLM_FIX = "llm_fix"  # Use LLM to fix the output
 
 
 @dataclass
 class StructuredOutputConfig:
     """Configuration for structured output handling."""
+
     format: OutputFormat = OutputFormat.TEXT
-    schema: Optional[Type[BaseModel]] = None
+    schema: type[BaseModel] | None = None
     max_retries: int = 2
     repair_strategy: RepairStrategy = RepairStrategy.EXTRACT_JSON
     strict_validation: bool = True
@@ -69,14 +67,15 @@ class StructuredOutputConfig:
 @dataclass
 class StructuredOutputResult(Generic[T]):
     """Result of structured output parsing."""
+
     success: bool
-    data: Optional[T] = None
+    data: T | None = None
     raw_output: str = ""
-    errors: List[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     retries_used: int = 0
     repair_applied: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "success": self.success,
             "data": self.data.model_dump() if self.data else None,
@@ -91,61 +90,54 @@ class StructuredOutputResult(Generic[T]):
 # Common Response Schemas
 # =============================================================================
 
+
 class AnswerWithCitations(BaseModel):
     """Standard answer with source citations."""
+
     answer: str = Field(..., description="The main answer text")
-    citations: List[str] = Field(
-        default_factory=list,
-        description="List of source references used"
-    )
-    confidence: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Confidence score (0-1)"
-    )
+    citations: list[str] = Field(default_factory=list, description="List of source references used")
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
 class StepByStepAnswer(BaseModel):
     """Answer broken down into steps."""
+
     summary: str = Field(..., description="Brief summary of the answer")
-    steps: List[str] = Field(
-        default_factory=list,
-        description="Step-by-step breakdown"
-    )
+    steps: list[str] = Field(default_factory=list, description="Step-by-step breakdown")
     conclusion: str = Field(default="", description="Final conclusion")
 
 
 class FactCheckResult(BaseModel):
     """Result of fact checking."""
+
     claim: str = Field(..., description="The claim being checked")
     verdict: str = Field(..., description="Verdict: true, false, partially_true, unverifiable")
     explanation: str = Field(..., description="Explanation for the verdict")
-    sources: List[str] = Field(default_factory=list, description="Supporting sources")
+    sources: list[str] = Field(default_factory=list, description="Supporting sources")
 
 
 class ExtractedEntities(BaseModel):
     """Named entities extracted from text."""
-    people: List[str] = Field(default_factory=list)
-    organizations: List[str] = Field(default_factory=list)
-    locations: List[str] = Field(default_factory=list)
-    dates: List[str] = Field(default_factory=list)
-    other: Dict[str, List[str]] = Field(default_factory=dict)
+
+    people: list[str] = Field(default_factory=list)
+    organizations: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    dates: list[str] = Field(default_factory=list)
+    other: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ClassificationResult(BaseModel):
     """Text classification result."""
+
     label: str = Field(..., description="Predicted label")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score")
-    all_scores: Dict[str, float] = Field(
-        default_factory=dict,
-        description="Scores for all labels"
-    )
+    all_scores: dict[str, float] = Field(default_factory=dict, description="Scores for all labels")
 
 
 # =============================================================================
 # Output Parsing & Repair
 # =============================================================================
+
 
 class StructuredOutputParser:
     """
@@ -166,7 +158,7 @@ class StructuredOutputParser:
 
     def __init__(
         self,
-        schema: Type[T],
+        schema: type[T],
         repair_strategy: RepairStrategy = RepairStrategy.EXTRACT_JSON,
         strict: bool = True,
     ):
@@ -239,14 +231,14 @@ class StructuredOutputParser:
 
         return result
 
-    def _extract_json(self, text: str) -> Optional[str]:
+    def _extract_json(self, text: str) -> str | None:
         """Extract JSON from text, handling common formats."""
         # Try markdown code block
         patterns = [
-            r'```json\s*([\s\S]*?)\s*```',  # ```json ... ```
-            r'```\s*([\s\S]*?)\s*```',       # ``` ... ```
-            r'\{[\s\S]*\}',                   # Raw JSON object
-            r'\[[\s\S]*\]',                   # Raw JSON array
+            r"```json\s*([\s\S]*?)\s*```",  # ```json ... ```
+            r"```\s*([\s\S]*?)\s*```",  # ``` ... ```
+            r"\{[\s\S]*\}",  # Raw JSON object
+            r"\[[\s\S]*\]",  # Raw JSON array
         ]
 
         for pattern in patterns:
@@ -255,7 +247,7 @@ class StructuredOutputParser:
                 candidate = match.group(1) if match.lastindex else match.group(0)
                 # Quick validation check
                 candidate = candidate.strip()
-                if candidate.startswith(('{', '[')):
+                if candidate.startswith(("{", "[")):
                     try:
                         json.loads(candidate)
                         return candidate
@@ -264,21 +256,21 @@ class StructuredOutputParser:
 
         return None
 
-    def _try_extract_json_aggressively(self, text: str) -> Optional[str]:
+    def _try_extract_json_aggressively(self, text: str) -> str | None:
         """Aggressive JSON extraction for malformed outputs."""
         # Find first { and match to closing }
         stack = []
         start = None
 
         for i, char in enumerate(text):
-            if char == '{':
+            if char == "{":
                 if start is None:
                     start = i
-                stack.append('{')
-            elif char == '}' and stack:
+                stack.append("{")
+            elif char == "}" and stack:
                 stack.pop()
                 if not stack and start is not None:
-                    candidate = text[start:i + 1]
+                    candidate = text[start : i + 1]
                     try:
                         json.loads(candidate)
                         return candidate
@@ -288,12 +280,12 @@ class StructuredOutputParser:
 
         return None
 
-    def _try_truncate_to_valid_json(self, text: str) -> Optional[str]:
+    def _try_truncate_to_valid_json(self, text: str) -> str | None:
         """Try to truncate text to valid JSON."""
         # Find the start of JSON
-        start = text.find('{')
+        start = text.find("{")
         if start == -1:
-            start = text.find('[')
+            start = text.find("[")
         if start == -1:
             return None
 
@@ -310,9 +302,9 @@ class StructuredOutputParser:
 
     def _try_fix_validation_errors(
         self,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         error: ValidationError,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Try to fix common validation errors."""
         fixed = data.copy()
 
@@ -350,10 +342,8 @@ class StructuredOutputParser:
                 if value is not None:
                     # Try string to number
                     if isinstance(value, str):
-                        try:
+                        with contextlib.suppress(ValueError):
                             fixed[field_name] = float(value)
-                        except ValueError:
-                            pass
                     # Try number to string
                     elif isinstance(value, (int, float)):
                         fixed[field_name] = str(value)
@@ -365,8 +355,9 @@ class StructuredOutputParser:
 # Prompt Templates for Structured Output
 # =============================================================================
 
+
 def create_json_prompt(
-    schema: Type[BaseModel],
+    schema: type[BaseModel],
     user_query: str,
     system_context: str = "",
 ) -> str:
@@ -410,8 +401,8 @@ User Query: {user_query}
 
 def get_schema_for_model(
     model_id: str,
-    schema: Type[BaseModel],
-) -> Dict[str, Any]:
+    schema: type[BaseModel],
+) -> dict[str, Any]:
     """
     Get the appropriate schema format for a model's API.
 
@@ -451,6 +442,7 @@ def get_schema_for_model(
 # Output Guardrails
 # =============================================================================
 
+
 class OutputGuardrail:
     """
     Guardrails for output validation and safety.
@@ -472,7 +464,7 @@ class OutputGuardrail:
         self.check_pii = check_pii
         self.check_hallucination = check_hallucination
 
-    def validate(self, output: str, context: Optional[str] = None) -> List[str]:
+    def validate(self, output: str, context: str | None = None) -> list[str]:
         """
         Validate output against guardrails.
 
@@ -501,25 +493,25 @@ class OutputGuardrail:
 
         return warnings
 
-    def _check_pii(self, text: str) -> List[str]:
+    def _check_pii(self, text: str) -> list[str]:
         """Check for potential PII in output."""
         warnings = []
 
         # Email pattern
-        if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text):
+        if re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text):
             warnings.append("Output may contain email addresses")
 
         # Phone pattern (simple)
-        if re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', text):
+        if re.search(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", text):
             warnings.append("Output may contain phone numbers")
 
         # SSN pattern
-        if re.search(r'\b\d{3}-\d{2}-\d{4}\b', text):
+        if re.search(r"\b\d{3}-\d{2}-\d{4}\b", text):
             warnings.append("Output may contain SSN-like patterns")
 
         return warnings
 
-    def _check_hallucination(self, output: str, context: str) -> List[str]:
+    def _check_hallucination(self, output: str, context: str) -> list[str]:
         """Check for potential hallucination indicators."""
         warnings = []
 
@@ -544,9 +536,10 @@ class OutputGuardrail:
 # Global Utilities
 # =============================================================================
 
+
 def parse_structured_output(
     text: str,
-    schema: Type[T],
+    schema: type[T],
     strict: bool = False,
 ) -> StructuredOutputResult[T]:
     """
@@ -568,7 +561,7 @@ def validate_output(
     output: str,
     max_length: int = 10000,
     check_pii: bool = True,
-) -> List[str]:
+) -> list[str]:
     """
     Convenience function to validate output.
 

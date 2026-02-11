@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
 """Direct test of image sync flow"""
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     from src.config.settings import Settings
@@ -63,8 +65,7 @@ async def main():
 
         try:
             attachments = await client.get_page_image_attachments(
-                page_id=page_id,
-                embeddable_only=True
+                page_id=page_id, embeddable_only=True
             )
             print(f"Image attachments found: {len(attachments)}")
             for att in attachments:
@@ -72,11 +73,13 @@ async def main():
         except Exception as e:
             print(f"Error getting attachments: {e}")
             import traceback
+
             traceback.print_exc()
 
     await client.close()
     await db.close()
     print("\nDone!")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

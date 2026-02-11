@@ -7,30 +7,33 @@ Implements Manus-style context caching with three cache layers:
 - Layer 3: Current input (dynamic)
 """
 
-from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
-from enum import Enum
 import hashlib
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
 
 class CacheBreakpoint(Enum):
     """Cache control markers for provider APIs."""
+
     EPHEMERAL = "ephemeral"  # Short-lived cache (5-60 min)
 
 
 @dataclass
 class CacheConfig:
     """Configuration for KV-cache optimization."""
+
     enable_layer1_cache: bool = True  # System prefix caching
     enable_layer2_cache: bool = True  # Session context caching
-    layer1_ttl_minutes: int = 60      # System prefix TTL
-    layer2_ttl_minutes: int = 10      # Session context TTL
+    layer1_ttl_minutes: int = 60  # System prefix TTL
+    layer2_ttl_minutes: int = 10  # Session context TTL
     min_cacheable_tokens: int = 1024  # Minimum tokens for caching
 
 
 @dataclass
 class CacheMetrics:
     """Metrics for cache performance tracking."""
+
     layer1_hit: bool = False
     layer2_hit: bool = False
     cached_tokens: int = 0
@@ -52,18 +55,18 @@ class ContextCacheOptimizer:
 
     def __init__(self, config: CacheConfig = None):
         self.config = config or CacheConfig()
-        self._system_prefix_hash: Optional[str] = None
+        self._system_prefix_hash: str | None = None
 
     def build_optimized_messages(
         self,
         system_prompt: str,
-        tools: Optional[List[Dict[str, Any]]],
-        kb_context: Optional[str],
-        web_context: Optional[str],
-        history: List[Dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        kb_context: str | None,
+        web_context: str | None,
+        history: list[dict[str, Any]],
         current_message: str,
         provider: str,  # "gemini" | "dashscope"
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Build messages with optimal cache structure.
 
         Args:
@@ -93,17 +96,23 @@ class ContextCacheOptimizer:
         # === Layer 2: Session Context ===
         if kb_context:
             messages.append({"role": "user", "content": f"[参考资料]\n{kb_context}"})
-            messages.append({"role": "assistant", "content": "我已阅读参考资料，将基于这些信息回答问题。"})
+            messages.append(
+                {"role": "assistant", "content": "我已阅读参考资料，将基于这些信息回答问题。"}
+            )
 
         if web_context:
             messages.append({"role": "user", "content": f"[网络搜索结果]\n{web_context}"})
             messages.append({"role": "assistant", "content": "我已获取最新的网络搜索结果。"})
 
         for msg in history:
-            messages.append({
-                "role": msg.get("role", "user"),
-                "content": msg.get("content", "") if isinstance(msg.get("content"), str) else str(msg.get("content", ""))
-            })
+            messages.append(
+                {
+                    "role": msg.get("role", "user"),
+                    "content": msg.get("content", "")
+                    if isinstance(msg.get("content"), str)
+                    else str(msg.get("content", "")),
+                }
+            )
 
         if self.config.enable_layer2_cache and len(messages) > 1:
             messages[-1]["cache_control"] = {"type": CacheBreakpoint.EPHEMERAL.value}
@@ -114,9 +123,7 @@ class ContextCacheOptimizer:
         return messages
 
     def _build_deterministic_system(
-        self,
-        base_prompt: str,
-        tools: Optional[List[Dict[str, Any]]] = None
+        self, base_prompt: str, tools: list[dict[str, Any]] | None = None
     ) -> str:
         """Build byte-identical system prompt for cache stability."""
         parts = [base_prompt.strip()]
@@ -137,10 +144,7 @@ class ContextCacheOptimizer:
         return system_content
 
     def calculate_cache_savings(
-        self,
-        total_tokens: int,
-        cached_tokens: int,
-        provider: str
+        self, total_tokens: int, cached_tokens: int, provider: str
     ) -> float:
         """Calculate estimated cost savings from cache hits."""
         pricing = {
@@ -150,16 +154,13 @@ class ContextCacheOptimizer:
 
         rates = pricing.get(provider, pricing["dashscope"])
         full_cost = (total_tokens / 1_000_000) * rates["uncached"]
-        actual_cost = (cached_tokens / 1_000_000) * rates["cached"] + \
-                      ((total_tokens - cached_tokens) / 1_000_000) * rates["uncached"]
+        actual_cost = (cached_tokens / 1_000_000) * rates["cached"] + (
+            (total_tokens - cached_tokens) / 1_000_000
+        ) * rates["uncached"]
 
         return full_cost - actual_cost
 
-    def parse_cache_metrics(
-        self,
-        response_usage: Dict[str, Any],
-        provider: str
-    ) -> CacheMetrics:
+    def parse_cache_metrics(self, response_usage: dict[str, Any], provider: str) -> CacheMetrics:
         """Extract cache metrics from LLM API response."""
         metrics = CacheMetrics()
 
@@ -175,9 +176,7 @@ class ContextCacheOptimizer:
             metrics.cache_hit_rate = metrics.cached_tokens / metrics.total_input_tokens
 
         metrics.estimated_savings_usd = self.calculate_cache_savings(
-            metrics.total_input_tokens,
-            metrics.cached_tokens,
-            provider
+            metrics.total_input_tokens, metrics.cached_tokens, provider
         )
         metrics.system_prefix_hash = self._system_prefix_hash or ""
 

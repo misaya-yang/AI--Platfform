@@ -12,13 +12,13 @@ import hashlib
 import logging
 import os
 from functools import lru_cache
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Try to import cryptography, fall back to no encryption if not available
 try:
     from cryptography.fernet import Fernet, InvalidToken
+
     CRYPTOGRAPHY_AVAILABLE = True
 except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
@@ -39,7 +39,7 @@ def _derive_fernet_key(secret: str) -> bytes:
 
 
 @lru_cache(maxsize=1)
-def _get_fernet(encryption_key: str) -> Optional["Fernet"]:
+def _get_fernet(encryption_key: str) -> Fernet | None:
     """Get cached Fernet instance for the given key."""
     if not CRYPTOGRAPHY_AVAILABLE:
         return None
@@ -146,6 +146,7 @@ def is_encrypted(value: str) -> bool:
 # URL Signing for Secure Image Access
 # =============================================================================
 
+
 def sign_url(url: str, secret_key: str, expiry_seconds: int = 3600) -> str:
     """
     Sign a URL with HMAC-SHA256 for secure access.
@@ -166,9 +167,9 @@ def sign_url(url: str, secret_key: str, expiry_seconds: int = 3600) -> str:
     Example:
         file:///path/to/image.png?expires=1704067200&sig=abc123...
     """
-    import time
     import hmac
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    import time
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
     if not url or not secret_key:
         return url
@@ -195,14 +196,16 @@ def sign_url(url: str, secret_key: str, expiry_seconds: int = 3600) -> str:
 
     # Reconstruct URL with signature
     new_query = urlencode(query_params, doseq=True)
-    signed_url = urlunparse((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        parsed.params,
-        new_query,
-        parsed.fragment,
-    ))
+    signed_url = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment,
+        )
+    )
 
     return signed_url
 
@@ -225,9 +228,9 @@ def verify_signed_url(url: str, secret_key: str) -> tuple[bool, str]:
         if not valid:
             raise HTTPException(403, error)
     """
-    import time
     import hmac
-    from urllib.parse import urlparse, parse_qs
+    import time
+    from urllib.parse import parse_qs, urlparse
 
     if not url:
         return False, "Empty URL"
@@ -285,7 +288,7 @@ def get_unsigned_url(url: str) -> str:
     Returns:
         URL without signature parameters
     """
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
     if not url:
         return url
@@ -299,11 +302,13 @@ def get_unsigned_url(url: str) -> str:
 
     # Reconstruct URL
     new_query = urlencode(query_params, doseq=True) if query_params else ""
-    return urlunparse((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        parsed.params,
-        new_query,
-        parsed.fragment,
-    ))
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment,
+        )
+    )

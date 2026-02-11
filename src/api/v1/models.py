@@ -5,19 +5,18 @@ REST endpoints for managing LLM models.
 """
 
 from decimal import Decimal
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ...core.auth.user_resolver import UserContext
+from ...services.assistant.model_registry import ModelRegistry
+from ...services.llm.model_service import ModelService
 from ..deps import get_user_context
 from ..schemas.providers import (
     ModelCreate,
-    ModelUpdate,
     ModelResponse,
+    ModelUpdate,
 )
-from ...core.auth.user_resolver import UserContext
-from ...services.llm.model_service import ModelService
-from ...services.assistant.model_registry import ModelRegistry
 
 router = APIRouter()
 
@@ -46,7 +45,7 @@ def get_model_service(request: Request) -> ModelService:
 
 @router.get("/models", response_model=list[ModelResponse])
 async def list_models(
-    provider_id: Optional[str] = Query(None, description="Filter by provider"),
+    provider_id: str | None = Query(None, description="Filter by provider"),
     include_disabled: bool = Query(False, description="Include disabled models"),
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
@@ -104,8 +103,7 @@ async def create_model(
 
         # Refresh model registry to reflect changes in assistant
         await model_registry.load_models_from_database(
-            model_service,
-            tenant_id=user.tenant_id or "default"
+            model_service, tenant_id=user.tenant_id or "default"
         )
 
         return model
@@ -145,8 +143,12 @@ async def update_model(
         raise HTTPException(status_code=403, detail="Admin permission required")
 
     # Convert price fields to Decimal if provided
-    input_price = Decimal(str(body.input_price_per_1k)) if body.input_price_per_1k is not None else None
-    output_price = Decimal(str(body.output_price_per_1k)) if body.output_price_per_1k is not None else None
+    input_price = (
+        Decimal(str(body.input_price_per_1k)) if body.input_price_per_1k is not None else None
+    )
+    output_price = (
+        Decimal(str(body.output_price_per_1k)) if body.output_price_per_1k is not None else None
+    )
 
     model = await model_service.update_model(
         tenant_id=user.tenant_id or "default",
@@ -167,8 +169,7 @@ async def update_model(
 
     # Refresh model registry to reflect changes in assistant
     await model_registry.load_models_from_database(
-        model_service,
-        tenant_id=user.tenant_id or "default"
+        model_service, tenant_id=user.tenant_id or "default"
     )
 
     return model
@@ -195,8 +196,7 @@ async def delete_model(
 
     # Refresh model registry to reflect changes in assistant
     await model_registry.load_models_from_database(
-        model_service,
-        tenant_id=user.tenant_id or "default"
+        model_service, tenant_id=user.tenant_id or "default"
     )
 
     return {"model_id": model_id, "status": "deleted"}
@@ -225,8 +225,7 @@ async def toggle_model(
 
     # Refresh model registry to reflect changes in assistant
     await model_registry.load_models_from_database(
-        model_service,
-        tenant_id=user.tenant_id or "default"
+        model_service, tenant_id=user.tenant_id or "default"
     )
 
     return model

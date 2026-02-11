@@ -4,7 +4,6 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Optional
 
 from ...models.service import ServiceDefinition
 from .service_registry import ServiceRegistry
@@ -16,15 +15,15 @@ class HealthStatus:
     status: str
     latency: float = 0.0
     last_check: datetime = field(default_factory=datetime.utcnow)
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class HealthMonitor:
     def __init__(self, registry: ServiceRegistry, check_interval: int = 30):
         self.registry = registry
         self.check_interval = check_interval
-        self._health_status: Dict[str, HealthStatus] = {}
-        self._task: Optional[asyncio.Task] = None
+        self._health_status: dict[str, HealthStatus] = {}
+        self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
         if self._task is None:
@@ -65,8 +64,8 @@ class HealthMonitor:
                 error=str(exc),
             )
 
-    def get_status(self, service_id: str) -> Optional[HealthStatus]:
+    def get_status(self, service_id: str) -> HealthStatus | None:
         return self._health_status.get(service_id)
 
-    def all_status(self) -> Dict[str, HealthStatus]:
+    def all_status(self) -> dict[str, HealthStatus]:
         return dict(self._health_status)

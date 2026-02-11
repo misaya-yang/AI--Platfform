@@ -3,10 +3,12 @@ Test all 9 chunking modes to verify they work correctly with user config.
 """
 
 import sys
-sys.path.insert(0, '/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/src')
+
+sys.path.insert(0, "/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/src")
 
 # Direct import to avoid complex dependency chain
 import importlib.util
+
 spec = importlib.util.spec_from_file_location(
     "chunking",
     "/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/src/services/knowledge/chunking.py",
@@ -47,55 +49,64 @@ In conclusion, we have covered the main topics.
 Final thoughts and future directions are discussed here.
 """
 
+
 def test_chunking_mode(mode: ChunkingMode, config: ChunkingConfig):
     """Test a single chunking mode."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Testing: {mode.value}")
     print(f"Config: token_limit={config.token_limit}, use_token_count={config.use_token_count}")
-    print('='*60)
-    
+    print("=" * 60)
+
     try:
         # Set the mode
         config.mode = mode
-        
+
         # Create chunker
         chunker = create_chunker(config)
         print(f"Chunker: {chunker.__class__.__name__}")
-        
+
         # Process text
         chunks = chunker.chunk(SAMPLE_TEXT)
         flat_chunks = flatten_chunks(chunks)
-        
+
         print(f"Generated {len(flat_chunks)} chunks")
-        
+
         # Show chunk stats
         if flat_chunks:
             token_counts = [c.token_count for c in flat_chunks]
             char_counts = [len(c.text) for c in flat_chunks]
-            print(f"Token counts: min={min(token_counts)}, max={max(token_counts)}, avg={sum(token_counts)/len(token_counts):.1f}")
-            print(f"Char counts: min={min(char_counts)}, max={max(char_counts)}, avg={sum(char_counts)/len(char_counts):.1f}")
-            
+            print(
+                f"Token counts: min={min(token_counts)}, max={max(token_counts)}, avg={sum(token_counts) / len(token_counts):.1f}"
+            )
+            print(
+                f"Char counts: min={min(char_counts)}, max={max(char_counts)}, avg={sum(char_counts) / len(char_counts):.1f}"
+            )
+
             # Check if respecting token_limit
             if config.use_token_count:
-                exceeding = sum(1 for t in token_counts if t > config.token_limit * 1.2)  # 20% tolerance
+                exceeding = sum(
+                    1 for t in token_counts if t > config.token_limit * 1.2
+                )  # 20% tolerance
                 if exceeding > 0:
                     print(f"⚠️  WARNING: {exceeding} chunks exceed token_limit by >20%")
                 else:
                     print(f"✅ All chunks within token_limit ({config.token_limit})")
-        
+
         return True, len(flat_chunks)
-        
+
     except Exception as e:
         print(f"❌ ERROR: {e}")
         import traceback
+
         traceback.print_exc()
         return False, 0
 
+
 def main():
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("TESTING ALL CHUNKING MODES WITH USER CONFIG (400 tokens)")
-    print("="*70)
-    
+    print("=" * 70)
+
     # User config: 400 tokens
     user_config = ChunkingConfig(
         token_limit=400,
@@ -104,7 +115,7 @@ def main():
         max_chunk_tokens=400,
         chunk_overlap=50,
     )
-    
+
     modes_to_test = [
         ChunkingMode.AUTOMATIC,
         ChunkingMode.FIXED_SIZE,
@@ -118,30 +129,30 @@ def main():
         ChunkingMode.QA,
         # Note: ISLAMIC mode requires special import
     ]
-    
+
     results = []
     for mode in modes_to_test:
         success, count = test_chunking_mode(mode, user_config)
         results.append((mode.value, success, count))
-    
+
     # Summary
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("SUMMARY")
-    print("="*70)
+    print("=" * 70)
     print(f"{'Mode':<20} {'Status':<10} {'Chunks':<10}")
-    print("-"*40)
+    print("-" * 40)
     for mode, success, count in results:
         status = "✅ PASS" if success else "❌ FAIL"
         print(f"{mode:<20} {status:<10} {count:<10}")
-    
+
     passed = sum(1 for _, s, _ in results if s)
     total = len(results)
     print(f"\nTotal: {passed}/{total} modes passed")
-    
+
     # Check Islamic mode separately
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("ISLAMIC MODE (requires islamic_chunking module)")
-    print("="*70)
+    print("=" * 70)
     try:
         islamic_config = ChunkingConfig(
             mode=ChunkingMode.ISLAMIC,
@@ -152,6 +163,7 @@ def main():
         print(f"✅ Islamic chunker loaded: {chunker.__class__.__name__}")
     except Exception as e:
         print(f"⚠️  Islamic chunker not available: {e}")
+
 
 if __name__ == "__main__":
     main()

@@ -9,11 +9,9 @@ LangGraph 适配器优化测试
 - HTTP 连接池设置
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-
 
 # ============ 操作类型检测测试 ============
+
 
 class TestOperationTypeDetection:
     """LangGraph API 操作类型检测测试"""
@@ -23,14 +21,20 @@ class TestOperationTypeDetection:
         from src.proxy.transparent_proxy import TransparentProxy
 
         assert TransparentProxy.detect_operation_type("POST", "/runs/stream") == "run_stream"
-        assert TransparentProxy.detect_operation_type("POST", "/threads/abc123/runs/stream") == "run_stream"
+        assert (
+            TransparentProxy.detect_operation_type("POST", "/threads/abc123/runs/stream")
+            == "run_stream"
+        )
 
     def test_detect_run_wait(self):
         """测试检测 run wait 操作"""
         from src.proxy.transparent_proxy import TransparentProxy
 
         assert TransparentProxy.detect_operation_type("POST", "/runs/wait") == "run_wait"
-        assert TransparentProxy.detect_operation_type("POST", "/threads/abc123/runs/wait") == "run_wait"
+        assert (
+            TransparentProxy.detect_operation_type("POST", "/threads/abc123/runs/wait")
+            == "run_wait"
+        )
 
     def test_detect_thread_operations(self):
         """测试检测 thread 操作"""
@@ -38,15 +42,21 @@ class TestOperationTypeDetection:
 
         assert TransparentProxy.detect_operation_type("POST", "/threads") == "thread_create"
         assert TransparentProxy.detect_operation_type("GET", "/threads/abc123") == "thread_read"
-        assert TransparentProxy.detect_operation_type("DELETE", "/threads/abc123") == "thread_delete"
+        assert (
+            TransparentProxy.detect_operation_type("DELETE", "/threads/abc123") == "thread_delete"
+        )
 
     def test_detect_assistant_operations(self):
         """测试检测 assistant 操作"""
         from src.proxy.transparent_proxy import TransparentProxy
 
         assert TransparentProxy.detect_operation_type("GET", "/assistants") == "assistant_list"
-        assert TransparentProxy.detect_operation_type("POST", "/assistants/search") == "assistant_list"
-        assert TransparentProxy.detect_operation_type("GET", "/assistants/abc123") == "assistant_read"
+        assert (
+            TransparentProxy.detect_operation_type("POST", "/assistants/search") == "assistant_list"
+        )
+        assert (
+            TransparentProxy.detect_operation_type("GET", "/assistants/abc123") == "assistant_read"
+        )
 
     def test_detect_store_operations(self):
         """测试检测 store 操作"""
@@ -64,6 +74,7 @@ class TestOperationTypeDetection:
 
 
 # ============ 流式路径检测测试 ============
+
 
 class TestStreamingPathDetection:
     """流式路径检测测试"""
@@ -100,6 +111,7 @@ class TestStreamingPathDetection:
 
 
 # ============ 上下文头注入测试 ============
+
 
 class TestContextHeaderInjection:
     """上下文头注入测试"""
@@ -175,6 +187,7 @@ class TestContextHeaderInjection:
 
 # ============ Redis 缓存测试 ============
 
+
 class TestRedisCaching:
     """Redis 缓存测试"""
 
@@ -211,6 +224,7 @@ class TestRedisCaching:
 
 # ============ HTTP 连接池测试 ============
 
+
 class TestHTTPConnectionPool:
     """HTTP 连接池优化设置测试"""
 
@@ -233,6 +247,7 @@ class TestHTTPConnectionPool:
 
 
 # ============ LangGraph Proxy 缓存测试 ============
+
 
 class TestLangGraphProxyCaching:
     """LangGraph Proxy 两级缓存测试"""

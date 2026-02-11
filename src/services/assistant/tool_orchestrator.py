@@ -40,16 +40,17 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 from .task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
-    from .tools.tool_registry import ToolRegistry, ToolCallRequest
-    from .tool_invoker import ToolInvoker, ToolInvocationContext
+    from .tool_invoker import ToolInvocationContext, ToolInvoker
+    from .tools.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -91,10 +92,10 @@ class ToolExecutionResult:
     tool: str
     success: bool
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     duration_ms: float = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Serialize result to dictionary for JSON serialization.
 
@@ -111,7 +112,7 @@ class ToolExecutionResult:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ToolExecutionResult":
+    def from_dict(cls, data: dict[str, Any]) -> ToolExecutionResult:
         """
         Deserialize result from dictionary.
 
@@ -184,14 +185,14 @@ class ToolOrchestrator:
     """
 
     # Pattern for matching parameter references like ${task_id.result} or ${task_id.field}
-    PARAM_REF_PATTERN = re.compile(r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}')
+    PARAM_REF_PATTERN = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}")
 
     def __init__(
         self,
-        tool_registry: Optional["ToolRegistry"] = None,
-        tool_invoker: Optional["ToolInvoker"] = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_invoker: ToolInvoker | None = None,
         max_parallel: int = 5,
-        invocation_context: Optional["ToolInvocationContext"] = None,
+        invocation_context: ToolInvocationContext | None = None,
     ):
         """
         Initialize the ToolOrchestrator.
@@ -216,6 +217,7 @@ class ToolOrchestrator:
         # If no invoker provided, create one from registry or default
         if self.tool_invoker is None:
             from .tool_invoker import create_tool_invoker
+
             self.tool_invoker = create_tool_invoker(tool_registry=tool_registry)
 
         logger.info(f"ToolOrchestrator initialized with max_parallel={max_parallel}")
@@ -224,7 +226,7 @@ class ToolOrchestrator:
         self,
         plan: ExecutionPlan,
         working_memory: WorkingMemory,
-        invocation_context: Optional["ToolInvocationContext"] = None,
+        invocation_context: ToolInvocationContext | None = None,
     ) -> AsyncGenerator[ToolExecutionResult, None]:
         """
         Execute plan respecting dependencies, yielding results as they complete.
@@ -255,7 +257,7 @@ class ToolOrchestrator:
         )
 
         # Track results from all completed tasks for parameter resolution
-        prior_results: Dict[str, ToolExecutionResult] = {}
+        prior_results: dict[str, ToolExecutionResult] = {}
 
         # Set the goal in working memory
         if plan.goal:
@@ -268,8 +270,7 @@ class ToolOrchestrator:
         # Process each parallel group sequentially
         for group_index, group_task_ids in enumerate(plan.parallel_groups):
             logger.debug(
-                f"Processing group {group_index + 1}/{len(plan.parallel_groups)}: "
-                f"{group_task_ids}"
+                f"Processing group {group_index + 1}/{len(plan.parallel_groups)}: {group_task_ids}"
             )
 
             # Get the PlannedTask objects for this group
@@ -315,10 +316,10 @@ class ToolOrchestrator:
 
     async def _execute_parallel(
         self,
-        tasks: List[PlannedTask],
-        prior_results: Dict[str, ToolExecutionResult],
+        tasks: list[PlannedTask],
+        prior_results: dict[str, ToolExecutionResult],
         working_memory: WorkingMemory,
-        invocation_context: Optional["ToolInvocationContext"] = None,
+        invocation_context: ToolInvocationContext | None = None,
     ) -> AsyncGenerator[ToolExecutionResult, None]:
         """
         Execute a group of tasks in parallel using asyncio.as_completed.
@@ -340,7 +341,7 @@ class ToolOrchestrator:
 
         # Create a task for each planned task
         # We need to map asyncio.Task back to PlannedTask for result association
-        async_tasks: Dict[asyncio.Task, PlannedTask] = {}
+        async_tasks: dict[asyncio.Task, PlannedTask] = {}
 
         for planned_task in tasks:
             # Mark task as in progress
@@ -368,7 +369,9 @@ class ToolOrchestrator:
                 # (as_completed may return wrapped futures)
                 if planned_task is None:
                     for task, pt in async_tasks.items():
-                        if task is coro or (hasattr(task, '_coro') and task._coro is getattr(coro, '_coro', None)):
+                        if task is coro or (
+                            hasattr(task, "_coro") and task._coro is getattr(coro, "_coro", None)
+                        ):
                             planned_task = pt
                             break
 
@@ -389,8 +392,8 @@ class ToolOrchestrator:
     async def _execute_single_task(
         self,
         task: PlannedTask,
-        prior_results: Dict[str, ToolExecutionResult],
-        invocation_context: Optional["ToolInvocationContext"] = None,
+        prior_results: dict[str, ToolExecutionResult],
+        invocation_context: ToolInvocationContext | None = None,
     ) -> ToolExecutionResult:
         """
         Execute a single task with semaphore protection.
@@ -416,8 +419,7 @@ class ToolOrchestrator:
                 resolved_params = self._resolve_params(task.parameters, prior_results)
 
                 logger.debug(
-                    f"Executing task {task.id}: tool={task.tool}, "
-                    f"params={resolved_params}"
+                    f"Executing task {task.id}: tool={task.tool}, params={resolved_params}"
                 )
 
                 # Execute via ToolInvoker (unified execution layer)
@@ -443,6 +445,7 @@ class ToolOrchestrator:
                         "This may affect audit trails and multi-tenant isolation."
                     )
                     from .tool_invoker import ToolInvocationContext
+
                     fallback_context = ToolInvocationContext(
                         session_id=f"orchestrator_{task.id}",
                         user_id="system",
@@ -482,9 +485,9 @@ class ToolOrchestrator:
 
     def _resolve_params(
         self,
-        params: Dict[str, Any],
-        prior_results: Dict[str, ToolExecutionResult],
-    ) -> Dict[str, Any]:
+        params: dict[str, Any],
+        prior_results: dict[str, ToolExecutionResult],
+    ) -> dict[str, Any]:
         """
         Resolve parameter references like ${task_1.result} in task parameters.
 
@@ -511,7 +514,7 @@ class ToolOrchestrator:
             # Returns params with ${...} replaced by actual values
             ```
         """
-        resolved: Dict[str, Any] = {}
+        resolved: dict[str, Any] = {}
 
         for key, value in params.items():
             resolved[key] = self._resolve_value(value, prior_results)
@@ -521,7 +524,7 @@ class ToolOrchestrator:
     def _resolve_value(
         self,
         value: Any,
-        prior_results: Dict[str, ToolExecutionResult],
+        prior_results: dict[str, ToolExecutionResult],
     ) -> Any:
         """
         Recursively resolve references in a value.
@@ -546,7 +549,7 @@ class ToolOrchestrator:
     def _resolve_string(
         self,
         value: str,
-        prior_results: Dict[str, ToolExecutionResult],
+        prior_results: dict[str, ToolExecutionResult],
     ) -> Any:
         """
         Resolve parameter references in a string value.
@@ -565,7 +568,7 @@ class ToolOrchestrator:
             The resolved value (may be any type if entire string is a reference)
         """
         # Check if the entire string is a single reference
-        single_ref_match = re.fullmatch(r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}', value)
+        single_ref_match = re.fullmatch(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\.([\w.]+)\}", value)
         if single_ref_match:
             task_id = single_ref_match.group(1)
             field_path = single_ref_match.group(2)
@@ -588,7 +591,7 @@ class ToolOrchestrator:
         self,
         task_id: str,
         field_path: str,
-        prior_results: Dict[str, ToolExecutionResult],
+        prior_results: dict[str, ToolExecutionResult],
     ) -> Any:
         """
         Get the value for a reference like task_id.field_path.
@@ -607,7 +610,7 @@ class ToolOrchestrator:
             return None
 
         # Split field path and navigate
-        fields = field_path.split('.')
+        fields = field_path.split(".")
         current = result
 
         for field in fields:
@@ -617,8 +620,7 @@ class ToolOrchestrator:
                 current = current[field]
             else:
                 logger.warning(
-                    f"Cannot resolve field '{field}' in reference "
-                    f"${{{task_id}.{field_path}}}"
+                    f"Cannot resolve field '{field}' in reference ${{{task_id}.{field_path}}}"
                 )
                 return None
 
@@ -631,10 +633,10 @@ class ToolOrchestrator:
 
 
 def create_tool_orchestrator(
-    tool_registry: Optional["ToolRegistry"] = None,
-    tool_invoker: Optional["ToolInvoker"] = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_invoker: ToolInvoker | None = None,
     max_parallel: int = 5,
-    invocation_context: Optional["ToolInvocationContext"] = None,
+    invocation_context: ToolInvocationContext | None = None,
 ) -> ToolOrchestrator:
     """
     Factory function to create a ToolOrchestrator instance.

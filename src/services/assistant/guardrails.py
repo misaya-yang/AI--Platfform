@@ -20,15 +20,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class IssueSeverity(str, Enum):
     """Severity levels for quality issues."""
 
     CRITICAL = "critical"  # Must be fixed, blocks output
-    WARNING = "warning"    # Should be fixed, doesn't block
-    INFO = "info"          # Informational only
+    WARNING = "warning"  # Should be fixed, doesn't block
+    INFO = "info"  # Informational only
 
 
 class DocumentType(str, Enum):
@@ -61,9 +61,9 @@ class QualityIssue:
     message: str
     severity: IssueSeverity
     action: str
-    location: Optional[str] = None
+    location: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "type": self.type,
@@ -74,7 +74,7 @@ class QualityIssue:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "QualityIssue":
+    def from_dict(cls, data: dict[str, Any]) -> QualityIssue:
         """Deserialize from dictionary."""
         return cls(
             type=data["type"],
@@ -98,7 +98,7 @@ class ValidationResult:
     """
 
     passed: bool
-    issues: List[QualityIssue]
+    issues: list[QualityIssue]
     score: float
     validated_at: datetime = field(default_factory=datetime.now)
 
@@ -110,13 +110,11 @@ class ValidationResult:
         """Check if there are any warnings."""
         return any(i.severity == IssueSeverity.WARNING for i in self.issues)
 
-    def get_issues_by_severity(
-        self, severity: IssueSeverity
-    ) -> List[QualityIssue]:
+    def get_issues_by_severity(self, severity: IssueSeverity) -> list[QualityIssue]:
         """Get all issues of a specific severity."""
         return [i for i in self.issues if i.severity == severity]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {
             "passed": self.passed,
@@ -130,7 +128,7 @@ class ValidationResult:
 # Hardcoded Quality Thresholds (Guardrails)
 # =============================================================================
 
-QUALITY_THRESHOLDS: Dict[DocumentType, Dict[str, Any]] = {
+QUALITY_THRESHOLDS: dict[DocumentType, dict[str, Any]] = {
     DocumentType.PPT: {
         "min_slides": 10,
         "min_words_total": 1500,
@@ -175,7 +173,7 @@ QUALITY_THRESHOLDS: Dict[DocumentType, Dict[str, Any]] = {
 # Banned Phrases (Guardrails)
 # =============================================================================
 
-BANNED_PHRASES: List[str] = [
+BANNED_PHRASES: list[str] = [
     # Chinese vague expressions
     "等等",
     "诸如此类",
@@ -205,7 +203,7 @@ BANNED_PHRASES: List[str] = [
 # Tool Constraints (Guardrails)
 # =============================================================================
 
-TOOL_CONSTRAINTS: Dict[str, Dict[str, Any]] = {
+TOOL_CONSTRAINTS: dict[str, dict[str, Any]] = {
     "generate_document": {
         "requires_content_first": True,
         "min_content_length": 500,
@@ -230,7 +228,7 @@ class ToolCallValidation:
 
     allowed: bool
     reason: str
-    suggestions: List[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
 
 
 class ToolConstraintValidator:
@@ -243,7 +241,7 @@ class ToolConstraintValidator:
 
     def __init__(
         self,
-        custom_constraints: Optional[Dict[str, Dict[str, Any]]] = None,
+        custom_constraints: dict[str, dict[str, Any]] | None = None,
     ):
         """Initialize with optional custom constraints."""
         self.constraints = {**TOOL_CONSTRAINTS}
@@ -253,8 +251,8 @@ class ToolConstraintValidator:
     def validate_tool_call(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
-        context: Dict[str, Any],
+        arguments: dict[str, Any],
+        context: dict[str, Any],
     ) -> ToolCallValidation:
         """
         Validate a tool call against constraints.
@@ -296,13 +294,12 @@ class ToolConstraintValidator:
                 )
 
         # Check outline requirement
-        if constraints.get("requires_outline_first"):
-            if not context.get("has_outline"):
-                return ToolCallValidation(
-                    allowed=False,
-                    reason="Outline required before generating presentation",
-                    suggestions=["Create an outline first"],
-                )
+        if constraints.get("requires_outline_first") and not context.get("has_outline"):
+            return ToolCallValidation(
+                allowed=False,
+                reason="Outline required before generating presentation",
+                suggestions=["Create an outline first"],
+            )
 
         # Check minimum slides
         min_slides = constraints.get("min_slides", 0)
@@ -340,8 +337,8 @@ class QualityGuardrails:
 
     def __init__(
         self,
-        custom_thresholds: Optional[Dict[DocumentType, Dict[str, Any]]] = None,
-        custom_banned_phrases: Optional[List[str]] = None,
+        custom_thresholds: dict[DocumentType, dict[str, Any]] | None = None,
+        custom_banned_phrases: list[str] | None = None,
     ):
         """
         Initialize the guardrails validator.
@@ -377,7 +374,7 @@ class QualityGuardrails:
         Returns:
             ValidationResult with pass/fail status and issues
         """
-        issues: List[QualityIssue] = []
+        issues: list[QualityIssue] = []
 
         # Get thresholds for this document type
         thresholds = self.thresholds.get(doc_type, {})
@@ -387,34 +384,40 @@ class QualityGuardrails:
         min_words = thresholds.get("min_words", thresholds.get("min_words_total", 0))
 
         if min_words > 0 and word_count < min_words:
-            issues.append(QualityIssue(
-                type="insufficient_content",
-                message=f"内容不足：{word_count}字 < {min_words}字最低要求",
-                severity=IssueSeverity.CRITICAL,
-                action="expand_content",
-            ))
+            issues.append(
+                QualityIssue(
+                    type="insufficient_content",
+                    message=f"内容不足：{word_count}字 < {min_words}字最低要求",
+                    severity=IssueSeverity.CRITICAL,
+                    action="expand_content",
+                )
+            )
 
         # Check section count
         min_sections = thresholds.get("min_sections", 0)
         if min_sections > 0:
             section_count = self._count_sections(content)
             if section_count < min_sections:
-                issues.append(QualityIssue(
-                    type="insufficient_sections",
-                    message=f"章节不足：{section_count}个 < {min_sections}个最低要求",
-                    severity=IssueSeverity.CRITICAL,
-                    action="add_sections",
-                ))
+                issues.append(
+                    QualityIssue(
+                        type="insufficient_sections",
+                        message=f"章节不足：{section_count}个 < {min_sections}个最低要求",
+                        severity=IssueSeverity.CRITICAL,
+                        action="add_sections",
+                    )
+                )
 
         # Check banned phrases
         for phrase in self.banned_phrases:
             if phrase in content:
-                issues.append(QualityIssue(
-                    type="vague_expression",
-                    message=f"发现模糊表达：'{phrase}'",
-                    severity=IssueSeverity.WARNING,
-                    action="replace_vague",
-                ))
+                issues.append(
+                    QualityIssue(
+                        type="vague_expression",
+                        message=f"发现模糊表达：'{phrase}'",
+                        severity=IssueSeverity.WARNING,
+                        action="replace_vague",
+                    )
+                )
 
         # Calculate score
         score = self._calculate_score(content, thresholds, issues)
@@ -435,28 +438,28 @@ class QualityGuardrails:
         Handles both Chinese (character-based) and English (space-separated).
         """
         # Remove markdown formatting
-        clean = re.sub(r'[#*`~\[\](){}|]', '', content)
+        clean = re.sub(r"[#*`~\[\](){}|]", "", content)
         # Remove extra whitespace
-        clean = re.sub(r'\s+', ' ', clean).strip()
+        clean = re.sub(r"\s+", " ", clean).strip()
 
         # For Chinese, count characters (excluding spaces and punctuation)
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', clean))
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", clean))
         # For English, count words
-        english_words = len(re.findall(r'[a-zA-Z]+', clean))
+        english_words = len(re.findall(r"[a-zA-Z]+", clean))
 
         return chinese_chars + english_words
 
     def _count_sections(self, content: str) -> int:
         """Count sections in markdown content."""
         # Count markdown headers (# ## ### etc.)
-        headers = re.findall(r'^#{1,6}\s+.+$', content, re.MULTILINE)
+        headers = re.findall(r"^#{1,6}\s+.+$", content, re.MULTILINE)
         return len(headers)
 
     def _calculate_score(
         self,
         content: str,
-        thresholds: Dict[str, Any],
-        issues: List[QualityIssue],
+        thresholds: dict[str, Any],
+        issues: list[QualityIssue],
     ) -> float:
         """
         Calculate quality score from 0.0 to 1.0.
@@ -473,7 +476,7 @@ class QualityGuardrails:
         if min_words > 0:
             word_count = self._count_words(content)
             word_ratio = min(word_count / min_words, 1.0)
-            score *= (0.6 + 0.4 * word_ratio)
+            score *= 0.6 + 0.4 * word_ratio
 
         # Issue penalty
         critical_count = sum(1 for i in issues if i.severity == IssueSeverity.CRITICAL)

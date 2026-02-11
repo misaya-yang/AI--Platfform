@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .islamic_metadata import get_authority_order, IslamicMetadataExtractor
+from .islamic_metadata import IslamicMetadataExtractor, get_authority_order
 
 
-def _parse_metadata(segment: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_metadata(segment: dict[str, Any]) -> dict[str, Any]:
     """Parse segment metadata, handling both dict and JSON string formats."""
     metadata = segment.get("metadata", {})
     if isinstance(metadata, str):
@@ -43,7 +43,7 @@ def _parse_json_field(value: Any) -> Any:
     return value
 
 
-def _get_source_type(segment: Dict[str, Any], metadata: Dict[str, Any]) -> str:
+def _get_source_type(segment: dict[str, Any], metadata: dict[str, Any]) -> str:
     """Extract source_type from segment or its metadata."""
     return (
         segment.get("source_type")
@@ -59,7 +59,7 @@ class CitationFormatter:
     def __init__(self):
         self._extractor = IslamicMetadataExtractor()
 
-    def format_citation(self, segment: Dict[str, Any]) -> Optional[str]:
+    def format_citation(self, segment: dict[str, Any]) -> str | None:
         """Format a single citation from segment data.
 
         Uses pre-computed citation_text if available, otherwise generates from metadata.
@@ -88,7 +88,9 @@ class CitationFormatter:
                     "abu dawud",
                 )
             )
-            missing_hadith_label = looks_like_hadith and "hadith" not in lower and "book" not in lower
+            missing_hadith_label = (
+                looks_like_hadith and "hadith" not in lower and "book" not in lower
+            )
             quran_missing_ref = "quran" in lower and not re.search(r"quran\s+\d+:\d+", lower)
             fiqh_missing_school = (
                 "jurisprudence according to the four sunni schools" in lower
@@ -107,8 +109,12 @@ class CitationFormatter:
                 return normalized
 
         doc_meta = {
-            "title": metadata.get("source_document") or metadata.get("document_title") or metadata.get("title"),
-            "name": metadata.get("source_document") or metadata.get("document_title") or metadata.get("name"),
+            "title": metadata.get("source_document")
+            or metadata.get("document_title")
+            or metadata.get("title"),
+            "name": metadata.get("source_document")
+            or metadata.get("document_title")
+            or metadata.get("name"),
             "section_title": metadata.get("section_title"),
             "paragraph_index": metadata.get("paragraph_index"),
             "chunk_index": metadata.get("chunk_index"),
@@ -118,12 +124,11 @@ class CitationFormatter:
         # Generate from metadata
         source_type_str = _get_source_type(segment, metadata)
         source_ref = _parse_json_field(
-            segment.get("source_reference")
-            or metadata.get("source_reference")
-            or {}
+            segment.get("source_reference") or metadata.get("source_reference") or {}
         )
 
         from .islamic_chunking import IslamicSourceType
+
         if source_type_str in ("unknown", "general_islamic"):
             detected = self._extractor.detect_source_type(
                 str(segment.get("text") or ""), doc_title=doc_meta.get("title")
@@ -137,6 +142,7 @@ class CitationFormatter:
         # If we lack structured reference, try to re-extract from text + doc_meta
         text_value = str(segment.get("text") or "").strip()
         if text_value:
+
             def _needs_reextract() -> bool:
                 if not source_ref or source_ref == {}:
                     return True
@@ -157,7 +163,9 @@ class CitationFormatter:
             if _needs_reextract():
                 regenerated = self._extractor.extract(text_value, doc_meta)
                 source_ref = _parse_json_field(regenerated.get("source_reference") or {})
-                if source_type_str in ("unknown", "general_islamic") and regenerated.get("source_type"):
+                if source_type_str in ("unknown", "general_islamic") and regenerated.get(
+                    "source_type"
+                ):
                     try:
                         source_type = IslamicSourceType(regenerated["source_type"])
                     except ValueError:
@@ -165,27 +173,33 @@ class CitationFormatter:
 
         # Normalize Bulugh Al-Maram references (avoid "Book" in citation)
         if isinstance(source_ref, dict):
-            if source_ref.get("collection") == "Bulugh Al-Maram" and not source_ref.get("hadith_number"):
+            if source_ref.get("collection") == "Bulugh Al-Maram" and not source_ref.get(
+                "hadith_number"
+            ):
                 if source_ref.get("book"):
                     source_ref["hadith_number"] = source_ref.get("book")
                 source_ref.pop("book", None)
 
         # Persist improved source_type for downstream authority sort
         existing_type = str(segment.get("source_type") or "").lower()
-        if source_type != IslamicSourceType.UNKNOWN and existing_type in ("", "unknown", "general_islamic"):
+        if source_type != IslamicSourceType.UNKNOWN and existing_type in (
+            "",
+            "unknown",
+            "general_islamic",
+        ):
             segment["source_type"] = source_type.value
 
         result = self._extractor.format_citation(source_type, source_ref, doc_meta=doc_meta)
 
         if (not result or not str(result).strip()) and citation:
             result = str(citation).strip()
-        
+
         # Return None for empty/whitespace-only results
         if result and str(result).strip():
             return str(result).strip()
         return None
 
-    def format_citation_block(self, segments: List[Dict[str, Any]]) -> str:
+    def format_citation_block(self, segments: list[dict[str, Any]]) -> str:
         """Format a complete citation block from multiple segments.
 
         Returns a markdown-formatted citation block sorted by authority.
@@ -204,35 +218,34 @@ class CitationFormatter:
             return ""
 
         lines = ["**Sources:**"]
-        for i, citation in enumerate(citations, 1):
+        for _i, citation in enumerate(citations, 1):
             lines.append(f"- {citation}")
 
         return "\n".join(lines)
 
-    def sort_by_authority(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def sort_by_authority(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Sort segments by Islamic authority order.
 
         Quran (1) > Hadith (2) > Tafseer (3) > Fiqh (4) > Others (5+)
         """
-        def sort_key(seg: Dict[str, Any]) -> int:
+
+        def sort_key(seg: dict[str, Any]) -> int:
             metadata = _parse_metadata(seg)
             source_type = _get_source_type(seg, metadata)
             return get_authority_order(source_type)
 
         return sorted(segments, key=sort_key)
 
-    def group_by_source(self, segments: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    def group_by_source(self, segments: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         """Group segments by source type for structured display."""
-        groups: Dict[str, List[Dict[str, Any]]] = {}
+        groups: dict[str, list[dict[str, Any]]] = {}
         for seg in segments:
             metadata = _parse_metadata(seg)
             source_type = _get_source_type(seg, metadata)
             groups.setdefault(source_type, []).append(seg)
         return groups
 
-    def enrich_results_with_citations(
-        self, results: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    def enrich_results_with_citations(self, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich retrieval results with citation information.
 
         Adds citation_text, source_type to results that don't already have them.

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
 
 from ...core.observability.logging import get_logger
 
@@ -30,7 +29,7 @@ FILE_STORAGE_PATH = Path(os.getenv("FILE_STORAGE_PATH", "./uploads")).expanduser
 class DocumentParseError(Exception):
     """Raised when document parsing fails."""
 
-    def __init__(self, message: str, file_path: str, original_error: Optional[Exception] = None):
+    def __init__(self, message: str, file_path: str, original_error: Exception | None = None):
         self.file_path = file_path
         self.original_error = original_error
         super().__init__(message)
@@ -49,7 +48,7 @@ class DocumentParser:
     """
 
     # Supported file types with their MIME types
-    SUPPORTED_TYPES: Dict[str, str] = {
+    SUPPORTED_TYPES: dict[str, str] = {
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ".doc": "application/msword",
@@ -61,7 +60,7 @@ class DocumentParser:
         ".htm": "text/html",
     }
 
-    def __init__(self, storage_base_path: Optional[Path] = None):
+    def __init__(self, storage_base_path: Path | None = None):
         """
         Initialize the document parser.
 
@@ -120,11 +119,9 @@ class DocumentParser:
             try:
                 actual_path.relative_to(base_path)
             except ValueError:
-                logger.warning(
-                    f"[Security] Path traversal attempt detected: {file_path}"
-                )
+                logger.warning(f"[Security] Path traversal attempt detected: {file_path}")
                 raise DocumentParseError(
-                    f"Invalid file path: path must be within storage directory",
+                    "Invalid file path: path must be within storage directory",
                     file_path=file_path,
                 )
 
@@ -187,9 +184,7 @@ class DocumentParser:
         # Validate file extension
         ext = self._validate_extension(actual_path)
 
-        logger.info(
-            f"[DocumentParser] Parsing file: {file_path} -> {actual_path}, type={ext}"
-        )
+        logger.info(f"[DocumentParser] Parsing file: {file_path} -> {actual_path}, type={ext}")
 
         try:
             if partition is None:
@@ -215,9 +210,7 @@ class DocumentParser:
             return result
 
         except ImportError as e:
-            logger.error(
-                f"[DocumentParser] unstructured library not installed: {e}"
-            )
+            logger.error(f"[DocumentParser] unstructured library not installed: {e}")
             raise DocumentParseError(
                 "Document parsing requires the 'unstructured' library. "
                 "Install with: pip install unstructured[all-docs]",
@@ -261,7 +254,7 @@ class DocumentParser:
         ext = Path(file_path).suffix.lower()
         return ext in self.SUPPORTED_TYPES
 
-    def get_mime_type(self, file_path: str) -> Optional[str]:
+    def get_mime_type(self, file_path: str) -> str | None:
         """
         Get the MIME type for a file based on its extension.
 
@@ -276,7 +269,7 @@ class DocumentParser:
 
 
 # Convenience function for one-off parsing
-async def parse_document(file_path: str, storage_base_path: Optional[Path] = None) -> str:
+async def parse_document(file_path: str, storage_base_path: Path | None = None) -> str:
     """
     Parse a document and return its text content.
 

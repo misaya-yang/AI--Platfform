@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class ConfluenceCredentials:
     """Confluence 认证凭据"""
+
     domain: str  # e.g., 'yourcompany.atlassian.net'
     email: str
     api_token: str
@@ -39,19 +40,20 @@ class ConfluenceCredentials:
 @dataclass
 class ConfluencePage:
     """Confluence 页面数据"""
+
     page_id: str
     space_key: str
     title: str
     version: int
     body_storage: str  # Storage format (XHTML-like)
-    body_text: Optional[str] = None  # Plain text (if converted)
-    parent_id: Optional[str] = None
-    web_url: Optional[str] = None
-    author_id: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    labels: List[str] = field(default_factory=list)
-    space_id: Optional[str] = None
+    body_text: str | None = None  # Plain text (if converted)
+    parent_id: str | None = None
+    web_url: str | None = None
+    author_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    labels: list[str] = field(default_factory=list)
+    space_id: str | None = None
 
     @property
     def content_hash(self) -> str:
@@ -59,7 +61,7 @@ class ConfluencePage:
         content = f"{self.title}:{self.version}:{self.body_storage}"
         return hashlib.sha256(content.encode()).hexdigest()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "page_id": self.page_id,
@@ -82,15 +84,16 @@ class ConfluencePage:
 @dataclass
 class ConfluenceSpace:
     """Confluence 空间数据"""
+
     space_id: str
     space_key: str
     name: str
     type: str  # global, personal
     status: str  # current, archived
-    homepage_id: Optional[str] = None
-    description: Optional[str] = None
+    homepage_id: str | None = None
+    description: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "space_id": self.space_id,
@@ -106,17 +109,18 @@ class ConfluenceSpace:
 @dataclass
 class SyncResult:
     """同步结果"""
+
     total_pages: int = 0
     synced_pages: int = 0
     skipped_pages: int = 0
     failed_pages: int = 0
-    created_documents: List[str] = field(default_factory=list)
-    updated_documents: List[str] = field(default_factory=list)
-    deleted_documents: List[str] = field(default_factory=list)
-    errors: List[Dict[str, Any]] = field(default_factory=list)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    task_id: Optional[str] = None
+    created_documents: list[str] = field(default_factory=list)
+    updated_documents: list[str] = field(default_factory=list)
+    deleted_documents: list[str] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    task_id: str | None = None
 
     @property
     def success_rate(self) -> float:
@@ -130,7 +134,7 @@ class SyncResult:
         """是否有错误"""
         return len(self.errors) > 0 or self.failed_pages > 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "task_id": self.task_id,
@@ -152,6 +156,7 @@ class SyncResult:
 @dataclass
 class ConfluenceConnection:
     """Confluence 连接配置"""
+
     connection_id: str
     tenant_id: str
     name: str
@@ -161,11 +166,11 @@ class ConfluenceConnection:
     sync_mode: str = "manual"  # manual | polling
     polling_interval_minutes: int = 60
     status: str = "active"  # active | disabled | error
-    last_sync_at: Optional[datetime] = None
-    last_error: Optional[str] = None
-    created_by: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    last_sync_at: datetime | None = None
+    last_error: str | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def to_credentials(self) -> ConfluenceCredentials:
         """转换为认证凭据"""
@@ -179,57 +184,60 @@ class ConfluenceConnection:
 @dataclass
 class ConfluenceSpaceBinding:
     """Confluence 空间绑定"""
+
     binding_id: str
     connection_id: str
     dataset_id: str
     space_key: str
-    space_id: Optional[str] = None
-    space_name: Optional[str] = None
-    include_patterns: List[str] = field(default_factory=list)
-    exclude_patterns: List[str] = field(default_factory=list)
+    space_id: str | None = None
+    space_name: str | None = None
+    include_patterns: list[str] = field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)
     max_depth: int = 10
     include_attachments: bool = False
     include_comments: bool = False
     status: str = "pending"  # pending | syncing | completed | error
-    last_sync_at: Optional[datetime] = None
+    last_sync_at: datetime | None = None
     synced_page_count: int = 0
     total_page_count: int = 0
-    last_error: Optional[str] = None
-    created_by: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    last_error: str | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass
 class ConfluencePageRecord:
     """Confluence 页面同步记录"""
+
     id: str
     binding_id: str
-    document_id: Optional[str]
+    document_id: str | None
     page_id: str
     space_key: str
     title: str
     version: int
-    content_hash: Optional[str] = None
-    parent_page_id: Optional[str] = None
+    content_hash: str | None = None
+    parent_page_id: str | None = None
     depth: int = 0
     status: str = "pending"  # pending | synced | error | deleted
-    last_synced_at: Optional[datetime] = None
-    confluence_updated_at: Optional[datetime] = None
-    error: Optional[str] = None
-    labels: List[str] = field(default_factory=list)
-    web_url: Optional[str] = None
-    author: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    last_synced_at: datetime | None = None
+    confluence_updated_at: datetime | None = None
+    error: str | None = None
+    labels: list[str] = field(default_factory=list)
+    web_url: str | None = None
+    author: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass
 class ConfluenceSyncTask:
     """Confluence 同步任务"""
+
     task_id: str
-    binding_id: Optional[str]
-    page_id: Optional[str]
+    binding_id: str | None
+    page_id: str | None
     task_type: str  # full_sync | incremental_sync | page_sync | page_delete
     priority: int = 0
     status: str = "pending"  # pending | processing | completed | failed
@@ -238,31 +246,39 @@ class ConfluenceSyncTask:
     progress: float = 0.0
     total_items: int = 0
     processed_items: int = 0
-    error: Optional[str] = None
-    result: Optional[Dict[str, Any]] = None
-    created_at: Optional[datetime] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    error: str | None = None
+    result: dict[str, Any] | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 @dataclass
 class ConfluenceAttachment:
     """Confluence 附件数据"""
+
     attachment_id: str
     page_id: str
     filename: str
     media_type: str
     file_size: int
     download_link: str
-    title: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    comment: Optional[str] = None
+    title: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    comment: str | None = None
 
     @property
     def is_image(self) -> bool:
         """判断是否为图片类型"""
-        image_types = {"image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp", "image/svg+xml"}
+        image_types = {
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/bmp",
+            "image/webp",
+            "image/svg+xml",
+        }
         return self.media_type.lower() in image_types
 
     @property
@@ -273,7 +289,7 @@ class ConfluenceAttachment:
         embeddable_types = {"image/jpeg", "image/png", "image/bmp", "image/webp"}
         return self.media_type.lower() in embeddable_types and self.file_size <= max_size
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "attachment_id": self.attachment_id,
@@ -294,6 +310,7 @@ class ConfluenceAttachment:
 @dataclass
 class ImageSegment:
     """图片段数据（用于向量化存储）"""
+
     segment_id: str
     document_id: str
     attachment_id: str
@@ -301,14 +318,14 @@ class ImageSegment:
     media_type: str
     file_size: int
     storage_url: str  # S3/OSS URL
-    vector_id: Optional[str] = None
-    alt_text: Optional[str] = None
-    ocr_text: Optional[str] = None
-    context_text: Optional[str] = None  # Surrounding text from page
-    vlm_description: Optional[str] = None  # VLM-generated image description for RAG
-    embedding: Optional[List[float]] = None  # Multimodal embedding vector
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    created_at: Optional[datetime] = None
+    vector_id: str | None = None
+    alt_text: str | None = None
+    ocr_text: str | None = None
+    context_text: str | None = None  # Surrounding text from page
+    vlm_description: str | None = None  # VLM-generated image description for RAG
+    embedding: list[float] | None = None  # Multimodal embedding vector
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
 
     @property
     def has_embedding(self) -> bool:
@@ -322,7 +339,7 @@ class ImageSegment:
             return len(self.embedding)
         return 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "segment_id": self.segment_id,

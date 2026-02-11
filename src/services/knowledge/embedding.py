@@ -6,8 +6,9 @@ import logging
 import math
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence
+from typing import Any
 
 import httpx
 
@@ -17,14 +18,14 @@ import httpx
 # =============================================================================
 class SensitiveDataFilter(logging.Filter):
     """Filter that redacts sensitive information like API keys from log records."""
-    
+
     # Patterns to redact
     _PATTERNS = [
-        (re.compile(r'Bearer\s+[a-zA-Z0-9_-]+'), 'Bearer ***'),
-        (re.compile(r'api_key[=:]\s*[a-zA-Z0-9_-]+'), 'api_key=***'),
-        (re.compile(r'key[=:]\s*[a-zA-Z0-9_-]+'), 'key=***'),
+        (re.compile(r"Bearer\s+[a-zA-Z0-9_-]+"), "Bearer ***"),
+        (re.compile(r"api_key[=:]\s*[a-zA-Z0-9_-]+"), "api_key=***"),
+        (re.compile(r"key[=:]\s*[a-zA-Z0-9_-]+"), "key=***"),
     ]
-    
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact sensitive data from log message."""
         if isinstance(record.msg, str):
@@ -32,7 +33,7 @@ class SensitiveDataFilter(logging.Filter):
         if record.args:
             record.args = tuple(self._redact(str(arg)) for arg in record.args)
         return True
-    
+
     def _redact(self, text: str) -> str:
         """Apply all redaction patterns."""
         for pattern, replacement in self._PATTERNS:
@@ -51,16 +52,18 @@ logger.addFilter(SensitiveDataFilter())
 # Centralized list of embedding models that support multimodal (image) content.
 # Used by assistant API to identify multimodal knowledge bases.
 
-MULTIMODAL_EMBEDDING_MODELS: FrozenSet[str] = frozenset({
-    # DashScope multimodal models
-    "multimodal-embedding-v1",
-    "multimodal-embedding-one-peace-v1",
-    "multimodal-embedding-one-peace",
-    # Tongyi unified vision models
-    "tongyi-embedding-vision-plus",
-    # Qwen VL models
-    "qwen2.5-vl-embedding",
-})
+MULTIMODAL_EMBEDDING_MODELS: frozenset[str] = frozenset(
+    {
+        # DashScope multimodal models
+        "multimodal-embedding-v1",
+        "multimodal-embedding-one-peace-v1",
+        "multimodal-embedding-one-peace",
+        # Tongyi unified vision models
+        "tongyi-embedding-vision-plus",
+        # Qwen VL models
+        "qwen2.5-vl-embedding",
+    }
+)
 
 
 def is_multimodal_embedding_model(model_name: str) -> bool:
@@ -83,10 +86,10 @@ class EmbeddingError(RuntimeError):
 class EmbeddingConfig:
     provider: str
     model: str
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    api_key: str | None = None
+    base_url: str | None = None
     timeout_seconds: float = 30.0
-    extra: Dict[str, Any] = None
+    extra: dict[str, Any] = None
 
     def __post_init__(self):
         object.__setattr__(self, "extra", self.extra or {})
@@ -99,11 +102,11 @@ class BaseEmbedding(ABC):
         self,
         provider: str,
         model: str,
-        dimension: Optional[int] = None,
+        dimension: int | None = None,
     ):
         self.provider = provider
         self.model = model
-        self._dimension: Optional[int] = dimension
+        self._dimension: int | None = dimension
 
     @property
     def dimension(self) -> int:
@@ -120,7 +123,7 @@ class BaseEmbedding(ABC):
     async def close(self) -> None:
         return None
 
-    async def embed_query(self, query: str) -> List[float]:
+    async def embed_query(self, query: str) -> list[float]:
         # Check cache first
         cached = get_cached_query_embedding(self.provider, self.model, query)
         if cached is not None:
@@ -132,16 +135,16 @@ class BaseEmbedding(ABC):
         set_cached_query_embedding(self.provider, self.model, query, result)
         return result
 
-    async def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return await self.embed_texts(list(texts), text_type="document")
 
     @abstractmethod
     async def embed_texts(
-        self, texts: List[str], text_type: Optional[str] = None
-    ) -> List[List[float]]:
+        self, texts: list[str], text_type: str | None = None
+    ) -> list[list[float]]:
         raise NotImplementedError
 
-    async def embed_images(self, images: List[bytes]) -> List[List[float]]:  # pragma: no cover
+    async def embed_images(self, images: list[bytes]) -> list[list[float]]:  # pragma: no cover
         raise EmbeddingError(f"{self.provider}:{self.model} does not support image embedding")
 
 
@@ -167,13 +170,13 @@ class GeminiEmbedding(BaseEmbedding):
         query_vector = await embedder.embed_query("search query")
     """
 
-    MODEL_DIMENSIONS: Dict[str, int] = {
+    MODEL_DIMENSIONS: dict[str, int] = {
         "gemini-embedding-001": 768,  # Default, but configurable up to 3072
-        "text-embedding-004": 768,    # Vertex AI model
+        "text-embedding-004": 768,  # Vertex AI model
     }
 
     # Task types for retrieval optimization
-    TASK_TYPES: Dict[str, str] = {
+    TASK_TYPES: dict[str, str] = {
         "query": "RETRIEVAL_QUERY",
         "document": "RETRIEVAL_DOCUMENT",
         "similarity": "SEMANTIC_SIMILARITY",
@@ -195,7 +198,7 @@ class GeminiEmbedding(BaseEmbedding):
         api_key: str,
         model: str = "gemini-embedding-001",
         dimension: int = 1024,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
     ):
         """
@@ -224,7 +227,7 @@ class GeminiEmbedding(BaseEmbedding):
         """Close the HTTP client."""
         await self._client.aclose()
 
-    async def embed_query(self, query: str) -> List[float]:
+    async def embed_query(self, query: str) -> list[float]:
         """Embed a query using RETRIEVAL_QUERY task type."""
         # Check cache first
         cached = get_cached_query_embedding(self.provider, self.model, query)
@@ -240,9 +243,9 @@ class GeminiEmbedding(BaseEmbedding):
 
     async def embed_texts(
         self,
-        texts: List[str],
-        text_type: Optional[str] = None,
-    ) -> List[List[float]]:
+        texts: list[str],
+        text_type: str | None = None,
+    ) -> list[list[float]]:
         """
         Embed texts using Gemini API.
 
@@ -260,10 +263,10 @@ class GeminiEmbedding(BaseEmbedding):
         task_type = self.TASK_TYPES.get(text_type or "document", "RETRIEVAL_DOCUMENT")
 
         # Process in batches
-        all_vectors: List[List[float]] = []
+        all_vectors: list[list[float]] = []
 
         for i in range(0, len(texts), self.MAX_BATCH_SIZE):
-            batch = texts[i:i + self.MAX_BATCH_SIZE]
+            batch = texts[i : i + self.MAX_BATCH_SIZE]
             batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
 
             vectors = await self._embed_batch_with_retry(batch, task_type, batch_info)
@@ -273,16 +276,17 @@ class GeminiEmbedding(BaseEmbedding):
 
     async def _embed_batch_with_retry(
         self,
-        texts: List[str],
+        texts: list[str],
         task_type: str,
         batch_info: str,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """Embed a batch of texts with retry logic."""
         import logging
         import re
+
         logger = logging.getLogger(__name__)
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -308,7 +312,8 @@ class GeminiEmbedding(BaseEmbedding):
             # Exponential backoff
             if attempt < self.MAX_RETRIES - 1:
                 import random
-                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+
+                delay = self.RETRY_BASE_DELAY * (2**attempt)
 
                 # Respect server-provided retry delay if present (e.g., 429 quota errors)
                 retry_match = re.search(r'"retryDelay"\s*:\s*"(\d+)s"', str(last_error or ""))
@@ -324,9 +329,9 @@ class GeminiEmbedding(BaseEmbedding):
 
     async def _embed_batch(
         self,
-        texts: List[str],
+        texts: list[str],
         task_type: str,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """Call Gemini embedContent API for a batch of texts."""
         # Build request for batch embedding
         # Gemini API: POST /v1beta/models/{model}:batchEmbedContents
@@ -354,9 +359,7 @@ class GeminiEmbedding(BaseEmbedding):
         )
 
         if response.status_code >= 400:
-            raise EmbeddingError(
-                f"Gemini API error: {response.status_code} - {response.text}"
-            )
+            raise EmbeddingError(f"Gemini API error: {response.status_code} - {response.text}")
 
         data = response.json()
 
@@ -365,7 +368,7 @@ class GeminiEmbedding(BaseEmbedding):
         if not embeddings:
             raise EmbeddingError("Gemini API returned no embeddings")
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for emb in embeddings:
             values = emb.get("values", [])
             if not values:
@@ -395,7 +398,7 @@ class DashScopeEmbedding(BaseEmbedding):
     - Max ~6000 characters per text (safe estimate)
     """
 
-    MODEL_DIMENSIONS: Dict[str, int] = {
+    MODEL_DIMENSIONS: dict[str, int] = {
         "text-embedding-v1": 1536,
         "text-embedding-v2": 1536,
         "text-embedding-v3": 1024,
@@ -405,10 +408,10 @@ class DashScopeEmbedding(BaseEmbedding):
     # Max characters per text (conservative: ~2.5 chars/token)
     # DashScope v1/v2: max 2048 tokens, v3: max 8192 tokens
     # But in practice, shorter is safer to avoid InvalidParameter errors
-    MODEL_MAX_CHARS: Dict[str, int] = {
+    MODEL_MAX_CHARS: dict[str, int] = {
         "text-embedding-v1": 4000,
         "text-embedding-v2": 4000,
-        "text-embedding-v3": 8000,   # More conservative for v3
+        "text-embedding-v3": 8000,  # More conservative for v3
         "text-embedding-v4": 8000,
     }
 
@@ -425,20 +428,27 @@ class DashScopeEmbedding(BaseEmbedding):
         self,
         model: str,
         api_key: str,
-        dimension: Optional[int] = None,
-        base_url: Optional[str] = None,
+        dimension: int | None = None,
+        base_url: str | None = None,
     ):
         # Try to lookup dimension, fallback to 1024 if model not recognized
-        dim = dimension or self.MODEL_DIMENSIONS.get(model) or self.MODEL_DIMENSIONS.get(model.lower()) or 1024
+        dim = (
+            dimension
+            or self.MODEL_DIMENSIONS.get(model)
+            or self.MODEL_DIMENSIONS.get(model.lower())
+            or 1024
+        )
         super().__init__(provider="dashscope", model=model, dimension=dim)
         if not api_key:
             raise EmbeddingError("DashScope api_key is required")
         self.api_key = api_key
         self.base_url = base_url
-        self.max_chars = self.MODEL_MAX_CHARS.get(model) or self.MODEL_MAX_CHARS.get(model.lower()) or 6000
+        self.max_chars = (
+            self.MODEL_MAX_CHARS.get(model) or self.MODEL_MAX_CHARS.get(model.lower()) or 6000
+        )
         try:
-            from dashscope import TextEmbedding  # type: ignore
             import dashscope
+            from dashscope import TextEmbedding  # type: ignore
 
             self._TextEmbedding = TextEmbedding
             # Set base URL if provided (careful: this is global)
@@ -456,7 +466,7 @@ class DashScopeEmbedding(BaseEmbedding):
         text = text.strip()
         if len(text) > self.max_chars:
             # Truncate at word boundary if possible
-            truncated = text[:self.max_chars]
+            truncated = text[: self.max_chars]
             last_space = truncated.rfind(" ")
             if last_space > self.max_chars * 0.8:  # Keep at least 80% of content
                 truncated = truncated[:last_space]
@@ -467,34 +477,35 @@ class DashScopeEmbedding(BaseEmbedding):
         """Clean text to avoid API errors."""
         if not text:
             return "empty"  # DashScope doesn't accept empty strings
-        
+
         # Remove NULL bytes and control characters
         text = text.replace("\x00", "")
         # Remove other control characters except newline/tab
         text = "".join(c if c.isprintable() or c in "\n\t" else " " for c in text)
-        
+
         # Normalize line endings
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-        
+
         # Collapse multiple newlines and spaces
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        text = re.sub(r'[ \t]{2,}', ' ', text)
-        text = re.sub(r'\n[ \t]+', '\n', text)  # Remove leading spaces on lines
-        
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)  # Remove leading spaces on lines
+
         # Remove very long sequences of repeated characters (often from PDF extraction errors)
-        text = re.sub(r'(.)\1{20,}', r'\1\1\1', text)
-        
+        text = re.sub(r"(.)\1{20,}", r"\1\1\1", text)
+
         text = text.strip()
         return text if text else "empty"
 
     async def _call_with_retry(
-        self, batch: List[str], batch_info: str, **kwargs: Any
-    ) -> List[List[float]]:
+        self, batch: list[str], batch_info: str, **kwargs: Any
+    ) -> list[list[float]]:
         """Call DashScope API with retry and exponential backoff."""
         import logging
+
         logger = logging.getLogger(__name__)
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -555,29 +566,31 @@ class DashScopeEmbedding(BaseEmbedding):
 
             # Exponential backoff before retry
             if attempt < self.MAX_RETRIES - 1:
-                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+                delay = self.RETRY_BASE_DELAY * (2**attempt)
                 await asyncio.sleep(delay)
 
         # All retries exhausted
-        raise last_error or EmbeddingError(f"DashScope embedding failed after {self.MAX_RETRIES} attempts ({batch_info})")
+        raise last_error or EmbeddingError(
+            f"DashScope embedding failed after {self.MAX_RETRIES} attempts ({batch_info})"
+        )
 
     async def embed_texts(
-        self, texts: List[str], text_type: Optional[str] = None
-    ) -> List[List[float]]:
+        self, texts: list[str], text_type: str | None = None
+    ) -> list[list[float]]:
         if not texts:
             return []
 
         # Sanitize and truncate all texts
         processed_texts = [self._truncate_text(self._sanitize_text(t)) for t in texts]
 
-        kwargs: Dict[str, Any] = {}
+        kwargs: dict[str, Any] = {}
         if text_type in {"query", "document"}:
             kwargs["text_type"] = text_type
 
         # Process in batches of MAX_BATCH_SIZE
-        all_vectors: List[List[float]] = []
+        all_vectors: list[list[float]] = []
         for i in range(0, len(processed_texts), self.MAX_BATCH_SIZE):
-            batch = processed_texts[i:i + self.MAX_BATCH_SIZE]
+            batch = processed_texts[i : i + self.MAX_BATCH_SIZE]
             batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}, texts {i}-{i + len(batch) - 1}"
 
             try:
@@ -613,7 +626,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
     - Supported formats: JPEG, PNG, GIF, BMP, WebP
     """
 
-    MODEL_DIMENSIONS: Dict[str, int] = {
+    MODEL_DIMENSIONS: dict[str, int] = {
         "multimodal-embedding-v1": 1024,
         "multimodal-embedding-one-peace": 1536,
         "tongyi-embedding-vision-plus": 1024,  # Unified to 1024
@@ -625,16 +638,20 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
     # Supported image MIME types
     SUPPORTED_MEDIA_TYPES = {
-        "image/jpeg", "image/jpg", "image/png",
-        "image/gif", "image/bmp", "image/webp"
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/gif",
+        "image/bmp",
+        "image/webp",
     }
 
     def __init__(
         self,
         model: str = "multimodal-embedding-v1",
         api_key: str = "",
-        dimension: Optional[int] = None,
-        base_url: Optional[str] = None,
+        dimension: int | None = None,
+        base_url: str | None = None,
     ):
         dim = dimension or self.MODEL_DIMENSIONS.get(model) or 1024
         super().__init__(provider="dashscope_multimodal", model=model, dimension=dim)
@@ -644,8 +661,8 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         self.base_url = base_url
 
         try:
-            from dashscope import MultiModalEmbedding  # type: ignore
             import dashscope
+            from dashscope import MultiModalEmbedding  # type: ignore
 
             self._MultiModalEmbedding = MultiModalEmbedding
             if base_url:
@@ -663,6 +680,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
     def _image_to_base64_data_uri(self, image_bytes: bytes, media_type: str = "image/png") -> str:
         """Convert image bytes to base64 data URI format."""
         import base64
+
         b64_data = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{media_type};base64,{b64_data}"
 
@@ -672,22 +690,22 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
             return "image/png"  # Default
 
         # Check magic bytes
-        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
             return "image/png"
-        elif image_bytes[:2] == b'\xff\xd8':
+        elif image_bytes[:2] == b"\xff\xd8":
             return "image/jpeg"
-        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+        elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
             return "image/gif"
-        elif image_bytes[:2] == b'BM':
+        elif image_bytes[:2] == b"BM":
             return "image/bmp"
-        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+        elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
             return "image/webp"
         else:
             return "image/png"  # Default fallback
 
     async def embed_texts(
-        self, texts: List[str], text_type: Optional[str] = None
-    ) -> List[List[float]]:
+        self, texts: list[str], text_type: str | None = None
+    ) -> list[list[float]]:
         """Embed text using multimodal model.
 
         Note: While this model supports text, it's primarily designed for images.
@@ -696,7 +714,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         if not texts:
             return []
 
-        all_vectors: List[List[float]] = []
+        all_vectors: list[list[float]] = []
 
         for text in texts:
             try:
@@ -732,9 +750,9 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
     async def embed_images(
         self,
-        images: List[bytes],
+        images: list[bytes],
         max_concurrent: int = 5,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """Embed images using DashScope multimodal embedding API.
 
         Supports concurrent processing with configurable parallelism.
@@ -762,7 +780,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         # Use semaphore for concurrent rate limiting
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def embed_single_image(idx: int, image_bytes: bytes) -> List[float]:
+        async def embed_single_image(idx: int, image_bytes: bytes) -> list[float]:
             """Embed a single image with semaphore-based rate limiting."""
             async with semaphore:
                 try:
@@ -810,10 +828,8 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         return list(all_vectors)
 
     async def embed_image_and_text(
-        self,
-        image_bytes: bytes,
-        text: Optional[str] = None
-    ) -> List[float]:
+        self, image_bytes: bytes, text: str | None = None
+    ) -> list[float]:
         """Embed an image with optional text context.
 
         This combines image and text into a single multimodal embedding,
@@ -836,7 +852,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
             data_uri = self._image_to_base64_data_uri(image_bytes, media_type)
 
             # Build input with image and optional text
-            input_items: List[Dict[str, str]] = [{"image": data_uri}]
+            input_items: list[dict[str, str]] = [{"image": data_uri}]
             if text:
                 input_items.append({"text": text})
 
@@ -868,7 +884,7 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
         except Exception as exc:
             raise EmbeddingError(f"DashScope multimodal embedding error: {exc}") from exc
 
-    def _parse_multimodal_output(self, output: Any) -> List[List[float]]:
+    def _parse_multimodal_output(self, output: Any) -> list[list[float]]:
         """Parse DashScope multimodal embedding output."""
         if output is None:
             raise EmbeddingError("DashScope multimodal response missing output")
@@ -883,11 +899,9 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
             output = embeddings_list
 
         if not isinstance(output, list):
-            raise EmbeddingError(
-                f"Unexpected DashScope multimodal output type: {type(output)}"
-            )
+            raise EmbeddingError(f"Unexpected DashScope multimodal output type: {type(output)}")
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for entry in output:
             if isinstance(entry, dict):
                 vec = entry.get("embedding") or entry.get("vector")
@@ -907,17 +921,17 @@ class LocalHashEmbedding(BaseEmbedding):
 
     DEFAULT_DIMENSION = 384
 
-    def __init__(self, model: str, dimension: Optional[int] = None):
+    def __init__(self, model: str, dimension: int | None = None):
         dim = dimension or _infer_local_dimension(model) or self.DEFAULT_DIMENSION
         super().__init__(provider="local", model=model, dimension=dim)
 
     async def embed_texts(
-        self, texts: List[str], text_type: Optional[str] = None
-    ) -> List[List[float]]:
+        self, texts: list[str], text_type: str | None = None
+    ) -> list[list[float]]:
         if not texts:
             return []
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         dim = self.dimension
         token_re = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 
@@ -937,7 +951,7 @@ class LocalHashEmbedding(BaseEmbedding):
         return vectors
 
 
-def _infer_local_dimension(model: str) -> Optional[int]:
+def _infer_local_dimension(model: str) -> int | None:
     if not model:
         return None
     match = re.search(r"(\d{2,5})", model)
@@ -949,7 +963,7 @@ def _infer_local_dimension(model: str) -> Optional[int]:
         return None
 
 
-def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
+def _parse_dashscope_embeddings(output: Any) -> list[list[float]]:
     """Best-effort parser for DashScope embedding outputs."""
     if output is None:
         raise EmbeddingError("DashScope embeddings response missing output")
@@ -963,16 +977,20 @@ def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
             or output.get("output")
         )
         if isinstance(candidates, dict):
-            candidates = candidates.get("embeddings") or candidates.get("data") or candidates.get("results")
+            candidates = (
+                candidates.get("embeddings") or candidates.get("data") or candidates.get("results")
+            )
         if candidates is None:
-            raise EmbeddingError(f"Unexpected DashScope embeddings output keys: {list(output.keys())}")
+            raise EmbeddingError(
+                f"Unexpected DashScope embeddings output keys: {list(output.keys())}"
+            )
         output = candidates
 
     if not isinstance(output, list):
         raise EmbeddingError(f"Unexpected DashScope embeddings output type: {type(output)}")
 
-    items: List[Dict[str, Any]] = []
-    vectors: List[List[float]] = []
+    items: list[dict[str, Any]] = []
+    vectors: list[list[float]] = []
     for entry in output:
         if isinstance(entry, dict):
             items.append(entry)
@@ -981,7 +999,8 @@ def _parse_dashscope_embeddings(output: Any) -> List[List[float]]:
 
     # If dict items exist, sort by index if present.
     if items:
-        def _idx(d: Dict[str, Any]) -> int:
+
+        def _idx(d: dict[str, Any]) -> int:
             for k in ("index", "text_index", "id"):
                 v = d.get(k)
                 if isinstance(v, int):
@@ -1024,7 +1043,7 @@ class SiliconFlowEmbedding(BaseEmbedding):
     - netease-youdao/bce-embedding-base_v1: 512 dimensions
     """
 
-    MODEL_DIMENSIONS: Dict[str, int] = {
+    MODEL_DIMENSIONS: dict[str, int] = {
         "BAAI/bge-m3": 1024,
         "Pro/BAAI/bge-m3": 1024,
         "BAAI/bge-large-zh-v1.5": 1024,
@@ -1044,8 +1063,8 @@ class SiliconFlowEmbedding(BaseEmbedding):
         self,
         api_key: str,
         model: str = "BAAI/bge-large-zh-v1.5",
-        dimension: Optional[int] = None,
-        base_url: Optional[str] = None,
+        dimension: int | None = None,
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
     ):
         """Initialize SiliconFlow Embedding.
@@ -1077,9 +1096,9 @@ class SiliconFlowEmbedding(BaseEmbedding):
 
     async def embed_texts(
         self,
-        texts: List[str],
-        text_type: Optional[str] = None,
-    ) -> List[List[float]]:
+        texts: list[str],
+        text_type: str | None = None,
+    ) -> list[list[float]]:
         """Embed texts using SiliconFlow API.
 
         Args:
@@ -1093,10 +1112,10 @@ class SiliconFlowEmbedding(BaseEmbedding):
             return []
 
         # Process in batches
-        all_vectors: List[List[float]] = []
+        all_vectors: list[list[float]] = []
 
         for i in range(0, len(texts), self.MAX_BATCH_SIZE):
-            batch = texts[i:i + self.MAX_BATCH_SIZE]
+            batch = texts[i : i + self.MAX_BATCH_SIZE]
             batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
 
             vectors = await self._embed_batch_with_retry(batch, batch_info)
@@ -1106,14 +1125,15 @@ class SiliconFlowEmbedding(BaseEmbedding):
 
     async def _embed_batch_with_retry(
         self,
-        texts: List[str],
+        texts: list[str],
         batch_info: str,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """Embed a batch of texts with retry logic."""
         import logging
+
         logger = logging.getLogger(__name__)
 
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
 
         for attempt in range(self.MAX_RETRIES):
             try:
@@ -1139,7 +1159,8 @@ class SiliconFlowEmbedding(BaseEmbedding):
             # Exponential backoff
             if attempt < self.MAX_RETRIES - 1:
                 import random
-                delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+
+                delay = self.RETRY_BASE_DELAY * (2**attempt)
                 delay = delay + random.uniform(0.0, min(0.3, delay))
                 await asyncio.sleep(delay)
 
@@ -1149,8 +1170,8 @@ class SiliconFlowEmbedding(BaseEmbedding):
 
     async def _embed_batch(
         self,
-        texts: List[str],
-    ) -> List[List[float]]:
+        texts: list[str],
+    ) -> list[list[float]]:
         """Call SiliconFlow embeddings API for a batch of texts."""
         payload = {
             "model": self.model,
@@ -1167,9 +1188,7 @@ class SiliconFlowEmbedding(BaseEmbedding):
         )
 
         if response.status_code >= 400:
-            raise EmbeddingError(
-                f"SiliconFlow API error: {response.status_code} - {response.text}"
-            )
+            raise EmbeddingError(f"SiliconFlow API error: {response.status_code} - {response.text}")
 
         data = response.json()
 
@@ -1178,7 +1197,7 @@ class SiliconFlowEmbedding(BaseEmbedding):
         if not embeddings:
             raise EmbeddingError("SiliconFlow API returned no embeddings")
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for emb in embeddings:
             values = emb.get("embedding", [])
             if not values:
@@ -1194,17 +1213,16 @@ class SiliconFlowEmbedding(BaseEmbedding):
 # =============================================================================
 # Embedder Cache - Singleton per config to reuse HTTP connections
 # =============================================================================
-_embedder_cache: Dict[str, BaseEmbedding] = {}
+_embedder_cache: dict[str, BaseEmbedding] = {}
 _embedder_cache_lock = asyncio.Lock()
 
 # =============================================================================
 # Query Embedding Cache - LRU cache for query embeddings to avoid recomputation
 # =============================================================================
-from functools import lru_cache
-from collections import OrderedDict
 import threading
+from collections import OrderedDict
 
-_query_embedding_cache: OrderedDict[str, List[float]] = OrderedDict()
+_query_embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
 _query_cache_lock = threading.Lock()
 _QUERY_CACHE_MAX_SIZE = 500  # Max cached queries
 
@@ -1214,7 +1232,7 @@ def _get_query_cache_key(provider: str, model: str, query: str) -> str:
     return f"{provider}:{model}:{hashlib.md5(query.encode()).hexdigest()}"
 
 
-def get_cached_query_embedding(provider: str, model: str, query: str) -> Optional[List[float]]:
+def get_cached_query_embedding(provider: str, model: str, query: str) -> list[float] | None:
     """Get cached query embedding if exists."""
     key = _get_query_cache_key(provider, model, query)
     with _query_cache_lock:
@@ -1225,7 +1243,9 @@ def get_cached_query_embedding(provider: str, model: str, query: str) -> Optiona
     return None
 
 
-def set_cached_query_embedding(provider: str, model: str, query: str, embedding: List[float]) -> None:
+def set_cached_query_embedding(
+    provider: str, model: str, query: str, embedding: list[float]
+) -> None:
     """Cache query embedding."""
     key = _get_query_cache_key(provider, model, query)
     with _query_cache_lock:
@@ -1238,12 +1258,14 @@ def set_cached_query_embedding(provider: str, model: str, query: str, embedding:
                 _query_embedding_cache.popitem(last=False)
 
 
-def _make_cache_key(config: EmbeddingConfig, dimension: Optional[int]) -> str:
+def _make_cache_key(config: EmbeddingConfig, dimension: int | None) -> str:
     """Generate cache key for embedder config."""
     return f"{config.provider}:{config.model}:{config.api_key[:8] if config.api_key else ''}:{dimension or ''}"
 
 
-async def get_cached_embedder(config: EmbeddingConfig, dimension: Optional[int] = None) -> BaseEmbedding:
+async def get_cached_embedder(
+    config: EmbeddingConfig, dimension: int | None = None
+) -> BaseEmbedding:
     """Get or create cached embedder instance.
 
     This helps reduce first-call latency by reusing HTTP connections.
@@ -1256,7 +1278,7 @@ async def get_cached_embedder(config: EmbeddingConfig, dimension: Optional[int] 
         return _embedder_cache[cache_key]
 
 
-def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -> BaseEmbedding:
+def create_embedding(config: EmbeddingConfig, dimension: int | None = None) -> BaseEmbedding:
     provider = (config.provider or "").lower()
     if provider in {"local", "builtin", "hash"}:
         return LocalHashEmbedding(
@@ -1312,7 +1334,7 @@ def create_embedding(config: EmbeddingConfig, dimension: Optional[int] = None) -
 def create_multimodal_embedding(
     api_key: str,
     model: str = "multimodal-embedding-v1",
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
 ) -> DashScopeMultimodalEmbedding:
     """Convenience factory for creating multimodal embedding instances.
 
@@ -1335,10 +1357,12 @@ def create_multimodal_embedding(
 # Unified Multimodal Embedding (Phase 2: Cross-Modal Search)
 # ============================================================
 
+
 @dataclass
 class UnifiedEmbeddingResult:
     """Result from unified multimodal embedding."""
-    vector: List[float]
+
+    vector: list[float]
     content_type: str  # "text" | "image" | "mixed"
     dimension: int
     model: str
@@ -1377,7 +1401,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
     # Recommended model for unified cross-modal embedding
     DEFAULT_MODEL = "tongyi-embedding-vision-plus"
 
-    MODEL_DIMENSIONS: Dict[str, int] = {
+    MODEL_DIMENSIONS: dict[str, int] = {
         "tongyi-embedding-vision-plus": 1024,  # Unified to 1024
         "multimodal-embedding-v1": 1024,
         "qwen2.5-vl-embedding": 1024,
@@ -1387,16 +1411,20 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
     MAX_TEXT_CHARS = 8000
 
     SUPPORTED_MEDIA_TYPES = {
-        "image/jpeg", "image/jpg", "image/png",
-        "image/gif", "image/bmp", "image/webp"
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/gif",
+        "image/bmp",
+        "image/webp",
     }
 
     def __init__(
         self,
         api_key: str,
         model: str = "tongyi-embedding-vision-plus",
-        dimension: Optional[int] = None,
-        base_url: Optional[str] = None,
+        dimension: int | None = None,
+        base_url: str | None = None,
         max_concurrent: int = 5,
     ):
         """Initialize unified multimodal embedding.
@@ -1420,8 +1448,8 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         try:
-            from dashscope import MultiModalEmbedding
             import dashscope
+            from dashscope import MultiModalEmbedding
 
             self._MultiModalEmbedding = MultiModalEmbedding
             if base_url:
@@ -1440,21 +1468,22 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         if len(image_bytes) < 8:
             return "image/png"
 
-        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
             return "image/png"
-        elif image_bytes[:2] == b'\xff\xd8':
+        elif image_bytes[:2] == b"\xff\xd8":
             return "image/jpeg"
-        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+        elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
             return "image/gif"
-        elif image_bytes[:2] == b'BM':
+        elif image_bytes[:2] == b"BM":
             return "image/bmp"
-        elif image_bytes[:4] == b'RIFF' and len(image_bytes) > 12 and image_bytes[8:12] == b'WEBP':
+        elif image_bytes[:4] == b"RIFF" and len(image_bytes) > 12 and image_bytes[8:12] == b"WEBP":
             return "image/webp"
         return "image/png"
 
     def _to_base64_data_uri(self, image_bytes: bytes, media_type: str) -> str:
         """Convert image bytes to base64 data URI."""
         import base64
+
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{media_type};base64,{b64}"
 
@@ -1468,15 +1497,15 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         text = "".join(c if c.isprintable() or c in "\n\t" else " " for c in text)
 
         # Normalize whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
 
         # Truncate if needed
         if len(text) > self.MAX_TEXT_CHARS:
-            text = text[:self.MAX_TEXT_CHARS]
+            text = text[: self.MAX_TEXT_CHARS]
 
         return text if text else "empty"
 
-    async def _call_api(self, input_items: List[Dict[str, str]]) -> List[float]:
+    async def _call_api(self, input_items: list[dict[str, str]]) -> list[float]:
         """Call DashScope multimodal embedding API."""
         async with self._semaphore:
             try:
@@ -1506,7 +1535,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
             except Exception as exc:
                 raise EmbeddingError(f"Unified embedding error: {exc}") from exc
 
-    def _parse_output(self, output: Any) -> List[List[float]]:
+    def _parse_output(self, output: Any) -> list[list[float]]:
         """Parse API response to extract vectors."""
         if output is None:
             raise EmbeddingError("Response missing output")
@@ -1520,7 +1549,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         if not isinstance(output, list):
             raise EmbeddingError(f"Unexpected output type: {type(output)}")
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
         for entry in output:
             if isinstance(entry, dict):
                 vec = entry.get("embedding") or entry.get("vector")
@@ -1533,9 +1562,9 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
     async def embed_texts(
         self,
-        texts: List[str],
-        text_type: Optional[str] = None,
-    ) -> List[List[float]]:
+        texts: list[str],
+        text_type: str | None = None,
+    ) -> list[list[float]]:
         """Embed text in the unified multimodal space.
 
         IMPORTANT: Use this instead of DashScopeEmbedding when you need
@@ -1551,7 +1580,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         if not texts:
             return []
 
-        vectors: List[List[float]] = []
+        vectors: list[list[float]] = []
 
         for text in texts:
             sanitized = self._sanitize_text(text)
@@ -1563,7 +1592,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
         return vectors
 
-    async def embed_query(self, query: str) -> List[float]:
+    async def embed_query(self, query: str) -> list[float]:
         """Embed a query for cross-modal search.
 
         The resulting vector can find both relevant text AND images.
@@ -1573,9 +1602,9 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
     async def embed_images(
         self,
-        images: List[bytes],
-        max_concurrent: Optional[int] = None,
-    ) -> List[List[float]]:
+        images: list[bytes],
+        max_concurrent: int | None = None,
+    ) -> list[list[float]]:
         """Embed images in the unified multimodal space.
 
         Args:
@@ -1591,12 +1620,10 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         # Validate sizes
         for i, img in enumerate(images):
             if len(img) > self.MAX_IMAGE_SIZE_BYTES:
-                raise EmbeddingError(
-                    f"Image {i} exceeds 3MB limit ({len(img)} bytes)"
-                )
+                raise EmbeddingError(f"Image {i} exceeds 3MB limit ({len(img)} bytes)")
 
         # Process concurrently
-        async def embed_single(idx: int, img_bytes: bytes) -> List[float]:
+        async def embed_single(idx: int, img_bytes: bytes) -> list[float]:
             media_type = self._detect_media_type(img_bytes)
             data_uri = self._to_base64_data_uri(img_bytes, media_type)
             return await self._call_api([{"image": data_uri}])
@@ -1612,8 +1639,8 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
     async def embed_image_with_context(
         self,
         image_bytes: bytes,
-        context_text: Optional[str] = None,
-    ) -> List[float]:
+        context_text: str | None = None,
+    ) -> list[float]:
         """Embed image with optional text context.
 
         This creates a combined embedding that captures both visual
@@ -1632,7 +1659,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         media_type = self._detect_media_type(image_bytes)
         data_uri = self._to_base64_data_uri(image_bytes, media_type)
 
-        input_items: List[Dict[str, str]] = [{"image": data_uri}]
+        input_items: list[dict[str, str]] = [{"image": data_uri}]
         if context_text:
             input_items.append({"text": self._sanitize_text(context_text)})
 
@@ -1641,8 +1668,8 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
     async def embed_image_and_text(
         self,
         image_bytes: bytes,
-        text: Optional[str] = None,
-    ) -> List[float]:
+        text: str | None = None,
+    ) -> list[float]:
         """Embed image with optional text - alias for embed_image_with_context.
 
         Provides compatibility with DashScopeMultimodalEmbedding interface.
@@ -1651,8 +1678,8 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 
     async def embed_mixed_batch(
         self,
-        items: List[Dict[str, Any]],
-    ) -> List[UnifiedEmbeddingResult]:
+        items: list[dict[str, Any]],
+    ) -> list[UnifiedEmbeddingResult]:
         """Embed a batch of mixed text and image content.
 
         Args:
@@ -1664,7 +1691,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
         Returns:
             List of UnifiedEmbeddingResult with vectors and metadata
         """
-        results: List[UnifiedEmbeddingResult] = []
+        results: list[UnifiedEmbeddingResult] = []
 
         for item in items:
             item_type = item.get("type", "text")
@@ -1672,33 +1699,39 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
             if item_type == "text":
                 text = item.get("content", "")
                 vec = (await self.embed_texts([text]))[0]
-                results.append(UnifiedEmbeddingResult(
-                    vector=vec,
-                    content_type="text",
-                    dimension=len(vec),
-                    model=self.model,
-                ))
+                results.append(
+                    UnifiedEmbeddingResult(
+                        vector=vec,
+                        content_type="text",
+                        dimension=len(vec),
+                        model=self.model,
+                    )
+                )
 
             elif item_type == "image":
                 img = item.get("content", b"")
                 vec = (await self.embed_images([img]))[0]
-                results.append(UnifiedEmbeddingResult(
-                    vector=vec,
-                    content_type="image",
-                    dimension=len(vec),
-                    model=self.model,
-                ))
+                results.append(
+                    UnifiedEmbeddingResult(
+                        vector=vec,
+                        content_type="image",
+                        dimension=len(vec),
+                        model=self.model,
+                    )
+                )
 
             elif item_type == "mixed":
                 text = item.get("text", "")
                 img = item.get("image", b"")
                 vec = await self.embed_image_with_context(img, text)
-                results.append(UnifiedEmbeddingResult(
-                    vector=vec,
-                    content_type="mixed",
-                    dimension=len(vec),
-                    model=self.model,
-                ))
+                results.append(
+                    UnifiedEmbeddingResult(
+                        vector=vec,
+                        content_type="mixed",
+                        dimension=len(vec),
+                        model=self.model,
+                    )
+                )
 
         return results
 
@@ -1706,7 +1739,7 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
 def create_unified_embedding(
     api_key: str,
     model: str = "tongyi-embedding-vision-plus",
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     max_concurrent: int = 5,
 ) -> UnifiedMultimodalEmbedding:
     """Create a unified multimodal embedding instance.

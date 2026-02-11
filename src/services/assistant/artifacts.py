@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any
 
 from ...core.auth.user_resolver import UserContext
 from ...core.observability.logging import get_logger
@@ -41,10 +41,10 @@ async def persist_output_files(
     artifact_storage: Any,
     user: UserContext,
     session_id: str,
-    output_files: List[Dict[str, Any]],
+    output_files: list[dict[str, Any]],
     source: str,
     expiry_seconds: int = 3600,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Persist tool output_files into ArtifactStorageService.
 
@@ -64,7 +64,7 @@ async def persist_output_files(
     if not artifact_storage or not output_files:
         return output_files
 
-    persisted: List[Dict[str, Any]] = []
+    persisted: list[dict[str, Any]] = []
     for file_info in output_files:
         filename = str(file_info.get("filename") or "output")
         mime_type = str(file_info.get("mime_type") or "application/octet-stream")

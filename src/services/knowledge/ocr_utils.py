@@ -7,12 +7,13 @@ between worker.py and knowledge_service.py.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,36 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # Security: whitelist validation to prevent command injection
-ALLOWED_OCR_LANGS_SINGLE = frozenset({
-    "eng", "ara", "chi_sim", "chi_tra", "fra", "deu", "spa", "rus",
-    "jpn", "kor", "por", "ita", "nld", "tur", "vie", "tha",
-})
+ALLOWED_OCR_LANGS_SINGLE = frozenset(
+    {
+        "eng",
+        "ara",
+        "chi_sim",
+        "chi_tra",
+        "fra",
+        "deu",
+        "spa",
+        "rus",
+        "jpn",
+        "kor",
+        "por",
+        "ita",
+        "nld",
+        "tur",
+        "vie",
+        "tha",
+    }
+)
 
-ALLOWED_OCR_COMBINATIONS = frozenset({
-    "eng+ara", "ara+eng", "chi_sim+eng", "jpn+eng", "kor+eng",
-})
+ALLOWED_OCR_COMBINATIONS = frozenset(
+    {
+        "eng+ara",
+        "ara+eng",
+        "chi_sim+eng",
+        "jpn+eng",
+        "kor+eng",
+    }
+)
 
 # Default OCR settings
 DEFAULT_OCR_LANGUAGE = "eng+ara"
@@ -45,9 +68,10 @@ MAX_OCR_TIMEOUT = 300
 # OCR Configuration
 # =============================================================================
 
+
 class OCRCConfig:
     """Configuration for OCR operations."""
-    
+
     def __init__(
         self,
         languages: str = DEFAULT_OCR_LANGUAGE,
@@ -57,44 +81,44 @@ class OCRCConfig:
         self.languages = self._validate_languages(languages)
         self.dpi = self._validate_dpi(dpi)
         self.timeout_seconds = self._validate_timeout(timeout_seconds)
-    
+
     @classmethod
-    def from_settings(cls, settings: Optional[Any] = None) -> "OCRCConfig":
+    def from_settings(cls, settings: Any | None = None) -> OCRCConfig:
         """Create OCR config from knowledge settings."""
         if settings is None:
             return cls()
-        
+
         ks = settings
         languages = getattr(ks, "ocr_languages", DEFAULT_OCR_LANGUAGE) or DEFAULT_OCR_LANGUAGE
         dpi = getattr(ks, "ocr_render_dpi", DEFAULT_OCR_DPI)
         timeout = getattr(ks, "ocr_tesseract_timeout_seconds", DEFAULT_OCR_TIMEOUT)
-        
+
         return cls(languages=languages, dpi=dpi, timeout_seconds=timeout)
-    
+
     def _validate_languages(self, langs: str) -> str:
         """Validate and normalize OCR language setting."""
         if not langs:
             return DEFAULT_OCR_LANGUAGE
-        
+
         langs = langs.strip()
-        
+
         # Check pre-defined combinations
         if langs in ALLOWED_OCR_COMBINATIONS:
             return langs
-        
+
         # Check single language
         if langs in ALLOWED_OCR_LANGS_SINGLE:
             return langs
-        
+
         # Validate custom combinations (e.g., "eng+fra")
         if "+" in langs:
             parts = langs.split("+")
             if all(p.strip() in ALLOWED_OCR_LANGS_SINGLE for p in parts):
                 return langs
-        
+
         logger.warning(f"Invalid OCR languages: {langs}, falling back to '{DEFAULT_OCR_LANGUAGE}'")
         return DEFAULT_OCR_LANGUAGE
-    
+
     def _validate_dpi(self, dpi: int) -> int:
         """Validate and clamp DPI to safe range."""
         try:
@@ -102,7 +126,7 @@ class OCRCConfig:
         except (TypeError, ValueError):
             dpi = DEFAULT_OCR_DPI
         return max(MIN_OCR_DPI, min(dpi, MAX_OCR_DPI))
-    
+
     def _validate_timeout(self, timeout: int) -> int:
         """Validate and clamp timeout to safe range."""
         try:
@@ -116,24 +140,25 @@ class OCRCConfig:
 # OCR Operations
 # =============================================================================
 
-def check_tesseract_available() -> Optional[str]:
+
+def check_tesseract_available() -> str | None:
     """Check if tesseract is available and return its path."""
     return shutil.which("tesseract")
 
 
 def ocr_image_bytes(
     image_bytes: bytes,
-    config: Optional[OCRCConfig] = None,
+    config: OCRCConfig | None = None,
     fallback_to_eng: bool = True,
 ) -> str:
     """
     Run OCR on a single image using Tesseract CLI.
-    
+
     Args:
         image_bytes: The image data as bytes
         config: OCR configuration. Uses defaults if not provided.
         fallback_to_eng: Whether to fallback to English if primary language fails
-        
+
     Returns:
         Extracted text from the image
     """
@@ -141,16 +166,16 @@ def ocr_image_bytes(
     if not tesseract:
         logger.warning("Tesseract not found in PATH")
         return ""
-    
+
     cfg = config or OCRCConfig()
-    
+
     # Write image to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as img_file:
         img_file.write(image_bytes)
         img_path = img_file.name
-    
+
     out_base = tempfile.NamedTemporaryFile(delete=False).name
-    
+
     try:
         # Try OCR with configured languages
         text = _run_tesseract(
@@ -161,10 +186,10 @@ def ocr_image_bytes(
             dpi=cfg.dpi,
             timeout=cfg.timeout_seconds,
         )
-        
+
         # Fallback to English if needed and configured
         if not text and fallback_to_eng and cfg.languages != "eng":
-            logger.debug(f"OCR fallback to English for image")
+            logger.debug("OCR fallback to English for image")
             text = _run_tesseract(
                 tesseract=tesseract,
                 img_path=img_path,
@@ -173,9 +198,9 @@ def ocr_image_bytes(
                 dpi=cfg.dpi,
                 timeout=cfg.timeout_seconds,
             )
-        
+
         return text
-        
+
     finally:
         _cleanup_temp_files(img_path, out_base)
 
@@ -192,8 +217,7 @@ def _run_tesseract(
     try:
         proc = subprocess.run(
             [tesseract, img_path, out_base, "-l", langs, "--dpi", str(dpi)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
             timeout=timeout,
@@ -204,16 +228,16 @@ def _run_tesseract(
     except Exception as e:
         logger.warning(f"OCR subprocess failed: {e}")
         return ""
-    
+
     # Handle language data file error
     if proc.returncode != 0 and "Error opening data file" in (proc.stderr or ""):
         logger.warning(f"OCR language data file error for '{langs}': {proc.stderr}")
         return ""
-    
+
     # Read output
     text_path = f"{out_base}.txt"
     try:
-        with open(text_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(text_path, encoding="utf-8", errors="ignore") as f:
             return f.read().strip()
     except FileNotFoundError:
         return ""
@@ -233,32 +257,32 @@ def _cleanup_temp_files(img_path: str, out_base: str) -> None:
 # PDF OCR Operations
 # =============================================================================
 
+
 def ocr_pdf_bytes(
     content: bytes,
-    config: Optional[OCRCConfig] = None,
+    config: OCRCConfig | None = None,
     max_workers: int = 2,
     max_pending_factor: int = 2,
 ) -> str:
     """
     OCR a PDF using PyMuPDF rendering + Tesseract CLI.
-    
+
     Args:
         content: PDF file content as bytes
         config: OCR configuration. Uses defaults if not provided.
         max_workers: Maximum number of concurrent OCR workers
         max_pending_factor: Factor to calculate max pending futures (workers * factor)
-        
+
     Returns:
         Extracted text from all pages
     """
-    import shutil
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    
+
     tesseract = check_tesseract_available()
     if not tesseract:
         logger.warning("Tesseract binary not found; OCR skipped")
         return ""
-    
+
     try:
         import pymupdf as fitz  # type: ignore
     except ImportError:
@@ -267,21 +291,21 @@ def ocr_pdf_bytes(
         except ImportError:
             logger.warning("PyMuPDF not installed; OCR skipped")
             return ""
-    
+
     cfg = config or OCRCConfig()
     max_workers = max(1, min(int(max_workers), 4))
     max_pending = max_workers * max_pending_factor
-    
+
     doc = None
     try:
         doc = fitz.open(stream=content, filetype="pdf")
-        parts_by_page: Dict[int, str] = {}
-        
-        def _ocr_page(page_idx: int, img_bytes: bytes) -> Tuple[int, str]:
+        parts_by_page: dict[int, str] = {}
+
+        def _ocr_page(page_idx: int, img_bytes: bytes) -> tuple[int, str]:
             """OCR a single page."""
             text = _ocr_single_image(tesseract, img_bytes, cfg)
             return page_idx, text
-        
+
         futures = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             for page_index, page in enumerate(doc):
@@ -291,13 +315,13 @@ def ocr_pdf_bytes(
                 except Exception as e:
                     logger.warning(f"OCR render failed on page {page_index + 1}: {e}")
                     continue
-                
+
                 futures.append(executor.submit(_ocr_page, page_index, img_bytes))
-                
+
                 # Flow control: limit pending futures
                 if len(futures) >= max_pending:
                     _process_completed_futures(futures, parts_by_page)
-            
+
             # Process remaining futures
             for fut in as_completed(futures):
                 try:
@@ -306,19 +330,17 @@ def ocr_pdf_bytes(
                         parts_by_page[page_idx] = page_text
                 except Exception as e:
                     logger.warning(f"OCR failed on page task: {e}")
-        
+
         ordered_parts = [parts_by_page[idx] for idx in sorted(parts_by_page.keys())]
         return "\n\n".join(ordered_parts)
-        
+
     except Exception as e:
         logger.warning(f"OCR failed for PDF: {e}")
         return ""
     finally:
         if doc is not None:
-            try:
+            with contextlib.suppress(Exception):
                 doc.close()
-            except Exception:
-                pass
 
 
 def _ocr_single_image(tesseract: str, img_bytes: bytes, config: OCRCConfig) -> str:
@@ -343,25 +365,25 @@ def _run_tesseract_with_temp(
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as img_file:
         img_file.write(img_bytes)
         img_path = img_file.name
-    
+
     out_base = tempfile.NamedTemporaryFile(delete=False).name
-    
+
     try:
         text = _run_tesseract(tesseract, img_path, out_base, langs, dpi, timeout)
-        
+
         # Fallback to English if no text extracted
         if not text and langs != "eng":
             text = _run_tesseract(tesseract, img_path, out_base, "eng", dpi, timeout)
-        
+
         return text
     finally:
         _cleanup_temp_files(img_path, out_base)
 
 
-def _process_completed_futures(futures, parts_by_page: Dict[int, str]) -> None:
+def _process_completed_futures(futures, parts_by_page: dict[int, str]) -> None:
     """Process completed futures from the executor."""
     from concurrent.futures import as_completed
-    
+
     try:
         fut = next(as_completed(futures))
     except Exception:

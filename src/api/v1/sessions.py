@@ -1,39 +1,38 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from ..deps import get_session_manager, get_user_context
 from ...core.auth.user_resolver import UserContext
 from ...services.session.session_manager import SessionManager
-
+from ..deps import get_session_manager, get_user_context
 
 router = APIRouter()
 
 
 class SessionCreate(BaseModel):
-    service_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-    config: Optional[Dict[str, Any]] = None  # 会话配置（知识库、模型等）
+    service_id: str | None = None
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None  # 会话配置（知识库、模型等）
 
 
 class SessionUpdate(BaseModel):
-    metadata: Optional[Dict[str, Any]] = None
-    config: Optional[Dict[str, Any]] = None  # 会话配置（知识库、模型等）
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None  # 会话配置（知识库、模型等）
 
 
 class SessionMessageCreate(BaseModel):
     role: str
     content: Any
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
 @router.get("/sessions")
 async def list_sessions(
-    service_id: Optional[str] = Query(default=None),
+    service_id: str | None = Query(default=None),
     limit: int = Query(100, ge=1, le=500),
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
@@ -63,7 +62,7 @@ async def _list_assistant_sessions_for_service_id(
     session_manager: SessionManager,
     user: UserContext,
     limit: int,
-    service_id: Optional[str],
+    service_id: str | None,
 ):
     """List sessions with backward compatibility for assistant service IDs."""
     if service_id != "__builtin_assistant__":
@@ -84,9 +83,7 @@ async def _list_assistant_sessions_for_service_id(
     )
 
     allowed_service_ids = {None, "", "__builtin_assistant__", "assistant"}
-    filtered = [
-        s for s in sessions if getattr(s, "service_id", None) in allowed_service_ids
-    ]
+    filtered = [s for s in sessions if getattr(s, "service_id", None) in allowed_service_ids]
     filtered.sort(
         key=lambda s: s.updated_at or s.created_at or datetime.min,
         reverse=True,
@@ -144,10 +141,10 @@ async def update_session(
     session = await session_manager.get(session_id)
     if not session or (session.user_id != user.user_id or session.tenant_id != user.tenant_id):
         raise HTTPException(status_code=404, detail="session not found")
-    
+
     if body.metadata:
         # 支持 update_metadata 方法（DatabaseSessionManager）或直接更新（内存版本）
-        if hasattr(session_manager, 'update_metadata'):
+        if hasattr(session_manager, "update_metadata"):
             await session_manager.update_metadata(session_id, body.metadata)
         else:
             session.metadata = session.metadata or {}
@@ -155,10 +152,10 @@ async def update_session(
 
     if body.config:
         # 支持 update_config 方法（DatabaseSessionManager）或直接更新（内存版本）
-        if hasattr(session_manager, 'update_config'):
+        if hasattr(session_manager, "update_config"):
             await session_manager.update_config(session_id, body.config)
         else:
-            session.config = getattr(session, 'config', {}) or {}
+            session.config = getattr(session, "config", {}) or {}
             session.config.update(body.config)
 
     return {"session_id": session_id, "status": "updated"}

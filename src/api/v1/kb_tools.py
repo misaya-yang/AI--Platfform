@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...services.knowledge.knowledge_service import KnowledgeService
 from ..deps import get_knowledge_service, get_user_context
 from ..schemas.kb_tools import (
     KBAssociatedImage,
@@ -39,9 +42,6 @@ from ..schemas.kb_tools import (
     get_kb_search_tool_definition,
     get_multi_kb_search_tool_definition,
 )
-from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
-from ...services.knowledge.knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +52,9 @@ router = APIRouter(prefix="/kb", tags=["KB Tools"])
 # Helper Functions
 # ============================================================
 
+
 def _format_context_for_llm(
-    results: List[KBSearchResult],
+    results: list[KBSearchResult],
     query: str,
     max_length: int = 8000,
 ) -> str:
@@ -106,14 +107,16 @@ def _convert_retrieve_result_to_search_result(
     associated_images = []
     if hasattr(result, "associated_images") and result.associated_images:
         for img in result.associated_images:
-            associated_images.append(KBAssociatedImage(
-                image_segment_id=getattr(img, "image_segment_id", ""),
-                storage_url=getattr(img, "storage_url", ""),
-                filename=getattr(img, "filename", ""),
-                vlm_description=getattr(img, "vlm_description", None),
-                proximity_score=getattr(img, "proximity_score", 1.0),
-                media_type=getattr(img, "media_type", "image/png"),
-            ))
+            associated_images.append(
+                KBAssociatedImage(
+                    image_segment_id=getattr(img, "image_segment_id", ""),
+                    storage_url=getattr(img, "storage_url", ""),
+                    filename=getattr(img, "filename", ""),
+                    vlm_description=getattr(img, "vlm_description", None),
+                    proximity_score=getattr(img, "proximity_score", 1.0),
+                    media_type=getattr(img, "media_type", "image/png"),
+                )
+            )
 
     return KBSearchResult(
         content=result.text,
@@ -155,6 +158,7 @@ def _resolve_mode(mode: str, query: str) -> str:
 # ============================================================
 # API Endpoints
 # ============================================================
+
 
 @router.post("/search", response_model=KBSearchResponse)
 async def kb_search(
@@ -235,8 +239,7 @@ async def kb_search(
 
         # Convert results
         search_results = [
-            _convert_retrieve_result_to_search_result(r, request.dataset_id)
-            for r in results
+            _convert_retrieve_result_to_search_result(r, request.dataset_id) for r in results
         ]
 
         # Format context for LLM
@@ -306,16 +309,13 @@ async def kb_multi_search(
             logger.warning(f"User {user.user_id} cannot access dataset {ds_id}")
 
     if not accessible_datasets:
-        raise HTTPException(
-            status_code=403,
-            detail="No accessible datasets found"
-        )
+        raise HTTPException(status_code=403, detail="No accessible datasets found")
 
     # Resolve mode
     mode = _resolve_mode(request.mode, request.query)
 
     # Search each dataset in parallel
-    async def search_dataset(ds_id: str) -> tuple[str, List[Any], Dict[str, Any]]:
+    async def search_dataset(ds_id: str) -> tuple[str, list[Any], dict[str, Any]]:
         try:
             results, meta = await svc.retrieve(
                 user=user,
@@ -336,15 +336,13 @@ async def kb_multi_search(
     search_results_raw = await asyncio.gather(*search_tasks)
 
     # Merge results
-    all_results: List[KBSearchResult] = []
-    results_per_dataset: Dict[str, int] = {}
+    all_results: list[KBSearchResult] = []
+    results_per_dataset: dict[str, int] = {}
 
-    for ds_id, results, meta in search_results_raw:
+    for ds_id, results, _meta in search_results_raw:
         results_per_dataset[ds_id] = len(results)
         for r in results:
-            all_results.append(
-                _convert_retrieve_result_to_search_result(r, ds_id)
-            )
+            all_results.append(_convert_retrieve_result_to_search_result(r, ds_id))
 
     # Apply merge strategy
     if request.merge_strategy == "score":
@@ -365,8 +363,8 @@ async def kb_multi_search(
     elif request.merge_strategy == "rrf":
         # Reciprocal Rank Fusion
         k = 60
-        rrf_scores: Dict[str, float] = {}
-        for ds_id, results, meta in search_results_raw:
+        rrf_scores: dict[str, float] = {}
+        for ds_id, results, _meta in search_results_raw:
             for rank, r in enumerate(results, 1):
                 key = f"{r.segment_id}"
                 rrf_scores[key] = rrf_scores.get(key, 0) + 1.0 / (k + rank)
@@ -378,7 +376,7 @@ async def kb_multi_search(
         all_results.sort(key=lambda x: x.score, reverse=True)
 
     # Take top_k
-    all_results = all_results[:request.top_k]
+    all_results = all_results[: request.top_k]
 
     # Format context
     formatted_context = _format_context_for_llm(all_results, request.query)
@@ -480,11 +478,11 @@ async def get_tool_definition(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-@router.get("/tool-definitions", response_model=List[KBToolDefinition])
+@router.get("/tool-definitions", response_model=list[KBToolDefinition])
 async def get_all_tool_definitions(
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
-) -> List[KBToolDefinition]:
+) -> list[KBToolDefinition]:
     """
     Get tool definitions for all accessible datasets.
 

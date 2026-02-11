@@ -16,20 +16,23 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from asyncpg import Connection
+
     from ...persistence.database import DatabaseStorage
+
+import contextlib
 
 from .observability import KNOWN_ERROR_TYPES, should_sample_trace
 
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
-_usage_recorder: Optional["UsageRecorder"] = None
+_usage_recorder: UsageRecorder | None = None
 
 UNATTRIBUTED_PROVIDER = "unattributed"
 UNATTRIBUTED_MODEL = "unattributed_model"
@@ -56,12 +59,12 @@ class UsageRecord:
     retrieval_duration_ms: int = 0
     tool_call_duration_ms: int = 0
     agent_or_graph_overhead_ms: int = 0
-    tool_call_breakdown: Dict[str, int] = field(default_factory=dict)
-    error_type: Optional[str] = None
+    tool_call_breakdown: dict[str, int] = field(default_factory=dict)
+    error_type: str | None = None
     status: str = "success"
     request_type: str = "chat"
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    trace_steps: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    trace_steps: list[dict[str, Any]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
 
     # Computed fields (filled by UsageRecorder)
@@ -76,8 +79,8 @@ def _hour_bucket(ts: float) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0, tzinfo=None)
 
 
-def group_records_by_hour(records: list[UsageRecord]) -> Dict[tuple, Dict[str, Any]]:
-    aggregates: Dict[tuple, Dict[str, Any]] = {}
+def group_records_by_hour(records: list[UsageRecord]) -> dict[tuple, dict[str, Any]]:
+    aggregates: dict[tuple, dict[str, Any]] = {}
     for record in records:
         bucket = _hour_bucket(record.timestamp)
         key = (
@@ -134,7 +137,7 @@ class UsageRecorder:
 
     def __init__(
         self,
-        database: Optional["DatabaseStorage"] = None,
+        database: DatabaseStorage | None = None,
         buffer_size: int = 100,
         flush_interval_seconds: float = 5.0,
         normal_trace_sample_rate: float = 0.03,
@@ -147,28 +150,28 @@ class UsageRecorder:
         self._normal_trace_sample_rate = max(0.0, min(float(normal_trace_sample_rate), 1.0))
         self._trace_p95_cache_ttl_seconds = max(float(trace_p95_cache_ttl_seconds), 1.0)
         self._default_trace_p95_threshold_ms = max(int(default_trace_p95_threshold_ms), 1)
-        self._buffer: List[UsageRecord] = []
+        self._buffer: list[UsageRecord] = []
         self._buffer_lock = asyncio.Lock()
-        self._flush_task: Optional[asyncio.Task] = None
+        self._flush_task: asyncio.Task | None = None
         self._running = False
-        self._pricing_cache: Dict[str, Dict[str, Any]] = {}
+        self._pricing_cache: dict[str, dict[str, Any]] = {}
         self._pricing_cache_time: float = 0
         self._pricing_cache_ttl: float = 300  # 5 minutes
-        self._trace_p95_cache: Dict[str, Tuple[int, float]] = {}
+        self._trace_p95_cache: dict[str, tuple[int, float]] = {}
 
-    def set_database(self, database: "DatabaseStorage") -> None:
+    def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
         self.database = database
 
     @staticmethod
-    def _normalize_identity(value: Optional[str], fallback: str) -> str:
+    def _normalize_identity(value: str | None, fallback: str) -> str:
         normalized = str(value or "").strip()
         if normalized.lower() in {"unknown", "none", "null", "n/a", "na"}:
             return fallback
         return normalized or fallback
 
     @staticmethod
-    def _extract_provider_from_metadata(metadata: Dict[str, Any]) -> str:
+    def _extract_provider_from_metadata(metadata: dict[str, Any]) -> str:
         for key in ("provider", "provider_id", "vendor", "llm_provider"):
             value = metadata.get(key)
             if value is None:
@@ -179,7 +182,7 @@ class UsageRecorder:
         return ""
 
     @staticmethod
-    def _extract_model_from_metadata(metadata: Dict[str, Any]) -> str:
+    def _extract_model_from_metadata(metadata: dict[str, Any]) -> str:
         for key in ("model", "model_id", "llm_model"):
             value = metadata.get(key)
             if value is None:
@@ -264,10 +267,8 @@ class UsageRecorder:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
-            except asyncio.CancelledError:
-                pass
         # Flush remaining records
         await self._flush_buffer()
         logger.info("UsageRecorder stopped")
@@ -308,12 +309,12 @@ class UsageRecorder:
         retrieval_duration_ms: int = 0,
         tool_call_duration_ms: int = 0,
         agent_or_graph_overhead_ms: int = 0,
-        tool_call_breakdown: Optional[Dict[str, int]] = None,
-        error_type: Optional[str] = None,
+        tool_call_breakdown: dict[str, int] | None = None,
+        error_type: str | None = None,
         status: str = "success",
         request_type: str = "chat",
-        metadata: Optional[Dict[str, Any]] = None,
-        trace_steps: Optional[List[Dict[str, Any]]] = None,
+        metadata: dict[str, Any] | None = None,
+        trace_steps: list[dict[str, Any]] | None = None,
     ) -> None:
         """
         Convenience method to record usage without creating UsageRecord manually.
@@ -362,7 +363,7 @@ class UsageRecorder:
             record.input_cost_cents = round(float(input_cost))
             record.output_cost_cents = round(float(output_cost))
 
-    async def _get_model_pricing(self, model: str) -> Optional[Dict[str, Any]]:
+    async def _get_model_pricing(self, model: str) -> dict[str, Any] | None:
         """Get pricing for a model from cache or database."""
         # Check cache
         now = time.time()
@@ -507,13 +508,12 @@ class UsageRecorder:
             return
 
         try:
-            async with self.database._pool.acquire() as conn:
-                async with conn.transaction():
-                    await self._write_records(conn, records)
-                    await self._update_quota_counters(conn, records)
-                    await self._write_sampled_traces(conn, records)
-                    await self._update_daily_aggregates(conn, records)
-                    await self._update_hourly_aggregates(conn, records)
+            async with self.database._pool.acquire() as conn, conn.transaction():
+                await self._write_records(conn, records)
+                await self._update_quota_counters(conn, records)
+                await self._write_sampled_traces(conn, records)
+                await self._update_daily_aggregates(conn, records)
+                await self._update_hourly_aggregates(conn, records)
             logger.debug(f"Flushed {len(records)} usage records")
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
@@ -522,12 +522,12 @@ class UsageRecorder:
                 self._buffer.extend(records)
 
     @staticmethod
-    def _ensure_request_ids(records: List[UsageRecord]) -> None:
+    def _ensure_request_ids(records: list[UsageRecord]) -> None:
         for record in records:
             if not record.request_id:
                 record.request_id = str(uuid.uuid4())
 
-    async def _get_trace_p95_threshold_ms(self, conn: "Connection", tenant_id: str) -> int:
+    async def _get_trace_p95_threshold_ms(self, conn: Connection, tenant_id: str) -> int:
         cache_key = tenant_id or "default"
         now = time.time()
         cached = self._trace_p95_cache.get(cache_key)
@@ -564,10 +564,10 @@ class UsageRecorder:
             return int(record.latency_ms)
         return 0
 
-    async def _write_sampled_traces(self, conn: "Connection", records: List[UsageRecord]) -> None:
-        sampled_rows: List[Tuple[Any, ...]] = []
-        sampled_flags: List[Tuple[str, str, str]] = []
-        threshold_cache: Dict[str, int] = {}
+    async def _write_sampled_traces(self, conn: Connection, records: list[UsageRecord]) -> None:
+        sampled_rows: list[tuple[Any, ...]] = []
+        sampled_flags: list[tuple[str, str, str]] = []
+        threshold_cache: dict[str, int] = {}
 
         for record in records:
             tenant_id = self._normalize_identity(record.tenant_id, "default")
@@ -644,7 +644,7 @@ class UsageRecorder:
             sampled_flags,
         )
 
-    async def _write_records(self, conn: "Connection", records: List[UsageRecord]) -> None:
+    async def _write_records(self, conn: Connection, records: list[UsageRecord]) -> None:
         """Write records to usage_records table."""
         await conn.executemany(
             """
@@ -702,9 +702,9 @@ class UsageRecorder:
             ],
         )
 
-    async def _update_quota_counters(self, conn: "Connection", records: List[UsageRecord]) -> None:
+    async def _update_quota_counters(self, conn: Connection, records: list[UsageRecord]) -> None:
         """Update quota counters from flushed usage records."""
-        aggregates: Dict[Tuple[str, str], Dict[str, int]] = {}
+        aggregates: dict[tuple[str, str], dict[str, int]] = {}
         for record in records:
             key = (record.tenant_id, record.user_id)
             current = aggregates.setdefault(
@@ -747,12 +747,10 @@ class UsageRecorder:
             ],
         )
 
-    async def _update_daily_aggregates(
-        self, conn: "Connection", records: List[UsageRecord]
-    ) -> None:
+    async def _update_daily_aggregates(self, conn: Connection, records: list[UsageRecord]) -> None:
         """Update daily aggregates table."""
         # Group records by aggregation key
-        aggregates: Dict[tuple, Dict[str, Any]] = {}
+        aggregates: dict[tuple, dict[str, Any]] = {}
 
         for record in records:
             # 修复：使用记录的 timestamp 而非 date.today()，避免跨日 flush 导致数据记录到错误日期
@@ -868,9 +866,7 @@ class UsageRecorder:
                 avg_first_token,
             )
 
-    async def _update_hourly_aggregates(
-        self, conn: "Connection", records: List[UsageRecord]
-    ) -> None:
+    async def _update_hourly_aggregates(self, conn: Connection, records: list[UsageRecord]) -> None:
         """Update hourly aggregates table."""
         aggregates = group_records_by_hour(records)
 
@@ -962,14 +958,14 @@ class UsageRecorder:
     async def get_usage_summary(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        user_id: Optional[str] = None,
-        model: Optional[str] = None,
-        service_id: Optional[str] = None,
-        assistant_id: Optional[str] = None,
-        provider: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        start_date: date | None = None,
+        end_date: date | None = None,
+        user_id: str | None = None,
+        model: str | None = None,
+        service_id: str | None = None,
+        assistant_id: str | None = None,
+        provider: str | None = None,
+    ) -> dict[str, Any]:
         """Get aggregated usage summary."""
         if not self.database or not self.database._pool:
             return self._empty_summary()
@@ -988,9 +984,9 @@ class UsageRecorder:
                         "tenant_id = $1",
                         "created_at::date >= $2",
                         "created_at::date <= $3",
-                        f"provider = $4",
+                        "provider = $4",
                     ]
-                    params: List[Any] = [tenant_id, start_date, end_date, provider]
+                    params: list[Any] = [tenant_id, start_date, end_date, provider]
                     if user_id:
                         conditions.append(f"user_id = ${len(params) + 1}")
                         params.append(user_id)
@@ -1079,12 +1075,12 @@ class UsageRecorder:
         self,
         tenant_id: str,
         dimension: str,  # model, user, assistant, service
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        user_id: Optional[str] = None,
-        service_id: Optional[str] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        user_id: str | None = None,
+        service_id: str | None = None,
         limit: int = 20,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get usage breakdown by dimension."""
         if not self.database or not self.database._pool:
             return []
@@ -1124,7 +1120,7 @@ class UsageRecorder:
                           AND created_at::date >= $2
                           AND created_at::date <= $3
                     """
-                    params: List[Any] = [tenant_id, start_date, end_date, UNATTRIBUTED_PROVIDER]
+                    params: list[Any] = [tenant_id, start_date, end_date, UNATTRIBUTED_PROVIDER]
 
                     if user_id:
                         query += " AND user_id = $" + str(len(params) + 1)
@@ -1201,7 +1197,7 @@ class UsageRecorder:
                         """
                         group_by_expr = f"{dimension_column}"
 
-                    params: List[Any] = [tenant_id, start_date, end_date]
+                    params: list[Any] = [tenant_id, start_date, end_date]
 
                     if user_id:
                         query += " AND u.user_id = $" + str(len(params) + 1)
@@ -1245,14 +1241,14 @@ class UsageRecorder:
     async def get_usage_timeseries(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        user_id: Optional[str] = None,
-        model: Optional[str] = None,
-        service_id: Optional[str] = None,
-        provider: Optional[str] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        user_id: str | None = None,
+        model: str | None = None,
+        service_id: str | None = None,
+        provider: str | None = None,
         granularity: str = "day",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get usage time series."""
         if not self.database or not self.database._pool:
             return []
@@ -1285,7 +1281,7 @@ class UsageRecorder:
                       AND created_at::date >= $2
                       AND created_at::date <= $3
                 """
-                params: List[Any] = [tenant_id, start_date, end_date]
+                params: list[Any] = [tenant_id, start_date, end_date]
                 if provider:
                     query += f" AND provider = ${len(params) + 1}"
                     params.append(provider)
@@ -1327,17 +1323,17 @@ class UsageRecorder:
         tenant_id: str,
         start_date: date,
         end_date: date,
-        user_id: Optional[str] = None,
-        model: Optional[str] = None,
-        service_id: Optional[str] = None,
-        provider: Optional[str] = None,
-    ) -> Tuple[List[str], List[Any]]:
+        user_id: str | None = None,
+        model: str | None = None,
+        service_id: str | None = None,
+        provider: str | None = None,
+    ) -> tuple[list[str], list[Any]]:
         conditions = [
             "tenant_id = $1",
             "created_at::date >= $2",
             "created_at::date <= $3",
         ]
-        params: List[Any] = [tenant_id, start_date, end_date]
+        params: list[Any] = [tenant_id, start_date, end_date]
 
         if user_id:
             conditions.append(f"user_id = ${len(params) + 1}")
@@ -1357,14 +1353,14 @@ class UsageRecorder:
     async def get_latency_breakdown_timeseries(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        user_id: Optional[str] = None,
-        model: Optional[str] = None,
-        service_id: Optional[str] = None,
-        provider: Optional[str] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        user_id: str | None = None,
+        model: str | None = None,
+        service_id: str | None = None,
+        provider: str | None = None,
         granularity: str = "day",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get detailed latency/phase breakdown for dashboard performance panel."""
         if not self.database or not self.database._pool:
             return []
@@ -1451,15 +1447,15 @@ class UsageRecorder:
     async def get_failure_breakdown(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         dimension: str = "service",
-        user_id: Optional[str] = None,
-        model: Optional[str] = None,
-        service_id: Optional[str] = None,
-        provider: Optional[str] = None,
+        user_id: str | None = None,
+        model: str | None = None,
+        service_id: str | None = None,
+        provider: str | None = None,
         limit: int = 50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get failure categorization breakdown by dimension + error_type."""
         if not self.database or not self.database._pool:
             return []
@@ -1529,7 +1525,7 @@ class UsageRecorder:
 
     async def get_request_trace_by_id(
         self, tenant_id: str, request_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get latest sampled trace by request_id."""
         if not self.database or not self.database._pool:
             return None
@@ -1554,16 +1550,16 @@ class UsageRecorder:
     async def list_request_traces(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        service_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        status: Optional[str] = None,
-        error_type: Optional[str] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        service_id: str | None = None,
+        user_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        status: str | None = None,
+        error_type: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List sampled traces for dashboard trace table."""
         if not self.database or not self.database._pool:
             return []
@@ -1578,7 +1574,7 @@ class UsageRecorder:
             "created_at::date >= $2",
             "created_at::date <= $3",
         ]
-        params: List[Any] = [tenant_id, start_date, end_date]
+        params: list[Any] = [tenant_id, start_date, end_date]
         if service_id:
             conditions.append(f"service_id = ${len(params) + 1}")
             params.append(service_id)
@@ -1615,7 +1611,7 @@ class UsageRecorder:
             return []
 
     @staticmethod
-    def _trace_row_to_dict(row: Any) -> Dict[str, Any]:
+    def _trace_row_to_dict(row: Any) -> dict[str, Any]:
         if not row:
             return {}
         trace_steps = row["trace_steps"]
@@ -1659,10 +1655,10 @@ class UsageRecorder:
     async def get_last_ingested_at(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         granularity: str = "day",
-    ) -> Optional[datetime]:
+    ) -> datetime | None:
         if not self.database or not self.database._pool:
             return None
         return await self.database.get_usage_last_ingested_at(
@@ -1672,7 +1668,7 @@ class UsageRecorder:
             granularity=granularity,
         )
 
-    def _empty_summary(self) -> Dict[str, Any]:
+    def _empty_summary(self) -> dict[str, Any]:
         """Return empty summary."""
         return {
             "total_requests": 0,
@@ -1695,7 +1691,7 @@ def get_usage_recorder() -> UsageRecorder:
     return _usage_recorder
 
 
-def init_usage_recorder(database: "DatabaseStorage") -> UsageRecorder:
+def init_usage_recorder(database: DatabaseStorage) -> UsageRecorder:
     """Initialize the global UsageRecorder with database storage."""
     global _usage_recorder
     if _usage_recorder is None:

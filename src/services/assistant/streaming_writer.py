@@ -31,15 +31,16 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ..knowledge.knowledge_service import KnowledgeService, RetrieveResult
-    from .assistant_service import AssistantService
     from ...core.auth.user_resolver import UserContext
+    from ..knowledge.knowledge_service import KnowledgeService
+    from .assistant_service import AssistantService
 
 logger = get_logger(__name__)
 
@@ -98,9 +99,10 @@ class StreamChunk:
         ...     metadata={"score": 0.95, "source": "policy_doc_v2"}
         ... )
     """
+
     type: str  # "text", "search_start", "search_result", "search_end", "error"
     content: str
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
     def __post_init__(self):
         """Validate chunk type."""
@@ -121,10 +123,11 @@ class VerificationContext:
         results: KB search results
         verified: Whether verification was successful
     """
+
     trigger: str
     trigger_position: int
     query: str
-    results: List[Dict[str, Any]] = field(default_factory=list)
+    results: list[dict[str, Any]] = field(default_factory=list)
     verified: bool = False
 
 
@@ -159,8 +162,8 @@ class StreamingWriter:
 
     def __init__(
         self,
-        kb_service: "KnowledgeService",
-        assistant_service: "AssistantService",
+        kb_service: KnowledgeService,
+        assistant_service: AssistantService,
         buffer_threshold: int = 100,
         search_top_k: int = 3,
     ):
@@ -189,11 +192,11 @@ class StreamingWriter:
     async def write_with_verification(
         self,
         writing_prompt: str,
-        dataset_ids: List[str],
-        verification_triggers: Optional[List[str]] = None,
-        user: Optional["UserContext"] = None,
+        dataset_ids: list[str],
+        verification_triggers: list[str] | None = None,
+        user: UserContext | None = None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         model_id: str = "gemini-3-flash-preview",
     ) -> AsyncGenerator[StreamChunk, None]:
         """
@@ -272,9 +275,7 @@ class StreamingWriter:
                             )
 
                         # Extract verification query from context
-                        query = self._extract_verification_query(
-                            total_text, trigger
-                        )
+                        query = self._extract_verification_query(total_text, trigger)
 
                         if query and dataset_ids:
                             search_count += 1
@@ -367,9 +368,7 @@ class StreamingWriter:
                 metadata={"error_type": type(e).__name__},
             )
 
-    def _compile_trigger_patterns(
-        self, triggers: List[str]
-    ) -> List[re.Pattern]:
+    def _compile_trigger_patterns(self, triggers: list[str]) -> list[re.Pattern]:
         """
         Compile trigger phrases into regex patterns for efficient matching.
 
@@ -384,10 +383,7 @@ class StreamingWriter:
             # Use word boundaries for English, direct match for Chinese
             if all(ord(c) < 128 for c in trigger):
                 # ASCII text - use word boundaries and case-insensitive
-                pattern = re.compile(
-                    r'\b' + re.escape(trigger) + r'\b',
-                    re.IGNORECASE
-                )
+                pattern = re.compile(r"\b" + re.escape(trigger) + r"\b", re.IGNORECASE)
             else:
                 # Contains non-ASCII (Chinese, etc.) - direct match
                 pattern = re.compile(re.escape(trigger))
@@ -397,9 +393,9 @@ class StreamingWriter:
     def _find_trigger(
         self,
         text: str,
-        patterns: List[re.Pattern],
-        triggers: List[str],
-    ) -> Optional[tuple[str, int]]:
+        patterns: list[re.Pattern],
+        triggers: list[str],
+    ) -> tuple[str, int] | None:
         """
         Find the first verification trigger in the text.
 
@@ -414,7 +410,7 @@ class StreamingWriter:
         first_match = None
         first_position = len(text)
 
-        for pattern, trigger in zip(patterns, triggers):
+        for pattern, trigger in zip(patterns, triggers, strict=False):
             match = pattern.search(text)
             if match and match.start() < first_position:
                 first_match = trigger
@@ -424,9 +420,7 @@ class StreamingWriter:
             return (first_match, first_position)
         return None
 
-    def _extract_verification_query(
-        self, text: str, trigger: str
-    ) -> Optional[str]:
+    def _extract_verification_query(self, text: str, trigger: str) -> str | None:
         """
         Extract the topic/query around a verification trigger.
 
@@ -478,10 +472,10 @@ class StreamingWriter:
         # Take the last sentence or clause before the trigger
         if before_context:
             # Find last sentence boundary
-            for sep in ['. ', '。', '\n', '; ', ';', '；']:
+            for sep in [". ", "。", "\n", "; ", ";", "；"]:
                 last_sep = before_context.rfind(sep)
                 if last_sep != -1:
-                    before_context = before_context[last_sep + len(sep):]
+                    before_context = before_context[last_sep + len(sep) :]
                     break
 
             # Take last few words as subject context
@@ -489,12 +483,12 @@ class StreamingWriter:
             if words:
                 # Take up to last 5 words for context
                 subject_words = words[-5:] if len(words) > 5 else words
-                query_parts.append(' '.join(subject_words))
+                query_parts.append(" ".join(subject_words))
 
         # Add key words after trigger (the claim)
         if after_context:
             # Take first sentence/clause after trigger
-            end_markers = ['. ', '。', '\n', ', ', ',', '，', ';', '；']
+            end_markers = [". ", "。", "\n", ", ", ",", "，", ";", "；"]
             end_pos = len(after_context)
             for marker in end_markers:
                 marker_pos = after_context.find(marker)
@@ -506,26 +500,26 @@ class StreamingWriter:
                 # Take up to first 10 words of the claim
                 words = claim_text.split()
                 claim_words = words[:10] if len(words) > 10 else words
-                query_parts.append(' '.join(claim_words))
+                query_parts.append(" ".join(claim_words))
 
         if not query_parts:
             return None
 
         # Combine parts into a search query
-        query = ' '.join(query_parts)
+        query = " ".join(query_parts)
 
         # Clean up the query
         query = query.strip()
-        query = re.sub(r'\s+', ' ', query)  # Normalize whitespace
+        query = re.sub(r"\s+", " ", query)  # Normalize whitespace
 
         # Limit query length
         max_query_length = 200
         if len(query) > max_query_length:
-            query = query[:max_query_length].rsplit(' ', 1)[0]
+            query = query[:max_query_length].rsplit(" ", 1)[0]
 
         return query if query else None
 
-    def _format_results(self, results: List[Dict[str, Any]]) -> str:
+    def _format_results(self, results: list[dict[str, Any]]) -> str:
         """
         Format KB results for inline display.
 
@@ -558,13 +552,9 @@ class StreamingWriter:
                 content = content[:max_content_length] + "..."
 
             if source:
-                formatted_parts.append(
-                    f"[{i}] (score: {score:.2f}) [Source: {source}]\n{content}"
-                )
+                formatted_parts.append(f"[{i}] (score: {score:.2f}) [Source: {source}]\n{content}")
             else:
-                formatted_parts.append(
-                    f"[{i}] (score: {score:.2f})\n{content}"
-                )
+                formatted_parts.append(f"[{i}] (score: {score:.2f})\n{content}")
 
         return "\n\n".join(formatted_parts)
 
@@ -585,14 +575,14 @@ class StreamingWriter:
             return 0
 
         # Look for sentence endings
-        sentence_endings = ['. ', '。', '! ', '！', '? ', '？', '\n']
+        sentence_endings = [". ", "。", "! ", "！", "? ", "？", "\n"]
         for ending in sentence_endings:
             pos = text.rfind(ending, 0, len(text))
             if pos != -1 and pos > self.buffer_threshold // 2:
                 return pos + len(ending)
 
         # Look for word boundaries (space)
-        space_pos = text.rfind(' ', 0, len(text))
+        space_pos = text.rfind(" ", 0, len(text))
         if space_pos != -1 and space_pos > self.buffer_threshold // 2:
             return space_pos + 1
 
@@ -604,7 +594,7 @@ class StreamingWriter:
         prompt: str,
         model_id: str = "gemini-3-flash-preview",
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Generate text using the assistant service.
@@ -623,9 +613,7 @@ class StreamingWriter:
         """
         from .model_registry import ChatMessage
 
-        messages = [
-            ChatMessage(role="user", content=prompt)
-        ]
+        messages = [ChatMessage(role="user", content=prompt)]
 
         try:
             async for delta in self.assistant_service.model_registry.chat_stream(
@@ -643,9 +631,9 @@ class StreamingWriter:
     async def _search_kb(
         self,
         query: str,
-        dataset_ids: List[str],
-        user: Optional["UserContext"] = None,
-    ) -> List[Dict[str, Any]]:
+        dataset_ids: list[str],
+        user: UserContext | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Search the knowledge base for verification.
 
@@ -675,32 +663,34 @@ class StreamingWriter:
                 )
 
                 for r in retrieve_results:
-                    results.append({
-                        "content": r.text,
-                        "score": r.score,
-                        "segment_id": r.segment_id,
-                        "document_id": r.document_id,
-                        "dataset_id": dataset_id,
-                        "metadata": r.metadata or {},
-                    })
+                    results.append(
+                        {
+                            "content": r.text,
+                            "score": r.score,
+                            "segment_id": r.segment_id,
+                            "document_id": r.document_id,
+                            "dataset_id": dataset_id,
+                            "metadata": r.metadata or {},
+                        }
+                    )
             except Exception as e:
                 logger.warning(f"KB search failed for dataset {dataset_id}: {e}")
                 continue
 
         # Sort by score and limit to top_k
-        def get_score(item: Dict[str, Any]) -> float:
+        def get_score(item: dict[str, Any]) -> float:
             score = item.get("score", 0)
             if isinstance(score, (int, float)):
                 return float(score)
             return 0.0
 
         results.sort(key=get_score, reverse=True)
-        return results[:self.search_top_k]
+        return results[: self.search_top_k]
 
 
 def create_streaming_writer(
-    kb_service: "KnowledgeService",
-    assistant_service: "AssistantService",
+    kb_service: KnowledgeService,
+    assistant_service: AssistantService,
     buffer_threshold: int = 100,
     search_top_k: int = 3,
 ) -> StreamingWriter:

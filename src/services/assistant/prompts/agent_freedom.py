@@ -262,6 +262,7 @@ SCENARIO_FREEDOM_MAP = {
 # Helper Functions
 # =============================================================================
 
+
 def get_agent_freedom(scenario: str = "default") -> str:
     """
     Get agent freedom definition for a specific scenario.

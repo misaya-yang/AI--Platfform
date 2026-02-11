@@ -80,7 +80,9 @@ def test_islamic_defaults_apply_profile_defaults_when_explicitly_opted_in():
             },
         }
     }
-    updated = KnowledgeService._apply_islamic_dataset_defaults("any_name", dict(index_config), defaults)
+    updated = KnowledgeService._apply_islamic_dataset_defaults(
+        "any_name", dict(index_config), defaults
+    )
     retrieval = updated["retrieval"]
     assert retrieval["top_k"] == 8
     assert retrieval["score_threshold"] == 0.3

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Dict, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 # Common token field variants across providers.
 _INPUT_TOKEN_KEYS = (
@@ -42,7 +43,7 @@ _ASSISTANT_KEYS = (
 )
 
 
-def _to_int(value: Any) -> Optional[int]:
+def _to_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -60,7 +61,7 @@ def _to_int(value: Any) -> Optional[int]:
     return None
 
 
-def _to_text(value: Any) -> Optional[str]:
+def _to_text(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -88,7 +89,7 @@ def _iter_nodes(payload: Any) -> Iterable[Any]:
             queue.extend(current)
 
 
-def _normalize_usage_dict(data: Dict[str, Any]) -> Optional[Dict[str, int]]:
+def _normalize_usage_dict(data: dict[str, Any]) -> dict[str, int] | None:
     if not isinstance(data, dict):
         return None
     if not any(key in data for key in _ALL_TOKEN_KEYS):
@@ -96,7 +97,7 @@ def _normalize_usage_dict(data: Dict[str, Any]) -> Optional[Dict[str, int]]:
 
     input_tokens = 0
     output_tokens = 0
-    total_tokens: Optional[int] = None
+    total_tokens: int | None = None
 
     for key in _INPUT_TOKEN_KEYS:
         parsed = _to_int(data.get(key))
@@ -126,8 +127,8 @@ def _normalize_usage_dict(data: Dict[str, Any]) -> Optional[Dict[str, int]]:
     }
 
 
-def extract_token_usage(payload: Any) -> Optional[Dict[str, int]]:
-    best: Optional[Dict[str, int]] = None
+def extract_token_usage(payload: Any) -> dict[str, int] | None:
+    best: dict[str, int] | None = None
     best_total = -1
 
     for node in _iter_nodes(payload):
@@ -144,7 +145,7 @@ def extract_token_usage(payload: Any) -> Optional[Dict[str, int]]:
     return best
 
 
-def extract_string_value(payload: Any, keys: Iterable[str]) -> Optional[str]:
+def extract_string_value(payload: Any, keys: Iterable[str]) -> str | None:
     ordered_keys = tuple(keys)
     for node in _iter_nodes(payload):
         if not isinstance(node, dict):
@@ -156,13 +157,13 @@ def extract_string_value(payload: Any, keys: Iterable[str]) -> Optional[str]:
     return None
 
 
-def extract_model(payload: Any) -> Optional[str]:
+def extract_model(payload: Any) -> str | None:
     return extract_string_value(payload, _MODEL_KEYS)
 
 
-def extract_provider(payload: Any) -> Optional[str]:
+def extract_provider(payload: Any) -> str | None:
     return extract_string_value(payload, _PROVIDER_KEYS)
 
 
-def extract_assistant_id(payload: Any) -> Optional[str]:
+def extract_assistant_id(payload: Any) -> str | None:
     return extract_string_value(payload, _ASSISTANT_KEYS)

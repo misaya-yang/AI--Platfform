@@ -10,12 +10,9 @@ Tests:
 """
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-import tempfile
-from pathlib import Path
-
 
 # ============ Test Validation Functions ============
+
 
 class TestValidationFunctions:
     """Tests for validation helper functions."""
@@ -32,8 +29,9 @@ class TestValidationFunctions:
 
     def test_validate_user_id_invalid(self):
         """Test invalid user_id formats are rejected."""
-        from src.api.v1.files import validate_user_id
         from fastapi import HTTPException
+
+        from src.api.v1.files import validate_user_id
 
         # Invalid formats (path traversal attempts)
         invalid_ids = [
@@ -62,8 +60,9 @@ class TestValidationFunctions:
 
     def test_validate_file_id_invalid(self):
         """Test invalid file_id formats are rejected."""
-        from src.api.v1.files import validate_file_id
         from fastapi import HTTPException
+
+        from src.api.v1.files import validate_file_id
 
         # Invalid formats
         invalid_ids = [
@@ -81,8 +80,9 @@ class TestValidationFunctions:
 
     def test_validate_file_extension(self):
         """Test file extension validation."""
-        from src.api.v1.files import validate_file_extension
         from fastapi import HTTPException
+
+        from src.api.v1.files import validate_file_extension
 
         # Valid extensions
         assert validate_file_extension("doc.pdf") == ".pdf"
@@ -100,7 +100,7 @@ class TestAdminAccess:
 
     def test_require_admin_with_admin_user(self):
         """Test admin user passes check."""
-        from src.api.v1.files import require_admin, ADMIN_USER_IDS
+        from src.api.v1.files import ADMIN_USER_IDS, require_admin
         from src.core.auth.user_resolver import UserContext
 
         # Add test admin
@@ -139,9 +139,10 @@ class TestAdminAccess:
 
     def test_require_admin_without_admin(self):
         """Test non-admin user is rejected."""
+        from fastapi import HTTPException
+
         from src.api.v1.files import require_admin
         from src.core.auth.user_resolver import UserContext
-        from fastapi import HTTPException
 
         user = UserContext(user_id="regular-user")
 
@@ -155,7 +156,7 @@ class TestFileIdGeneration:
 
     def test_generate_file_id_format(self):
         """Test file ID is 8 hex characters."""
-        from src.api.v1.files import generate_file_id, FILE_ID_PATTERN
+        from src.api.v1.files import FILE_ID_PATTERN, generate_file_id
 
         for _ in range(10):
             file_id = generate_file_id()
@@ -205,8 +206,9 @@ class TestPathSecurity:
 
     def test_user_uploads_path_validated(self):
         """Test that get_user_uploads_path validates user_id."""
-        from src.api.v1.files import get_user_uploads_path
         from fastapi import HTTPException
+
+        from src.api.v1.files import get_user_uploads_path
 
         # Path traversal attempts should be blocked
         with pytest.raises(HTTPException):
@@ -217,7 +219,7 @@ class TestPathSecurity:
 
     def test_user_uploads_path_normal(self):
         """Test normal user_id creates proper path."""
-        from src.api.v1.files import get_user_uploads_path, FILE_STORAGE_PATH
+        from src.api.v1.files import FILE_STORAGE_PATH, get_user_uploads_path
 
         path = get_user_uploads_path("test_user_123")
 

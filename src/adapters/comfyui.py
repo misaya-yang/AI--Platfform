@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from ..models.enums import ContentType
 from ..models.request import ContentItem, UnifiedRequest
@@ -10,7 +10,7 @@ from .base import ProtocolAdapter
 
 class ComfyUIAdapter(ProtocolAdapter):
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
-        workflow: Dict[str, Any] = request.parameters or {}
+        workflow: dict[str, Any] = request.parameters or {}
         ws = await self.connector.websocket()
         try:
             await ws.send_json({"type": "execute", "data": workflow})

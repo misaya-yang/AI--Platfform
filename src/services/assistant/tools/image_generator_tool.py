@@ -7,26 +7,27 @@ Provides text-to-image generation using:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import time
-import asyncio
-import httpx
-from typing import Any, Dict, Optional
 from dataclasses import dataclass, field
+from typing import Any
 
+import httpx
+
+from ....core.observability.logging import get_logger
 from .tool_registry import (
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
     ToolCallRequest,
     ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRiskLevel,
     register_tool,
 )
-from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -38,13 +39,13 @@ logger = get_logger(__name__)
 IMAGE_GENERATION_DEFINITION = ToolDefinition(
     name="generate_image",
     description="Generate images from text descriptions using AI. "
-                "Creates high-quality images based on the provided prompt.",
+    "Creates high-quality images based on the provided prompt.",
     parameters=[
         ToolParameter(
             name="prompt",
             type="string",
             description="Detailed description of the image to generate. "
-                        "Be specific about style, content, colors, composition.",
+            "Be specific about style, content, colors, composition.",
             required=True,
         ),
         ToolParameter(
@@ -68,8 +69,17 @@ IMAGE_GENERATION_DEFINITION = ToolDefinition(
             description="Image style preset.",
             required=False,
             default="<auto>",
-            enum=["<auto>", "<photography>", "<portrait>", "<3d cartoon>",
-                  "<anime>", "<oil painting>", "<watercolor>", "<sketch>", "<flat illustration>"],
+            enum=[
+                "<auto>",
+                "<photography>",
+                "<portrait>",
+                "<3d cartoon>",
+                "<anime>",
+                "<oil painting>",
+                "<watercolor>",
+                "<sketch>",
+                "<flat illustration>",
+            ],
         ),
         ToolParameter(
             name="n",
@@ -82,22 +92,27 @@ IMAGE_GENERATION_DEFINITION = ToolDefinition(
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.MEDIUM,
     when_to_use="Use when the user asks to create, generate, draw, or design an image/picture/artwork. "
-                "Good for: illustrations, photos, artwork, logos, concept art, portraits, landscapes, "
-                "animals, objects, or any visual content that requires AI image generation.",
+    "Good for: illustrations, photos, artwork, logos, concept art, portraits, landscapes, "
+    "animals, objects, or any visual content that requires AI image generation.",
     when_not_to_use="Do not use for data visualization or charts (use code execution with matplotlib instead). "
-                    "Do not use if the user just wants to analyze or describe existing images. "
-                    "Do not use for mathematical function plots - use code execution instead.",
+    "Do not use if the user just wants to analyze or describe existing images. "
+    "Do not use for mathematical function plots - use code execution instead.",
     examples=[
         ToolExample(
             description="Generate a logo",
-            input={"prompt": "A modern minimalist logo for a tech company, blue gradient, clean lines",
-                   "style": "<flat illustration>"},
+            input={
+                "prompt": "A modern minimalist logo for a tech company, blue gradient, clean lines",
+                "style": "<flat illustration>",
+            },
             expected_output="Returns a generated logo image",
         ),
         ToolExample(
             description="Generate an illustration",
-            input={"prompt": "A cozy coffee shop interior with warm lighting, plants, and wooden furniture",
-                   "size": "1280*720", "style": "<watercolor>"},
+            input={
+                "prompt": "A cozy coffee shop interior with warm lighting, plants, and wooden furniture",
+                "size": "1280*720",
+                "style": "<watercolor>",
+            },
             expected_output="Returns a watercolor style illustration",
         ),
     ],
@@ -109,13 +124,17 @@ IMAGE_GENERATION_DEFINITION = ToolDefinition(
 # DashScope Wanx Image Generator
 # =============================================================================
 
+
 @dataclass
 class ImageGenerationResult:
     """Result of image generation."""
+
     success: bool
-    images: list[Dict[str, Any]] = field(default_factory=list)  # [{filename, content_base64, mime_type, size_bytes}]
-    error: Optional[str] = None
-    task_id: Optional[str] = None
+    images: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # [{filename, content_base64, mime_type, size_bytes}]
+    error: str | None = None
+    task_id: str | None = None
     duration_ms: float = 0
 
 
@@ -125,9 +144,9 @@ class DashScopeImageGenerator:
     SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
     TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -148,10 +167,7 @@ class DashScopeImageGenerator:
     ) -> ImageGenerationResult:
         """Generate images from text prompt."""
         if not self.is_configured:
-            return ImageGenerationResult(
-                success=False,
-                error="DashScope API key not configured"
-            )
+            return ImageGenerationResult(success=False, error="DashScope API key not configured")
 
         start_time = time.time()
 
@@ -174,7 +190,7 @@ class DashScopeImageGenerator:
                     "size": size,
                     "n": min(n, 4),
                     "style": style,
-                }
+                },
             }
 
             if negative_prompt:
@@ -192,18 +208,14 @@ class DashScopeImageGenerator:
                 error_text = response.text
                 logger.error(f"Image generation submit failed: {error_text}")
                 return ImageGenerationResult(
-                    success=False,
-                    error=f"API error: {response.status_code} - {error_text}"
+                    success=False, error=f"API error: {response.status_code} - {error_text}"
                 )
 
             result = response.json()
             task_id = result.get("output", {}).get("task_id")
 
             if not task_id:
-                return ImageGenerationResult(
-                    success=False,
-                    error="No task_id returned from API"
-                )
+                return ImageGenerationResult(success=False, error="No task_id returned from API")
 
             logger.info(f"Image generation task submitted: {task_id}")
 
@@ -230,11 +242,11 @@ class DashScopeImageGenerator:
     async def _poll_task(
         self,
         client: httpx.AsyncClient,
-        headers: Dict[str, str],
+        headers: dict[str, str],
         task_id: str,
         max_wait: int = 120,
         poll_interval: float = 2.0,
-    ) -> list[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Poll task until completion."""
         url = self.TASK_URL.format(task_id=task_id)
 
@@ -266,8 +278,8 @@ class DashScopeImageGenerator:
     async def _download_images(
         self,
         client: httpx.AsyncClient,
-        results: list[Dict[str, Any]],
-    ) -> list[Dict[str, Any]]:
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
         """Download images from URLs and convert to base64."""
         images = []
 
@@ -296,14 +308,16 @@ class DashScopeImageGenerator:
                     }
                     ext = ext_map.get(mime_type, "png")
 
-                    logger.info(f"Downloaded image {i+1}: {len(content)} bytes, type={mime_type}")
+                    logger.info(f"Downloaded image {i + 1}: {len(content)} bytes, type={mime_type}")
 
-                    images.append({
-                        "filename": f"generated_image_{i+1}.{ext}",
-                        "content_base64": base64.b64encode(content).decode("utf-8"),
-                        "mime_type": mime_type,
-                        "size_bytes": len(content),
-                    })
+                    images.append(
+                        {
+                            "filename": f"generated_image_{i + 1}.{ext}",
+                            "content_base64": base64.b64encode(content).decode("utf-8"),
+                            "mime_type": mime_type,
+                            "size_bytes": len(content),
+                        }
+                    )
             except Exception as e:
                 logger.warning(f"Failed to download image {i}: {e}")
 
@@ -319,6 +333,7 @@ class DashScopeImageGenerator:
 # =============================================================================
 # Image Generation Tool Executor
 # =============================================================================
+
 
 class ImageGeneratorExecutor(ToolExecutor):
     """Executor for image generation tool."""
@@ -364,8 +379,8 @@ class ImageGeneratorExecutor(ToolExecutor):
                 error="Prompt is required",
             )
 
-        from .smart_image_generator import get_smart_image_generator
         from .gemini_image_tool import get_gemini_image_generator
+        from .smart_image_generator import get_smart_image_generator
 
         gemini = get_gemini_image_generator()
         dash = get_image_generator()
@@ -430,7 +445,7 @@ class ImageGeneratorExecutor(ToolExecutor):
 # Registration Helper
 # =============================================================================
 
-_image_generator: Optional[DashScopeImageGenerator] = None
+_image_generator: DashScopeImageGenerator | None = None
 
 
 def get_image_generator() -> DashScopeImageGenerator:

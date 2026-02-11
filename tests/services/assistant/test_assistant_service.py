@@ -3,10 +3,11 @@ Tests for AssistantService core functionality.
 
 Tests session management, streaming, and configuration handling.
 """
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
 from dataclasses import dataclass
-from typing import List, Optional
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 # Skip entire module if tiktoken is not available
 tiktoken = pytest.importorskip("tiktoken", reason="tiktoken required for assistant service tests")
@@ -15,12 +16,13 @@ tiktoken = pytest.importorskip("tiktoken", reason="tiktoken required for assista
 @dataclass
 class MockUserContext:
     """Mock UserContext for testing."""
+
     user_id: str
     tenant_id: str = ""
     tier: str = "normal"
     is_authenticated: bool = True
     ip: str = "127.0.0.1"
-    roles: List[str] = None
+    roles: list[str] = None
 
     def __post_init__(self):
         if self.roles is None:
@@ -139,26 +141,30 @@ class TestAssistantServiceChatStream:
         from src.services.assistant.model_registry import ModelRegistry
 
         registry = MagicMock(spec=ModelRegistry)
-        registry.get_model = MagicMock(return_value={
-            "model_id": "gpt-4",
-            "provider_id": "openai",
-            "context_window": 8192,
-        })
+        registry.get_model = MagicMock(
+            return_value={
+                "model_id": "gpt-4",
+                "provider_id": "openai",
+                "context_window": 8192,
+            }
+        )
         return registry
 
     @pytest.fixture
     def mock_session_manager(self):
         """Create mock session manager."""
-        from src.services.session.database_session_manager import DatabaseSessionManager
         from src.models.session import Session
+        from src.services.session.database_session_manager import DatabaseSessionManager
 
         manager = AsyncMock(spec=DatabaseSessionManager)
-        manager.get = AsyncMock(return_value=Session(
-            session_id="test-session",
-            user_id="user1",
-            tenant_id="tenant1",
-            history=[],
-        ))
+        manager.get = AsyncMock(
+            return_value=Session(
+                session_id="test-session",
+                user_id="user1",
+                tenant_id="tenant1",
+                history=[],
+            )
+        )
         manager.add_message = AsyncMock()
         return manager
 
@@ -191,6 +197,7 @@ class TestAssistantServiceChatStream:
         # Create async generator that yields text
         async def mock_stream(*args, **kwargs):
             from src.services.assistant.model_registry import StreamDelta
+
             yield StreamDelta(text="Hello")
 
         mock_provider.chat_stream = mock_stream

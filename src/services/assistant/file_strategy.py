@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Awaitable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 
@@ -28,6 +29,7 @@ logger = get_logger(__name__)
 
 class ProcessingStrategy(str, Enum):
     """Available file processing strategies."""
+
     GEMINI_FILE_API = "gemini_file_api"  # Gemini native File API
     VISION_IMAGES = "vision_images"  # Convert to images for vision models
     TEXT_EXTRACTION = "text_extraction"  # Extract text content
@@ -36,25 +38,26 @@ class ProcessingStrategy(str, Enum):
 @dataclass
 class ProcessedContent:
     """Result of file processing."""
+
     strategy: ProcessingStrategy
     file_path: str
     original_filename: str
 
     # For text extraction
-    text_content: Optional[str] = None
+    text_content: str | None = None
 
     # For vision/image processing
-    image_blocks: List[Dict[str, Any]] = field(default_factory=list)
+    image_blocks: list[dict[str, Any]] = field(default_factory=list)
 
     # For Gemini File API
-    gemini_file_uri: Optional[str] = None
-    gemini_file_state: Optional[str] = None  # PROCESSING, ACTIVE, FAILED
+    gemini_file_uri: str | None = None
+    gemini_file_state: str | None = None  # PROCESSING, ACTIVE, FAILED
 
     # Metadata
     total_pages: int = 0
     total_size_bytes: int = 0
     processing_time_ms: float = 0
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
     def is_success(self) -> bool:
@@ -85,7 +88,7 @@ class FileProcessingStrategy(ABC):
         self,
         file_path: str,
         content_type: str,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: ProgressCallback | None = None,
         **kwargs,
     ) -> ProcessedContent:
         """
@@ -116,7 +119,7 @@ class TextExtractionStrategy(FileProcessingStrategy):
     Cons: Loses formatting, tables, images
     """
 
-    def __init__(self, storage_base_path: Optional[Path] = None):
+    def __init__(self, storage_base_path: Path | None = None):
         """
         Initialize text extraction strategy.
 
@@ -133,11 +136,12 @@ class TextExtractionStrategy(FileProcessingStrategy):
         self,
         file_path: str,
         content_type: str,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: ProgressCallback | None = None,
         **kwargs,
     ) -> ProcessedContent:
         """Extract text from document."""
         import time
+
         start_time = time.time()
 
         result = ProcessedContent(
@@ -178,9 +182,9 @@ class VisionModelStrategy(FileProcessingStrategy):
     def __init__(
         self,
         dpi: int = 150,
-        max_pages: Optional[int] = None,
+        max_pages: int | None = None,
         provider: str = "openai",
-        storage_base_path: Optional[Path] = None,
+        storage_base_path: Path | None = None,
     ):
         """
         Initialize vision model strategy.
@@ -208,11 +212,12 @@ class VisionModelStrategy(FileProcessingStrategy):
         self,
         file_path: str,
         content_type: str,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: ProgressCallback | None = None,
         **kwargs,
     ) -> ProcessedContent:
         """Convert PDF to images."""
         import time
+
         start_time = time.time()
 
         result = ProcessedContent(
@@ -228,8 +233,8 @@ class VisionModelStrategy(FileProcessingStrategy):
             return await text_strategy.process(file_path, content_type, on_progress, **kwargs)
 
         try:
-            from .pdf_converter import PDFConverter
             from .document_parser import DocumentParser
+            from .pdf_converter import PDFConverter
 
             # Resolve file path
             parser = DocumentParser(storage_base_path=self.storage_base_path)
@@ -277,7 +282,7 @@ class GeminiFileStrategy(FileProcessingStrategy):
     def __init__(
         self,
         api_key: str,
-        storage_base_path: Optional[Path] = None,
+        storage_base_path: Path | None = None,
     ):
         """
         Initialize Gemini file strategy.
@@ -299,6 +304,7 @@ class GeminiFileStrategy(FileProcessingStrategy):
         if self._client is None:
             try:
                 import google.generativeai as genai
+
                 genai.configure(api_key=self.api_key)
                 self._client = genai
             except ImportError:
@@ -312,11 +318,12 @@ class GeminiFileStrategy(FileProcessingStrategy):
         self,
         file_path: str,
         content_type: str,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: ProgressCallback | None = None,
         **kwargs,
     ) -> ProcessedContent:
         """Upload file to Gemini and get file URI."""
         import time
+
         start_time = time.time()
 
         result = ProcessedContent(
@@ -392,9 +399,9 @@ class FileProcessingStrategyFactory:
 
     def __init__(
         self,
-        google_api_key: Optional[str] = None,
-        storage_base_path: Optional[Path] = None,
-        model_registry: Optional["ModelRegistry"] = None,
+        google_api_key: str | None = None,
+        storage_base_path: Path | None = None,
+        model_registry: ModelRegistry | None = None,
     ):
         """
         Initialize the strategy factory.
@@ -413,7 +420,7 @@ class FileProcessingStrategyFactory:
         provider: str,
         model_id: str,
         content_type: str,
-        force_strategy: Optional[ProcessingStrategy] = None,
+        force_strategy: ProcessingStrategy | None = None,
     ) -> FileProcessingStrategy:
         """
         Get the best strategy for the given parameters.
@@ -507,8 +514,4 @@ class FileProcessingStrategyFactory:
 
         # Check exact match or prefix match
         model_lower = model_id.lower()
-        for vm in vision_model_prefixes:
-            if model_lower == vm or model_lower.startswith(vm):
-                return True
-
-        return False
+        return any(model_lower == vm or model_lower.startswith(vm) for vm in vision_model_prefixes)

@@ -7,15 +7,13 @@
 - 具体异常类
 """
 
-import pytest
-
-from src.core.errors.codes import ErrorCode, ErrorCategory
 from src.core.errors.base import GatewayException
+from src.core.errors.codes import ErrorCategory, ErrorCode
 from src.core.errors.exceptions import (
-    ValidationError,
     AuthenticationError,
     RateLimitError,
     ResourceNotFoundError,
+    ValidationError,
 )
 
 
@@ -37,8 +35,8 @@ class TestErrorCodes:
 
     def test_retryable_errors(self):
         """测试可重试错误"""
-        assert ErrorCode.TIMEOUT.retryable == True
-        assert ErrorCode.PERMISSION_DENIED.retryable == False
+        assert ErrorCode.TIMEOUT.retryable
+        assert not ErrorCode.PERMISSION_DENIED.retryable
 
 
 class TestGatewayException:
@@ -88,7 +86,7 @@ class TestSpecificExceptions:
         """测试限流错误"""
         err = RateLimitError(dimension="user", limit=100, retry_after=30)
         assert err.http_status == 429
-        assert err.retryable == True
+        assert err.retryable
 
     def test_resource_not_found_error(self):
         """测试资源不存在错误"""

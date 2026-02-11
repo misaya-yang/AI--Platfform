@@ -10,7 +10,6 @@ Provides:
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 
 from ...persistence.database import DatabaseStorage
 
@@ -39,7 +38,7 @@ class AggregationTask:
         self.db = db
         self.retention_days = retention_days
 
-    async def run_daily_aggregation(self, target_date: Optional[datetime] = None) -> dict:
+    async def run_daily_aggregation(self, target_date: datetime | None = None) -> dict:
         """
         Aggregate usage records for a specific date into daily aggregates.
 
@@ -104,12 +103,14 @@ class AggregationTask:
             # Parse result to get row count
             rows_affected = int(result.split()[-1]) if result else 0
 
-            logger.info(f"Aggregation complete for {target_date}: {rows_affected} dimension combinations")
+            logger.info(
+                f"Aggregation complete for {target_date}: {rows_affected} dimension combinations"
+            )
 
             return {
                 "date": str(target_date),
                 "aggregations_created": rows_affected,
-                "status": "success"
+                "status": "success",
             }
 
     async def cleanup_old_records(self) -> dict:
@@ -139,7 +140,7 @@ class AggregationTask:
                     )
                     """,
                     cutoff_date,
-                    batch_size
+                    batch_size,
                 )
 
                 deleted_count = int(result.split()[-1]) if result else 0
@@ -156,7 +157,7 @@ class AggregationTask:
             return {
                 "cutoff_date": str(cutoff_date.date()),
                 "records_deleted": total_deleted,
-                "status": "success"
+                "status": "success",
             }
 
     async def run_full_maintenance(self) -> dict:
@@ -219,11 +220,7 @@ class QuotaResetTask:
 
             logger.info(f"Daily quota reset complete: {rows_affected} users")
 
-            return {
-                "users_reset": rows_affected,
-                "reset_type": "daily",
-                "status": "success"
-            }
+            return {"users_reset": rows_affected, "reset_type": "daily", "status": "success"}
 
     async def reset_monthly_quotas(self) -> dict:
         """
@@ -251,11 +248,7 @@ class QuotaResetTask:
 
             logger.info(f"Monthly quota reset complete: {rows_affected} users")
 
-            return {
-                "users_reset": rows_affected,
-                "reset_type": "monthly",
-                "status": "success"
-            }
+            return {"users_reset": rows_affected, "reset_type": "monthly", "status": "success"}
 
     async def check_and_reset_quotas(self) -> dict:
         """
@@ -288,8 +281,8 @@ class QuotaResetTask:
 
 
 # Singleton instances
-_aggregation_task: Optional[AggregationTask] = None
-_quota_reset_task: Optional[QuotaResetTask] = None
+_aggregation_task: AggregationTask | None = None
+_quota_reset_task: QuotaResetTask | None = None
 
 
 def init_aggregation_task(db: DatabaseStorage, retention_days: int = 30) -> AggregationTask:
@@ -299,7 +292,7 @@ def init_aggregation_task(db: DatabaseStorage, retention_days: int = 30) -> Aggr
     return _aggregation_task
 
 
-def get_aggregation_task() -> Optional[AggregationTask]:
+def get_aggregation_task() -> AggregationTask | None:
     """Get the aggregation task singleton."""
     return _aggregation_task
 
@@ -311,6 +304,6 @@ def init_quota_reset_task(db: DatabaseStorage) -> QuotaResetTask:
     return _quota_reset_task
 
 
-def get_quota_reset_task() -> Optional[QuotaResetTask]:
+def get_quota_reset_task() -> QuotaResetTask | None:
     """Get the quota reset task singleton."""
     return _quota_reset_task

@@ -38,17 +38,19 @@ References:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from .tools.tool_registry import ToolRegistry, ToolCallRequest, ToolCallResult, ToolDefinition
     from ...core.auth.user_resolver import UserContext
+    from .tools.tool_registry import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -81,29 +83,30 @@ class ToolInvocationContext:
         parent_task_id: For nested invocations, the parent task
         metadata: Additional context for logging/analytics
     """
+
     session_id: str
     user_id: str
     tenant_id: str
     request_id: str
-    run_id: Optional[str] = None
+    run_id: str | None = None
 
     # Execution constraints
     timeout_ms: int = 30000  # 30 seconds default
     max_retries: int = 2
 
     # Parent task context (for nested invocations)
-    parent_task_id: Optional[str] = None
+    parent_task_id: str | None = None
 
     # Knowledge Base context - auto-injected into KB search tools
-    kb_dataset_ids: List[str] = field(default_factory=list)
+    kb_dataset_ids: list[str] = field(default_factory=list)
 
     # User context - required for tools that need user permissions (e.g., KB search)
-    user: Optional["UserContext"] = None
+    user: UserContext | None = None
 
     # Metadata for logging and analytics
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "session_id": self.session_id,
@@ -126,7 +129,8 @@ class BatchInvocationResult:
 
     Contains all results plus aggregate statistics.
     """
-    results: List["ToolCallResult"]
+
+    results: list[ToolCallResult]
     total_duration_ms: float
     successful_count: int
     failed_count: int
@@ -136,7 +140,7 @@ class BatchInvocationResult:
         """Check if all invocations succeeded."""
         return self.failed_count == 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "results": [r.to_dict() for r in self.results],
@@ -172,10 +176,10 @@ class ToolInvoker(ABC):
     async def invoke(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         context: ToolInvocationContext,
-        cancel_event: Optional[asyncio.Event] = None,
-    ) -> "ToolCallResult":
+        cancel_event: asyncio.Event | None = None,
+    ) -> ToolCallResult:
         """
         Invoke a tool with the given arguments and context.
 
@@ -196,7 +200,7 @@ class ToolInvoker(ABC):
     @abstractmethod
     async def invoke_batch(
         self,
-        requests: List[Dict[str, Any]],
+        requests: list[dict[str, Any]],
         context: ToolInvocationContext,
         parallel: bool = True,
         max_concurrency: int = 5,
@@ -219,7 +223,7 @@ class ToolInvoker(ABC):
     def get_available_tools(
         self,
         context: ToolInvocationContext,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Get list of tool names available for this context.
 
@@ -235,8 +239,8 @@ class ToolInvoker(ABC):
     def get_tool_definitions(
         self,
         context: ToolInvocationContext,
-        tool_names: Optional[List[str]] = None,
-    ) -> List["ToolDefinition"]:
+        tool_names: list[str] | None = None,
+    ) -> list[ToolDefinition]:
         """
         Get tool definitions for schema generation.
 
@@ -283,9 +287,9 @@ class RegistryToolInvoker(ToolInvoker):
 
     def __init__(
         self,
-        tool_registry: "ToolRegistry",
-        rate_limiter: Optional[Callable[[str, str], bool]] = None,
-        metrics_collector: Optional[Callable[[str, float, bool], None]] = None,
+        tool_registry: ToolRegistry,
+        rate_limiter: Callable[[str, str], bool] | None = None,
+        metrics_collector: Callable[[str, float, bool], None] | None = None,
     ):
         """
         Initialize the RegistryToolInvoker.
@@ -304,10 +308,10 @@ class RegistryToolInvoker(ToolInvoker):
     async def invoke(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
         context: ToolInvocationContext,
-        cancel_event: Optional[asyncio.Event] = None,
-    ) -> "ToolCallResult":
+        cancel_event: asyncio.Event | None = None,
+    ) -> ToolCallResult:
         """
         Invoke a tool with the given arguments and context.
 
@@ -336,9 +340,7 @@ class RegistryToolInvoker(ToolInvoker):
 
         # Check rate limit
         if self.rate_limiter and self.rate_limiter(context.tenant_id, tool_name):
-            logger.warning(
-                f"Rate limited: tool={tool_name} tenant={context.tenant_id}"
-            )
+            logger.warning(f"Rate limited: tool={tool_name} tenant={context.tenant_id}")
             return ToolCallResult(
                 call_id=call_id,
                 tool_name=tool_name,
@@ -391,11 +393,11 @@ class RegistryToolInvoker(ToolInvoker):
 
     async def _execute_with_retry(
         self,
-        request: "ToolCallRequest",
+        request: ToolCallRequest,
         timeout_ms: int,
         max_retries: int,
-        cancel_event: Optional[asyncio.Event] = None,
-    ) -> "ToolCallResult":
+        cancel_event: asyncio.Event | None = None,
+    ) -> ToolCallResult:
         """
         Execute with timeout, retry, and cancellation support.
 
@@ -411,7 +413,7 @@ class RegistryToolInvoker(ToolInvoker):
         """
         from .tools.tool_registry import ToolCallResult
 
-        last_error: Optional[str] = None
+        last_error: str | None = None
 
         for attempt in range(max_retries + 1):
             # Check cancellation before each attempt
@@ -425,9 +427,7 @@ class RegistryToolInvoker(ToolInvoker):
 
             try:
                 # Create execution task
-                execution_task = asyncio.create_task(
-                    self.tool_registry.execute(request)
-                )
+                execution_task = asyncio.create_task(self.tool_registry.execute(request))
 
                 # If we have a cancel event, race between execution and cancellation
                 if cancel_event:
@@ -442,10 +442,8 @@ class RegistryToolInvoker(ToolInvoker):
                     # Cancel any pending tasks
                     for task in pending:
                         task.cancel()
-                        try:
+                        with contextlib.suppress(asyncio.CancelledError):
                             await task
-                        except asyncio.CancelledError:
-                            pass
 
                     # Check if cancellation won the race
                     if cancel_task in done:
@@ -473,13 +471,16 @@ class RegistryToolInvoker(ToolInvoker):
                 if not result.success:
                     error_lower = (result.error or "").lower()
                     # Non-retryable errors
-                    if any(phrase in error_lower for phrase in [
-                        "unknown tool",
-                        "validation error",
-                        "missing required",
-                        "permission denied",
-                        "cancelled",
-                    ]):
+                    if any(
+                        phrase in error_lower
+                        for phrase in [
+                            "unknown tool",
+                            "validation error",
+                            "missing required",
+                            "permission denied",
+                            "cancelled",
+                        ]
+                    ):
                         return result
 
                 return result
@@ -487,8 +488,7 @@ class RegistryToolInvoker(ToolInvoker):
             except asyncio.TimeoutError:
                 last_error = f"Tool execution timed out after {timeout_ms}ms"
                 logger.warning(
-                    f"Timeout on attempt {attempt + 1}/{max_retries + 1}: "
-                    f"tool={request.tool_name}"
+                    f"Timeout on attempt {attempt + 1}/{max_retries + 1}: tool={request.tool_name}"
                 )
 
             except asyncio.CancelledError:
@@ -515,7 +515,7 @@ class RegistryToolInvoker(ToolInvoker):
                         success=False,
                         error="Cancelled during retry wait",
                     )
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                await asyncio.sleep(0.5 * (2**attempt))
 
         # All retries exhausted
         return ToolCallResult(
@@ -527,7 +527,7 @@ class RegistryToolInvoker(ToolInvoker):
 
     async def invoke_batch(
         self,
-        requests: List[Dict[str, Any]],
+        requests: list[dict[str, Any]],
         context: ToolInvocationContext,
         parallel: bool = True,
         max_concurrency: int = 5,
@@ -573,14 +573,14 @@ class RegistryToolInvoker(ToolInvoker):
 
     async def _invoke_parallel(
         self,
-        requests: List[Dict[str, Any]],
+        requests: list[dict[str, Any]],
         context: ToolInvocationContext,
         max_concurrency: int,
-    ) -> List["ToolCallResult"]:
+    ) -> list[ToolCallResult]:
         """Execute requests in parallel with concurrency limit."""
         semaphore = asyncio.Semaphore(max_concurrency)
 
-        async def invoke_with_semaphore(req: Dict[str, Any], idx: int):
+        async def invoke_with_semaphore(req: dict[str, Any], idx: int):
             async with semaphore:
                 result = await self.invoke(
                     tool_name=req["tool_name"],
@@ -590,18 +590,14 @@ class RegistryToolInvoker(ToolInvoker):
                 return (idx, result)
 
         # Create tasks preserving order
-        tasks = [
-            invoke_with_semaphore(req, idx)
-            for idx, req in enumerate(requests)
-        ]
+        tasks = [invoke_with_semaphore(req, idx) for idx, req in enumerate(requests)]
 
         # Execute all and collect results
         completed = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Sort by original index and extract results
-        from .tools.tool_registry import ToolCallResult
 
-        results: List[ToolCallResult] = [None] * len(requests)  # type: ignore
+        results: list[ToolCallResult] = [None] * len(requests)  # type: ignore
         for item in completed:
             if isinstance(item, Exception):
                 # Should not happen with return_exceptions=True
@@ -614,9 +610,9 @@ class RegistryToolInvoker(ToolInvoker):
 
     async def _invoke_sequential(
         self,
-        requests: List[Dict[str, Any]],
+        requests: list[dict[str, Any]],
         context: ToolInvocationContext,
-    ) -> List["ToolCallResult"]:
+    ) -> list[ToolCallResult]:
         """Execute requests sequentially."""
         results = []
         for req in requests:
@@ -631,7 +627,7 @@ class RegistryToolInvoker(ToolInvoker):
     def get_available_tools(
         self,
         context: ToolInvocationContext,
-    ) -> List[str]:
+    ) -> list[str]:
         """Get list of tool names available for this context."""
         tools = self.tool_registry.list_tools()
         return [t.name for t in tools]
@@ -639,8 +635,8 @@ class RegistryToolInvoker(ToolInvoker):
     def get_tool_definitions(
         self,
         context: ToolInvocationContext,
-        tool_names: Optional[List[str]] = None,
-    ) -> List["ToolDefinition"]:
+        tool_names: list[str] | None = None,
+    ) -> list[ToolDefinition]:
         """Get tool definitions for schema generation."""
         tools = self.tool_registry.list_tools()
         if tool_names:
@@ -654,9 +650,9 @@ class RegistryToolInvoker(ToolInvoker):
 
 
 def create_tool_invoker(
-    tool_registry: Optional["ToolRegistry"] = None,
-    rate_limiter: Optional[Callable[[str, str], bool]] = None,
-    metrics_collector: Optional[Callable[[str, float, bool], None]] = None,
+    tool_registry: ToolRegistry | None = None,
+    rate_limiter: Callable[[str, str], bool] | None = None,
+    metrics_collector: Callable[[str, float, bool], None] | None = None,
 ) -> ToolInvoker:
     """
     Create a ToolInvoker instance.

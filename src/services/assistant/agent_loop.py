@@ -48,53 +48,54 @@ References:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
-from .scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
-from .scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
-from .query_intent_analyzer import QueryIntentAnalyzer, QueryIntent, create_query_intent_analyzer
-from .task_planner import TaskPlanner, ExecutionPlan
-from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult
-from .tool_invoker import ToolInvoker, ToolInvocationContext, create_tool_invoker
-from .working_memory import WorkingMemory, TaskStatus
+from ...models.enums import StreamEventType
 from .context_engine import (
     ContextEngine,
     ContextStructure,
-    format_long_term_memory,
     estimate_history_tokens,
-    estimate_tokens,
+    format_long_term_memory,
 )
-from .rag_metrics import (
-    RAGMetrics, RetrievalMetrics, RAGMetricsCollector,
-    get_rag_evaluator, get_rag_metrics_collector,
+from .context_metrics import (
+    ContextMetricsBuilder,
+    get_context_metrics_collector,
 )
-from .task_manager import TaskManager, SessionResources, get_task_manager
-from .memory.compressor import ContextCompressor, CompressedContext
-from .react_executor import ReActExecutor, ReActEvent, ReActPhase
-from ...models.enums import StreamEventType
 from .error_recovery import (
     ErrorRecoveryManager,
     ErrorType,
     RecoveryResult,
 )
-from .context_metrics import (
-    ContextMetrics,
-    ContextMetricsBuilder,
-    ContextMetricsCollector,
-    MetricLayer,
-    get_context_metrics_collector,
+from .memory.compressor import CompressedContext, ContextCompressor
+from .query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
+from .rag_metrics import (
+    RAGMetrics,
+    RAGMetricsCollector,
+    RetrievalMetrics,
+    get_rag_evaluator,
+    get_rag_metrics_collector,
 )
+from .react_executor import ReActEvent, ReActExecutor
+from .scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
+from .scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
+from .task_manager import SessionResources, TaskManager, get_task_manager
+from .task_planner import ExecutionPlan, TaskPlanner
+from .tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
+from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
+from .working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
+    from ...core.auth.user_resolver import UserContext
     from ..knowledge.knowledge_service import KnowledgeService
     from ..model.model_registry import ModelRegistry
     from .memory_service import MemoryService
-    from ...core.auth.user_resolver import UserContext
 
 logger = get_logger(__name__)
 
@@ -106,6 +107,7 @@ logger = get_logger(__name__)
 
 class AgentLoopPhase(str, Enum):
     """Phases in the 8-step agent loop."""
+
     MEMORY_LOADING = "memory_loading"
     SCENARIO_ANALYSIS = "scenario_analysis"
     TASK_PLANNING = "task_planning"
@@ -145,10 +147,11 @@ TOTAL_PHASES = 8
 
 class ErrorSeverity(str, Enum):
     """Error severity levels for structured error reporting."""
-    INFO = "info"        # Informational, non-blocking
+
+    INFO = "info"  # Informational, non-blocking
     WARNING = "warning"  # Recoverable, may affect quality
-    ERROR = "error"      # Operation failed but can continue
-    FATAL = "fatal"      # Must stop execution
+    ERROR = "error"  # Operation failed but can continue
+    FATAL = "fatal"  # Must stop execution
 
 
 @dataclass
@@ -165,15 +168,16 @@ class StructuredError:
         suggestion: Suggested user action (optional)
         details: Additional error context (optional)
     """
+
     code: str
     message: str
     severity: ErrorSeverity
     recoverable: bool
-    phase: Optional[AgentLoopPhase] = None
-    suggestion: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
+    phase: AgentLoopPhase | None = None
+    suggestion: str | None = None
+    details: dict[str, Any] | None = None
 
-    def to_event_data(self) -> Dict[str, Any]:
+    def to_event_data(self) -> dict[str, Any]:
         """Convert to event data dictionary for SSE transmission."""
         return {
             "code": self.code,
@@ -197,12 +201,13 @@ class AgentLoopEvent:
     - data: Event payload
     - timestamp: When the event occurred
     """
+
     phase: AgentLoopPhase
     event_type: str
     data: Any
     timestamp: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "phase": self.phase.value,
@@ -219,6 +224,7 @@ class AgentLoopConfig:
 
     Controls which features are enabled and their parameters.
     """
+
     # Model configuration
     model_id: str = "gemini-2.0-flash"
     temperature: float = 0.7
@@ -236,7 +242,7 @@ class AgentLoopConfig:
     enable_memory_loading: bool = False
 
     # RAG configuration (JIT Retrieval - optimized for TTFT and relevance)
-    kb_dataset_ids: List[str] = field(default_factory=list)
+    kb_dataset_ids: list[str] = field(default_factory=list)
     # kb_mode: auto | tool | off
     # - auto: encourage/require KB tool usage early for better grounding
     # - tool: KB is available but model decides when to call
@@ -255,7 +261,7 @@ class AgentLoopConfig:
     web_search_enabled: bool = False
 
     # File attachments (uploaded file paths accessible via FileProcessor/FileStorage)
-    file_paths: List[str] = field(default_factory=list)
+    file_paths: list[str] = field(default_factory=list)
 
     # Execution limits
     max_tool_iterations: int = 10
@@ -294,9 +300,9 @@ class AgentLoopConfig:
     streaming_first_mode: bool = True  # Default ON for best TTFT
 
     # System prompt (optional override, otherwise uses default from prompts)
-    system_prompt: Optional[str] = None
+    system_prompt: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "model_id": self.model_id,
@@ -321,6 +327,7 @@ class AgentLoopContext:
 
     Accumulates results from each step for use in subsequent steps.
     """
+
     # Request info
     session_id: str
     user_id: str
@@ -328,44 +335,44 @@ class AgentLoopContext:
     message: str
     config: AgentLoopConfig
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    task_id: Optional[str] = None  # For cancellation tracking
-    cancel_event: Optional[asyncio.Event] = None  # For immediate cancellation
+    task_id: str | None = None  # For cancellation tracking
+    cancel_event: asyncio.Event | None = None  # For immediate cancellation
 
     # Step 1: Memory
-    user_preferences: Optional[Dict[str, Any]] = None
-    session_memory: Optional[Dict[str, Any]] = None
-    long_term_memory: Optional[Dict[str, Any]] = None
+    user_preferences: dict[str, Any] | None = None
+    session_memory: dict[str, Any] | None = None
+    long_term_memory: dict[str, Any] | None = None
 
     # Step 2: Scenario
-    scenario: Optional[ScenarioDetectionResult] = None
+    scenario: ScenarioDetectionResult | None = None
 
     # Step 3: Planning
-    execution_plan: Optional[ExecutionPlan] = None
-    working_memory: Optional[WorkingMemory] = None
+    execution_plan: ExecutionPlan | None = None
+    working_memory: WorkingMemory | None = None
 
     # Step 4: RAG
-    query_intent: Optional[QueryIntent] = None  # LLM-driven intent analysis result
-    retrieval_context: Optional[ScenarioRetrievalContext] = None
-    retrieval_metrics: Optional[RetrievalMetrics] = None
+    query_intent: QueryIntent | None = None  # LLM-driven intent analysis result
+    retrieval_context: ScenarioRetrievalContext | None = None
+    retrieval_metrics: RetrievalMetrics | None = None
 
     # Step 5: Context
-    context_structure: Optional[ContextStructure] = None
-    messages: List[Dict[str, Any]] = field(default_factory=list)
+    context_structure: ContextStructure | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
 
     # Step 6: Execution
-    tool_results: List[ToolExecutionResult] = field(default_factory=list)
+    tool_results: list[ToolExecutionResult] = field(default_factory=list)
 
     # Step 7: Compression
-    compressed_context: Optional[str] = None
+    compressed_context: str | None = None
     tokens_saved: int = 0
 
     # Step 8: Generation
     generated_content: str = ""
-    rag_metrics: Optional[RAGMetrics] = None
-    usage: Dict[str, int] = field(default_factory=dict)
+    rag_metrics: RAGMetrics | None = None
+    usage: dict[str, int] = field(default_factory=dict)
 
     # Observability: Context Metrics
-    metrics_builder: Optional[ContextMetricsBuilder] = None
+    metrics_builder: ContextMetricsBuilder | None = None
 
 
 # =============================================================================
@@ -391,27 +398,24 @@ class AgentLoop:
     def __init__(
         self,
         # Core services
-        model_registry: Optional["ModelRegistry"] = None,
-        kb_service: Optional["KnowledgeService"] = None,
-        memory_service: Optional["MemoryService"] = None,
-
+        model_registry: ModelRegistry | None = None,
+        kb_service: KnowledgeService | None = None,
+        memory_service: MemoryService | None = None,
         # Components (optional - will be created if not provided)
-        scenario_analyzer: Optional[ScenarioAnalyzer] = None,
-        scenario_retriever: Optional[ScenarioAwareRetriever] = None,
-        query_intent_analyzer: Optional[QueryIntentAnalyzer] = None,
-        task_planner: Optional[TaskPlanner] = None,
-        tool_invoker: Optional[ToolInvoker] = None,
-        context_engine: Optional[ContextEngine] = None,
-        task_manager: Optional[TaskManager] = None,
-        metrics_collector: Optional[RAGMetricsCollector] = None,
-
+        scenario_analyzer: ScenarioAnalyzer | None = None,
+        scenario_retriever: ScenarioAwareRetriever | None = None,
+        query_intent_analyzer: QueryIntentAnalyzer | None = None,
+        task_planner: TaskPlanner | None = None,
+        tool_invoker: ToolInvoker | None = None,
+        context_engine: ContextEngine | None = None,
+        task_manager: TaskManager | None = None,
+        metrics_collector: RAGMetricsCollector | None = None,
         # System prompt
         system_prompt: str = "",
-
         # Optional persistence / artifact / file-processing dependencies
-        session_manager: Optional[Any] = None,
-        artifact_storage: Optional[Any] = None,
-        file_processor: Optional[Any] = None,
+        session_manager: Any | None = None,
+        artifact_storage: Any | None = None,
+        file_processor: Any | None = None,
     ):
         """
         Initialize the AgentLoop.
@@ -464,6 +468,7 @@ class AgentLoop:
         """Create a ScenarioAnalyzer instance."""
         try:
             from .scenario_analyzer import create_scenario_analyzer
+
             return create_scenario_analyzer()
         except Exception:
             return ScenarioAnalyzer()
@@ -471,10 +476,10 @@ class AgentLoop:
     async def execute(
         self,
         session_id: str,
-        user: "UserContext",
+        user: UserContext,
         message: str,
         config: AgentLoopConfig,
-        history: Optional[List[Dict[str, Any]]] = None,
+        history: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Execute the complete 8-step agent loop.
@@ -539,7 +544,6 @@ class AgentLoop:
                         # AG-UI compatible fields
                         "run_id": ctx.request_id,
                         "thread_id": session_id,
-
                         "session_id": session_id,
                         "task_id": task_id,
                         "request_id": ctx.request_id,
@@ -559,7 +563,7 @@ class AgentLoop:
                         f"session={session_id}, query='{message[:50]}...'"
                     )
                     had_fatal_error = False
-                    fatal_error_message: Optional[str] = None
+                    fatal_error_message: str | None = None
                     async for event in self._execute_streaming_first(
                         ctx=ctx,
                         user=user,
@@ -571,7 +575,9 @@ class AgentLoop:
                         if event.event_type == "error" and not had_fatal_error:
                             had_fatal_error = True
                             if isinstance(event.data, dict):
-                                fatal_error_message = str(event.data.get("message") or event.data.get("error") or "")
+                                fatal_error_message = str(
+                                    event.data.get("message") or event.data.get("error") or ""
+                                )
                             else:
                                 fatal_error_message = str(event.data)
                         yield event
@@ -644,7 +650,7 @@ class AgentLoop:
                 # Use QueryIntentAnalyzer for truly intelligent retrieval decisions
                 # This replaces pattern-matching with LLM-based understanding
                 should_retrieve = False
-                intent_result: Optional[QueryIntent] = None
+                intent_result: QueryIntent | None = None
                 skip_reason = "Unknown"
 
                 if not config.kb_dataset_ids:
@@ -711,14 +717,15 @@ class AgentLoop:
                         data={
                             "reason": skip_reason,
                             "intent": intent_result.to_dict() if intent_result else None,
-                            "scenario": ctx.scenario.primary_scenario.value if ctx.scenario else None,
-                            "query_preview": ctx.message[:50] + "..." if len(ctx.message) > 50 else ctx.message,
+                            "scenario": ctx.scenario.primary_scenario.value
+                            if ctx.scenario
+                            else None,
+                            "query_preview": ctx.message[:50] + "..."
+                            if len(ctx.message) > 50
+                            else ctx.message,
                         },
                     )
-                    logger.info(
-                        f"[RAG SKIP] {skip_reason}. "
-                        f"Query='{ctx.message[:50]}...'"
-                    )
+                    logger.info(f"[RAG SKIP] {skip_reason}. Query='{ctx.message[:50]}...'")
 
                 # Step 5: Context Building
                 async for event in self._step_context_building(ctx, history):
@@ -757,8 +764,12 @@ class AgentLoop:
                     ctx.metrics_builder.set_memory(
                         long_term_loaded=ctx.long_term_memory is not None,
                         session_loaded=ctx.session_memory is not None,
-                        working_memory_tasks=len(ctx.working_memory.tasks) if ctx.working_memory else 0,
-                        working_memory_restored=ctx.session_memory.get("working_memory") is not None if ctx.session_memory else False,
+                        working_memory_tasks=len(ctx.working_memory.tasks)
+                        if ctx.working_memory
+                        else 0,
+                        working_memory_restored=ctx.session_memory.get("working_memory") is not None
+                        if ctx.session_memory
+                        else False,
                         working_memory_persisted=False,  # Will be set in finally
                     )
 
@@ -810,10 +821,10 @@ class AgentLoop:
 
     async def _preprocess_history(
         self,
-        history: List[Dict[str, Any]],
+        history: list[dict[str, Any]],
         max_tokens: int,
         min_recent: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Proactively trim history to prevent context overflow.
 
@@ -836,14 +847,10 @@ class AgentLoop:
 
         # If within budget, no trimming needed
         if total_tokens <= max_tokens:
-            logger.debug(
-                f"History within budget: {total_tokens} tokens (max: {max_tokens})"
-            )
+            logger.debug(f"History within budget: {total_tokens} tokens (max: {max_tokens})")
             return history
 
-        logger.info(
-            f"History exceeds budget ({total_tokens} > {max_tokens} tokens), trimming..."
-        )
+        logger.info(f"History exceeds budget ({total_tokens} > {max_tokens} tokens), trimming...")
 
         # Always preserve recent messages
         if len(history) <= min_recent:
@@ -888,9 +895,9 @@ class AgentLoop:
 
     async def _summarize_history(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         max_tokens: int = 500,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Summarize a list of messages into a concise summary.
 
@@ -912,9 +919,7 @@ class AgentLoop:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content if p.get("type") == "text"
-                )
+                content = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
             text_parts.append(f"{role}: {content[:500]}")  # Truncate long messages
 
         conversation_text = "\n".join(text_parts)
@@ -956,9 +961,9 @@ class AgentLoop:
     async def _execute_streaming_first(
         self,
         ctx: AgentLoopContext,
-        user: "UserContext",
-        history: List[Dict[str, Any]],
-        task_ctx: Optional[Any] = None,
+        user: UserContext,
+        history: list[dict[str, Any]],
+        task_ctx: Any | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Streaming-First execution mode (Manus-style architecture).
@@ -977,8 +982,9 @@ class AgentLoop:
 
         This achieves TTFT similar to Manus (~1-2s) vs legacy mode (~10s).
         """
-        from .prompts.system_prompt_v2 import get_streaming_first_prompt
         import json
+
+        from .prompts.system_prompt_v2 import get_streaming_first_prompt
 
         phase = AgentLoopPhase.GENERATION_STORAGE  # Use generation phase for streaming
         start_time = time.time()
@@ -991,7 +997,9 @@ class AgentLoop:
             event_type="streaming_first_started",
             data={
                 "mode": "streaming_first",
-                "message_preview": ctx.message[:100] + "..." if len(ctx.message) > 100 else ctx.message,
+                "message_preview": ctx.message[:100] + "..."
+                if len(ctx.message) > 100
+                else ctx.message,
             },
         )
 
@@ -1001,14 +1009,14 @@ class AgentLoop:
             # Step 1: Minimal setup (no pre-processing), but still support:
             # - Session persistence (history + artifacts restore)
             # - Uploaded files visibility (vision + text-only fallbacks)
-            messages: List[Dict[str, Any]] = []
-            contexts_for_persistence: List[Dict[str, Any]] = []
-            web_search_results_for_persistence: Optional[Dict[str, Any]] = None
-            created_artifact_ids: List[str] = []
+            messages: list[dict[str, Any]] = []
+            contexts_for_persistence: list[dict[str, Any]] = []
+            web_search_results_for_persistence: dict[str, Any] | None = None
+            created_artifact_ids: list[str] = []
 
-            def _sanitize_output_files(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            def _sanitize_output_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 """Reduce payload for non-image files when we already have download_url/artifact_id."""
-                sanitized: List[Dict[str, Any]] = []
+                sanitized: list[dict[str, Any]] = []
                 for f in files:
                     mime = str(f.get("mime_type") or "")
                     if f.get("artifact_id") and (not mime.startswith("image/")):
@@ -1017,7 +1025,7 @@ class AgentLoop:
                         sanitized.append(f)
                 return sanitized
 
-            def _tool_step_info(name: str, args: Dict[str, Any]) -> Dict[str, str]:
+            def _tool_step_info(name: str, args: dict[str, Any]) -> dict[str, str]:
                 """Minimal mapping for Manus-style task panel visualization."""
                 if name == "search_knowledge_base":
                     q = str(args.get("query") or "")[:120]
@@ -1044,13 +1052,13 @@ class AgentLoop:
                     return text
                 return text[: max_len - 3].rstrip() + "..."
 
-            def _split_text_for_stream(text: str, max_chunk_chars: int = 120) -> List[str]:
+            def _split_text_for_stream(text: str, max_chunk_chars: int = 120) -> list[str]:
                 """Split large provider chunks so frontend receives visible incremental updates."""
                 text = text or ""
                 if len(text) <= max_chunk_chars:
                     return [text] if text else []
 
-                chunks: List[str] = []
+                chunks: list[str] = []
                 delimiters = {"。", "！", "？", ".", "!", "?", "\n"}
                 start = 0
                 n = len(text)
@@ -1070,9 +1078,9 @@ class AgentLoop:
                     start = end
                 return chunks
 
-            def _compact_context_payload(ctx_item: Dict[str, Any]) -> Dict[str, Any]:
+            def _compact_context_payload(ctx_item: dict[str, Any]) -> dict[str, Any]:
                 """Trim large KB payloads for SSE/session metadata to reduce transfer latency."""
-                compact_chunks: List[Dict[str, Any]] = []
+                compact_chunks: list[dict[str, Any]] = []
                 for chunk in (ctx_item.get("chunks") or [])[:3]:
                     if not isinstance(chunk, dict):
                         continue
@@ -1088,7 +1096,8 @@ class AgentLoop:
                             "content": _truncate_text(str(chunk.get("content") or ""), 320),
                             "score": chunk.get("score"),
                             "dataset_id": chunk.get("dataset_id") or ctx_item.get("dataset_id"),
-                            "dataset_name": chunk.get("dataset_name") or ctx_item.get("dataset_name"),
+                            "dataset_name": chunk.get("dataset_name")
+                            or ctx_item.get("dataset_name"),
                             "segment_id": chunk.get("segment_id"),
                             "document_id": chunk.get("document_id"),
                             "source_url": chunk.get("source_url"),
@@ -1098,7 +1107,7 @@ class AgentLoop:
                         }
                     )
 
-                compact: Dict[str, Any] = {
+                compact: dict[str, Any] = {
                     "dataset_id": ctx_item.get("dataset_id"),
                     "dataset_name": ctx_item.get("dataset_name"),
                     "query": ctx_item.get("query"),
@@ -1112,7 +1121,7 @@ class AgentLoop:
             def _compact_tool_result_for_model(
                 tool_name: str,
                 tool_result_text: Any,
-                tool_metadata: Dict[str, Any],
+                tool_metadata: dict[str, Any],
             ) -> str:
                 """
                 Build a concise tool result payload for follow-up LLM calls.
@@ -1120,23 +1129,27 @@ class AgentLoop:
                 """
                 text_result = str(tool_result_text or "")
                 if tool_name == "search_knowledge_base":
-                    contexts = tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
+                    contexts = (
+                        tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
+                    )
                     if isinstance(contexts, list):
-                        flat_chunks: List[Dict[str, Any]] = []
+                        flat_chunks: list[dict[str, Any]] = []
                         for ctx_item in contexts:
                             if not isinstance(ctx_item, dict):
                                 continue
-                            for c in (ctx_item.get("chunks") or []):
+                            for c in ctx_item.get("chunks") or []:
                                 if isinstance(c, dict):
                                     flat_chunks.append(c)
 
                         flat_chunks.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
                         selected = flat_chunks[:6]
-                        lines: List[str] = []
+                        lines: list[str] = []
                         q = tool_metadata.get("query")
                         if q:
                             lines.append(f"KB query: {q}")
-                        lines.append(f"KB results: {len(flat_chunks)} total, using top {len(selected)} snippets.")
+                        lines.append(
+                            f"KB results: {len(flat_chunks)} total, using top {len(selected)} snippets."
+                        )
                         for idx, item in enumerate(selected, 1):
                             ds = item.get("dataset_name") or item.get("dataset_id") or "dataset"
                             score = float(item.get("score") or 0.0)
@@ -1150,7 +1163,9 @@ class AgentLoop:
                         return "\n".join(lines)
 
                 if tool_name in ("search_web", "web_search"):
-                    display = tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
+                    display = (
+                        tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
+                    )
                     if isinstance(display, dict) and isinstance(display.get("results"), list):
                         lines = [f"Web results for: {display.get('query') or ''}".strip()]
                         for idx, item in enumerate(display.get("results", [])[:6], 1):
@@ -1169,9 +1184,9 @@ class AgentLoop:
                 return _truncate_text(text_result, 3000)
 
             def _select_tools_for_request(
-                all_defs: List[Any],
+                all_defs: list[Any],
                 user_message: str,
-            ) -> List[Any]:
+            ) -> list[Any]:
                 """
                 Select a lean tool set for question-style turns to reduce prompt overhead.
 
@@ -1179,20 +1194,61 @@ class AgentLoop:
                 """
                 message_lower = (user_message or "").lower()
                 create_markers = (
-                    "generate", "create", "build", "draft", "write", "code", "python",
-                    "ppt", "slide", "document", "docx", "image", "poster",
-                    "生成", "创建", "制作", "写", "代码", "脚本", "图片", "海报", "文档", "报告", "ppt",
+                    "generate",
+                    "create",
+                    "build",
+                    "draft",
+                    "write",
+                    "code",
+                    "python",
+                    "ppt",
+                    "slide",
+                    "document",
+                    "docx",
+                    "image",
+                    "poster",
+                    "生成",
+                    "创建",
+                    "制作",
+                    "写",
+                    "代码",
+                    "脚本",
+                    "图片",
+                    "海报",
+                    "文档",
+                    "报告",
+                    "ppt",
                 )
                 question_markers = (
-                    "?", "？", "what", "why", "when", "where", "who", "how",
-                    "什么", "为什么", "如何", "怎么", "是否", "能否", "请问", "介绍", "解释",
+                    "?",
+                    "？",
+                    "what",
+                    "why",
+                    "when",
+                    "where",
+                    "who",
+                    "how",
+                    "什么",
+                    "为什么",
+                    "如何",
+                    "怎么",
+                    "是否",
+                    "能否",
+                    "请问",
+                    "介绍",
+                    "解释",
                 )
                 asks_to_create = any(token in message_lower for token in create_markers)
                 question_like = any(token in message_lower for token in question_markers)
 
                 # For non-creation Q&A turns, keep only retrieval + memory tools.
                 if question_like and not asks_to_create:
-                    keep_names = {"search_knowledge_base", "search_web", "web_search", "update_user_memory"}
+                    keep_names = {
+                        "search_knowledge_base",
+                        "search_web",
+                        "web_search",
+                        "update_user_memory",
+                    }
                     selected = [d for d in all_defs if getattr(d, "name", "") in keep_names]
                     if selected:
                         return selected
@@ -1200,10 +1256,10 @@ class AgentLoop:
                 return all_defs
 
             def _trim_history_for_streaming(
-                messages_history: List[Dict[str, Any]],
+                messages_history: list[dict[str, Any]],
                 max_messages: int = 12,
                 max_chars: int = 7000,
-            ) -> List[Dict[str, Any]]:
+            ) -> list[dict[str, Any]]:
                 """
                 Keep recent turns only for streaming-first calls.
 
@@ -1213,7 +1269,7 @@ class AgentLoop:
                 if not messages_history:
                     return []
 
-                selected: List[Dict[str, Any]] = []
+                selected: list[dict[str, Any]] = []
                 running_chars = 0
                 for item in reversed(messages_history):
                     if len(selected) >= max_messages:
@@ -1245,7 +1301,9 @@ class AgentLoop:
                 return selected
 
             # Determine whether the selected model supports vision.
-            model_info = self.model_registry.get_model(ctx.config.model_id) if self.model_registry else None
+            model_info = (
+                self.model_registry.get_model(ctx.config.model_id) if self.model_registry else None
+            )
             model_supports_vision = bool(getattr(model_info, "supports_vision", False))
 
             # Fire-and-forget persist user message for session restoration.
@@ -1253,7 +1311,7 @@ class AgentLoop:
                 try:
                     from datetime import datetime
 
-                    user_msg_metadata: Dict[str, Any] = {
+                    user_msg_metadata: dict[str, Any] = {
                         "timestamp": datetime.utcnow().isoformat(),
                     }
                     if ctx.config.file_paths:
@@ -1310,7 +1368,9 @@ class AgentLoop:
                         data={
                             "image_count": len(getattr(processed_files, "images", []) or []),
                             "text_length": len(getattr(processed_files, "text_content", "") or ""),
-                            "description_count": len(getattr(processed_files, "image_descriptions", []) or []),
+                            "description_count": len(
+                                getattr(processed_files, "image_descriptions", []) or []
+                            ),
                             "requires_rag": bool(getattr(processed_files, "requires_rag", False)),
                             "file_metadata": getattr(processed_files, "file_metadata", []) or [],
                         },
@@ -1329,7 +1389,7 @@ class AgentLoop:
 
             # Step 2: Get tool definitions (ALL tools available - AI decides when to use)
             tools = []
-            available_tool_names: List[str] = []
+            available_tool_names: list[str] = []
             invocation_context = ToolInvocationContext(
                 session_id=ctx.session_id,
                 user_id=ctx.user_id,
@@ -1357,7 +1417,7 @@ class AgentLoop:
                 )
 
             # Best-effort dataset_id -> dataset_name mapping for prompt clarity (low latency budget).
-            dataset_name_map: Optional[Dict[str, str]] = None
+            dataset_name_map: dict[str, str] | None = None
             if self.kb_service and ctx.config.kb_dataset_ids:
                 try:
                     ds_rows = await asyncio.wait_for(
@@ -1389,9 +1449,7 @@ class AgentLoop:
             extra_prompt = (ctx.config.system_prompt or "").strip()
             if extra_prompt:
                 system_prompt = (
-                    f"{base_prompt}\n\n"
-                    "## Additional System Instructions\n"
-                    f"{extra_prompt}"
+                    f"{base_prompt}\n\n## Additional System Instructions\n{extra_prompt}"
                 )
             else:
                 system_prompt = base_prompt
@@ -1410,7 +1468,7 @@ class AgentLoop:
 
             # Build the current user message with potential file content
             final_message = ctx.message
-            user_images: Optional[List[str]] = None
+            user_images: list[str] | None = None
             if processed_files:
                 try:
                     # Vision model: attach images as data URLs.
@@ -1419,7 +1477,9 @@ class AgentLoop:
                         for img in getattr(processed_files, "images", []) or []:
                             user_images.append(f"data:{img.media_type};base64,{img.base64_data}")
                         for pdf_page in getattr(processed_files, "pdf_pages", []) or []:
-                            user_images.append(f"data:{pdf_page.media_type};base64,{pdf_page.base64_data}")
+                            user_images.append(
+                                f"data:{pdf_page.media_type};base64,{pdf_page.base64_data}"
+                            )
 
                     # Always inject extracted text (when present).
                     text_content = getattr(processed_files, "text_content", "") or ""
@@ -1427,10 +1487,14 @@ class AgentLoop:
                         final_message += f"\n\n---\n[上传文件内容]\n{text_content}"
 
                     # For text-only models, inject image descriptions.
-                    if (not model_supports_vision) and (getattr(processed_files, "image_descriptions", None) or []):
+                    if (not model_supports_vision) and (
+                        getattr(processed_files, "image_descriptions", None) or []
+                    ):
                         descriptions = "\n".join(
-                            f"- 图像 {i+1}: {desc}"
-                            for i, desc in enumerate(getattr(processed_files, "image_descriptions", []) or [])
+                            f"- 图像 {i + 1}: {desc}"
+                            for i, desc in enumerate(
+                                getattr(processed_files, "image_descriptions", []) or []
+                            )
                         )
                         if descriptions:
                             final_message += f"\n\n---\n[图像描述]\n{descriptions}"
@@ -1438,19 +1502,21 @@ class AgentLoop:
                     logger.warning("Failed to inject processed files into prompt: %s", e)
 
             # Add current user message
-            user_msg: Dict[str, Any] = {"role": "user", "content": final_message}
+            user_msg: dict[str, Any] = {"role": "user", "content": final_message}
             if user_images:
                 user_msg["images"] = user_images
             messages.append(user_msg)
 
             t1 = time.time()
             logger.info(
-                f"[STREAMING-FIRST] Context build: {(t1-t0)*1000:.0f}ms, "
+                f"[STREAMING-FIRST] Context build: {(t1 - t0) * 1000:.0f}ms, "
                 f"{len(messages)} messages, prompt={len(system_prompt)} chars"
             )
 
             t2 = time.time()
-            logger.info(f"[STREAMING-FIRST] Tool defs: {(t2-t1)*1000:.0f}ms, {len(tools)} tools")
+            logger.info(
+                f"[STREAMING-FIRST] Tool defs: {(t2 - t1) * 1000:.0f}ms, {len(tools)} tools"
+            )
 
             # Step 3: Start streaming loop with tool handling
             max_iterations = ctx.config.max_tool_iterations
@@ -1474,15 +1540,19 @@ class AgentLoop:
 
                 # Stream from model with tools
                 t_llm_start = time.time()
-                logger.info(f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start-t0)*1000:.0f}ms")
-                tools_for_call = (tools if tools else None)
+                logger.info(
+                    f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start - t0) * 1000:.0f}ms"
+                )
+                tools_for_call = tools if tools else None
                 if force_answer_without_tools:
                     tools_for_call = None
                     force_answer_without_tools = False
-                    logger.info("[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once).")
+                    logger.info(
+                        "[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once)."
+                    )
 
                 tool_calls_batch = []
-                call_usage: Dict[str, int] = {}
+                call_usage: dict[str, int] = {}
                 async for delta in self.model_registry.chat_stream(
                     model_id=ctx.config.model_id,
                     messages=messages,
@@ -1526,10 +1596,8 @@ class AgentLoop:
                             elif value is not None:
                                 # Keep latest non-numeric field if providers add any extra metadata.
                                 # Numeric tokens are accumulated separately after each model call.
-                                try:
+                                with contextlib.suppress(Exception):
                                     call_usage[key] = int(value)
-                                except Exception:
-                                    pass
 
                 # Aggregate usage per model call (sum across iterations, max within each call).
                 for key, value in call_usage.items():
@@ -1570,12 +1638,12 @@ class AgentLoop:
                     # Manus-style step card (parent) for this tool call
                     step_id = f"step_{tool_id}"
                     step_started_at = time.time()
-                    step_status_override: Optional[str] = None
-                    step_success: Optional[bool] = None
-                    step_error: Optional[str] = None
-                    step_result_preview: Optional[str] = None
+                    step_status_override: str | None = None
+                    step_success: bool | None = None
+                    step_error: str | None = None
+                    step_result_preview: str | None = None
                     step_info = _tool_step_info(tool_name, tool_args)
-                    step_started_payload: Dict[str, Any] = {
+                    step_started_payload: dict[str, Any] = {
                         "step_id": step_id,
                         "title": step_info.get("title") or f"执行工具: {tool_name}",
                         "timestamp": step_started_at,
@@ -1621,7 +1689,10 @@ class AgentLoop:
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type=StreamEventType.IMAGE_GENERATION_START.value,
-                                data={"execution_id": tool_id, "prompt": tool_args.get("prompt", "")},
+                                data={
+                                    "execution_id": tool_id,
+                                    "prompt": tool_args.get("prompt", ""),
+                                },
                             )
                         elif tool_name == "generate_document":
                             yield AgentLoopEvent(
@@ -1682,11 +1753,11 @@ class AgentLoop:
 
                         # Invoke tool
                         result = None
-                        tool_metadata: Dict[str, Any] = {}
-                        tool_duration_ms: Optional[float] = None
-                        tool_error: Optional[str] = None
+                        tool_metadata: dict[str, Any] = {}
+                        tool_duration_ms: float | None = None
+                        tool_error: str | None = None
                         tool_success = False
-                        tool_output_files: List[Dict[str, Any]] = []
+                        tool_output_files: list[dict[str, Any]] = []
                         tool_result_for_model = ""
 
                         # Guardrail: avoid repeated KB searches before producing any answer text.
@@ -1699,7 +1770,7 @@ class AgentLoop:
 
                         if short_circuit_kb:
                             total_cached = sum(
-                                len((c.get("chunks") or []))
+                                len(c.get("chunks") or [])
                                 for c in contexts_for_persistence
                                 if isinstance(c, dict)
                             )
@@ -1735,9 +1806,10 @@ class AgentLoop:
 
                             # Check if cancelled (via metadata or error message)
                             is_cancelled = (
-                                (tool_metadata.get("cancelled", False) if isinstance(tool_metadata, dict) else False)
-                                or (tool_error and "cancelled" in tool_error.lower())
-                            )
+                                tool_metadata.get("cancelled", False)
+                                if isinstance(tool_metadata, dict)
+                                else False
+                            ) or (tool_error and "cancelled" in tool_error.lower())
                             if is_cancelled:
                                 step_status_override = "skipped"
                                 step_success = False
@@ -1771,7 +1843,11 @@ class AgentLoop:
 
                         # Emit KB/Web UI panel events from tool metadata
                         if tool_name == "search_knowledge_base":
-                            contexts = tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
+                            contexts = (
+                                tool_metadata.get("contexts")
+                                if isinstance(tool_metadata, dict)
+                                else None
+                            )
                             if isinstance(contexts, list):
                                 for ctx_item in contexts:
                                     if isinstance(ctx_item, dict):
@@ -1783,7 +1859,11 @@ class AgentLoop:
                                             data=compact_ctx,
                                         )
                         elif tool_name in ("search_web", "web_search"):
-                            display = tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
+                            display = (
+                                tool_metadata.get("display")
+                                if isinstance(tool_metadata, dict)
+                                else None
+                            )
                             if isinstance(display, dict):
                                 web_search_results_for_persistence = display
                                 yield AgentLoopEvent(
@@ -1803,13 +1883,17 @@ class AgentLoop:
                             results_count = None
                             if isinstance(tool_metadata, dict):
                                 results_count = tool_metadata.get("total_results")
-                                if results_count is None and isinstance(tool_metadata.get("display"), dict):
-                                    results_count = len(tool_metadata.get("display", {}).get("results", []) or [])
+                                if results_count is None and isinstance(
+                                    tool_metadata.get("display"), dict
+                                ):
+                                    results_count = len(
+                                        tool_metadata.get("display", {}).get("results", []) or []
+                                    )
                             if int(results_count or 0) > 0:
                                 force_answer_without_tools = True
 
                         # Persist output files into ArtifactStorage (if available)
-                        persisted_output_files: List[Dict[str, Any]] = tool_output_files
+                        persisted_output_files: list[dict[str, Any]] = tool_output_files
                         if tool_output_files and self.artifact_storage:
                             from .artifacts import persist_output_files
 
@@ -1839,11 +1923,19 @@ class AgentLoop:
                                         event_type=StreamEventType.ARTIFACT_CREATED.value,
                                         data={
                                             "artifact_id": artifact_id,
-                                            "type": file_info.get("type") or (
-                                                "image" if str(file_info.get("mime_type", "")).startswith("image/") else "file"
+                                            "type": file_info.get("type")
+                                            or (
+                                                "image"
+                                                if str(file_info.get("mime_type", "")).startswith(
+                                                    "image/"
+                                                )
+                                                else "file"
                                             ),
-                                            "format": file_info.get("format") or (
-                                                str(file_info.get("mime_type", "")).split("/")[-1] if file_info.get("mime_type") else "bin"
+                                            "format": file_info.get("format")
+                                            or (
+                                                str(file_info.get("mime_type", "")).split("/")[-1]
+                                                if file_info.get("mime_type")
+                                                else "bin"
                                             ),
                                             "title": file_info.get("filename", "output"),
                                             "filename": file_info.get("filename"),
@@ -1855,7 +1947,9 @@ class AgentLoop:
                                     )
 
                         # Reduce payload for non-image files when we already have download_url
-                        output_files_for_events = _sanitize_output_files(persisted_output_files or [])
+                        output_files_for_events = _sanitize_output_files(
+                            persisted_output_files or []
+                        )
 
                         # Semantic RESULT events (frontend expects these)
                         if tool_name == "execute_python_code":
@@ -1886,7 +1980,11 @@ class AgentLoop:
                             )
                         elif tool_name in ("generate_document", "generate_pptx"):
                             title = tool_args.get("title", "Document")
-                            fmt = "pptx" if tool_name == "generate_pptx" else tool_args.get("format", "docx")
+                            fmt = (
+                                "pptx"
+                                if tool_name == "generate_pptx"
+                                else tool_args.get("format", "docx")
+                            )
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type=StreamEventType.DOCUMENT_GENERATION_RESULT.value,
@@ -1953,7 +2051,7 @@ class AgentLoop:
                         else:
                             # Defensive fallback: determine status from presence of error
                             step_status = "failed" if step_error else "completed"
-                        step_finished_payload: Dict[str, Any] = {
+                        step_finished_payload: dict[str, Any] = {
                             "step_id": step_id,
                             "status": step_status,
                             "duration_ms": round((step_finished_at - step_started_at) * 1000, 2),
@@ -1972,13 +2070,19 @@ class AgentLoop:
                         )
 
                     # Add tool result to messages
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": tool_result_for_model
-                        or (str(tool_result) if not isinstance(tool_result, str) else tool_result),
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": tool_result_for_model
+                            or (
+                                str(tool_result)
+                                if not isinstance(tool_result, str)
+                                else tool_result
+                            ),
+                        }
+                    )
 
                 # Continue loop to get LLM's response to tool results
 
@@ -2052,7 +2156,7 @@ class AgentLoop:
     async def _step_memory_loading(
         self,
         ctx: AgentLoopContext,
-        user: "UserContext",
+        user: UserContext,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Step 1: Load three-layer memory system.
@@ -2095,9 +2199,9 @@ class AgentLoop:
                     event_type="long_term_loaded",
                     data={
                         "preferences_loaded": ctx.user_preferences is not None,
-                        "frequent_memories_count": len(
-                            long_term_ctx.get("frequent_memories", [])
-                        ) if long_term_ctx else 0,
+                        "frequent_memories_count": len(long_term_ctx.get("frequent_memories", []))
+                        if long_term_ctx
+                        else 0,
                     },
                 )
 
@@ -2113,12 +2217,12 @@ class AgentLoop:
                     event_type="session_loaded",
                     data={
                         "session_context_loaded": ctx.session_memory is not None,
-                        "has_compressed_context": bool(
-                            session_ctx.get("compressed_context")
-                        ) if session_ctx else False,
-                        "has_task_state": bool(
-                            session_ctx.get("task_state")
-                        ) if session_ctx else False,
+                        "has_compressed_context": bool(session_ctx.get("compressed_context"))
+                        if session_ctx
+                        else False,
+                        "has_task_state": bool(session_ctx.get("task_state"))
+                        if session_ctx
+                        else False,
                     },
                 )
 
@@ -2228,7 +2332,9 @@ class AgentLoop:
                 event_type="scenario_detected",
                 data={
                     "primary_scenario": ctx.scenario.primary_scenario.value,
-                    "urgency": ctx.scenario.urgency.value if hasattr(ctx.scenario.urgency, 'value') else str(ctx.scenario.urgency),
+                    "urgency": ctx.scenario.urgency.value
+                    if hasattr(ctx.scenario.urgency, "value")
+                    else str(ctx.scenario.urgency),
                     "confidence": ctx.scenario.confidence,
                     "suggested_queries": len(ctx.scenario.suggested_kb_queries),
                 },
@@ -2410,7 +2516,7 @@ class AgentLoop:
     async def _step_rag_retrieval(
         self,
         ctx: AgentLoopContext,
-        user: "UserContext",
+        user: UserContext,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Step 4: RAG retrieval using ScenarioAwareRetriever."""
         phase = AgentLoopPhase.RAG_RETRIEVAL
@@ -2455,6 +2561,7 @@ class AgentLoop:
             # Create ScenarioAwareRetriever if needed
             if self.scenario_retriever is None:
                 from .scenario_aware_retriever import ScenarioAwareRetriever
+
                 self.scenario_retriever = ScenarioAwareRetriever(
                     knowledge_service=self.kb_service,
                     default_top_k=ctx.config.kb_top_k,
@@ -2484,7 +2591,7 @@ class AgentLoop:
 
                 # Truncate overly long content to save tokens
                 if len(result.content) > ctx.config.kb_max_content_length:
-                    result.content = result.content[:ctx.config.kb_max_content_length] + "..."
+                    result.content = result.content[: ctx.config.kb_max_content_length] + "..."
 
                 filtered_results.append(result)
 
@@ -2516,7 +2623,8 @@ class AgentLoop:
                 total_retrieved=ctx.retrieval_context.total_retrieved,
                 after_dedupe=ctx.retrieval_context.after_dedupe,
                 retrieval_time_ms=retrieval_time_ms,
-                avg_score=sum(r.score for r in ctx.retrieval_context.results) / max(len(ctx.retrieval_context.results), 1),
+                avg_score=sum(r.score for r in ctx.retrieval_context.results)
+                / max(len(ctx.retrieval_context.results), 1),
                 top_score=max((r.score for r in ctx.retrieval_context.results), default=0.0),
                 scenario_type=ctx.scenario.primary_scenario.value if ctx.scenario else "general",
                 dataset_ids=ctx.config.kb_dataset_ids,
@@ -2583,7 +2691,7 @@ class AgentLoop:
     async def _step_context_building(
         self,
         ctx: AgentLoopContext,
-        history: List[Dict[str, Any]],
+        history: list[dict[str, Any]],
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Step 5: Build context structure for LLM."""
         phase = AgentLoopPhase.CONTEXT_BUILDING
@@ -2614,7 +2722,8 @@ class AgentLoop:
                 if isinstance(ctx.user_preferences, dict):
                     # Format preferences dict for prompt
                     pref_items = [
-                        f"- {k}: {v}" for k, v in ctx.user_preferences.items()
+                        f"- {k}: {v}"
+                        for k, v in ctx.user_preferences.items()
                         if v and k not in ("language",)
                     ]
                     user_prefs_str = "\n".join(pref_items) if pref_items else ""
@@ -2644,7 +2753,11 @@ class AgentLoop:
                 long_term_memory=long_term_str if long_term_str else None,
                 task_state=task_state if task_state else None,
                 conversation_history=history,
-                current_context=rag_context if rag_context else compressed_ctx if compressed_ctx else None,
+                current_context=rag_context
+                if rag_context
+                else compressed_ctx
+                if compressed_ctx
+                else None,
                 current_query=ctx.message,
             )
 
@@ -2777,7 +2890,9 @@ class AgentLoop:
                 "run_id": ctx.request_id,
                 "session_id": ctx.session_id,
                 "scenario": ctx.scenario.to_dict() if ctx.scenario else None,
-                "rag_context": ctx.retrieval_context.to_formatted_context() if ctx.retrieval_context else None,
+                "rag_context": ctx.retrieval_context.to_formatted_context()
+                if ctx.retrieval_context
+                else None,
             }
 
             # Get available tools
@@ -2790,9 +2905,7 @@ class AgentLoop:
                     request_id=ctx.request_id,
                     kb_dataset_ids=ctx.config.kb_dataset_ids or [],
                 )
-                available_tools = self.tool_invoker.get_tool_definitions(
-                    context=invocation_context
-                )
+                available_tools = self.tool_invoker.get_tool_definitions(context=invocation_context)
 
             # Execute ReAct loop
             async for event in react_executor.execute(
@@ -2825,7 +2938,7 @@ class AgentLoop:
                     tool_call_id = event.data.get("tool_call_id", "")
                     success = event.data.get("success", True)
                     result_data = event.data.get("result")
-                    duration_ms = event.data.get("duration_ms", 0)
+                    event.data.get("duration_ms", 0)
 
                     # The tool_call_id format is "{task_id}_{uuid8}" so extract task_id
                     # Using rsplit to handle task_ids that may contain underscores
@@ -3013,7 +3126,7 @@ class AgentLoop:
         async def execute_tool(
             call_id: str,
             tool_name: str,
-            arguments: Dict[str, Any],
+            arguments: dict[str, Any],
         ) -> Any:
             """
             Execute a tool with error recovery.
@@ -3092,14 +3205,19 @@ class AgentLoop:
             return ErrorType.RATE_LIMIT
 
         # Transient network errors
-        if any(kw in error_str for kw in ["timeout", "connection", "network", "temporary", "unavailable"]):
+        if any(
+            kw in error_str
+            for kw in ["timeout", "connection", "network", "temporary", "unavailable"]
+        ):
             return ErrorType.TRANSIENT
 
         if any(kw in error_type for kw in ["timeout", "connection", "network"]):
             return ErrorType.TRANSIENT
 
         # Validation errors (tool input issues)
-        if any(kw in error_str for kw in ["validation", "invalid", "parameter", "argument", "schema"]):
+        if any(
+            kw in error_str for kw in ["validation", "invalid", "parameter", "argument", "schema"]
+        ):
             return ErrorType.VALIDATION_ERROR
 
         # Permission/auth errors are permanent
@@ -3115,7 +3233,8 @@ class AgentLoop:
 
     def _create_llm_caller(self, ctx: AgentLoopContext):
         """Create an LLM caller function for ReActExecutor."""
-        async def call_llm(messages: List[Dict[str, Any]], **kwargs):
+
+        async def call_llm(messages: list[dict[str, Any]], **kwargs):
             if not self.model_registry:
                 raise ValueError("No model registry configured")
 
@@ -3129,7 +3248,7 @@ class AgentLoop:
 
         return call_llm
 
-    def _create_planner_llm_adapter(self, model_id: str) -> "_PlannerLLMAdapter":
+    def _create_planner_llm_adapter(self, model_id: str) -> _PlannerLLMAdapter:
         """
         Create an LLM adapter for TaskPlanner.
 
@@ -3284,9 +3403,7 @@ class AgentLoop:
             ctx.compressed_context = compressed.summary
 
             # Calculate tokens saved (rough estimate)
-            original_tokens = sum(
-                len(str(m.get("content", ""))) // 4 for m in history
-            )
+            original_tokens = sum(len(str(m.get("content", ""))) // 4 for m in history)
             ctx.tokens_saved = max(0, original_tokens - compressed.token_count)
 
             yield AgentLoopEvent(
@@ -3301,9 +3418,9 @@ class AgentLoop:
                     "key_artifacts": len(compressed.key_artifacts),
                     "summary_length": len(compressed.summary),
                     "tokens_saved": ctx.tokens_saved,
-                    "compression_ratio": round(
-                        original_tokens / max(1, compressed.token_count), 2
-                    ) if original_tokens > 0 else 1.0,
+                    "compression_ratio": round(original_tokens / max(1, compressed.token_count), 2)
+                    if original_tokens > 0
+                    else 1.0,
                 },
             )
 
@@ -3348,7 +3465,7 @@ class AgentLoop:
     async def _step_generation_storage(
         self,
         ctx: AgentLoopContext,
-        user: "UserContext",
+        user: UserContext,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Step 8: Generate final content and persist."""
         phase = AgentLoopPhase.GENERATION_STORAGE
@@ -3400,14 +3517,18 @@ class AgentLoop:
         try:
             # Add tool results to context if any
             if ctx.tool_results:
-                tool_results_summary = "\n".join([
-                    f"- {r.tool}: {'Success' if r.success else 'Failed'} - {str(r.result)[:200] if r.result else r.error}"
-                    for r in ctx.tool_results
-                ])
-                ctx.messages.append({
-                    "role": "user",
-                    "content": f"Tool execution results:\n{tool_results_summary}\n\nPlease provide a final response based on these results.",
-                })
+                tool_results_summary = "\n".join(
+                    [
+                        f"- {r.tool}: {'Success' if r.success else 'Failed'} - {str(r.result)[:200] if r.result else r.error}"
+                        for r in ctx.tool_results
+                    ]
+                )
+                ctx.messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Tool execution results:\n{tool_results_summary}\n\nPlease provide a final response based on these results.",
+                    }
+                )
 
             # Stream from model
             async for delta in self.model_registry.chat_stream(
@@ -3416,7 +3537,7 @@ class AgentLoop:
                 temperature=ctx.config.temperature,
                 max_tokens=ctx.config.max_tokens,
             ):
-                if hasattr(delta, 'content') and delta.content:
+                if hasattr(delta, "content") and delta.content:
                     ctx.generated_content += delta.content
                     yield AgentLoopEvent(
                         phase=phase,
@@ -3424,11 +3545,15 @@ class AgentLoop:
                         data=delta.content,
                     )
 
-                if hasattr(delta, 'usage') and delta.usage:
+                if hasattr(delta, "usage") and delta.usage:
                     ctx.usage.update(delta.usage)
 
             # Evaluate RAG quality if we had retrieval
-            if ctx.retrieval_context and ctx.retrieval_context.results and ctx.config.enable_rag_metrics:
+            if (
+                ctx.retrieval_context
+                and ctx.retrieval_context.results
+                and ctx.config.enable_rag_metrics
+            ):
                 try:
                     evaluator = get_rag_evaluator()
                     chunks = [
@@ -3447,7 +3572,9 @@ class AgentLoop:
                         query=ctx.message,
                         response=ctx.generated_content,
                         retrieved_chunks=chunks,
-                        retrieval_time_ms=ctx.retrieval_metrics.retrieval_time_ms if ctx.retrieval_metrics else 0,
+                        retrieval_time_ms=ctx.retrieval_metrics.retrieval_time_ms
+                        if ctx.retrieval_metrics
+                        else 0,
                     )
 
                     # Record evaluation metrics
@@ -3554,7 +3681,7 @@ class _PlannerLLMAdapter:
 
     def __init__(
         self,
-        model_registry: "ModelRegistry",
+        model_registry: ModelRegistry,
         model_id: str,
     ):
         """
@@ -3585,7 +3712,7 @@ class _MessagesInterface:
 
     def __init__(
         self,
-        model_registry: "ModelRegistry",
+        model_registry: ModelRegistry,
         model_id: str,
     ):
         self.model_registry = model_registry
@@ -3595,9 +3722,9 @@ class _MessagesInterface:
         self,
         model: str,
         max_tokens: int,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         **kwargs,
-    ) -> "_MessageResponse":
+    ) -> _MessageResponse:
         """
         Create a message completion (Anthropic-style interface).
 
@@ -3623,7 +3750,7 @@ class _MessagesInterface:
 
             # Extract content from response
             content_text = ""
-            if hasattr(response, 'content'):
+            if hasattr(response, "content"):
                 content_text = response.content or ""
             elif isinstance(response, dict):
                 content_text = response.get("content", "")
@@ -3665,7 +3792,7 @@ class _ModelRegistryAdapter:
 
     def __init__(
         self,
-        model_registry: "ModelRegistry",
+        model_registry: ModelRegistry,
         model_id: str,
         temperature: float = 0.3,
     ):
@@ -3692,9 +3819,7 @@ class _ModelRegistryAdapter:
         Returns:
             The generated completion text
         """
-        messages = [
-            {"role": "user", "content": prompt}
-        ]
+        messages = [{"role": "user", "content": prompt}]
 
         try:
             response = await self.model_registry.chat(
@@ -3705,7 +3830,7 @@ class _ModelRegistryAdapter:
             )
 
             # Extract content from response
-            if hasattr(response, 'content'):
+            if hasattr(response, "content"):
                 return response.content or ""
             elif isinstance(response, dict):
                 return response.get("content", "")
@@ -3723,9 +3848,9 @@ class _ModelRegistryAdapter:
 
 
 def create_agent_loop(
-    model_registry: Optional["ModelRegistry"] = None,
-    kb_service: Optional["KnowledgeService"] = None,
-    memory_service: Optional["MemoryService"] = None,
+    model_registry: ModelRegistry | None = None,
+    kb_service: KnowledgeService | None = None,
+    memory_service: MemoryService | None = None,
     system_prompt: str = "",
 ) -> AgentLoop:
     """

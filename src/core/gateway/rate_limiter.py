@@ -4,11 +4,10 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Optional
 
-from ..exceptions import RateLimitExceededError
 from ...models.request import UnifiedRequest
 from ...models.service import ServiceDefinition
+from ..exceptions import RateLimitExceededError
 
 
 @dataclass
@@ -21,11 +20,11 @@ class RateLimit:
 
 @dataclass
 class RateLimitConfig:
-    global_limit: Optional[RateLimit] = None
-    tenant_limits: Optional[Dict[str, RateLimit]] = None
-    user_limits: Optional[Dict[str, RateLimit]] = None
-    service_limits: Optional[Dict[str, RateLimit]] = None
-    ip_limits: Optional[RateLimit] = None
+    global_limit: RateLimit | None = None
+    tenant_limits: dict[str, RateLimit] | None = None
+    user_limits: dict[str, RateLimit] | None = None
+    service_limits: dict[str, RateLimit] | None = None
+    ip_limits: RateLimit | None = None
 
 
 class RateLimiter:
@@ -40,9 +39,9 @@ class RateLimiter:
 
     def __init__(self, config: RateLimitConfig, max_entries: int = 10000):
         self.config = config
-        self._requests: Dict[str, Deque[float]] = {}
+        self._requests: dict[str, deque[float]] = {}
         # 按 key 分片的锁，减少全局锁竞争
-        self._locks: Dict[str, asyncio.Lock] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self._max_entries = max_entries
         self._last_cleanup = time.time()
@@ -50,7 +49,7 @@ class RateLimiter:
 
     async def _get_lock(self, key: str) -> asyncio.Lock:
         """获取指定 key 的锁（如果不存在则创建）
-        
+
         使用双重检查锁定模式确保线程安全。
         """
         if key not in self._locks:
@@ -86,7 +85,8 @@ class RateLimiter:
             all_keys = list(self._requests.keys())
 
             expired_keys = [
-                key for key in all_keys
+                key
+                for key in all_keys
                 if key in self._requests
                 and self._requests[key]
                 and self._requests[key][-1] < cutoff
@@ -125,7 +125,7 @@ class RateLimiter:
         self,
         request: UnifiedRequest,
         service: ServiceDefinition,
-        client_ip: Optional[str] = None,
+        client_ip: str | None = None,
     ) -> None:
         checks: list[tuple[str, RateLimit]] = []
 

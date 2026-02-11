@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Union
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..deps import get_health_monitor, get_registry, get_user_context
-from ...services.registry.health_monitor import HealthMonitor
-from ...services.registry.service_registry import ServiceRegistry
 from ...core.auth.user_resolver import UserContext
 from ...core.observability.logging import get_logger
+from ...services.registry.health_monitor import HealthMonitor
+from ...services.registry.service_registry import ServiceRegistry
+from ..deps import get_health_monitor, get_registry, get_user_context
 
 logger = get_logger(__name__)
 
@@ -155,10 +155,11 @@ async def all_providers_health(
     for provider in ModelProvider:
         is_configured = model_registry.is_provider_configured(provider)
         # 统计该供应商的可用模型数量
-        model_count = sum(
-            1 for m in model_registry.get_available_models()
-            if m.provider == provider
-        ) if is_configured else 0
+        model_count = (
+            sum(1 for m in model_registry.get_available_models() if m.provider == provider)
+            if is_configured
+            else 0
+        )
 
         providers_status[provider.value] = {
             "name": provider_names.get(provider, provider.value),

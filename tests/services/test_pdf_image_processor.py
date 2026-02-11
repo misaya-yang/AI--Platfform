@@ -7,20 +7,18 @@ Tests for the PDF image extraction functionality:
 - PDFImageProcessor class
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-import io
+from unittest.mock import Mock, patch
 
 from src.services.knowledge.pdf_image_processor import (
+    EMBEDDABLE_IMAGE_TYPES,
+    EXTENSION_TO_MIME,
+    MAX_IMAGE_SIZE_BYTES,
+    MIN_IMAGE_HEIGHT,
+    MIN_IMAGE_WIDTH,
     ExtractedImage,
     PDFExtractionResult,
     PDFImageProcessor,
     extract_pdf_with_images,
-    EMBEDDABLE_IMAGE_TYPES,
-    EXTENSION_TO_MIME,
-    MAX_IMAGE_SIZE_BYTES,
-    MIN_IMAGE_WIDTH,
-    MIN_IMAGE_HEIGHT,
 )
 
 
@@ -274,8 +272,8 @@ class TestPDFImageProcessor:
         processor = PDFImageProcessor()
 
         # Mock fitz import to fail
-        with patch.dict('sys.modules', {'fitz': None}):
-            with patch.object(processor, '_fallback_text_only') as mock_fallback:
+        with patch.dict("sys.modules", {"fitz": None}):
+            with patch.object(processor, "_fallback_text_only") as mock_fallback:
                 mock_fallback.return_value = PDFExtractionResult(
                     text="Fallback text",
                     images=[],
@@ -322,10 +320,10 @@ class TestPDFImageProcessor:
         processor = PDFImageProcessor()
 
         # Verify the method exists and can be called
-        assert hasattr(processor, '_fallback_text_only')
+        assert hasattr(processor, "_fallback_text_only")
 
         # Test with pypdf mocked at the import location inside the method
-        with patch('pypdf.PdfReader') as MockReader:
+        with patch("pypdf.PdfReader") as MockReader:
             mock_reader = Mock()
             mock_page = Mock()
             mock_page.extract_text.return_value = "Page 1 content"
@@ -378,7 +376,7 @@ class TestConvenienceFunction:
 
     def test_returns_tuple(self):
         """Test extract_pdf_with_images returns correct tuple structure"""
-        with patch.object(PDFImageProcessor, 'process_pdf_bytes') as mock_process:
+        with patch.object(PDFImageProcessor, "process_pdf_bytes") as mock_process:
             mock_process.return_value = PDFExtractionResult(
                 text="Test text",
                 images=[

@@ -29,8 +29,7 @@ References:
 - https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices
 """
 
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 
 # =============================================================================
 # Scenario Types Definition (KV-Cache Friendly - Static Metadata)
@@ -44,8 +43,23 @@ SCENARIO_TYPES = {
     "customer_service": {
         "name": "Customer Service",
         "description": "Handling customer complaints, issue resolution, service inquiries",
-        "keywords": ["complaint", "issue", "problem", "feedback", "refund", "support", "help", "broken", "not working"],
-        "analysis_dimensions": ["Issue Diagnosis", "Empathy Response", "Solution Options", "Prevention"],
+        "keywords": [
+            "complaint",
+            "issue",
+            "problem",
+            "feedback",
+            "refund",
+            "support",
+            "help",
+            "broken",
+            "not working",
+        ],
+        "analysis_dimensions": [
+            "Issue Diagnosis",
+            "Empathy Response",
+            "Solution Options",
+            "Prevention",
+        ],
         # Manus-inspired enhancements
         "urgency_weight": 0.8,  # Higher = more likely to be urgent
         "tool_affinity": ["kb_search", "ticket_create", "escalation_check"],
@@ -55,8 +69,23 @@ SCENARIO_TYPES = {
     "sales_consultation": {
         "name": "Sales Consultation",
         "description": "Product recommendations, pricing inquiries, promotions, purchase decisions",
-        "keywords": ["buy", "purchase", "price", "cost", "discount", "recommend", "compare", "budget", "deal"],
-        "analysis_dimensions": ["Needs Analysis", "Product Match", "Value Proposition", "Purchase Guidance"],
+        "keywords": [
+            "buy",
+            "purchase",
+            "price",
+            "cost",
+            "discount",
+            "recommend",
+            "compare",
+            "budget",
+            "deal",
+        ],
+        "analysis_dimensions": [
+            "Needs Analysis",
+            "Product Match",
+            "Value Proposition",
+            "Purchase Guidance",
+        ],
         "urgency_weight": 0.5,
         "tool_affinity": ["kb_search", "product_catalog", "pricing_lookup"],
         "retrieval_strategy": "hybrid",
@@ -65,8 +94,23 @@ SCENARIO_TYPES = {
     "technical_support": {
         "name": "Technical Support",
         "description": "Technical issues, troubleshooting, configuration, setup assistance",
-        "keywords": ["how to", "error", "cannot", "configure", "install", "setup", "upgrade", "fix", "not working"],
-        "analysis_dimensions": ["Problem Identification", "Root Cause Analysis", "Step-by-Step Solution", "Verification"],
+        "keywords": [
+            "how to",
+            "error",
+            "cannot",
+            "configure",
+            "install",
+            "setup",
+            "upgrade",
+            "fix",
+            "not working",
+        ],
+        "analysis_dimensions": [
+            "Problem Identification",
+            "Root Cause Analysis",
+            "Step-by-Step Solution",
+            "Verification",
+        ],
         "urgency_weight": 0.7,
         "tool_affinity": ["kb_search", "documentation_search", "code_executor"],
         "retrieval_strategy": "keyword_first",  # Technical queries often have specific terms
@@ -75,8 +119,21 @@ SCENARIO_TYPES = {
     "product_inquiry": {
         "name": "Product Inquiry",
         "description": "Product features, specifications, use cases, comparisons",
-        "keywords": ["feature", "capability", "specification", "support", "compatible", "difference", "version"],
-        "analysis_dimensions": ["Feature Overview", "Use Cases", "Technical Specs", "Selection Guidance"],
+        "keywords": [
+            "feature",
+            "capability",
+            "specification",
+            "support",
+            "compatible",
+            "difference",
+            "version",
+        ],
+        "analysis_dimensions": [
+            "Feature Overview",
+            "Use Cases",
+            "Technical Specs",
+            "Selection Guidance",
+        ],
         "urgency_weight": 0.3,
         "tool_affinity": ["kb_search", "product_catalog", "comparison_tool"],
         "retrieval_strategy": "hybrid",
@@ -85,8 +142,22 @@ SCENARIO_TYPES = {
     "policy_inquiry": {
         "name": "Policy Inquiry",
         "description": "Company policies, procedures, compliance requirements, process explanations",
-        "keywords": ["policy", "rule", "procedure", "requirement", "compliance", "standard", "approval", "process"],
-        "analysis_dimensions": ["Policy Explanation", "Applicability", "Process Steps", "Important Notes"],
+        "keywords": [
+            "policy",
+            "rule",
+            "procedure",
+            "requirement",
+            "compliance",
+            "standard",
+            "approval",
+            "process",
+        ],
+        "analysis_dimensions": [
+            "Policy Explanation",
+            "Applicability",
+            "Process Steps",
+            "Important Notes",
+        ],
         "urgency_weight": 0.4,
         "tool_affinity": ["kb_search", "policy_database", "compliance_checker"],
         "retrieval_strategy": "semantic_first",  # Policies need contextual understanding
@@ -95,8 +166,23 @@ SCENARIO_TYPES = {
     "data_analysis": {
         "name": "Data Analysis",
         "description": "Data interpretation, trend analysis, report understanding, metrics explanation",
-        "keywords": ["data", "report", "metric", "trend", "analysis", "statistics", "compare", "growth", "decline"],
-        "analysis_dimensions": ["Data Interpretation", "Trend Analysis", "Causal Factors", "Recommendations"],
+        "keywords": [
+            "data",
+            "report",
+            "metric",
+            "trend",
+            "analysis",
+            "statistics",
+            "compare",
+            "growth",
+            "decline",
+        ],
+        "analysis_dimensions": [
+            "Data Interpretation",
+            "Trend Analysis",
+            "Causal Factors",
+            "Recommendations",
+        ],
         "urgency_weight": 0.4,
         "tool_affinity": ["data_query", "chart_generator", "statistical_analysis"],
         "retrieval_strategy": "keyword_first",  # Data queries often reference specific metrics
@@ -106,7 +192,12 @@ SCENARIO_TYPES = {
         "name": "General Inquiry",
         "description": "General questions, information requests, knowledge queries",
         "keywords": [],  # Fallback scenario - no specific keywords
-        "analysis_dimensions": ["Information Summary", "Key Points", "Additional Context", "Related Resources"],
+        "analysis_dimensions": [
+            "Information Summary",
+            "Key Points",
+            "Additional Context",
+            "Related Resources",
+        ],
         "urgency_weight": 0.2,
         "tool_affinity": ["kb_search", "web_search"],
         "retrieval_strategy": "semantic_first",
@@ -331,7 +422,6 @@ EXPERT_TEMPLATES = {
 
 ### Confidence Note
 [State confidence level: "Based on documented procedures" vs "General guidance"]""",
-
     "sales_consultation": """### Needs Analysis
 **Stated Requirements**: [What the customer explicitly asked for]
 **Inferred Needs**: [What they might also need based on context - label as inference]
@@ -352,7 +442,6 @@ EXPERT_TEMPLATES = {
 
 ### Information Gaps
 [What additional information would improve this recommendation]""",
-
     "technical_support": """### Problem Identification
 **Reported Symptoms**: [Exact description from user]
 **Environment**: [Platform/version/configuration if mentioned]
@@ -381,7 +470,6 @@ Step 2: [Action]
 
 ### Caveats
 [Any warnings or edge cases from the documentation]""",
-
     "product_inquiry": """### Feature Overview [^KB-n]
 | Feature | Description | Availability |
 |---------|-------------|--------------|
@@ -405,7 +493,6 @@ Step 2: [Action]
 
 ### Documentation Links
 [References to detailed product documentation]""",
-
     "policy_inquiry": """### Policy Statement [^KB-n]
 **Policy Name**: [Official policy name]
 **Effective Date**: [When it applies from]
@@ -430,7 +517,6 @@ Step 2: [Action]
 
 ### Policy Source
 [Direct reference to policy document with version]""",
-
     "data_analysis": """### Data Summary
 **Dataset**: [What data was analyzed]
 **Period**: [Time range if applicable]
@@ -459,7 +545,6 @@ Step 2: [Action]
 
 **Requires Further Analysis**:
 [Questions that the current data cannot answer]""",
-
     "general_inquiry": """### Direct Answer
 [Concise answer to the question, with source if from KB]
 
@@ -775,6 +860,7 @@ Requirement: Every claim must cite its source. No unattributed information.
 # Prompt Builder Functions
 # =============================================================================
 
+
 def get_scenario_types_description() -> str:
     """Get formatted description of all scenario types."""
     lines = []
@@ -836,10 +922,7 @@ def build_analysis_prompt(
     dimensions = scenario_info["analysis_dimensions"]
 
     # Build dimension sections from expert template
-    dimension_sections = EXPERT_TEMPLATES.get(
-        scenario_type,
-        EXPERT_TEMPLATES["general_inquiry"]
-    )
+    dimension_sections = EXPERT_TEMPLATES.get(scenario_type, EXPERT_TEMPLATES["general_inquiry"])
 
     # Format dimensions list
     dimensions_text = "\n".join(f"- {dim}" for dim in dimensions)
@@ -923,13 +1006,14 @@ def build_kb_enhanced_prompt(
 # Scenario Metadata Accessors
 # =============================================================================
 
-def get_scenario_keywords(scenario_type: str) -> List[str]:
+
+def get_scenario_keywords(scenario_type: str) -> list[str]:
     """Get keywords for a specific scenario type."""
     scenario_info = SCENARIO_TYPES.get(scenario_type, {})
     return scenario_info.get("keywords", [])
 
 
-def get_analysis_dimensions(scenario_type: str) -> List[str]:
+def get_analysis_dimensions(scenario_type: str) -> list[str]:
     """Get analysis dimensions for a specific scenario type."""
     scenario_info = SCENARIO_TYPES.get(scenario_type, SCENARIO_TYPES["general_inquiry"])
     return scenario_info.get("analysis_dimensions", [])
@@ -940,7 +1024,7 @@ def get_expert_template(scenario_type: str) -> str:
     return EXPERT_TEMPLATES.get(scenario_type, EXPERT_TEMPLATES["general_inquiry"])
 
 
-def get_scenario_metadata(scenario_type: str) -> Dict[str, Any]:
+def get_scenario_metadata(scenario_type: str) -> dict[str, Any]:
     """
     Get complete metadata for a scenario type.
 
@@ -961,7 +1045,7 @@ def get_retrieval_strategy(scenario_type: str) -> str:
     return scenario_info.get("retrieval_strategy", "semantic_first")
 
 
-def get_tool_affinity(scenario_type: str) -> List[str]:
+def get_tool_affinity(scenario_type: str) -> list[str]:
     """
     Get list of tools commonly needed for a scenario type.
 
@@ -985,7 +1069,8 @@ def get_confidence_threshold(scenario_type: str) -> float:
 # Scenario Detection Helpers
 # =============================================================================
 
-def detect_scenario_by_keywords(query: str) -> Tuple[str, float]:
+
+def detect_scenario_by_keywords(query: str) -> tuple[str, float]:
     """
     Fast keyword-based scenario detection (no LLM call).
 
@@ -1001,7 +1086,7 @@ def detect_scenario_by_keywords(query: str) -> Tuple[str, float]:
         Tuple of (scenario_type, confidence_score)
     """
     query_lower = query.lower()
-    scores: Dict[str, float] = {}
+    scores: dict[str, float] = {}
 
     for scenario_type, info in SCENARIO_TYPES.items():
         keywords = info.get("keywords", [])
@@ -1022,9 +1107,9 @@ def detect_scenario_by_keywords(query: str) -> Tuple[str, float]:
 
 
 def validate_scenario_detection(
-    detection_result: Dict[str, Any],
+    detection_result: dict[str, Any],
     user_query: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Validate LLM scenario detection result against keyword heuristics.
 
@@ -1062,11 +1147,11 @@ def validate_scenario_detection(
     return result
 
 
-def get_all_scenario_types() -> Dict[str, Dict[str, Any]]:
+def get_all_scenario_types() -> dict[str, dict[str, Any]]:
     """Get the complete SCENARIO_TYPES dictionary."""
     return SCENARIO_TYPES.copy()
 
 
-def list_scenario_codes() -> List[str]:
+def list_scenario_codes() -> list[str]:
     """Get list of all valid scenario type codes."""
     return list(SCENARIO_TYPES.keys())

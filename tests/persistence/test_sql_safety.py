@@ -3,7 +3,7 @@ Tests for SQL query construction safety.
 
 Ensures SQL parameters are safely indexed to prevent off-by-one errors.
 """
-import pytest
+
 import re
 
 
@@ -14,23 +14,21 @@ class TestSQLSafety:
         """SQL parameter indices should match params list."""
         from src.persistence.database import build_service_query
 
-        query, params = build_service_query(
-            status="active",
-            service_type="llm",
-            tags=["ai", "ml"]
-        )
+        query, params = build_service_query(status="active", service_type="llm", tags=["ai", "ml"])
 
         # Count $N placeholders
-        placeholders = re.findall(r'\$(\d+)', query)
+        placeholders = re.findall(r"\$(\d+)", query)
         placeholder_nums = [int(p) for p in placeholders]
 
         # Verify sequential starting from 1
-        assert placeholder_nums == list(range(1, len(params) + 1)), \
+        assert placeholder_nums == list(range(1, len(params) + 1)), (
             f"Placeholders {placeholder_nums} don't match expected 1-{len(params)}"
+        )
 
         # Verify params count matches
-        assert len(params) == len(placeholders), \
+        assert len(params) == len(placeholders), (
             f"Params count {len(params)} != placeholder count {len(placeholders)}"
+        )
 
     def test_no_parameters_produces_valid_query(self):
         """Query with no filters should have no placeholders."""
@@ -38,7 +36,7 @@ class TestSQLSafety:
 
         query, params = build_service_query()
 
-        placeholders = re.findall(r'\$(\d+)', query)
+        placeholders = re.findall(r"\$(\d+)", query)
         assert len(placeholders) == 0
         assert len(params) == 0
 
@@ -48,7 +46,7 @@ class TestSQLSafety:
 
         query, params = build_service_query(status="active")
 
-        placeholders = re.findall(r'\$(\d+)', query)
+        placeholders = re.findall(r"\$(\d+)", query)
         assert placeholders == ["1"]
         assert len(params) == 1
         assert params[0] == "active"
@@ -58,13 +56,9 @@ class TestSQLSafety:
         from src.persistence.database import build_service_query
 
         # All three parameters
-        query, params = build_service_query(
-            status="active",
-            service_type="llm",
-            tags=["tag1"]
-        )
+        query, params = build_service_query(status="active", service_type="llm", tags=["tag1"])
 
-        placeholders = re.findall(r'\$(\d+)', query)
+        placeholders = re.findall(r"\$(\d+)", query)
         assert placeholders == ["1", "2", "3"]
         assert params == ["active", "llm", ["tag1"]]
 
@@ -73,12 +67,9 @@ class TestSQLSafety:
         from src.persistence.database import build_service_query
 
         # Skip service_type
-        query, params = build_service_query(
-            status="active",
-            tags=["tag1"]
-        )
+        query, params = build_service_query(status="active", tags=["tag1"])
 
-        placeholders = re.findall(r'\$(\d+)', query)
+        placeholders = re.findall(r"\$(\d+)", query)
         assert placeholders == ["1", "2"]  # Not ["1", "3"]!
         assert params == ["active", ["tag1"]]
 
@@ -95,8 +86,7 @@ class TestSQLSafety:
 
         # Pass potentially malicious input
         query, params = build_service_query(
-            status="'; DROP TABLE services; --",
-            service_type="<script>alert(1)</script>"
+            status="'; DROP TABLE services; --", service_type="<script>alert(1)</script>"
         )
 
         # The malicious strings should be in params, not interpolated into query

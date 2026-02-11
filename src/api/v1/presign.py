@@ -27,21 +27,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..deps import get_user_context, get_image_storage_service
 from ...core.auth.user_resolver import UserContext
 from ...core.observability.logging import get_logger
 from ...services.storage.image_storage import ImageStorageService
+from ..deps import get_image_storage_service, get_user_context
 
 logger = get_logger(__name__)
 
 # In-memory upload session cache (TTL-based cleanup)
 # For production, consider using Redis or database
-_upload_sessions: Dict[str, Dict] = {}
+_upload_sessions: dict[str, dict] = {}
 
 # Maximum number of sessions to prevent memory exhaustion
 # In production, use Redis with TTL instead
@@ -51,6 +50,7 @@ router = APIRouter(prefix="/presign", tags=["Presigned Upload"])
 
 
 # ============ Helper Functions ============
+
 
 def _get_effective_tenant_id(user: UserContext) -> str:
     """Get effective tenant_id, falling back to user_id if tenant_id is empty."""
@@ -67,7 +67,8 @@ def _cleanup_expired_sessions() -> None:
 
     # Remove expired sessions
     expired = [
-        upload_id for upload_id, session in _upload_sessions.items()
+        upload_id
+        for upload_id, session in _upload_sessions.items()
         if session.get("expires_at", now) < now
     ]
     for upload_id in expired:
@@ -80,8 +81,7 @@ def _cleanup_expired_sessions() -> None:
     if len(_upload_sessions) >= MAX_UPLOAD_SESSIONS:
         # Sort by created_at and remove oldest
         sorted_sessions = sorted(
-            _upload_sessions.items(),
-            key=lambda x: x[1].get("created_at", now)
+            _upload_sessions.items(), key=lambda x: x[1].get("created_at", now)
         )
         to_remove = len(_upload_sessions) - MAX_UPLOAD_SESSIONS + 100  # Remove 100 extra
         for upload_id, _ in sorted_sessions[:to_remove]:
@@ -120,25 +120,16 @@ async def _validate_document_access(
         # Get document
         document = await db.get_document(document_id)
         if not document:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Document not found: {document_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
 
         # Get dataset to check tenant ownership
         dataset_id = document.get("dataset_id")
         if not dataset_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Document has no associated dataset"
-            )
+            raise HTTPException(status_code=400, detail="Document has no associated dataset")
 
         dataset = await db.get_dataset(dataset_id)
         if not dataset:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Dataset not found: {dataset_id}"
-            )
+            raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
 
         # Check tenant ownership
         dataset_tenant = dataset.get("tenant_id", "")
@@ -167,34 +158,31 @@ async def _validate_document_access(
                 if perm.get("subject_id") in user.roles:
                     return True
 
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied to document"
-        )
+        raise HTTPException(status_code=403, detail="Access denied to document")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to validate document access: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to validate document access: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to validate document access: {str(e)}")
 
 
 # ============ Schemas ============
 
+
 class PresignedUploadRequest(BaseModel):
     """Request for presigned upload URL."""
+
     filename: str = Field(..., description="Original filename", max_length=255)
     content_type: str = Field(..., description="MIME type of the file")
     document_id: str = Field(..., description="Document ID to associate with")
-    file_size_bytes: Optional[int] = Field(None, description="Expected file size in bytes")
-    metadata: Optional[dict] = Field(None, description="Optional metadata")
+    file_size_bytes: int | None = Field(None, description="Expected file size in bytes")
+    metadata: dict | None = Field(None, description="Optional metadata")
 
 
 class PresignedUploadResponse(BaseModel):
     """Response with presigned upload URL."""
+
     upload_url: str = Field(..., description="Presigned URL for PUT upload")
     method: str = Field(default="PUT", description="HTTP method to use")
     headers: dict = Field(default_factory=dict, description="Required headers for upload")
@@ -206,23 +194,26 @@ class PresignedUploadResponse(BaseModel):
 
 class UploadConfirmRequest(BaseModel):
     """Request to confirm upload completion."""
+
     upload_id: str = Field(..., description="Upload ID from presigned URL response")
     storage_key: str = Field(..., description="Storage key from presigned URL response")
     document_id: str = Field(..., description="Document ID")
     filename: str = Field(..., description="Original filename")
     content_type: str = Field(..., description="MIME type")
-    file_size_bytes: Optional[int] = Field(None, description="Actual file size")
+    file_size_bytes: int | None = Field(None, description="Actual file size")
 
 
 class UploadConfirmResponse(BaseModel):
     """Response after confirming upload."""
+
     status: str = Field(..., description="Status: processing, queued, error")
-    task_id: Optional[str] = Field(None, description="Task ID for async processing")
+    task_id: str | None = Field(None, description="Task ID for async processing")
     message: str = Field(..., description="Status message")
     storage_url: str = Field(..., description="Final storage URL")
 
 
 # ============ Endpoints ============
+
 
 @router.post("/upload", response_model=PresignedUploadResponse)
 async def get_presigned_upload_url(
@@ -252,8 +243,7 @@ async def get_presigned_upload_url(
     # Check if presigned URLs are supported
     if not storage.supports_presigned_urls():
         raise HTTPException(
-            status_code=400,
-            detail="Presigned URLs not supported with current storage backend"
+            status_code=400, detail="Presigned URLs not supported with current storage backend"
         )
 
     # Validate document access (Critical: prevent cross-tenant/cross-document attacks)
@@ -261,13 +251,16 @@ async def get_presigned_upload_url(
 
     # Validate content type
     allowed_types = {
-        "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
         "application/pdf",
     }
     if request.content_type not in allowed_types:
         raise HTTPException(
-            status_code=400,
-            detail=f"Content type not allowed: {request.content_type}"
+            status_code=400, detail=f"Content type not allowed: {request.content_type}"
         )
 
     # Generate unique upload ID and attachment ID
@@ -291,10 +284,7 @@ async def get_presigned_upload_url(
     )
 
     if not result:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate presigned URL"
-        )
+        raise HTTPException(status_code=500, detail="Failed to generate presigned URL")
 
     # Calculate expiry timestamp
     expires_at_dt = datetime.now(timezone.utc) + timedelta(seconds=expiry_seconds)
@@ -361,7 +351,7 @@ async def confirm_upload(
     if not session:
         raise HTTPException(
             status_code=400,
-            detail="Invalid or expired upload_id. Please request a new presigned URL."
+            detail="Invalid or expired upload_id. Please request a new presigned URL.",
         )
 
     # Verify session ownership
@@ -371,8 +361,7 @@ async def confirm_upload(
             f"request user={user.user_id}, upload_id={request.upload_id}"
         )
         raise HTTPException(
-            status_code=403,
-            detail="Upload session does not belong to current user"
+            status_code=403, detail="Upload session does not belong to current user"
         )
 
     # Verify storage_key matches
@@ -381,10 +370,7 @@ async def confirm_upload(
             f"Storage key mismatch: session key={session['storage_key']}, "
             f"request key={request.storage_key}, upload_id={request.upload_id}"
         )
-        raise HTTPException(
-            status_code=400,
-            detail="Storage key does not match upload session"
-        )
+        raise HTTPException(status_code=400, detail="Storage key does not match upload session")
 
     # Verify document_id matches
     if session["document_id"] != request.document_id:
@@ -392,27 +378,20 @@ async def confirm_upload(
             f"Document ID mismatch: session doc={session['document_id']}, "
             f"request doc={request.document_id}, upload_id={request.upload_id}"
         )
-        raise HTTPException(
-            status_code=400,
-            detail="Document ID does not match upload session"
-        )
+        raise HTTPException(status_code=400, detail="Document ID does not match upload session")
 
     # Verify file exists in storage
     try:
         exists = await storage.exists_by_key(request.storage_key)
         if not exists:
             raise HTTPException(
-                status_code=404,
-                detail="File not found in storage. Upload may have failed."
+                status_code=404, detail="File not found in storage. Upload may have failed."
             )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to verify upload: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to verify upload: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to verify upload: {str(e)}")
 
     # Generate storage URL
     storage_url = storage.get_url_by_key(request.storage_key)

@@ -42,12 +42,10 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from ...core.observability.logging import get_logger
 from ...models.enums import StreamEventType
-
 
 logger = get_logger(__name__)
 
@@ -63,9 +61,9 @@ class BaseEvent:
 
     event: str
     timestamp: float = field(default_factory=time.time)
-    raw_event: Optional[Dict[str, Any]] = None
+    raw_event: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert event to dictionary for JSON serialization."""
         result = {
             "event": self.event,
@@ -81,10 +79,10 @@ class RunLifecycleEvent(BaseEvent):
     """Run lifecycle events (started, finished, error)."""
 
     run_id: str = ""
-    thread_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["run_id"] = self.run_id
         if self.thread_id:
@@ -101,10 +99,10 @@ class StepEvent(BaseEvent):
     step_id: str = ""
     step_name: str = ""
     step_type: str = ""
-    parent_step_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    parent_step_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["step_id"] = self.step_id
         result["step_name"] = self.step_name
@@ -124,7 +122,7 @@ class TextMessageEvent(BaseEvent):
     role: str = "assistant"
     content: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["message_id"] = self.message_id
         result["role"] = self.role
@@ -140,11 +138,11 @@ class ToolCallEvent(BaseEvent):
     tool_call_id: str = ""
     tool_name: str = ""
     arguments: str = ""
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    result: Any | None = None
+    error: str | None = None
     status: str = "pending"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["tool_call_id"] = self.tool_call_id
         result["tool_name"] = self.tool_name
@@ -162,10 +160,10 @@ class ToolCallEvent(BaseEvent):
 class StateEvent(BaseEvent):
     """State management events."""
 
-    state: Optional[Dict[str, Any]] = None
-    delta: Optional[List[Dict[str, Any]]] = None  # JSON Patch operations
+    state: dict[str, Any] | None = None
+    delta: list[dict[str, Any]] | None = None  # JSON Patch operations
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         if self.state is not None:
             result["state"] = self.state
@@ -181,13 +179,13 @@ class ArtifactEvent(BaseEvent):
     artifact_id: str = ""
     artifact_type: str = ""  # file, document, image, code
     name: str = ""
-    mime_type: Optional[str] = None
-    url: Optional[str] = None
-    content: Optional[str] = None
-    size: Optional[int] = None
-    metadata: Optional[Dict[str, Any]] = None
+    mime_type: str | None = None
+    url: str | None = None
+    content: str | None = None
+    size: int | None = None
+    metadata: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["artifact_id"] = self.artifact_id
         result["artifact_type"] = self.artifact_type
@@ -211,10 +209,10 @@ class StatusEvent(BaseEvent):
 
     status: str = ""
     message: str = ""
-    progress: Optional[float] = None
-    phase: Optional[str] = None
+    progress: float | None = None
+    phase: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result["status"] = self.status
         result["message"] = self.message
@@ -252,8 +250,8 @@ class AGUIEventEmitter:
     def __init__(
         self,
         request_id: str,
-        run_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
+        run_id: str | None = None,
+        thread_id: str | None = None,
     ):
         """
         Initialize the event emitter.
@@ -267,10 +265,10 @@ class AGUIEventEmitter:
         self.run_id = run_id or str(uuid.uuid4())
         self.thread_id = thread_id
         self.chunk_index = 0
-        self._current_message_id: Optional[str] = None
-        self._current_step_id: Optional[str] = None
+        self._current_message_id: str | None = None
+        self._current_step_id: str | None = None
 
-    def _format_sse(self, event_type: str, data: Dict[str, Any]) -> str:
+    def _format_sse(self, event_type: str, data: dict[str, Any]) -> str:
         """
         Format event data as SSE string.
 
@@ -299,8 +297,8 @@ class AGUIEventEmitter:
 
     def run_started(
         self,
-        run_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit RUN_STARTED event."""
         if run_id:
@@ -316,7 +314,7 @@ class AGUIEventEmitter:
 
     def run_finished(
         self,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit RUN_FINISHED event."""
         event = RunLifecycleEvent(
@@ -330,8 +328,8 @@ class AGUIEventEmitter:
     def run_error(
         self,
         error: str,
-        error_code: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        error_code: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit RUN_ERROR event."""
         meta = metadata or {}
@@ -355,9 +353,9 @@ class AGUIEventEmitter:
         self,
         step_name: str,
         step_type: str = "task",
-        step_id: Optional[str] = None,
-        parent_step_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        step_id: str | None = None,
+        parent_step_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit STEP_STARTED event."""
         self._current_step_id = step_id or str(uuid.uuid4())
@@ -374,8 +372,8 @@ class AGUIEventEmitter:
 
     def step_finished(
         self,
-        step_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        step_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit STEP_FINISHED event."""
         event = StepEvent(
@@ -393,7 +391,7 @@ class AGUIEventEmitter:
 
     def text_message_start(
         self,
-        message_id: Optional[str] = None,
+        message_id: str | None = None,
         role: str = "assistant",
     ) -> str:
         """Emit TEXT_MESSAGE_START event."""
@@ -454,7 +452,7 @@ class AGUIEventEmitter:
     def tool_call_args(
         self,
         tool_call_id: str,
-        arguments: Union[str, Dict[str, Any]],
+        arguments: str | dict[str, Any],
     ) -> str:
         """Emit TOOL_CALL_ARGS event (streaming tool arguments)."""
         args_str = arguments if isinstance(arguments, str) else json.dumps(arguments)
@@ -487,8 +485,8 @@ class AGUIEventEmitter:
         self,
         tool_call_id: str,
         tool_name: str,
-        result: Optional[Any] = None,
-        error: Optional[str] = None,
+        result: Any | None = None,
+        error: str | None = None,
     ) -> str:
         """Emit TOOL_CALL_END event."""
         event = ToolCallEvent(
@@ -506,7 +504,7 @@ class AGUIEventEmitter:
         tool_call_id: str,
         tool_name: str,
         error: str,
-        error_code: Optional[str] = None,
+        error_code: str | None = None,
     ) -> str:
         """Emit TOOL_ERROR event."""
         data = {
@@ -524,7 +522,7 @@ class AGUIEventEmitter:
     # State Management Events
     # =========================================================================
 
-    def state_snapshot(self, state: Dict[str, Any]) -> str:
+    def state_snapshot(self, state: dict[str, Any]) -> str:
         """Emit STATE_SNAPSHOT event (full state)."""
         event = StateEvent(
             event=StreamEventType.STATE_SNAPSHOT.value,
@@ -532,7 +530,7 @@ class AGUIEventEmitter:
         )
         return self._format_sse(StreamEventType.STATE_SNAPSHOT.value, event.to_dict())
 
-    def state_delta(self, delta: List[Dict[str, Any]]) -> str:
+    def state_delta(self, delta: list[dict[str, Any]]) -> str:
         """Emit STATE_DELTA event (JSON Patch operations)."""
         event = StateEvent(
             event=StreamEventType.STATE_DELTA.value,
@@ -540,7 +538,7 @@ class AGUIEventEmitter:
         )
         return self._format_sse(StreamEventType.STATE_DELTA.value, event.to_dict())
 
-    def messages_snapshot(self, messages: List[Dict[str, Any]]) -> str:
+    def messages_snapshot(self, messages: list[dict[str, Any]]) -> str:
         """Emit MESSAGES_SNAPSHOT event."""
         data = {
             "event": StreamEventType.MESSAGES_SNAPSHOT.value,
@@ -557,11 +555,11 @@ class AGUIEventEmitter:
         artifact_id: str,
         artifact_type: str,
         name: str,
-        url: Optional[str] = None,
-        content: Optional[str] = None,
-        mime_type: Optional[str] = None,
-        size: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        url: str | None = None,
+        content: str | None = None,
+        mime_type: str | None = None,
+        size: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit ARTIFACT_CREATED event."""
         event = ArtifactEvent(
@@ -581,7 +579,7 @@ class AGUIEventEmitter:
         self,
         file_name: str,
         file_type: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit FILE_CREATING event."""
         data = {
@@ -600,8 +598,8 @@ class AGUIEventEmitter:
         file_name: str,
         file_type: str,
         url: str,
-        size: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        size: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit FILE_CREATED event."""
         data = {
@@ -625,8 +623,8 @@ class AGUIEventEmitter:
     def outline_ready(
         self,
         title: str,
-        sections: List[str],
-        metadata: Optional[Dict[str, Any]] = None,
+        sections: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit OUTLINE_READY event."""
         data = {
@@ -642,7 +640,7 @@ class AGUIEventEmitter:
         self,
         doc_type: str,
         title: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit DOCUMENT_GENERATION_START event."""
         data = {
@@ -660,8 +658,8 @@ class AGUIEventEmitter:
         doc_type: str,
         title: str,
         url: str,
-        file_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        file_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit DOCUMENT_GENERATION_RESULT event."""
         data = {
@@ -685,7 +683,7 @@ class AGUIEventEmitter:
         self,
         query: str,
         search_type: str = "knowledge_base",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit SEARCH_STARTED event."""
         data = {
@@ -717,8 +715,8 @@ class AGUIEventEmitter:
         self,
         query: str,
         result_count: int,
-        results: Optional[List[Dict[str, Any]]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        results: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit SEARCH_COMPLETED event."""
         data = {
@@ -741,7 +739,7 @@ class AGUIEventEmitter:
         self,
         code: str,
         language: str = "python",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit CODE_EXECUTION_START event."""
         data = {
@@ -758,8 +756,8 @@ class AGUIEventEmitter:
         self,
         output: str,
         success: bool = True,
-        error: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit CODE_EXECUTION_RESULT event."""
         data = {
@@ -781,7 +779,7 @@ class AGUIEventEmitter:
     def image_generation_start(
         self,
         prompt: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit IMAGE_GENERATION_START event."""
         data = {
@@ -797,7 +795,7 @@ class AGUIEventEmitter:
         self,
         url: str,
         prompt: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Emit IMAGE_GENERATION_RESULT event."""
         data = {
@@ -818,8 +816,8 @@ class AGUIEventEmitter:
         self,
         status: str,
         message: str,
-        phase: Optional[str] = None,
-        progress: Optional[float] = None,
+        phase: str | None = None,
+        progress: float | None = None,
     ) -> str:
         """Emit STATUS event (ReAct phases, progress)."""
         event = StatusEvent(
@@ -838,7 +836,7 @@ class AGUIEventEmitter:
     def custom_event(
         self,
         event_name: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
     ) -> str:
         """Emit CUSTOM_EVENT."""
         payload = {
@@ -851,7 +849,7 @@ class AGUIEventEmitter:
     def raw_event(
         self,
         source: str,
-        raw_data: Dict[str, Any],
+        raw_data: dict[str, Any],
     ) -> str:
         """Emit RAW_EVENT (passthrough external events)."""
         payload = {
@@ -877,8 +875,8 @@ class AGUIEventEmitter:
 
 def create_agui_emitter(
     request_id: str,
-    run_id: Optional[str] = None,
-    thread_id: Optional[str] = None,
+    run_id: str | None = None,
+    thread_id: str | None = None,
 ) -> AGUIEventEmitter:
     """
     Factory function to create an AG-UI event emitter.

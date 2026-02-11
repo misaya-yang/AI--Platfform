@@ -17,10 +17,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ....core.observability.logging import get_logger
 
@@ -32,47 +31,52 @@ logger = get_logger(__name__)
 
 class ToolRiskLevel(str, Enum):
     """Risk level for tool operations."""
-    LOW = "low"         # Read-only operations, no side effects
-    MEDIUM = "medium"   # May modify data but reversible
-    HIGH = "high"       # Irreversible operations, requires confirmation
+
+    LOW = "low"  # Read-only operations, no side effects
+    MEDIUM = "medium"  # May modify data but reversible
+    HIGH = "high"  # Irreversible operations, requires confirmation
 
 
 class ToolCategory(str, Enum):
     """Tool categories for organization."""
-    RETRIEVAL = "retrieval"     # KB search, web search
-    GENERATION = "generation"   # Content creation
-    ANALYSIS = "analysis"       # Data analysis
-    INTEGRATION = "integration" # External system calls
-    UTILITY = "utility"         # Helper functions
+
+    RETRIEVAL = "retrieval"  # KB search, web search
+    GENERATION = "generation"  # Content creation
+    ANALYSIS = "analysis"  # Data analysis
+    INTEGRATION = "integration"  # External system calls
+    UTILITY = "utility"  # Helper functions
 
 
 @dataclass
 class ToolParameter:
     """Definition of a tool parameter."""
+
     name: str
     type: str  # string, number, boolean, array, object
     description: str
     required: bool = True
     default: Any = None
-    enum: Optional[List[str]] = None
-    items: Optional[Dict[str, Any]] = None  # For array types
-    properties: Optional[Dict[str, Any]] = None  # For object types
+    enum: list[str] | None = None
+    items: dict[str, Any] | None = None  # For array types
+    properties: dict[str, Any] | None = None  # For object types
 
 
 @dataclass
 class ToolExample:
     """Example usage of a tool."""
+
     description: str
-    input: Dict[str, Any]
-    expected_output: Optional[str] = None
+    input: dict[str, Any]
+    expected_output: str | None = None
 
 
 @dataclass
 class ToolDefinition:
     """Complete tool definition for the registry."""
+
     name: str
     description: str
-    parameters: List[ToolParameter]
+    parameters: list[ToolParameter]
 
     # Metadata
     category: ToolCategory = ToolCategory.UTILITY
@@ -80,9 +84,9 @@ class ToolDefinition:
     requires_confirmation: bool = False
 
     # Usage guidance
-    when_to_use: Optional[str] = None
-    when_not_to_use: Optional[str] = None
-    examples: List[ToolExample] = field(default_factory=list)
+    when_to_use: str | None = None
+    when_not_to_use: str | None = None
+    examples: list[ToolExample] = field(default_factory=list)
 
     # Execution hints
     timeout_seconds: int = 30
@@ -90,9 +94,9 @@ class ToolDefinition:
     is_async: bool = True
 
     # Access control
-    required_permissions: List[str] = field(default_factory=list)
+    required_permissions: list[str] = field(default_factory=list)
 
-    def to_openai_schema(self, compact: bool = False) -> Dict[str, Any]:
+    def to_openai_schema(self, compact: bool = False) -> dict[str, Any]:
         """Convert to OpenAI function calling schema."""
         properties = {}
         required = []
@@ -100,7 +104,9 @@ class ToolDefinition:
         for param in self.parameters:
             prop = {
                 "type": param.type,
-                "description": self._compact_text(param.description, 140) if compact else param.description,
+                "description": self._compact_text(param.description, 140)
+                if compact
+                else param.description,
             }
             if param.enum:
                 prop["enum"] = param.enum
@@ -118,7 +124,9 @@ class ToolDefinition:
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self._compact_text(self.description, 220) if compact else self._build_full_description(),
+                "description": self._compact_text(self.description, 220)
+                if compact
+                else self._build_full_description(),
                 "parameters": {
                     "type": "object",
                     "properties": properties,
@@ -127,7 +135,7 @@ class ToolDefinition:
             },
         }
 
-    def to_anthropic_schema(self, compact: bool = False) -> Dict[str, Any]:
+    def to_anthropic_schema(self, compact: bool = False) -> dict[str, Any]:
         """Convert to Anthropic tool use schema."""
         properties = {}
         required = []
@@ -135,7 +143,9 @@ class ToolDefinition:
         for param in self.parameters:
             prop = {
                 "type": param.type,
-                "description": self._compact_text(param.description, 140) if compact else param.description,
+                "description": self._compact_text(param.description, 140)
+                if compact
+                else param.description,
             }
             if param.enum:
                 prop["enum"] = param.enum
@@ -151,7 +161,9 @@ class ToolDefinition:
 
         return {
             "name": self.name,
-            "description": self._compact_text(self.description, 220) if compact else self._build_full_description(),
+            "description": self._compact_text(self.description, 220)
+            if compact
+            else self._build_full_description(),
             "input_schema": {
                 "type": "object",
                 "properties": properties,
@@ -190,26 +202,30 @@ class ToolDefinition:
 @dataclass
 class ToolCallRequest:
     """A request to execute a tool."""
+
     call_id: str
     tool_name: str
-    arguments: Dict[str, Any]
-    user: Optional["UserContext"] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    arguments: dict[str, Any]
+    user: UserContext | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ToolCallResult:
     """Result of a tool execution."""
+
     call_id: str
     tool_name: str
     success: bool
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     duration_ms: float = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    output_files: List[Dict[str, Any]] = field(default_factory=list)  # [{filename, content_base64, mime_type, size_bytes}]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    output_files: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # [{filename, content_base64, mime_type, size_bytes}]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "call_id": self.call_id,
@@ -236,8 +252,8 @@ class ToolExecutor:
     def validate_arguments(
         self,
         definition: ToolDefinition,
-        arguments: Dict[str, Any],
-    ) -> List[str]:
+        arguments: dict[str, Any],
+    ) -> list[str]:
         """Validate arguments against schema. Returns list of errors."""
         errors = []
 
@@ -278,8 +294,8 @@ class ToolRegistry:
     """
 
     def __init__(self):
-        self._tools: Dict[str, ToolDefinition] = {}
-        self._executors: Dict[str, ToolExecutor] = {}
+        self._tools: dict[str, ToolDefinition] = {}
+        self._executors: dict[str, ToolExecutor] = {}
 
     def register(
         self,
@@ -307,15 +323,15 @@ class ToolRegistry:
             return True
         return False
 
-    def get_tool(self, name: str) -> Optional[ToolDefinition]:
+    def get_tool(self, name: str) -> ToolDefinition | None:
         """Get tool definition by name."""
         return self._tools.get(name)
 
     def list_tools(
         self,
-        category: Optional[ToolCategory] = None,
-        user: Optional["UserContext"] = None,
-    ) -> List[ToolDefinition]:
+        category: ToolCategory | None = None,
+        user: UserContext | None = None,
+    ) -> list[ToolDefinition]:
         """List available tools, optionally filtered by category and user permissions."""
         tools = list(self._tools.values())
 
@@ -331,9 +347,9 @@ class ToolRegistry:
 
     def get_openai_schemas(
         self,
-        tool_names: Optional[List[str]] = None,
-        user: Optional["UserContext"] = None,
-    ) -> List[Dict[str, Any]]:
+        tool_names: list[str] | None = None,
+        user: UserContext | None = None,
+    ) -> list[dict[str, Any]]:
         """Get OpenAI-compatible schemas for specified tools."""
         tools = self.list_tools(user=user)
 
@@ -344,9 +360,9 @@ class ToolRegistry:
 
     def get_anthropic_schemas(
         self,
-        tool_names: Optional[List[str]] = None,
-        user: Optional["UserContext"] = None,
-    ) -> List[Dict[str, Any]]:
+        tool_names: list[str] | None = None,
+        user: UserContext | None = None,
+    ) -> list[dict[str, Any]]:
         """Get Anthropic-compatible schemas for specified tools."""
         tools = self.list_tools(user=user)
 
@@ -408,8 +424,7 @@ class ToolRegistry:
             # Enforce timeout from tool definition
             try:
                 result = await asyncio.wait_for(
-                    executor.execute(request),
-                    timeout=definition.timeout_seconds
+                    executor.execute(request), timeout=definition.timeout_seconds
                 )
             except asyncio.TimeoutError:
                 duration_ms = definition.timeout_seconds * 1000
@@ -447,7 +462,7 @@ class ToolRegistry:
 
 
 # Global registry instance
-_registry: Optional[ToolRegistry] = None
+_registry: ToolRegistry | None = None
 
 
 def get_tool_registry() -> ToolRegistry:

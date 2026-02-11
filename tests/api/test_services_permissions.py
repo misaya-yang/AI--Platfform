@@ -18,9 +18,7 @@ def _make_request(request_id: str = "req-services-001") -> SimpleNamespace:
     request = SimpleNamespace()
     request.app = SimpleNamespace()
     request.app.state = SimpleNamespace()
-    request.app.state.dispatcher = SimpleNamespace(
-        rbac=RBAC(role_permissions=settings.rbac.roles)
-    )
+    request.app.state.dispatcher = SimpleNamespace(rbac=RBAC(role_permissions=settings.rbac.roles))
     request.app.state.assistant_service = None
     request.state = SimpleNamespace(request_id=request_id)
     return request

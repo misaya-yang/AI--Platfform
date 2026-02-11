@@ -3,8 +3,8 @@ Tests for ModelRegistry - Unified LLM provider interface.
 
 Tests model management, provider configuration, and access control.
 """
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
 # Skip if tiktoken not available (required by assistant module)
 pytest.importorskip("tiktoken", reason="tiktoken required for model registry tests")
@@ -42,9 +42,9 @@ class TestModelInfo:
     def test_create_model_info(self):
         """Should create ModelInfo with required fields."""
         from src.services.assistant.model_registry import (
+            ModelAccessLevel,
             ModelInfo,
             ModelProvider,
-            ModelAccessLevel,
         )
 
         model = ModelInfo(
@@ -65,9 +65,9 @@ class TestModelInfo:
     def test_model_info_with_custom_values(self):
         """Should accept custom configuration."""
         from src.services.assistant.model_registry import (
+            ModelAccessLevel,
             ModelInfo,
             ModelProvider,
-            ModelAccessLevel,
         )
 
         model = ModelInfo(
@@ -116,7 +116,7 @@ class TestModelRegistryProviderConfig:
 
     def test_configure_provider(self):
         """Should configure provider with API key."""
-        from src.services.assistant.model_registry import ModelRegistry, ModelProvider
+        from src.services.assistant.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -130,7 +130,7 @@ class TestModelRegistryProviderConfig:
 
     def test_configure_provider_with_custom_base_url(self):
         """Should allow custom base URL."""
-        from src.services.assistant.model_registry import ModelRegistry, ModelProvider
+        from src.services.assistant.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -146,7 +146,7 @@ class TestModelRegistryProviderConfig:
 
     def test_unconfigured_provider(self):
         """Unconfigured provider should return False."""
-        from src.services.assistant.model_registry import ModelRegistry, ModelProvider
+        from src.services.assistant.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -159,9 +159,9 @@ class TestModelRegistryModelManagement:
     def test_get_model(self):
         """Should retrieve model by ID."""
         from src.services.assistant.model_registry import (
-            ModelRegistry,
             ModelInfo,
             ModelProvider,
+            ModelRegistry,
         )
 
         registry = ModelRegistry(use_default_models=False)
@@ -192,9 +192,9 @@ class TestModelRegistryModelManagement:
     def test_add_custom_model(self):
         """Should add custom model to registry."""
         from src.services.assistant.model_registry import (
-            ModelRegistry,
             ModelInfo,
             ModelProvider,
+            ModelRegistry,
         )
 
         registry = ModelRegistry(use_default_models=False)
@@ -230,24 +230,28 @@ class TestModelRegistryAvailableModels:
     def test_get_available_models_configured_provider(self):
         """Should return models only from configured providers."""
         from src.services.assistant.model_registry import (
-            ModelRegistry,
             ModelInfo,
             ModelProvider,
+            ModelRegistry,
         )
 
         registry = ModelRegistry(use_default_models=False)
 
         # Add models from different providers
-        registry.add_custom_model(ModelInfo(
-            id="openai-model",
-            name="OpenAI Model",
-            provider=ModelProvider.OPENAI,
-        ))
-        registry.add_custom_model(ModelInfo(
-            id="anthropic-model",
-            name="Anthropic Model",
-            provider=ModelProvider.ANTHROPIC,
-        ))
+        registry.add_custom_model(
+            ModelInfo(
+                id="openai-model",
+                name="OpenAI Model",
+                provider=ModelProvider.OPENAI,
+            )
+        )
+        registry.add_custom_model(
+            ModelInfo(
+                id="anthropic-model",
+                name="Anthropic Model",
+                provider=ModelProvider.ANTHROPIC,
+            )
+        )
 
         # Only configure OpenAI
         registry.configure_provider(
@@ -376,11 +380,13 @@ class TestChatMessage:
         message = ChatMessage(
             role="assistant",
             content="",
-            tool_calls=[{
-                "id": "call_123",
-                "type": "function",
-                "function": {"name": "get_weather", "arguments": "{}"},
-            }],
+            tool_calls=[
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"},
+                }
+            ],
         )
 
         assert len(message.tool_calls) == 1

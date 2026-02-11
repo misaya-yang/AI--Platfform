@@ -12,15 +12,15 @@ Tests for the StreamingWriter class and StreamChunk dataclass:
 - Edge cases and error handling
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import List, Dict, Any
 
 from src.services.assistant.streaming_writer import (
+    DEFAULT_VERIFICATION_TRIGGERS,
     StreamChunk,
     StreamingWriter,
     VerificationContext,
-    DEFAULT_VERIFICATION_TRIGGERS,
     create_streaming_writer,
 )
 
@@ -431,7 +431,9 @@ class TestQueryExtraction:
         writer = StreamingWriter(mock_kb_service, mock_assistant_service)
 
         # Create very long text
-        long_text = "A very " + "long " * 100 + "text according to the " + "detailed " * 100 + "policy"
+        long_text = (
+            "A very " + "long " * 100 + "text according to the " + "detailed " * 100 + "policy"
+        )
 
         query = writer._extract_verification_query(long_text, "according to")
 
@@ -553,7 +555,7 @@ class TestSafeBreakFinding:
 
         assert break_point > 0
         # Should break at sentence ending
-        assert text[break_point - 1] in [' ', '.', '。', '!', '?', '\n']
+        assert text[break_point - 1] in [" ", ".", "。", "!", "?", "\n"]
 
     def test_find_word_break(self):
         """Test finding word boundary break points."""
@@ -640,11 +642,27 @@ class TestKBSearch:
         mock_kb_service.retrieve = AsyncMock(
             side_effect=[
                 (
-                    [MagicMock(text="Result 1", score=0.9, segment_id="s1", document_id="d1", metadata={})],
+                    [
+                        MagicMock(
+                            text="Result 1",
+                            score=0.9,
+                            segment_id="s1",
+                            document_id="d1",
+                            metadata={},
+                        )
+                    ],
                     {},
                 ),
                 (
-                    [MagicMock(text="Result 2", score=0.8, segment_id="s2", document_id="d2", metadata={})],
+                    [
+                        MagicMock(
+                            text="Result 2",
+                            score=0.8,
+                            segment_id="s2",
+                            document_id="d2",
+                            metadata={},
+                        )
+                    ],
                     {},
                 ),
             ]
@@ -702,7 +720,13 @@ class TestKBSearch:
         mock_kb_service.retrieve = AsyncMock(
             return_value=(
                 [
-                    MagicMock(text=f"Result {i}", score=0.9 - i * 0.1, segment_id=f"s{i}", document_id=f"d{i}", metadata={})
+                    MagicMock(
+                        text=f"Result {i}",
+                        score=0.9 - i * 0.1,
+                        segment_id=f"s{i}",
+                        document_id=f"d{i}",
+                        metadata={},
+                    )
                     for i in range(10)
                 ],
                 {},
@@ -789,7 +813,10 @@ class TestWriteWithVerification:
 
         # Combined text should match input
         combined_text = "".join(c.content for c in text_chunks)
-        assert "Hello, this is a test message." in combined_text or combined_text == "Hello, this is a test message."
+        assert (
+            "Hello, this is a test message." in combined_text
+            or combined_text == "Hello, this is a test message."
+        )
 
     @pytest.mark.asyncio
     async def test_triggers_search(self):
@@ -797,7 +824,15 @@ class TestWriteWithVerification:
         mock_kb_service = MagicMock()
         mock_kb_service.retrieve = AsyncMock(
             return_value=(
-                [MagicMock(text="Policy result", score=0.9, segment_id="s1", document_id="d1", metadata={})],
+                [
+                    MagicMock(
+                        text="Policy result",
+                        score=0.9,
+                        segment_id="s1",
+                        document_id="d1",
+                        metadata={},
+                    )
+                ],
                 {},
             )
         )
@@ -860,7 +895,11 @@ class TestWriteWithVerification:
         mock_kb_service = MagicMock()
         mock_kb_service.retrieve = AsyncMock(
             return_value=(
-                [MagicMock(text="政策内容", score=0.85, segment_id="s1", document_id="d1", metadata={})],
+                [
+                    MagicMock(
+                        text="政策内容", score=0.85, segment_id="s1", document_id="d1", metadata={}
+                    )
+                ],
                 {},
             )
         )

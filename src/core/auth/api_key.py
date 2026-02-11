@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hmac
-from typing import List
 
 from ..exceptions import AuthError
 
@@ -11,7 +10,7 @@ def _constant_time_compare(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
-def verify_api_key(key: str, valid_keys: List[str]) -> None:
+def verify_api_key(key: str, valid_keys: list[str]) -> None:
     """
     验证 API Key（使用常量时间比较防止时序攻击）
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Confluence Integration API Endpoints.
 
 Provides REST API for Confluence integration management:
@@ -12,10 +12,16 @@ Provides REST API for Confluence integration management:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
+from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...services.knowledge.confluence.sync_service import (
+    ConfluenceAccessDeniedError,
+    ConfluenceSyncError,
+)
 from ..deps import get_knowledge_service, get_user_context
 from ..schemas.confluence import (
     ConfluenceBatchSyncRequestSchema,
@@ -28,7 +34,6 @@ from ..schemas.confluence import (
     ConfluencePageListResponseSchema,
     ConfluencePageRecordSchema,
     ConfluencePageSyncConfigUpdateSchema,
-    ConfluencePageTreeNodeSchema,
     ConfluencePageTreeResponseSchema,
     ConfluenceRemovePagesRequestSchema,
     ConfluenceRemovePagesResultSchema,
@@ -43,12 +48,6 @@ from ..schemas.confluence import (
     ConfluenceSyncTaskSchema,
     ConfluenceSyncTriggerSchema,
     ConfluenceUrlImportSchema,
-)
-from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
-from ...services.knowledge.confluence.sync_service import (
-    ConfluenceAccessDeniedError,
-    ConfluenceSyncError,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +76,7 @@ def get_confluence_scheduler(request: Request):
 # Connection Management
 # ============================================================
 
+
 @router.post("/connections", response_model=ConfluenceConnectionResponseSchema)
 async def create_connection(
     request: Request,
@@ -104,10 +104,10 @@ async def create_connection(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.get("/connections", response_model=List[ConfluenceConnectionResponseSchema])
+@router.get("/connections", response_model=list[ConfluenceConnectionResponseSchema])
 async def list_connections(
     request: Request,
-    status: Optional[str] = Query(None, description="Filter by status"),
+    status: str | None = Query(None, description="Filter by status"),
     user: UserContext = Depends(get_user_context),
 ):
     """List all Confluence connections for the tenant."""
@@ -206,11 +206,11 @@ async def delete_connection(
 @router.post("/connections/test", response_model=ConfluenceConnectionTestResponseSchema)
 async def test_connection_credentials(
     request: Request,
-    payload: Dict[str, Any] = Body(...),
+    payload: dict[str, Any] = Body(...),
     user: UserContext = Depends(get_user_context),
 ):
     """Test Confluence credentials without creating a connection."""
-    from ...services.knowledge.confluence.client import ConfluenceClient, ConfluenceAPIError
+    from ...services.knowledge.confluence.client import ConfluenceAPIError, ConfluenceClient
     from ...services.knowledge.confluence.models import ConfluenceCredentials
 
     try:
@@ -243,13 +243,16 @@ async def test_connection_credentials(
             return result
 
     except ConfluenceAPIError as exc:
-        logger.error(f"Confluence API error during test: {exc}, status_code={exc.status_code}, body={exc.response_body}")
+        logger.error(
+            f"Confluence API error during test: {exc}, status_code={exc.status_code}, body={exc.response_body}"
+        )
         return {
             "status": "error",
             "message": f"API error ({exc.status_code}): {str(exc)}",
         }
     except Exception as exc:
         import traceback
+
         tb = traceback.format_exc()
         logger.error(f"Connection credentials test failed: {exc}\n{tb}")
         return {
@@ -258,7 +261,9 @@ async def test_connection_credentials(
         }
 
 
-@router.post("/connections/{connection_id}/test", response_model=ConfluenceConnectionTestResponseSchema)
+@router.post(
+    "/connections/{connection_id}/test", response_model=ConfluenceConnectionTestResponseSchema
+)
 async def test_connection(
     request: Request,
     connection_id: str,
@@ -281,6 +286,7 @@ async def test_connection(
 # Space Discovery
 # ============================================================
 
+
 @router.get(
     "/connections/{connection_id}/discover/spaces",
     response_model=ConfluenceSpaceListResponseSchema,
@@ -288,7 +294,7 @@ async def test_connection(
 async def discover_spaces(
     request: Request,
     connection_id: str,
-    type_filter: Optional[str] = Query(None, description="Filter by type: global | personal"),
+    type_filter: str | None = Query(None, description="Filter by type: global | personal"),
     user: UserContext = Depends(get_user_context),
 ):
     """Discover available spaces in the Confluence instance."""
@@ -353,6 +359,7 @@ async def discover_space_pages(
 # Space Binding
 # ============================================================
 
+
 @router.post(
     "/connections/{connection_id}/bindings",
     response_model=ConfluenceSpaceBindingResponseSchema,
@@ -409,7 +416,7 @@ async def create_space_binding(
 
 @router.get(
     "/connections/{connection_id}/bindings",
-    response_model=List[ConfluenceSpaceBindingResponseSchema],
+    response_model=list[ConfluenceSpaceBindingResponseSchema],
 )
 async def list_space_bindings(
     request: Request,
@@ -432,12 +439,12 @@ async def list_space_bindings(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/bindings", response_model=List[ConfluenceSpaceBindingResponseSchema])
+@router.get("/bindings", response_model=list[ConfluenceSpaceBindingResponseSchema])
 async def list_all_bindings(
     request: Request,
-    connection_id: Optional[str] = Query(None, description="Filter by connection ID"),
-    dataset_id: Optional[str] = Query(None, description="Filter by dataset ID"),
-    status: Optional[str] = Query(None, description="Filter by status"),
+    connection_id: str | None = Query(None, description="Filter by connection ID"),
+    dataset_id: str | None = Query(None, description="Filter by dataset ID"),
+    status: str | None = Query(None, description="Filter by status"),
     user: UserContext = Depends(get_user_context),
 ):
     """List all space bindings for the current tenant."""
@@ -550,7 +557,7 @@ async def delete_space_binding(
 async def add_pages_to_binding(
     request: Request,
     binding_id: str,
-    payload: Dict[str, Any] = Body(...),
+    payload: dict[str, Any] = Body(...),
     user: UserContext = Depends(get_user_context),
 ):
     """
@@ -585,18 +592,22 @@ async def add_pages_to_binding(
                     page_id=str(page_id),
                     event_type="created",
                 )
-                results.append({
-                    "page_id": page_id,
-                    "status": "success" if doc_id else "skipped",
-                    "document_id": doc_id,
-                })
+                results.append(
+                    {
+                        "page_id": page_id,
+                        "status": "success" if doc_id else "skipped",
+                        "document_id": doc_id,
+                    }
+                )
             except Exception as e:
                 logger.warning(f"Failed to sync page {page_id}: {e}")
-                results.append({
-                    "page_id": page_id,
-                    "status": "error",
-                    "error": str(e),
-                })
+                results.append(
+                    {
+                        "page_id": page_id,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
 
         # Update binding page counts
         await svc.refresh_binding_stats(binding_id)
@@ -622,6 +633,7 @@ async def add_pages_to_binding(
 # ============================================================
 # Import Operations
 # ============================================================
+
 
 @router.post("/import/url", response_model=ConfluenceImportResultSchema)
 async def import_from_url(
@@ -691,6 +703,7 @@ async def import_space(
 # ============================================================
 # Sync Operations
 # ============================================================
+
 
 @router.post("/bindings/{binding_id}/sync")
 async def trigger_sync(
@@ -794,10 +807,12 @@ async def get_sync_status(
 async def list_synced_pages(
     request: Request,
     binding_id: str,
-    status: Optional[str] = Query(None, description="Filter by status"),
+    status: str | None = Query(None, description="Filter by status"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    synced_only: bool = Query(True, description="Only return pages with document_id (synced to knowledge base)"),
+    synced_only: bool = Query(
+        True, description="Only return pages with document_id (synced to knowledge base)"
+    ),
     user: UserContext = Depends(get_user_context),
 ):
     """List synced pages for a binding."""
@@ -816,7 +831,9 @@ async def list_synced_pages(
         valid_pages = []
         for p in pages:
             if not p.get("id"):
-                logger.error(f"Page record missing 'id' field: {p.get('title', 'unknown')} (page_id={p.get('page_id')})")
+                logger.error(
+                    f"Page record missing 'id' field: {p.get('title', 'unknown')} (page_id={p.get('page_id')})"
+                )
                 continue
             valid_pages.append(p)
 
@@ -928,6 +945,7 @@ async def update_page_sync_config(
         # 如果设置为 polling 模式，计算下次同步时间并确保 interval 有值
         if updates.get("sync_mode") == "polling":
             from datetime import datetime, timedelta
+
             # 确保 polling_interval_minutes 有默认值（防止 NULL 导致调度器崩溃）
             interval = updates.get("polling_interval_minutes")
             if interval is None:
@@ -1051,11 +1069,12 @@ async def remove_pages(
 # Sync Tasks
 # ============================================================
 
-@router.get("/tasks", response_model=List[ConfluenceSyncTaskSchema])
+
+@router.get("/tasks", response_model=list[ConfluenceSyncTaskSchema])
 async def list_sync_tasks(
     request: Request,
-    binding_id: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    binding_id: str | None = Query(None),
+    status: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     user: UserContext = Depends(get_user_context),
 ):
@@ -1101,6 +1120,7 @@ async def get_sync_task(
 # ============================================================
 # Scheduler
 # ============================================================
+
 
 @router.get("/scheduler/status", response_model=ConfluenceSchedulerStatusSchema)
 async def get_scheduler_status(
@@ -1172,7 +1192,8 @@ async def stop_scheduler(
 # Helper Functions
 # ============================================================
 
-def _connection_to_response(connection: Dict[str, Any]) -> ConfluenceConnectionResponseSchema:
+
+def _connection_to_response(connection: dict[str, Any]) -> ConfluenceConnectionResponseSchema:
     """Convert connection dict to response schema (excluding sensitive data)."""
     return ConfluenceConnectionResponseSchema(
         connection_id=connection.get("connection_id", ""),

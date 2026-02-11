@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
@@ -18,7 +18,7 @@ from ...persistence.database import DatabaseStorage
 logger = get_logger(__name__)
 
 
-def _permission_rank(p: Optional[str]) -> int:
+def _permission_rank(p: str | None) -> int:
     """Get numeric rank for permission level."""
     if not p:
         return 0
@@ -32,7 +32,7 @@ def _require_not_guest(user: UserContext) -> None:
         raise PermissionDeniedError("Authentication required")
 
 
-def _ensure_dict(value: Any) -> Dict[str, Any]:
+def _ensure_dict(value: Any) -> dict[str, Any]:
     """Ensure value is a dict."""
     if value is None:
         return {}
@@ -58,7 +58,7 @@ class DatasetService:
     # Dataset CRUD Operations
     # ========================================================================
 
-    async def list_datasets(self, user: UserContext) -> List[Dict[str, Any]]:
+    async def list_datasets(self, user: UserContext) -> list[dict[str, Any]]:
         """List all datasets accessible by the user."""
         _require_not_guest(user)
 
@@ -68,23 +68,23 @@ class DatasetService:
             dataset_id = row.get("dataset_id") or row.get("id")
             permission = await self._effective_dataset_permission(user, dataset_id)
             if permission:
-                results.append({
-                    "id": dataset_id,
-                    "name": row.get("name"),
-                    "description": row.get("description"),
-                    "embedding_model": row.get("embedding_model"),
-                    "permission": permission,
-                    "created_at": row.get("created_at"),
-                    "updated_at": row.get("updated_at"),
-                    "document_count": row.get("document_count", 0),
-                    "chunking_mode": row.get("chunking_mode", "auto"),
-                    "is_public": row.get("is_public", False),
-                })
+                results.append(
+                    {
+                        "id": dataset_id,
+                        "name": row.get("name"),
+                        "description": row.get("description"),
+                        "embedding_model": row.get("embedding_model"),
+                        "permission": permission,
+                        "created_at": row.get("created_at"),
+                        "updated_at": row.get("updated_at"),
+                        "document_count": row.get("document_count", 0),
+                        "chunking_mode": row.get("chunking_mode", "auto"),
+                        "is_public": row.get("is_public", False),
+                    }
+                )
         return results
 
-    async def create_dataset(
-        self, user: UserContext, data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def create_dataset(self, user: UserContext, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new dataset."""
         _require_not_guest(user)
 
@@ -93,7 +93,7 @@ class DatasetService:
             raise ValidationFailedError("Dataset name is required")
 
         # Validate dataset name - only allow alphanumeric, space, hyphen, underscore
-        if not re.match(r'^[\w\s\-]+$', name):
+        if not re.match(r"^[\w\s\-]+$", name):
             raise ValidationFailedError(
                 "Dataset name can only contain letters, numbers, spaces, hyphens and underscores"
             )
@@ -105,6 +105,7 @@ class DatasetService:
         embedding_model = embedding_config.get("model") or data.get("embedding_model")
         if not embedding_model:
             from ..embedding import EMBEDDING_DIMENSIONS
+
             embedding_model = list(EMBEDDING_DIMENSIONS.keys())[0]
 
         # Extract chunking config
@@ -151,8 +152,8 @@ class DatasetService:
         }
 
     async def update_dataset(
-        self, user: UserContext, dataset_id: str, patch: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, user: UserContext, dataset_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
         """Update dataset configuration."""
         _require_not_guest(user)
         await self._require_dataset_permission(user, dataset_id, "editor")
@@ -166,7 +167,7 @@ class DatasetService:
             name = patch["name"].strip()
             if not name:
                 raise ValidationFailedError("Dataset name cannot be empty")
-            if not re.match(r'^[\w\s\-]+$', name):
+            if not re.match(r"^[\w\s\-]+$", name):
                 raise ValidationFailedError(
                     "Dataset name can only contain letters, numbers, spaces, hyphens and underscores"
                 )
@@ -217,7 +218,7 @@ class DatasetService:
         logger.info(f"Dataset deleted: {dataset_id}")
         return True
 
-    async def get_dataset(self, user: UserContext, dataset_id: str) -> Dict[str, Any]:
+    async def get_dataset(self, user: UserContext, dataset_id: str) -> dict[str, Any]:
         """Get dataset details."""
         _require_not_guest(user)
         await self._require_dataset_permission(user, dataset_id, "viewer")
@@ -229,7 +230,7 @@ class DatasetService:
 
     async def list_dataset_permissions(
         self, user: UserContext, dataset_id: str
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List all permissions for a dataset."""
         _require_not_guest(user)
         await self._require_dataset_permission(user, dataset_id, "owner")
@@ -241,7 +242,7 @@ class DatasetService:
         dataset_id: str,
         target_user_id: str,
         permission: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Grant permission to a user."""
         _require_not_guest(user)
         await self._require_dataset_permission(user, dataset_id, "owner")
@@ -254,7 +255,7 @@ class DatasetService:
 
     async def revoke_dataset_permission(
         self, user: UserContext, dataset_id: str, target_user_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Revoke permission from a user."""
         _require_not_guest(user)
         await self._require_dataset_permission(user, dataset_id, "owner")
@@ -266,7 +267,7 @@ class DatasetService:
     # Statistics
     # ========================================================================
 
-    async def get_dataset_statistics(self, dataset_id: str) -> Dict[str, Any]:
+    async def get_dataset_statistics(self, dataset_id: str) -> dict[str, Any]:
         """Get statistics for a dataset."""
         return await self.db.get_dataset_statistics(dataset_id)
 
@@ -274,17 +275,16 @@ class DatasetService:
     # Internal Helpers
     # ========================================================================
 
-    async def _get_dataset_or_404(self, dataset_id: str) -> Dict[str, Any]:
+    async def _get_dataset_or_404(self, dataset_id: str) -> dict[str, Any]:
         """Get dataset or raise 404."""
         dataset = await self.db.get_dataset(dataset_id)
         if not dataset:
             from ...core.exceptions import NotFoundError
+
             raise NotFoundError(f"Dataset not found: {dataset_id}")
         return dataset
 
-    async def _effective_dataset_permission(
-        self, user: UserContext, dataset_id: str
-    ) -> Optional[str]:
+    async def _effective_dataset_permission(self, user: UserContext, dataset_id: str) -> str | None:
         """Get effective permission for user on dataset."""
         # Admin bypass
         if user.is_authenticated and (
@@ -326,13 +326,9 @@ class DatasetService:
         if not effective:
             raise PermissionDeniedError("You don't have access to this dataset")
         if _permission_rank(effective) < _permission_rank(required):
-            raise PermissionDeniedError(
-                f"This operation requires '{required}' permission"
-            )
+            raise PermissionDeniedError(f"This operation requires '{required}' permission")
 
-    async def require_dataset_access(
-        self, user: UserContext, dataset_id: str
-    ) -> Dict[str, Any]:
+    async def require_dataset_access(self, user: UserContext, dataset_id: str) -> dict[str, Any]:
         """Check dataset access and return dataset."""
         _require_not_guest(user)
         effective = await self._effective_dataset_permission(user, dataset_id)

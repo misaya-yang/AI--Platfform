@@ -6,14 +6,13 @@ for Imam-type datasets requiring chapter/section citations.
 """
 
 import pytest
-from src.services.knowledge.section_extractor import (
-    SectionExtractor,
-    Section,
-    get_section_aware_citation,
-    extract_sections_with_traceability,
-)
+
 from src.services.knowledge.chunking import Chunk, ChunkingConfig
 from src.services.knowledge.islamic_chunking import IslamicTextChunker
+from src.services.knowledge.section_extractor import (
+    SectionExtractor,
+    get_section_aware_citation,
+)
 
 
 class TestSectionExtractor:
@@ -35,7 +34,7 @@ More detailed content.
 """
         extractor = SectionExtractor()
         sections = extractor.extract_sections(text)
-        
+
         assert len(sections) >= 3
         # Check that Arabic sections were found
         titles = [s.title for s in sections]
@@ -57,7 +56,7 @@ Detailed content about wudu.
 """
         extractor = SectionExtractor(include_arabic=False, include_english=True)
         sections = extractor.extract_sections(text)
-        
+
         assert len(sections) >= 3
         # Check that sections were extracted
         titles = [s.title for s in sections]
@@ -82,11 +81,11 @@ Content about fasting.
 """
         extractor = SectionExtractor(include_arabic=False, include_markdown=True)
         sections = extractor.extract_sections(text)
-        
+
         # Find sections
         ch1 = next((s for s in sections if "Prayer" in s.title), None)
         sec11 = next((s for s in sections if "Wudu" in s.title), None)
-        
+
         if ch1:
             assert ch1.level == 1
         if sec11:
@@ -104,7 +103,7 @@ Content in chapter 2.
 """
         extractor = SectionExtractor(include_arabic=False, include_markdown=True)
         sections = extractor.extract_sections(text)
-        
+
         # Position in chapter 1
         pos_ch1 = text.find("Content in chapter 1")
         section = extractor.get_section_for_position(sections, pos_ch1)
@@ -125,10 +124,10 @@ This is the main content.
             Chunk(text="This is the introduction content.", index=0),
             Chunk(text="This is the main content.", index=1),
         ]
-        
+
         extractor = SectionExtractor(include_arabic=False, include_markdown=True)
         metadata_list = extractor.assign_section_to_chunks(text, chunks)
-        
+
         assert len(metadata_list) == 2
         # Chunks should have section info
         assert metadata_list[0].get("section_title") is not None
@@ -139,14 +138,12 @@ This is the main content.
             Chunk(text="Some content without section.", index=0),
             Chunk(text="More content.", index=1),
         ]
-        
+
         extractor = SectionExtractor()
         metadata_list = extractor.force_section_title(
-            chunks,
-            document_title="Test Document",
-            default_section="General"
+            chunks, document_title="Test Document", default_section="General"
         )
-        
+
         assert len(metadata_list) == 2
         # Both chunks should have section_title
         assert metadata_list[0].get("section_title") is not None
@@ -163,24 +160,16 @@ class TestSectionAwareCitation:
             "section_title": "Chapter 1: Prayer",
             "section_level": 1,
         }
-        citation = get_section_aware_citation(
-            metadata,
-            document_name="Book of Worship",
-            position=5
-        )
-        
+        citation = get_section_aware_citation(metadata, document_name="Book of Worship", position=5)
+
         assert "Book of Worship" in citation
         assert "5" in citation
 
     def test_citation_without_section(self):
         """Test building citation without section info."""
         metadata = {}
-        citation = get_section_aware_citation(
-            metadata,
-            document_name="Book of Worship",
-            position=3
-        )
-        
+        citation = get_section_aware_citation(metadata, document_name="Book of Worship", position=3)
+
         assert "Book of Worship" in citation
         assert "3" in citation
 
@@ -211,7 +200,7 @@ Content about prayer.
         )
         chunker = IslamicTextChunker(config)
         chunks = chunker.chunk(text)
-        
+
         # All chunks should have section_title
         for chunk in chunks:
             assert "section_title" in chunk.metadata
@@ -227,7 +216,7 @@ Content about prayer.
         )
         chunker = IslamicTextChunker(config)
         chunks = chunker.chunk(text)
-        
+
         # Should produce chunks without forced section traceability
         assert len(chunks) > 0
 
@@ -264,7 +253,7 @@ class TestRetrievalConfig:
     def test_islamic_strict_traceability_preset(self):
         """Test the islamic_strict_traceability preset."""
         from src.services.knowledge.retrieval_config import get_preset_config
-        
+
         config = get_preset_config("islamic_strict_traceability")
         assert config.islamic.strict_section_traceability is True
         assert config.islamic.citation_format is True

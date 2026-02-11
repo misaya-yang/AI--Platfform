@@ -13,10 +13,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from io import StringIO
-from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +28,12 @@ class ImageReference:
     """
 
     filename: str  # ri:filename attribute
-    content_type: Optional[str] = None  # ri:content-type, e.g., "image/png"
-    attachment_id: Optional[str] = None  # ri:content-id if available
-    width: Optional[int] = None  # ac:width attribute
-    height: Optional[int] = None  # ac:height attribute
-    alt_text: Optional[str] = None  # ac:alt attribute
-    title: Optional[str] = None  # ac:title attribute
+    content_type: str | None = None  # ri:content-type, e.g., "image/png"
+    attachment_id: str | None = None  # ri:content-id if available
+    width: int | None = None  # ac:width attribute
+    height: int | None = None  # ac:height attribute
+    alt_text: str | None = None  # ac:alt attribute
+    title: str | None = None  # ac:title attribute
     context_text: str = ""  # Surrounding text for context
 
     @property
@@ -45,8 +44,12 @@ class ImageReference:
             ext = self.filename.lower().rsplit(".", 1)[-1] if "." in self.filename else ""
             return ext in {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
         embeddable_types = {
-            "image/png", "image/jpeg", "image/jpg",
-            "image/gif", "image/bmp", "image/webp"
+            "image/png",
+            "image/jpeg",
+            "image/jpg",
+            "image/gif",
+            "image/bmp",
+            "image/webp",
         }
         return self.content_type.lower() in embeddable_types
 
@@ -76,10 +79,10 @@ class StorageFormatParser(HTMLParser):
         # 状态跟踪
         self.in_code_block = False
         self.code_language = ""
-        self.list_stack: List[str] = []  # 用于跟踪嵌套列表
+        self.list_stack: list[str] = []  # 用于跟踪嵌套列表
         self.current_depth = 0
         self.in_table = False
-        self.table_row: List[str] = []
+        self.table_row: list[str] = []
         self.in_link = False
         self.current_link_href = ""
 
@@ -89,15 +92,15 @@ class StorageFormatParser(HTMLParser):
 
         # 当前宏信息
         self.current_macro = ""
-        self.macro_params: Dict[str, str] = {}
+        self.macro_params: dict[str, str] = {}
 
         # Image tracking
-        self.images: List[ImageReference] = []
+        self.images: list[ImageReference] = []
         self.in_image = False
-        self.current_image_attrs: Dict[str, str] = {}
-        self.recent_text_buffer: List[str] = []  # For context around images
+        self.current_image_attrs: dict[str, str] = {}
+        self.recent_text_buffer: list[str] = []  # For context around images
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         attrs_dict = {k: v for k, v in attrs if v is not None}
 
         # 忽略某些标签
@@ -278,7 +281,7 @@ class StorageFormatParser(HTMLParser):
             if len(self.recent_text_buffer) > 10:
                 self.recent_text_buffer.pop(0)
 
-    def _handle_macro_start(self, tag: str, attrs: Dict[str, str]):
+    def _handle_macro_start(self, tag: str, attrs: dict[str, str]):
         """处理 Confluence 宏开始标签"""
         # Handle image elements
         if tag == "ac:image":
@@ -418,11 +421,11 @@ class StorageFormatParser(HTMLParser):
 
         return result.strip()
 
-    def get_images(self) -> List[ImageReference]:
+    def get_images(self) -> list[ImageReference]:
         """获取提取的图片引用列表"""
         return self.images.copy()
 
-    def get_embeddable_images(self) -> List[ImageReference]:
+    def get_embeddable_images(self) -> list[ImageReference]:
         """获取可嵌入的图片引用列表（用于多模态 API）"""
         return [img for img in self.images if img.is_embeddable]
 
@@ -448,7 +451,9 @@ def parse_storage_format(content: str, output_format: str = "markdown") -> str:
         parser = StorageFormatParser(output_format=output_format)
         parser.feed(content)
         result = parser.get_output()
-        logger.info(f"parse_storage_format: output length={len(result)}, in_ignored_tag={parser.in_ignored_tag}")
+        logger.info(
+            f"parse_storage_format: output length={len(result)}, in_ignored_tag={parser.in_ignored_tag}"
+        )
         if len(result) == 0 and len(content) > 0:
             logger.warning(
                 f"Parser returned empty result! in_ignored_tag={parser.in_ignored_tag}, "
@@ -504,7 +509,7 @@ def extract_markdown(content: str) -> str:
     return parse_storage_format(content, output_format="markdown")
 
 
-def extract_image_references(content: str) -> List[ImageReference]:
+def extract_image_references(content: str) -> list[ImageReference]:
     """
     提取图片引用
 
@@ -528,7 +533,7 @@ def extract_image_references(content: str) -> List[ImageReference]:
         return []
 
 
-def extract_embeddable_images(content: str) -> List[ImageReference]:
+def extract_embeddable_images(content: str) -> list[ImageReference]:
     """
     提取可嵌入的图片引用
 
@@ -553,7 +558,7 @@ def extract_embeddable_images(content: str) -> List[ImageReference]:
         return []
 
 
-def extract_headings(content: str) -> List[Dict[str, str]]:
+def extract_headings(content: str) -> list[dict[str, str]]:
     """
     提取标题结构
 

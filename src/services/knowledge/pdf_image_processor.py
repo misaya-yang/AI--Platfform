@@ -7,12 +7,10 @@ Uses PyMuPDF (fitz) for reliable image extraction.
 
 from __future__ import annotations
 
-import io
-import logging
 import hashlib
+import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict, Any
-from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +49,15 @@ MIN_IMAGE_HEIGHT = 50
 class ExtractedImage:
     """Represents an image extracted from a PDF"""
 
-    image_id: str                    # Unique ID (hash of content)
-    content: bytes                   # Raw image bytes
-    mime_type: str                   # MIME type (image/png, etc.)
-    width: int                       # Image width in pixels
-    height: int                      # Image height in pixels
-    page_number: int                 # Page where image was found (1-indexed)
-    context_text: str = ""           # Surrounding text context
-    alt_text: str = ""               # Alt text if available
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    image_id: str  # Unique ID (hash of content)
+    content: bytes  # Raw image bytes
+    mime_type: str  # MIME type (image/png, etc.)
+    width: int  # Image width in pixels
+    height: int  # Image height in pixels
+    page_number: int  # Page where image was found (1-indexed)
+    context_text: str = ""  # Surrounding text context
+    alt_text: str = ""  # Alt text if available
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def size_bytes(self) -> int:
@@ -76,7 +74,7 @@ class ExtractedImage:
             and self.height >= MIN_IMAGE_HEIGHT
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary (without content for serialization)"""
         return {
             "image_id": self.image_id,
@@ -96,13 +94,13 @@ class ExtractedImage:
 class PDFExtractionResult:
     """Result of PDF extraction containing text and images"""
 
-    text: str                              # Extracted text content
-    images: List[ExtractedImage]           # Extracted images
-    page_count: int                        # Total pages in PDF
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    text: str  # Extracted text content
+    images: list[ExtractedImage]  # Extracted images
+    page_count: int  # Total pages in PDF
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def embeddable_images(self) -> List[ExtractedImage]:
+    def embeddable_images(self) -> list[ExtractedImage]:
         """Get only images that can be embedded"""
         return [img for img in self.images if img.is_embeddable]
 
@@ -175,8 +173,8 @@ class PDFImageProcessor:
             return self._fallback_text_only(content)
 
         try:
-            text_parts: List[str] = []
-            images: List[ExtractedImage] = []
+            text_parts: list[str] = []
+            images: list[ExtractedImage] = []
             seen_image_hashes: set = set()  # Deduplicate images
 
             metadata = {
@@ -212,7 +210,7 @@ class PDFImageProcessor:
             return PDFExtractionResult(
                 text=full_text,
                 images=images,
-                page_count=doc.page_count if hasattr(doc, 'page_count') else len(text_parts),
+                page_count=doc.page_count if hasattr(doc, "page_count") else len(text_parts),
                 metadata=metadata,
             )
 
@@ -228,14 +226,14 @@ class PDFImageProcessor:
         page_num: int,
         page_text: str,
         seen_hashes: set,
-    ) -> List[ExtractedImage]:
+    ) -> list[ExtractedImage]:
         """Extract images from a single PDF page."""
         try:
             import pymupdf as fitz  # type: ignore
         except ImportError:
-            import fitz  # type: ignore
+            pass  # type: ignore
 
-        images: List[ExtractedImage] = []
+        images: list[ExtractedImage] = []
 
         try:
             # Get list of images on page
@@ -340,7 +338,7 @@ class PDFImageProcessor:
 
         # Extend to sentence boundaries if possible
         # Support both English and Chinese punctuation marks
-        sentence_end_markers = ['. ', '。', '！', '？', '；', '\n']
+        sentence_end_markers = [". ", "。", "！", "？", "；", "\n"]
 
         if start > 0:
             # Find sentence start - look for the first sentence boundary
@@ -354,11 +352,11 @@ class PDFImageProcessor:
                         best_pos = pos
                         best_marker_len = len(marker)
             if best_pos >= 0:
-                context = context[best_pos + best_marker_len:]
+                context = context[best_pos + best_marker_len :]
 
         # Limit length
         if len(context) > self.context_chars:
-            context = context[:self.context_chars]
+            context = context[: self.context_chars]
             # Try to end at sentence - look for the last sentence boundary
             best_pos = -1
             for marker in sentence_end_markers:
@@ -366,15 +364,16 @@ class PDFImageProcessor:
                 if pos > len(context) // 2 and pos > best_pos:
                     best_pos = pos
             if best_pos > 0:
-                context = context[:best_pos + 1]
+                context = context[: best_pos + 1]
 
         return context.strip()
 
     def _fallback_text_only(self, content: bytes) -> PDFExtractionResult:
         """Fallback to text-only extraction when PyMuPDF fails."""
         try:
-            from pypdf import PdfReader
             from io import BytesIO
+
+            from pypdf import PdfReader
 
             reader = PdfReader(BytesIO(content))
             text_parts = []
@@ -398,7 +397,7 @@ class PDFImageProcessor:
             return PDFExtractionResult(text="", images=[], page_count=0)
 
 
-def extract_pdf_with_images(content: bytes) -> Tuple[str, List[ExtractedImage]]:
+def extract_pdf_with_images(content: bytes) -> tuple[str, list[ExtractedImage]]:
     """
     Convenience function to extract text and images from PDF.
 

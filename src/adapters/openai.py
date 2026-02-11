@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any
 
 from ..core.exceptions import ValidationFailedError
 from ..models.enums import ContentType, ServiceType, StreamEventType
@@ -14,11 +15,7 @@ class OpenAIAdapter(ProtocolAdapter):
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         prompt = self._extract_text(request.inputs)
         params = request.parameters or {}
-        model = (
-            params.get("model")
-            or (self.service.metadata or {}).get("model")
-            or "gpt-4o-mini"
-        )
+        model = params.get("model") or (self.service.metadata or {}).get("model") or "gpt-4o-mini"
 
         if self.service.service_type == ServiceType.EMBEDDING:
             payload = {"model": model, "input": prompt}
@@ -30,7 +27,7 @@ class OpenAIAdapter(ProtocolAdapter):
                 outputs=[ContentItem(type=ContentType.JSON, data=response)],
             )
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -50,12 +47,8 @@ class OpenAIAdapter(ProtocolAdapter):
             raise ValidationFailedError("stream not supported for embedding")
         prompt = self._extract_text(request.inputs)
         params = request.parameters or {}
-        model = (
-            params.get("model")
-            or (self.service.metadata or {}).get("model")
-            or "gpt-4o-mini"
-        )
-        payload: Dict[str, Any] = {
+        model = params.get("model") or (self.service.metadata or {}).get("model") or "gpt-4o-mini"
+        payload: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": True,
@@ -69,10 +62,8 @@ class OpenAIAdapter(ProtocolAdapter):
             raise ValidationFailedError("stream requires HTTPConnector")
 
         chunk_index = 0
-        usage: Optional[Dict[str, Any]] = None
-        async with client.stream(
-            "POST", "/v1/chat/completions", json=payload
-        ) as resp:
+        usage: dict[str, Any] | None = None
+        async with client.stream("POST", "/v1/chat/completions", json=payload) as resp:
             async for line in resp.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -85,11 +76,7 @@ class OpenAIAdapter(ProtocolAdapter):
                     continue
                 if isinstance(evt, dict) and isinstance(evt.get("usage"), dict):
                     usage = evt.get("usage")
-                delta = (
-                    evt.get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content")
-                )
+                delta = evt.get("choices", [{}])[0].get("delta", {}).get("content")
                 if delta:
                     yield StreamChunk(
                         request_id=request.request_id,
@@ -107,7 +94,7 @@ class OpenAIAdapter(ProtocolAdapter):
             metadata={"usage": usage} if usage else None,
         )
 
-    def _extract_text(self, inputs: List[ContentItem]) -> str:
+    def _extract_text(self, inputs: list[ContentItem]) -> str:
         texts = [str(i.data) for i in inputs if i.type == ContentType.TEXT and i.data]
         if not texts:
             raise ValidationFailedError("text input is required")

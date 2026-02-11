@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 # ============================================================
 # Pre-processing Rules (Dify-style)
@@ -19,10 +18,10 @@ PRE_PROCESSING_RULES = {
 def _remove_urls_emails(text: str) -> str:
     """Remove URLs and email addresses from text."""
     # Remove URLs
-    text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', '', text)
-    text = re.sub(r'www\.[^\s<>"{}|\\^`\[\]]+', '', text)
+    text = re.sub(r'https?://[^\s<>"{}|\\^`\[\]]+', "", text)
+    text = re.sub(r'www\.[^\s<>"{}|\\^`\[\]]+', "", text)
     # Remove emails
-    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', text)
+    text = re.sub(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", "", text)
     return text
 
 
@@ -34,10 +33,7 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def apply_pre_processing_rules(
-    text: str, 
-    rules: List[Dict[str, Any]]
-) -> str:
+def apply_pre_processing_rules(text: str, rules: list[dict[str, Any]]) -> str:
     """Apply pre-processing rules to text (Dify-style)."""
     for rule in rules:
         rule_id = rule.get("id", "")
@@ -64,13 +60,13 @@ def count_words(text: str) -> int:
     """Count words in text (handles CJK and Latin)."""
     if not text:
         return 0
-    
+
     # Count Latin words
     latin_words = len(re.findall(r"[A-Za-z0-9]+", text))
-    
+
     # Count CJK characters as individual words
     cjk_chars = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF]", text))
-    
+
     return latin_words + cjk_chars
 
 
@@ -78,15 +74,17 @@ def count_words(text: str) -> int:
 # Segmentation Configuration
 # ============================================================
 
+
 @dataclass
 class SegmentationConfig:
     """Segmentation configuration - matches Dify's format"""
+
     separator: str = "\n"
     max_tokens: int = 500
     chunk_overlap: int = 50
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "SegmentationConfig":
+    def from_dict(cls, data: dict[str, Any]) -> SegmentationConfig:
         return cls(
             separator=data.get("separator", "\n"),
             max_tokens=data.get("max_tokens", 500),
@@ -94,15 +92,16 @@ class SegmentationConfig:
         )
 
 
-@dataclass 
+@dataclass
 class ProcessingConfig:
     """Complete processing configuration"""
+
     mode: str = "automatic"  # automatic|custom|hierarchical
-    pre_processing_rules: List[Dict[str, Any]] = None
+    pre_processing_rules: list[dict[str, Any]] = None
     segmentation: SegmentationConfig = None
-    parent_mode: Optional[str] = None  # paragraph|full_doc (hierarchical only)
-    child_chunk_size: Optional[int] = None
-    
+    parent_mode: str | None = None  # paragraph|full_doc (hierarchical only)
+    child_chunk_size: int | None = None
+
     def __post_init__(self):
         if self.pre_processing_rules is None:
             self.pre_processing_rules = [
@@ -111,22 +110,27 @@ class ProcessingConfig:
             ]
         if self.segmentation is None:
             self.segmentation = SegmentationConfig()
-    
+
     @classmethod
-    def automatic(cls) -> "ProcessingConfig":
+    def automatic(cls) -> ProcessingConfig:
         """Default automatic processing config"""
         return cls(mode="automatic")
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ProcessingConfig":
+    def from_dict(cls, data: dict[str, Any]) -> ProcessingConfig:
         seg_data = data.get("segmentation", {})
         return cls(
             mode=data.get("mode", "automatic"),
-            pre_processing_rules=data.get("pre_processing_rules", [
-                {"id": "remove_extra_spaces", "enabled": True},
-                {"id": "remove_urls_emails", "enabled": False},
-            ]),
-            segmentation=SegmentationConfig.from_dict(seg_data) if seg_data else SegmentationConfig(),
+            pre_processing_rules=data.get(
+                "pre_processing_rules",
+                [
+                    {"id": "remove_extra_spaces", "enabled": True},
+                    {"id": "remove_urls_emails", "enabled": False},
+                ],
+            ),
+            segmentation=SegmentationConfig.from_dict(seg_data)
+            if seg_data
+            else SegmentationConfig(),
             parent_mode=data.get("parent_mode"),
             child_chunk_size=data.get("child_chunk_size"),
         )
@@ -136,12 +140,13 @@ class ProcessingConfig:
 # Segmentation Functions
 # ============================================================
 
+
 def split_into_segments(
     text: str,
     max_chars: int = 1200,
     overlap_chars: int = 120,
     min_chars: int = 50,
-) -> List[Tuple[str, int]]:
+) -> list[tuple[str, int]]:
     """Split text into overlapping chunks.
 
     Returns list of (chunk_text, token_count).
@@ -150,7 +155,7 @@ def split_into_segments(
     if not text:
         return []
 
-    segments: List[Tuple[str, int]] = []
+    segments: list[tuple[str, int]] = []
     n = len(text)
     start = 0
 
@@ -200,42 +205,42 @@ def split_by_separator(
     separator: str = "\n",
     max_tokens: int = 500,
     chunk_overlap: int = 50,
-) -> List[Tuple[str, int]]:
+) -> list[tuple[str, int]]:
     """Split text by separator with overlap (Dify custom mode style).
-    
+
     Returns list of (chunk_text, token_count).
     """
     text = normalize_text(text)
     if not text:
         return []
-    
+
     # Estimate chars per token (rough approximation)
     chars_per_token = 4  # Typical for English, adjust for CJK
     max_chars = max_tokens * chars_per_token
     overlap_chars = chunk_overlap * chars_per_token
-    
+
     # First split by separator
     if separator == "\\n":
         separator = "\n"
     elif separator == "\\n\\n":
         separator = "\n\n"
-    
+
     parts = text.split(separator)
-    
-    segments: List[Tuple[str, int]] = []
+
+    segments: list[tuple[str, int]] = []
     current_chunk = ""
-    
+
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        
+
         # Check if adding this part would exceed max
         test_chunk = current_chunk + (separator if current_chunk else "") + part
         if len(test_chunk) > max_chars and current_chunk:
             # Save current chunk and start new one with overlap
             segments.append((current_chunk, estimate_tokens(current_chunk)))
-            
+
             # Calculate overlap
             if overlap_chars > 0 and len(current_chunk) > overlap_chars:
                 overlap_text = current_chunk[-overlap_chars:]
@@ -244,11 +249,11 @@ def split_by_separator(
                 current_chunk = part
         else:
             current_chunk = test_chunk
-    
+
     # Don't forget the last chunk
     if current_chunk.strip():
         segments.append((current_chunk, estimate_tokens(current_chunk)))
-    
+
     return segments
 
 
@@ -257,64 +262,68 @@ def split_hierarchical(
     parent_mode: str = "paragraph",
     max_tokens: int = 500,
     child_chunk_size: int = 100,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Split text hierarchically (parent-child chunks).
-    
+
     Returns list of dicts with 'text', 'token_count', 'children'.
     """
     text = normalize_text(text)
     if not text:
         return []
-    
-    parents: List[Dict[str, Any]] = []
-    
+
+    parents: list[dict[str, Any]] = []
+
     if parent_mode == "full_doc":
         # Whole document as single parent
         children = split_by_separator(text, "\n", child_chunk_size, 0)
-        parents.append({
-            "text": text[:2000],  # Truncate for storage
-            "token_count": estimate_tokens(text),
-            "children": children,
-        })
+        parents.append(
+            {
+                "text": text[:2000],  # Truncate for storage
+                "token_count": estimate_tokens(text),
+                "children": children,
+            }
+        )
     else:
         # Split by paragraphs (double newline)
         paragraphs = re.split(r"\n\n+", text)
-        
+
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
-            
+
             # Split paragraph into child chunks
             children = split_by_separator(para, "\n", child_chunk_size, 0)
-            
-            parents.append({
-                "text": para,
-                "token_count": estimate_tokens(para),
-                "children": children,
-            })
-    
+
+            parents.append(
+                {
+                    "text": para,
+                    "token_count": estimate_tokens(para),
+                    "children": children,
+                }
+            )
+
     return parents
 
 
 def process_document_text(
     text: str,
-    config: Optional[ProcessingConfig] = None,
-) -> List[Tuple[str, int]]:
+    config: ProcessingConfig | None = None,
+) -> list[tuple[str, int]]:
     """Process document text with given configuration.
-    
+
     Returns list of (chunk_text, token_count).
     """
     if config is None:
         config = ProcessingConfig.automatic()
-    
+
     # Apply pre-processing rules
     text = normalize_text(text)
     text = apply_pre_processing_rules(text, config.pre_processing_rules)
-    
+
     if not text:
         return []
-    
+
     # Split based on mode
     if config.mode == "hierarchical":
         # For hierarchical, we return parent chunks

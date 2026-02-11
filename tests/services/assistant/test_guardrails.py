@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.services.assistant.guardrails import (
-    QualityIssue,
-    IssueSeverity,
-    ValidationResult,
-    DocumentType,
-    QUALITY_THRESHOLDS,
     BANNED_PHRASES,
+    QUALITY_THRESHOLDS,
     TOOL_CONSTRAINTS,
+    DocumentType,
+    IssueSeverity,
     QualityGuardrails,
+    QualityIssue,
     ToolConstraintValidator,
+    ValidationResult,
 )
 
 
@@ -160,7 +158,8 @@ class TestQualityGuardrails:
         """Test validation passes for sufficient content."""
         validator = QualityGuardrails()
         # Content with enough words AND sections
-        content = """
+        content = (
+            """
 # 第一章 引言
 这是第一章的内容，包含了足够的字数来满足测试要求。
 
@@ -172,7 +171,9 @@ class TestQualityGuardrails:
 
 # 第四章 结论
 这是第四章的内容，最后一章也包含了足够的字数来满足测试要求。
-""" * 30  # Repeat to meet word count (1000+)
+"""
+            * 30
+        )  # Repeat to meet word count (1000+)
 
         result = validator.validate(content, DocumentType.DOCX)
 

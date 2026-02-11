@@ -14,11 +14,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional, Tuple
-import uuid
 
 from ...core.observability.logging import get_logger
 from .image_storage import (
@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 @dataclass
 class FileInfo:
     """Information about an uploaded file."""
+
     file_id: str
     user_id: str
     filename: str  # Original filename
@@ -43,7 +44,7 @@ class FileInfo:
     size_bytes: int
     content_type: str
     uploaded_at: datetime
-    metadata: Optional[Dict[str, str]] = None
+    metadata: dict[str, str] | None = None
 
     @property
     def file_path(self) -> str:
@@ -119,7 +120,7 @@ class FileStorageService:
         user_id: str,
         file_id: str,
         ext: str,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """
         Generate storage key and safe filename for a file.
 
@@ -144,8 +145,8 @@ class FileStorageService:
         filename: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
-        file_id: Optional[str] = None,
+        metadata: dict[str, str] | None = None,
+        file_id: str | None = None,
     ) -> FileInfo:
         """
         Upload a file to storage.
@@ -219,8 +220,8 @@ class FileStorageService:
         content_iterator: AsyncIterator[bytes],
         content_type: str,
         max_size_bytes: int = 50 * 1024 * 1024,  # 50MB default
-        metadata: Optional[Dict[str, str]] = None,
-        file_id: Optional[str] = None,
+        metadata: dict[str, str] | None = None,
+        file_id: str | None = None,
     ) -> FileInfo:
         """
         Upload a file using streaming to handle large files.
@@ -301,7 +302,7 @@ class FileStorageService:
         content_iterator: AsyncIterator[bytes],
         content_type: str,
         max_size_bytes: int,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> FileInfo:
         """Stream upload to local filesystem."""
         assert isinstance(self._backend, LocalStorageBackend)
@@ -341,13 +342,11 @@ class FileStorageService:
                 file_metadata.update(metadata)
 
             import json
-            meta_path = full_path.with_suffix(full_path.suffix + ".meta")
-            await asyncio.to_thread(
-                meta_path.write_text,
-                json.dumps(file_metadata)
-            )
 
-        except Exception as e:
+            meta_path = full_path.with_suffix(full_path.suffix + ".meta")
+            await asyncio.to_thread(meta_path.write_text, json.dumps(file_metadata))
+
+        except Exception:
             temp_path.unlink(missing_ok=True)
             raise
 
@@ -457,8 +456,8 @@ class FileStorageService:
         self,
         storage_key: str,
         expiry_seconds: int = 3600,
-        filename: Optional[str] = None,
-    ) -> Optional[str]:
+        filename: str | None = None,
+    ) -> str | None:
         """
         Get presigned download URL for a file.
 
@@ -488,8 +487,8 @@ class FileStorageService:
         filename: str,
         content_type: str,
         expiry_seconds: int = 900,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, str]]:
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
         """
         Generate presigned URL for direct client upload.
 
@@ -531,8 +530,7 @@ class FileStorageService:
             result["storage_key"] = storage_key
             result["filename"] = safe_filename
             logger.info(
-                f"[FileStorage] Generated presigned upload URL for "
-                f"user {user_id} -> {storage_key}"
+                f"[FileStorage] Generated presigned upload URL for user {user_id} -> {storage_key}"
             )
 
         return result
@@ -541,7 +539,7 @@ class FileStorageService:
         """Check if backend supports presigned URLs."""
         return self.config.backend == StorageBackend.S3
 
-    def get_local_path(self, storage_key: str) -> Optional[Path]:
+    def get_local_path(self, storage_key: str) -> Path | None:
         """
         Get local filesystem path for a file.
 
@@ -563,7 +561,7 @@ class FileStorageService:
         if self._backend is not None:
             await self._backend.close()
 
-    async def __aenter__(self) -> "FileStorageService":
+    async def __aenter__(self) -> FileStorageService:
         """Async context manager entry."""
         return self
 
@@ -574,7 +572,7 @@ class FileStorageService:
 
 # ============ Global Instance Management ============
 
-_file_storage_service: Optional[FileStorageService] = None
+_file_storage_service: FileStorageService | None = None
 
 
 def get_file_storage() -> FileStorageService:
@@ -589,13 +587,11 @@ def get_file_storage() -> FileStorageService:
     """
     global _file_storage_service
     if _file_storage_service is None:
-        raise RuntimeError(
-            "FileStorageService not initialized. Call init_file_storage() first."
-        )
+        raise RuntimeError("FileStorageService not initialized. Call init_file_storage() first.")
     return _file_storage_service
 
 
-def init_file_storage(config: Optional[StorageConfig] = None) -> FileStorageService:
+def init_file_storage(config: StorageConfig | None = None) -> FileStorageService:
     """
     Initialize the global file storage service.
 
@@ -616,7 +612,11 @@ def init_file_storage(config: Optional[StorageConfig] = None) -> FileStorageServ
     if config is None:
         # Read from environment
         backend_str = os.getenv("FILE_STORAGE_BACKEND", "local").lower()
-        backend = StorageBackend(backend_str) if backend_str in ("s3", "oss", "local") else StorageBackend.LOCAL
+        backend = (
+            StorageBackend(backend_str)
+            if backend_str in ("s3", "oss", "local")
+            else StorageBackend.LOCAL
+        )
 
         config = StorageConfig(
             backend=backend,

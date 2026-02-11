@@ -3,16 +3,15 @@ User Management API - CRUD operations for users
 
 Provides endpoints for managing user accounts.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
 
-from ..deps import get_auth_context, get_dispatcher, get_user_context, AuthContext
-from ...core.auth.user_resolver import UserContext
 from ...core.auth.password import (
     ALLOWED_EMAIL_DOMAIN,
     DEFAULT_PASSWORD,
@@ -20,7 +19,8 @@ from ...core.auth.password import (
     hash_password,
     validate_email,
 )
-
+from ...core.auth.user_resolver import UserContext
+from ..deps import AuthContext, get_auth_context, get_dispatcher, get_user_context
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -29,12 +29,16 @@ router = APIRouter(prefix="/users", tags=["users"])
 # Request/Response Models
 # ============================================================
 
+
 class UserCreate(BaseModel):
     """Create user request."""
+
     email: str
     display_name: str = Field(..., min_length=1, max_length=255)
-    department: Optional[str] = Field(None, max_length=50, description="Department: cs, sales, tech, admin")
-    roles: List[str] = Field(default=["user"])
+    department: str | None = Field(
+        None, max_length=50, description="Department: cs, sales, tech, admin"
+    )
+    roles: list[str] = Field(default=["user"])
 
     @validator("email")
     def normalize_email_domain(cls, v):
@@ -59,24 +63,29 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     """Update user request."""
-    display_name: Optional[str] = Field(None, min_length=1, max_length=255)
-    department: Optional[str] = Field(None, max_length=50, description="Department: cs, sales, tech, admin")
-    roles: Optional[List[str]] = None
-    extra_permissions: Optional[List[str]] = Field(None, description="Extra permissions (directly assigned, not through roles)")
-    service_access_mode: Optional[str] = Field(
+
+    display_name: str | None = Field(None, min_length=1, max_length=255)
+    department: str | None = Field(
+        None, max_length=50, description="Department: cs, sales, tech, admin"
+    )
+    roles: list[str] | None = None
+    extra_permissions: list[str] | None = Field(
+        None, description="Extra permissions (directly assigned, not through roles)"
+    )
+    service_access_mode: str | None = Field(
         None,
         description="Service access mode: all | allowlist",
     )
-    allowed_services: Optional[List[str]] = Field(
+    allowed_services: list[str] | None = Field(
         None,
         description="Allowed service IDs/names when allowlist mode is enabled",
     )
-    denied_services: Optional[List[str]] = Field(
+    denied_services: list[str] | None = Field(
         None,
         description="Denied service IDs/names (takes precedence)",
     )
-    status: Optional[str] = None
-    tier: Optional[str] = None
+    status: str | None = None
+    tier: str | None = None
 
     @validator("department")
     def validate_department(cls, v):
@@ -98,38 +107,41 @@ class UserUpdate(BaseModel):
 
 class ProfileUpdate(BaseModel):
     """Update own profile request (limited fields - no roles/permissions)."""
-    display_name: Optional[str] = Field(None, min_length=1, max_length=255)
+
+    display_name: str | None = Field(None, min_length=1, max_length=255)
 
 
 class UserResponse(BaseModel):
     """User response model."""
+
     user_id: str
-    email: Optional[str] = None
-    display_name: Optional[str] = None
-    username: Optional[str] = None
-    department: Optional[str] = None
-    roles: List[str] = []
-    extra_permissions: List[str] = []
+    email: str | None = None
+    display_name: str | None = None
+    username: str | None = None
+    department: str | None = None
+    roles: list[str] = []
+    extra_permissions: list[str] = []
     service_access_mode: str = "all"
-    allowed_services: List[str] = []
-    denied_services: List[str] = []
+    allowed_services: list[str] = []
+    denied_services: list[str] = []
     status: str = "active"
     tier: str = "normal"
     force_password_change: bool = True
-    last_login_at: Optional[str] = None
-    created_at: Optional[str] = None
+    last_login_at: str | None = None
+    created_at: str | None = None
 
 
 class UserListResponse(BaseModel):
     """User list response with pagination."""
-    users: List[UserResponse]
+
+    users: list[UserResponse]
     total: int
     page: int
     page_size: int
 
 
-def _normalize_service_list(values: Optional[List[str]]) -> List[str]:
-    normalized: List[str] = []
+def _normalize_service_list(values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
     if values is None:
         return normalized
     for value in values:
@@ -139,7 +151,7 @@ def _normalize_service_list(values: Optional[List[str]]) -> List[str]:
     return normalized
 
 
-def _extract_service_access_metadata(metadata: Any) -> Dict[str, Any]:
+def _extract_service_access_metadata(metadata: Any) -> dict[str, Any]:
     payload = metadata if isinstance(metadata, dict) else {}
     service_access = payload.get("service_access")
     service_access = service_access if isinstance(service_access, dict) else {}
@@ -159,10 +171,10 @@ def _extract_service_access_metadata(metadata: Any) -> Dict[str, Any]:
 
 
 def _build_user_response_payload(
-    user: Dict[str, Any],
+    user: dict[str, Any],
     *,
-    extra_permissions: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    extra_permissions: list[str] | None = None,
+) -> dict[str, Any]:
     payload = {k: v for k, v in user.items() if k in UserResponse.__fields__}
     payload["extra_permissions"] = extra_permissions or []
     payload.update(_extract_service_access_metadata(user.get("metadata")))
@@ -173,14 +185,15 @@ def _build_user_response_payload(
 # API Endpoints
 # ============================================================
 
+
 @router.get("", response_model=UserListResponse)
 async def list_users(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    status: str | None = Query(None),
+    search: str | None = Query(None),
 ):
     """
     List all users with pagination.
@@ -203,7 +216,7 @@ async def list_users(
         users=[UserResponse(**_build_user_response_payload(u)) for u in users],
         total=total,
         page=page,
-        page_size=page_size
+        page_size=page_size,
     )
 
 
@@ -241,6 +254,7 @@ async def create_user(
     if existing_id:
         # Add suffix to make unique
         import uuid
+
         user_id = f"{user_id}_{uuid.uuid4().hex[:6]}"
 
     # Create user with default password
@@ -281,7 +295,7 @@ async def create_user(
         tier="normal",
         force_password_change=True,
         last_login_at=None,
-        created_at=datetime.utcnow().isoformat()
+        created_at=datetime.utcnow().isoformat(),
     )
 
 
@@ -363,7 +377,9 @@ async def update_user(
             service_access["denied_services"] = _normalize_service_list(body.denied_services)
 
         if "mode" not in service_access:
-            service_access["mode"] = "allowlist" if service_access.get("allowed_services") else "all"
+            service_access["mode"] = (
+                "allowlist" if service_access.get("allowed_services") else "all"
+            )
 
         metadata["service_access"] = service_access
         update_data["metadata"] = metadata
@@ -535,10 +551,7 @@ async def update_user_profile(
     """
     # Users can only update their own profile
     if current_user.user_id != user_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Can only update your own profile"
-        )
+        raise HTTPException(status_code=403, detail="Can only update your own profile")
 
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False):

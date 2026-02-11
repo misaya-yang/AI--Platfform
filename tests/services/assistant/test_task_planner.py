@@ -11,20 +11,20 @@ Comprehensive tests for the TaskPlanner module including:
 - Edge cases (empty, single task, all parallel, all sequential)
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services.assistant.task_planner import (
-    TaskType,
-    PlannedTask,
-    ExecutionPlan,
-    TaskPlanner,
-    WorkflowPattern,
     CircularDependencyError,
-    create_task_planner,
+    ExecutionPlan,
+    PlannedTask,
+    TaskPlanner,
+    TaskType,
+    WorkflowPattern,
     create_simple_plan,
+    create_task_planner,
 )
-
 
 # =============================================================================
 # TaskType Tests
@@ -68,7 +68,7 @@ class TestPlannedTask:
             id="task_1",
             type=TaskType.RETRIEVE,
             tool="kb_search",
-            description="Search the knowledge base"
+            description="Search the knowledge base",
         )
 
         assert task.id == "task_1"
@@ -216,7 +216,13 @@ class TestExecutionPlan:
         """Test creating ExecutionPlan with all fields."""
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="kb_search", description="Search"),
-            PlannedTask(id="t2", type=TaskType.GENERATE, tool="generate", description="Generate", dependencies={"t1"}),
+            PlannedTask(
+                id="t2",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Generate",
+                dependencies={"t1"},
+            ),
         ]
 
         plan = ExecutionPlan(
@@ -232,7 +238,9 @@ class TestExecutionPlan:
 
     def test_get_task_existing(self):
         """Test getting an existing task by ID."""
-        task = PlannedTask(id="search_1", type=TaskType.RETRIEVE, tool="kb_search", description="Search")
+        task = PlannedTask(
+            id="search_1", type=TaskType.RETRIEVE, tool="kb_search", description="Search"
+        )
         plan = ExecutionPlan(goal="Test", tasks=[task])
 
         result = plan.get_task("search_1")
@@ -270,7 +278,13 @@ class TestExecutionPlan:
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search 1"),
             PlannedTask(id="t2", type=TaskType.RETRIEVE, tool="search", description="Search 2"),
-            PlannedTask(id="t3", type=TaskType.ANALYZE, tool="analyze", description="Analyze", dependencies={"t1", "t2"}),
+            PlannedTask(
+                id="t3",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Analyze",
+                dependencies={"t1", "t2"},
+            ),
         ]
         plan = ExecutionPlan(goal="Test", tasks=tasks)
 
@@ -283,8 +297,20 @@ class TestExecutionPlan:
         """Test getting tasks that no other task depends on."""
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search"),
-            PlannedTask(id="t2", type=TaskType.ANALYZE, tool="analyze", description="Analyze", dependencies={"t1"}),
-            PlannedTask(id="t3", type=TaskType.GENERATE, tool="generate", description="Generate", dependencies={"t2"}),
+            PlannedTask(
+                id="t2",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Analyze",
+                dependencies={"t1"},
+            ),
+            PlannedTask(
+                id="t3",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Generate",
+                dependencies={"t2"},
+            ),
         ]
         plan = ExecutionPlan(goal="Test", tasks=tasks)
 
@@ -296,9 +322,27 @@ class TestExecutionPlan:
     def test_get_total_estimated_duration(self):
         """Test total duration estimation with parallel groups."""
         tasks = [
-            PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search 1", estimated_duration_ms=1000),
-            PlannedTask(id="t2", type=TaskType.RETRIEVE, tool="search", description="Search 2", estimated_duration_ms=2000),
-            PlannedTask(id="t3", type=TaskType.ANALYZE, tool="analyze", description="Analyze", estimated_duration_ms=1500),
+            PlannedTask(
+                id="t1",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Search 1",
+                estimated_duration_ms=1000,
+            ),
+            PlannedTask(
+                id="t2",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Search 2",
+                estimated_duration_ms=2000,
+            ),
+            PlannedTask(
+                id="t3",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Analyze",
+                estimated_duration_ms=1500,
+            ),
         ]
         plan = ExecutionPlan(
             goal="Test",
@@ -336,7 +380,16 @@ class TestExecutionPlan:
         data = {
             "goal": "Restored goal",
             "tasks": [
-                {"id": "t1", "type": "retrieve", "tool": "search", "description": "Search", "dependencies": [], "priority": 0, "estimated_duration_ms": 1000, "parameters": {}}
+                {
+                    "id": "t1",
+                    "type": "retrieve",
+                    "tool": "search",
+                    "description": "Search",
+                    "dependencies": [],
+                    "priority": 0,
+                    "estimated_duration_ms": 1000,
+                    "parameters": {},
+                }
             ],
             "parallel_groups": [["t1"]],
             "metadata": {"restored": True},
@@ -414,8 +467,20 @@ class TestTaskPlannerDependencyAnalysis:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Step 1"),
-            PlannedTask(id="t2", type=TaskType.ANALYZE, tool="analyze", description="Step 2", dependencies={"t1"}),
-            PlannedTask(id="t3", type=TaskType.GENERATE, tool="generate", description="Step 3", dependencies={"t2"}),
+            PlannedTask(
+                id="t2",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Step 2",
+                dependencies={"t1"},
+            ),
+            PlannedTask(
+                id="t3",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Step 3",
+                dependencies={"t2"},
+            ),
         ]
 
         groups = planner.analyze_dependencies(tasks)
@@ -433,10 +498,34 @@ class TestTaskPlannerDependencyAnalysis:
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search A"),
             PlannedTask(id="t2", type=TaskType.RETRIEVE, tool="search", description="Search B"),
-            PlannedTask(id="t3", type=TaskType.ANALYZE, tool="analyze", description="Compare", dependencies={"t1", "t2"}),
-            PlannedTask(id="t4", type=TaskType.TRANSFORM, tool="transform", description="Transform 1", dependencies={"t3"}),
-            PlannedTask(id="t5", type=TaskType.TRANSFORM, tool="transform", description="Transform 2", dependencies={"t3"}),
-            PlannedTask(id="t6", type=TaskType.GENERATE, tool="generate", description="Final", dependencies={"t4", "t5"}),
+            PlannedTask(
+                id="t3",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Compare",
+                dependencies={"t1", "t2"},
+            ),
+            PlannedTask(
+                id="t4",
+                type=TaskType.TRANSFORM,
+                tool="transform",
+                description="Transform 1",
+                dependencies={"t3"},
+            ),
+            PlannedTask(
+                id="t5",
+                type=TaskType.TRANSFORM,
+                tool="transform",
+                description="Transform 2",
+                dependencies={"t3"},
+            ),
+            PlannedTask(
+                id="t6",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Final",
+                dependencies={"t4", "t5"},
+            ),
         ]
 
         groups = planner.analyze_dependencies(tasks)
@@ -452,9 +541,27 @@ class TestTaskPlannerDependencyAnalysis:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="a", type=TaskType.RETRIEVE, tool="search", description="Start"),
-            PlannedTask(id="b", type=TaskType.ANALYZE, tool="analyze", description="Branch 1", dependencies={"a"}),
-            PlannedTask(id="c", type=TaskType.ANALYZE, tool="analyze", description="Branch 2", dependencies={"a"}),
-            PlannedTask(id="d", type=TaskType.GENERATE, tool="generate", description="Merge", dependencies={"b", "c"}),
+            PlannedTask(
+                id="b",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Branch 1",
+                dependencies={"a"},
+            ),
+            PlannedTask(
+                id="c",
+                type=TaskType.ANALYZE,
+                tool="analyze",
+                description="Branch 2",
+                dependencies={"a"},
+            ),
+            PlannedTask(
+                id="d",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Merge",
+                dependencies={"b", "c"},
+            ),
         ]
 
         groups = planner.analyze_dependencies(tasks)
@@ -468,8 +575,20 @@ class TestTaskPlannerDependencyAnalysis:
         """Test detection of simple circular dependency (A -> B -> A)."""
         planner = TaskPlanner()
         tasks = [
-            PlannedTask(id="a", type=TaskType.RETRIEVE, tool="search", description="Task A", dependencies={"b"}),
-            PlannedTask(id="b", type=TaskType.RETRIEVE, tool="search", description="Task B", dependencies={"a"}),
+            PlannedTask(
+                id="a",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task A",
+                dependencies={"b"},
+            ),
+            PlannedTask(
+                id="b",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task B",
+                dependencies={"a"},
+            ),
         ]
 
         with pytest.raises(CircularDependencyError) as exc_info:
@@ -481,9 +600,27 @@ class TestTaskPlannerDependencyAnalysis:
         """Test detection of three-node circular dependency (A -> B -> C -> A)."""
         planner = TaskPlanner()
         tasks = [
-            PlannedTask(id="a", type=TaskType.RETRIEVE, tool="search", description="Task A", dependencies={"c"}),
-            PlannedTask(id="b", type=TaskType.RETRIEVE, tool="search", description="Task B", dependencies={"a"}),
-            PlannedTask(id="c", type=TaskType.RETRIEVE, tool="search", description="Task C", dependencies={"b"}),
+            PlannedTask(
+                id="a",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task A",
+                dependencies={"c"},
+            ),
+            PlannedTask(
+                id="b",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task B",
+                dependencies={"a"},
+            ),
+            PlannedTask(
+                id="c",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task C",
+                dependencies={"b"},
+            ),
         ]
 
         with pytest.raises(CircularDependencyError):
@@ -493,7 +630,13 @@ class TestTaskPlannerDependencyAnalysis:
         """Test detection of self-referential dependency."""
         planner = TaskPlanner()
         tasks = [
-            PlannedTask(id="a", type=TaskType.RETRIEVE, tool="search", description="Self-dep", dependencies={"a"}),
+            PlannedTask(
+                id="a",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Self-dep",
+                dependencies={"a"},
+            ),
         ]
 
         with pytest.raises(CircularDependencyError):
@@ -504,7 +647,13 @@ class TestTaskPlannerDependencyAnalysis:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="a", type=TaskType.RETRIEVE, tool="search", description="Task A"),
-            PlannedTask(id="b", type=TaskType.RETRIEVE, tool="search", description="Task B", dependencies={"nonexistent"}),
+            PlannedTask(
+                id="b",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Task B",
+                dependencies={"nonexistent"},
+            ),
         ]
 
         # Should not raise, but warn and remove invalid dependency
@@ -518,9 +667,27 @@ class TestTaskPlannerDependencyAnalysis:
         """Test that tasks are ordered by priority within parallel groups."""
         planner = TaskPlanner()
         tasks = [
-            PlannedTask(id="low", type=TaskType.RETRIEVE, tool="search", description="Low priority", priority=1),
-            PlannedTask(id="high", type=TaskType.RETRIEVE, tool="search", description="High priority", priority=10),
-            PlannedTask(id="medium", type=TaskType.RETRIEVE, tool="search", description="Medium priority", priority=5),
+            PlannedTask(
+                id="low",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Low priority",
+                priority=1,
+            ),
+            PlannedTask(
+                id="high",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="High priority",
+                priority=10,
+            ),
+            PlannedTask(
+                id="medium",
+                type=TaskType.RETRIEVE,
+                tool="search",
+                description="Medium priority",
+                priority=5,
+            ),
         ]
 
         groups = planner.analyze_dependencies(tasks)
@@ -744,7 +911,13 @@ class TestTaskPlannerValidation:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search"),
-            PlannedTask(id="t2", type=TaskType.GENERATE, tool="generate", description="Generate", dependencies={"t1"}),
+            PlannedTask(
+                id="t2",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Generate",
+                dependencies={"t1"},
+            ),
         ]
         plan = ExecutionPlan(
             goal="Test",
@@ -762,7 +935,13 @@ class TestTaskPlannerValidation:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="Search"),
-            PlannedTask(id="t2", type=TaskType.GENERATE, tool="generate", description="Generate", dependencies={"nonexistent"}),
+            PlannedTask(
+                id="t2",
+                type=TaskType.GENERATE,
+                tool="generate",
+                description="Generate",
+                dependencies={"nonexistent"},
+            ),
         ]
         plan = ExecutionPlan(
             goal="Test",
@@ -798,7 +977,9 @@ class TestTaskPlannerValidation:
         planner = TaskPlanner()
         tasks = [
             PlannedTask(id="t1", type=TaskType.RETRIEVE, tool="search", description="First"),
-            PlannedTask(id="t1", type=TaskType.GENERATE, tool="generate", description="Duplicate ID!"),
+            PlannedTask(
+                id="t1", type=TaskType.GENERATE, tool="generate", description="Duplicate ID!"
+            ),
         ]
         plan = ExecutionPlan(
             goal="Test",
@@ -826,14 +1007,18 @@ class TestTaskPlannerWithLLM:
         mock_client = MagicMock()
         mock_client.messages = MagicMock()
         mock_response = MagicMock()
-        mock_response.content = [MagicMock(text='''
+        mock_response.content = [
+            MagicMock(
+                text="""
 ```json
 [
   {"id": "search_1", "type": "retrieve", "tool": "kb_search", "description": "Search KB", "dependencies": []},
   {"id": "generate_1", "type": "generate", "tool": "generate_text", "description": "Generate answer", "dependencies": ["search_1"]}
 ]
 ```
-''')]
+"""
+            )
+        ]
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         planner = TaskPlanner(model_client=mock_client)
@@ -915,8 +1100,22 @@ class TestModuleFunctions:
     def test_create_simple_plan(self):
         """Test create_simple_plan utility function."""
         tasks = [
-            {"id": "t1", "type": "retrieve", "tool": "search", "description": "Search", "dependencies": [], "parameters": {}},
-            {"id": "t2", "type": "generate", "tool": "generate", "description": "Generate", "dependencies": ["t1"], "parameters": {}},
+            {
+                "id": "t1",
+                "type": "retrieve",
+                "tool": "search",
+                "description": "Search",
+                "dependencies": [],
+                "parameters": {},
+            },
+            {
+                "id": "t2",
+                "type": "generate",
+                "tool": "generate",
+                "description": "Generate",
+                "dependencies": ["t1"],
+                "parameters": {},
+            },
         ]
 
         plan = create_simple_plan(goal="Test goal", tasks=tasks)
@@ -928,9 +1127,30 @@ class TestModuleFunctions:
     def test_create_simple_plan_with_parallel_tasks(self):
         """Test create_simple_plan with parallel tasks."""
         tasks = [
-            {"id": "a", "type": "retrieve", "tool": "search", "description": "A", "dependencies": [], "parameters": {}},
-            {"id": "b", "type": "retrieve", "tool": "search", "description": "B", "dependencies": [], "parameters": {}},
-            {"id": "c", "type": "analyze", "tool": "analyze", "description": "C", "dependencies": ["a", "b"], "parameters": {}},
+            {
+                "id": "a",
+                "type": "retrieve",
+                "tool": "search",
+                "description": "A",
+                "dependencies": [],
+                "parameters": {},
+            },
+            {
+                "id": "b",
+                "type": "retrieve",
+                "tool": "search",
+                "description": "B",
+                "dependencies": [],
+                "parameters": {},
+            },
+            {
+                "id": "c",
+                "type": "analyze",
+                "tool": "analyze",
+                "description": "C",
+                "dependencies": ["a", "b"],
+                "parameters": {},
+            },
         ]
 
         plan = create_simple_plan(goal="Parallel test", tasks=tasks)
@@ -954,7 +1174,12 @@ class TestWorkflowPattern:
             name="test_pattern",
             description="A test pattern",
             task_templates=[
-                {"id": "task_1", "type": TaskType.RETRIEVE, "tool": "search", "description": "Search"},
+                {
+                    "id": "task_1",
+                    "type": TaskType.RETRIEVE,
+                    "tool": "search",
+                    "description": "Search",
+                },
             ],
             keywords=["test", "example"],
         )
@@ -966,7 +1191,14 @@ class TestWorkflowPattern:
 
     def test_builtin_patterns_exist(self):
         """Test that all expected builtin patterns exist."""
-        expected_patterns = ["comparison", "report", "search_and_answer", "multi_search", "translate", "image_generation"]
+        expected_patterns = [
+            "comparison",
+            "report",
+            "search_and_answer",
+            "multi_search",
+            "translate",
+            "image_generation",
+        ]
 
         for pattern_name in expected_patterns:
             assert pattern_name in TaskPlanner.WORKFLOW_PATTERNS
@@ -1036,7 +1268,7 @@ class TestEdgeCases:
                 type=TaskType.RETRIEVE,
                 tool="search",
                 description=f"Task {i}",
-                dependencies=set() if i == 0 else {f"task_{i-1}"},
+                dependencies=set() if i == 0 else {f"task_{i - 1}"},
             )
             for i in range(100)
         ]
@@ -1092,11 +1324,21 @@ class TestEdgeCases:
         #     f
         tasks = [
             PlannedTask(id="a", type=TaskType.RETRIEVE, tool="s", description="A"),
-            PlannedTask(id="b", type=TaskType.ANALYZE, tool="s", description="B", dependencies={"a"}),
-            PlannedTask(id="c", type=TaskType.ANALYZE, tool="s", description="C", dependencies={"a"}),
-            PlannedTask(id="d", type=TaskType.ANALYZE, tool="s", description="D", dependencies={"b", "c"}),
-            PlannedTask(id="e", type=TaskType.ANALYZE, tool="s", description="E", dependencies={"b", "c"}),
-            PlannedTask(id="f", type=TaskType.GENERATE, tool="s", description="F", dependencies={"d", "e"}),
+            PlannedTask(
+                id="b", type=TaskType.ANALYZE, tool="s", description="B", dependencies={"a"}
+            ),
+            PlannedTask(
+                id="c", type=TaskType.ANALYZE, tool="s", description="C", dependencies={"a"}
+            ),
+            PlannedTask(
+                id="d", type=TaskType.ANALYZE, tool="s", description="D", dependencies={"b", "c"}
+            ),
+            PlannedTask(
+                id="e", type=TaskType.ANALYZE, tool="s", description="E", dependencies={"b", "c"}
+            ),
+            PlannedTask(
+                id="f", type=TaskType.GENERATE, tool="s", description="F", dependencies={"d", "e"}
+            ),
         ]
 
         groups = planner.analyze_dependencies(tasks)

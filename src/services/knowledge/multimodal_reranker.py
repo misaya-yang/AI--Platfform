@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .vlm_service import DashScopeVLMService
@@ -28,14 +28,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RerankCandidate:
     """Candidate for multimodal reranking."""
+
     segment_id: str
-    text: Optional[str] = None
-    image_url: Optional[str] = None
-    image_bytes: Optional[bytes] = None
+    text: str | None = None
+    image_url: str | None = None
+    image_bytes: bytes | None = None
     media_type: str = "text"  # "text" | "image"
     original_score: float = 0.0
     rerank_score: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class MultimodalReranker:
@@ -58,7 +59,7 @@ class MultimodalReranker:
     """
 
     # Prompt for evaluating image-query relevance (optimized for VLM scoring)
-    RELEVANCE_PROMPT = '''你是一个专业的图文相关性评估专家。请评估这张图片与用户查询的相关性。
+    RELEVANCE_PROMPT = """你是一个专业的图文相关性评估专家。请评估这张图片与用户查询的相关性。
 
 用户查询: {query}
 {description_context}
@@ -71,10 +72,10 @@ class MultimodalReranker:
 0.1-0.2: 图片与查询关系很弱
 0.0: 图片与查询完全无关
 
-请只输出一个0到1之间的数字作为评分，不要输出任何解释或其他内容。'''
+请只输出一个0到1之间的数字作为评分，不要输出任何解释或其他内容。"""
 
     # Alternative English prompt (optimized for VLM scoring)
-    RELEVANCE_PROMPT_EN = '''You are a professional image-query relevance expert. Evaluate how relevant this image is to the user's query.
+    RELEVANCE_PROMPT_EN = """You are a professional image-query relevance expert. Evaluate how relevant this image is to the user's query.
 
 User Query: {query}
 {description_context}
@@ -87,16 +88,16 @@ Scoring criteria:
 0.1-0.2: Image has very weak relation to the query
 0.0: Image is completely irrelevant
 
-Output ONLY a single number between 0 and 1 as the score, nothing else.'''
+Output ONLY a single number between 0 and 1 as the score, nothing else."""
 
     def __init__(
         self,
-        vlm_service: Optional["DashScopeVLMService"] = None,
+        vlm_service: DashScopeVLMService | None = None,
         max_concurrent: int = 3,
         timeout_seconds: float = 30.0,
         image_weight: float = 0.4,
         use_english_prompt: bool = False,
-        image_storage_service: Optional[Any] = None,
+        image_storage_service: Any | None = None,
     ):
         """
         Initialize MultimodalReranker.
@@ -114,18 +115,20 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         self.timeout = timeout_seconds
         self.image_weight = image_weight
         self._semaphore = asyncio.Semaphore(max_concurrent)
-        self.prompt_template = self.RELEVANCE_PROMPT_EN if use_english_prompt else self.RELEVANCE_PROMPT
+        self.prompt_template = (
+            self.RELEVANCE_PROMPT_EN if use_english_prompt else self.RELEVANCE_PROMPT
+        )
         self.image_storage_service = image_storage_service
 
     async def rerank(
         self,
         query: str,
-        candidates: List[RerankCandidate],
+        candidates: list[RerankCandidate],
         top_k: int = 10,
         rerank_images_only: bool = False,
         score_threshold: float = 0.0,
-        score_weight: Optional[float] = None,
-    ) -> List[RerankCandidate]:
+        score_weight: float | None = None,
+    ) -> list[RerankCandidate]:
         """
         Rerank candidates using multimodal scoring.
 
@@ -197,8 +200,8 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
     async def _score_images_batch(
         self,
         query: str,
-        candidates: List[RerankCandidate],
-        score_weight: Optional[float] = None,
+        candidates: list[RerankCandidate],
+        score_weight: float | None = None,
     ) -> None:
         """
         Score image candidates in batch with concurrency control.
@@ -221,9 +224,8 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
                     c.metadata["score_weight"] = effective_weight
                     # Combine VLM score with original score using weighted fusion
                     c.rerank_score = (
-                        (1 - effective_weight) * c.original_score +
-                        effective_weight * vlm_score
-                    )
+                        1 - effective_weight
+                    ) * c.original_score + effective_weight * vlm_score
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout scoring image {c.segment_id}")
                     c.metadata["original_score"] = c.original_score
@@ -270,13 +272,14 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         # Build description context if available
         description_context = ""
         if candidate.text:
-            description_context = f"图片描述: {candidate.text}\n" if "你是" in self.prompt_template else f"Image description: {candidate.text}\n"
+            description_context = (
+                f"图片描述: {candidate.text}\n"
+                if "你是" in self.prompt_template
+                else f"Image description: {candidate.text}\n"
+            )
 
         # Build prompt with query and optional description
-        prompt = self.prompt_template.format(
-            query=query,
-            description_context=description_context
-        )
+        prompt = self.prompt_template.format(query=query, description_context=description_context)
 
         try:
             # Call VLM with timeout
@@ -334,10 +337,10 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         # Try to extract number from text
         # Match patterns like "0.85", ".85", "85%", "85"
         patterns = [
-            r'(\d+\.\d+)',  # 0.85
-            r'\.(\d+)',     # .85
-            r'(\d+)%',      # 85%
-            r'(\d+)',       # 85
+            r"(\d+\.\d+)",  # 0.85
+            r"\.(\d+)",  # .85
+            r"(\d+)%",  # 85%
+            r"(\d+)",  # 85
         ]
 
         for pattern in patterns:
@@ -345,7 +348,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             if match:
                 try:
                     value = float(match.group(1))
-                    if pattern == r'\.(\d+)':
+                    if pattern == r"\.(\d+)":
                         value = float(f"0.{match.group(1)}")
                     if value > 1 and value <= 100:
                         value = value / 100.0
@@ -358,7 +361,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         logger.warning(f"Could not parse score from: {text[:100]}")
         return 0.5
 
-    async def _load_image_from_url(self, url: str) -> Optional[bytes]:
+    async def _load_image_from_url(self, url: str) -> bytes | None:
         """
         Load image bytes from URL.
 
@@ -383,15 +386,13 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             # Handle S3/OSS URLs via storage service
             if url.startswith("s3://") or url.startswith("oss://"):
                 if not self.image_storage_service:
-                    logger.warning(
-                        f"S3/OSS URL loading requires image_storage_service: {url}"
-                    )
+                    logger.warning(f"S3/OSS URL loading requires image_storage_service: {url}")
                     return None
 
                 # Parse S3/OSS URL: s3://bucket/path/to/image.png
                 from urllib.parse import urlparse
+
                 parsed = urlparse(url)
-                bucket = parsed.netloc
                 key = parsed.path.lstrip("/")
 
                 if not key:
@@ -409,8 +410,8 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
 
             # Handle local file:// URLs
             if url.startswith("file://"):
-                from urllib.parse import urlparse, unquote
                 import os
+                from urllib.parse import unquote, urlparse
 
                 parsed = urlparse(url)
                 # Handle signed URLs by stripping query params
@@ -439,7 +440,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
         self,
         query: str,
         text: str,
-        image_urls: List[str],
+        image_urls: list[str],
         original_score: float = 0.0,
     ) -> float:
         """
@@ -461,7 +462,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
             return original_score
 
         # Score each associated image
-        image_scores: List[float] = []
+        image_scores: list[float] = []
         for url in image_urls[:3]:  # Limit to top 3 images
             try:
                 image_bytes = await self._load_image_from_url(url)
@@ -494,7 +495,7 @@ Output ONLY a single number between 0 and 1 as the score, nothing else.'''
 
 
 def create_multimodal_reranker(
-    vlm_service: Optional["DashScopeVLMService"] = None,
+    vlm_service: DashScopeVLMService | None = None,
     max_concurrent: int = 3,
     timeout_seconds: float = 30.0,
 ) -> MultimodalReranker:

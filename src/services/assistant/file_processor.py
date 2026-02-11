@@ -20,28 +20,27 @@ Supports remote storage backends (S3/OSS) via FileStorageService:
 from __future__ import annotations
 
 import base64
+import json
 import os
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Awaitable, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
 from ...core.auth.user_resolver import UserContext
-from .document_parser import DocumentParser, DocumentParseError
-from .pdf_converter import PDFConverter, PDFConversionError, create_pdf_converter
+from ...core.observability.logging import get_logger
+from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (
     FileProcessingStrategyFactory,
-    ProcessingStrategy,
     ProcessedContent,
-    GeminiFileStrategy,
-    VisionModelStrategy,
-    TextExtractionStrategy,
+    ProcessingStrategy,
 )
+from .pdf_converter import PDFConversionError, create_pdf_converter
 
 if TYPE_CHECKING:
-    from ..knowledge.vlm_service import DashScopeVLMService
     from ..knowledge.knowledge_service import KnowledgeService
+    from ..knowledge.vlm_service import DashScopeVLMService
     from ..storage.file_storage import FileStorageService
 
 # Type alias for progress callback
@@ -56,9 +55,9 @@ FILE_STORAGE_PATH = Path(os.getenv("FILE_STORAGE_PATH", "./uploads")).expanduser
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 
 # Supported document extensions (from DocumentParser)
-DOCUMENT_EXTENSIONS = frozenset({
-    ".pdf", ".docx", ".doc", ".txt", ".md", ".csv", ".xlsx", ".html", ".htm"
-})
+DOCUMENT_EXTENSIONS = frozenset(
+    {".pdf", ".docx", ".doc", ".txt", ".md", ".csv", ".xlsx", ".html", ".htm"}
+)
 
 
 class FileProcessError(Exception):
@@ -68,7 +67,7 @@ class FileProcessError(Exception):
         self,
         message: str,
         file_path: str,
-        original_error: Optional[Exception] = None,
+        original_error: Exception | None = None,
     ):
         self.file_path = file_path
         self.original_error = original_error
@@ -78,12 +77,13 @@ class FileProcessError(Exception):
 @dataclass
 class ImageContent:
     """Base64-encoded image content for vision models."""
+
     base64_data: str
     media_type: str  # e.g., "image/png", "image/jpeg"
     file_path: str
     size_bytes: int
 
-    def to_openai_format(self) -> Dict[str, Any]:
+    def to_openai_format(self) -> dict[str, Any]:
         """Convert to OpenAI vision API format."""
         return {
             "type": "image_url",
@@ -92,7 +92,7 @@ class ImageContent:
             },
         }
 
-    def to_anthropic_format(self) -> Dict[str, Any]:
+    def to_anthropic_format(self) -> dict[str, Any]:
         """Convert to Anthropic vision API format."""
         return {
             "type": "image",
@@ -107,6 +107,7 @@ class ImageContent:
 @dataclass
 class PDFPageContent:
     """PDF page converted to image for vision models."""
+
     page_number: int
     base64_data: str
     media_type: str  # Always "image/png"
@@ -115,7 +116,7 @@ class PDFPageContent:
     size_bytes: int
     file_path: str
 
-    def to_openai_format(self) -> Dict[str, Any]:
+    def to_openai_format(self) -> dict[str, Any]:
         """Convert to OpenAI vision API format."""
         return {
             "type": "image_url",
@@ -124,7 +125,7 @@ class PDFPageContent:
             },
         }
 
-    def to_anthropic_format(self) -> Dict[str, Any]:
+    def to_anthropic_format(self) -> dict[str, Any]:
         """Convert to Anthropic vision API format."""
         return {
             "type": "image",
@@ -139,15 +140,16 @@ class PDFPageContent:
 @dataclass
 class DocumentStructure:
     """Structure analysis result for a document."""
+
     total_chars: int = 0
     total_lines: int = 0
-    sections: List[Dict[str, Any]] = field(default_factory=list)  # [{level, title, line}]
+    sections: list[dict[str, Any]] = field(default_factory=list)  # [{level, title, line}]
     has_headers: bool = False
     has_lists: bool = False
     has_tables: bool = False
     has_code_blocks: bool = False
     estimated_reading_time_min: int = 0
-    key_topics: List[str] = field(default_factory=list)  # Extracted from headers
+    key_topics: list[str] = field(default_factory=list)  # Extracted from headers
 
 
 @dataclass
@@ -164,14 +166,15 @@ class ProcessedFiles:
         requires_rag: Flag indicating long documents need RAG retrieval
         document_structure: Structure analysis for deep document understanding
     """
-    images: List[ImageContent] = field(default_factory=list)
-    pdf_pages: List[PDFPageContent] = field(default_factory=list)
+
+    images: list[ImageContent] = field(default_factory=list)
+    pdf_pages: list[PDFPageContent] = field(default_factory=list)
     text_content: str = ""
-    image_descriptions: List[str] = field(default_factory=list)
-    session_kb_id: Optional[str] = None
-    file_metadata: List[Dict[str, Any]] = field(default_factory=list)
+    image_descriptions: list[str] = field(default_factory=list)
+    session_kb_id: str | None = None
+    file_metadata: list[dict[str, Any]] = field(default_factory=list)
     requires_rag: bool = False
-    document_structure: Optional[DocumentStructure] = None
+    document_structure: DocumentStructure | None = None
 
     @property
     def has_images(self) -> bool:
@@ -235,13 +238,13 @@ The description should be detailed enough for someone who hasn't seen the image 
 
     def __init__(
         self,
-        vlm_service: Optional["DashScopeVLMService"] = None,
-        knowledge_service: Optional["KnowledgeService"] = None,
-        storage_base_path: Optional[Path] = None,
+        vlm_service: DashScopeVLMService | None = None,
+        knowledge_service: KnowledgeService | None = None,
+        storage_base_path: Path | None = None,
         use_english_prompt: bool = False,
         max_pdf_pages: int = MAX_PDF_PAGES,
-        file_storage: Optional["FileStorageService"] = None,
-        redis_client: Optional[Any] = None,
+        file_storage: FileStorageService | None = None,
+        redis_client: Any | None = None,
     ):
         """
         Initialize FileProcessor.
@@ -266,9 +269,10 @@ The description should be detailed enough for someone who hasn't seen the image 
         self.max_pdf_pages = max_pdf_pages
         self.file_storage = file_storage
         self.redis = redis_client
-        self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
+        self._temp_dir: tempfile.TemporaryDirectory | None = None
         self.description_prompt = (
-            self.IMAGE_DESCRIPTION_PROMPT_EN if use_english_prompt
+            self.IMAGE_DESCRIPTION_PROMPT_EN
+            if use_english_prompt
             else self.IMAGE_DESCRIPTION_PROMPT
         )
 
@@ -279,11 +283,11 @@ The description should be detailed enough for someone who hasn't seen the image 
         mode = "vision" if model_supports_vision else "text"
         return f"file_proc:{api_path}:{mode}"
 
-    async def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+    async def _get_cached_result(self, cache_key: str) -> dict[str, Any] | None:
         """Get processed result from Redis cache."""
         if not self.redis:
             return None
-        
+
         try:
             data = await self.redis.get(cache_key)
             if data:
@@ -297,11 +301,11 @@ The description should be detailed enough for someone who hasn't seen the image 
             logger.warning(f"[FileProcessor] Cache read failed: {e}")
         return None
 
-    async def _cache_result(self, cache_key: str, result: Dict[str, Any], ttl: int = 86400):
+    async def _cache_result(self, cache_key: str, result: dict[str, Any], ttl: int = 86400):
         """Cache processed result in Redis."""
         if not self.redis:
             return
-        
+
         try:
             json_data = json.dumps(result)
             if hasattr(self.redis, "save"):
@@ -321,28 +325,28 @@ The description should be detailed enough for someone who hasn't seen the image 
     ) -> None:
         """
         Preprocess a file asynchronously and cache the result.
-        
+
         This is designed to be called by a background task immediately after upload.
         """
         cache_key = self._get_cache_key(file_path, model_supports_vision)
-        
+
         # Check cache first
         if await self._get_cached_result(cache_key):
             logger.info(f"[FileProcessor] File already cached: {file_path}")
             return
 
         logger.info(f"[FileProcessor] Preprocessing file: {file_path}")
-        
+
         # We need a dummy ProcessedFiles object to accumulate results
         # This duplicates some logic from process_files but focused on single file
         # Ideally process_files calls this, but for now we implement a focused version
-        
+
         try:
             # Resolve path (supports remote storage download)
             actual_path = await self._resolve_path_async(file_path)
             file_type = self._detect_file_type(actual_path)
             is_pdf = actual_path.suffix.lower() == ".pdf"
-            
+
             processed_data = {
                 "file_path": file_path,
                 "images": [],
@@ -350,7 +354,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                 "text_content": "",
                 "image_descriptions": [],
                 "metadata": {},
-                "requires_rag": False
+                "requires_rag": False,
             }
 
             if file_type == "image":
@@ -361,12 +365,14 @@ The description should be detailed enough for someone who hasn't seen the image 
                 )
                 if image:
                     # Convert ImageContent to dict for serialization
-                    processed_data["images"].append({
-                        "base64_data": image.base64_data,
-                        "media_type": image.media_type,
-                        "file_path": image.file_path,
-                        "size_bytes": image.size_bytes
-                    })
+                    processed_data["images"].append(
+                        {
+                            "base64_data": image.base64_data,
+                            "media_type": image.media_type,
+                            "file_path": image.file_path,
+                            "size_bytes": image.size_bytes,
+                        }
+                    )
                 if description:
                     processed_data["image_descriptions"].append(description)
                 processed_data["metadata"] = metadata
@@ -385,8 +391,9 @@ The description should be detailed enough for someone who hasn't seen the image 
                         "width": p.width,
                         "height": p.height,
                         "size_bytes": p.size_bytes,
-                        "file_path": p.file_path
-                    } for p in pdf_pages
+                        "file_path": p.file_path,
+                    }
+                    for p in pdf_pages
                 ]
                 processed_data["metadata"] = metadata
 
@@ -421,7 +428,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         """Destructor to ensure cleanup."""
         self.cleanup()
 
-    async def __aenter__(self) -> "FileProcessor":
+    async def __aenter__(self) -> FileProcessor:
         """Async context manager entry."""
         return self
 
@@ -441,7 +448,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             return file_path[1:]  # Remove leading /
         return file_path
 
-    async def _download_from_remote(self, file_path: str) -> Optional[Path]:
+    async def _download_from_remote(self, file_path: str) -> Path | None:
         """
         Download file from remote storage to a temporary local path.
 
@@ -452,7 +459,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             Path to downloaded file, or None if download failed
         """
         if not self.file_storage:
-            logger.warning(f"[FileProcessor] Cannot download: file_storage is None")
+            logger.warning("[FileProcessor] Cannot download: file_storage is None")
             return None
 
         storage_key = self._get_storage_key(file_path)
@@ -483,14 +490,16 @@ The description should be detailed enough for someone who hasn't seen the image 
             # Write content to temp file
             temp_path.write_bytes(content)
 
-            logger.info(f"[FileProcessor] Downloaded from remote storage: {storage_key} -> {temp_path}")
+            logger.info(
+                f"[FileProcessor] Downloaded from remote storage: {storage_key} -> {temp_path}"
+            )
             return temp_path
 
         except Exception as e:
             logger.error(
                 f"[FileProcessor] Failed to download from remote: "
                 f"storage_key={storage_key}, error={type(e).__name__}: {e}",
-                exc_info=True
+                exc_info=True,
             )
             return None
 
@@ -639,15 +648,19 @@ The description should be detailed enough for someone who hasn't seen the image 
         """
         if len(image_bytes) >= 8:
             # Check magic bytes
-            if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
                 return "image/png"
-            elif image_bytes[:2] == b'\xff\xd8':
+            elif image_bytes[:2] == b"\xff\xd8":
                 return "image/jpeg"
-            elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
                 return "image/gif"
-            elif image_bytes[:2] == b'BM':
+            elif image_bytes[:2] == b"BM":
                 return "image/bmp"
-            elif image_bytes[:4] == b'RIFF' and len(image_bytes) > 12 and image_bytes[8:12] == b'WEBP':
+            elif (
+                image_bytes[:4] == b"RIFF"
+                and len(image_bytes) > 12
+                and image_bytes[8:12] == b"WEBP"
+            ):
                 return "image/webp"
 
         # Fallback to extension
@@ -666,7 +679,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         file_path: Path,
         api_path: str,
         model_supports_vision: bool,
-    ) -> tuple[Optional[ImageContent], Optional[str], Dict[str, Any]]:
+    ) -> tuple[ImageContent | None, str | None, dict[str, Any]]:
         """
         Process an image file.
 
@@ -692,8 +705,8 @@ The description should be detailed enough for someone who hasn't seen the image 
             "size_bytes": size_bytes,
         }
 
-        image_content: Optional[ImageContent] = None
-        description: Optional[str] = None
+        image_content: ImageContent | None = None
+        description: str | None = None
 
         if model_supports_vision:
             # Convert to base64 for vision models
@@ -726,9 +739,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                         f"tokens={result.tokens_used}"
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"[FileProcessor] Failed to generate image description: {e}"
-                    )
+                    logger.warning(f"[FileProcessor] Failed to generate image description: {e}")
                     description = f"[Image: {file_path.name}] (description unavailable)"
                     metadata["vlm_error"] = str(e)
             else:
@@ -743,7 +754,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         file_path: Path,
         api_path: str,
         max_text_chars: int,
-    ) -> tuple[str, bool, Dict[str, Any]]:
+    ) -> tuple[str, bool, dict[str, Any]]:
         """
         Process a document file.
 
@@ -772,8 +783,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             if text_length <= max_text_chars:
                 # Short document: include inline
                 logger.info(
-                    f"[FileProcessor] Document parsed (short): {api_path}, "
-                    f"length={text_length}"
+                    f"[FileProcessor] Document parsed (short): {api_path}, length={text_length}"
                 )
                 return text, False, metadata
             else:
@@ -809,7 +819,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         """
         import re
 
-        lines = text_content.split('\n')
+        lines = text_content.split("\n")
         structure = DocumentStructure(
             total_chars=len(text_content),
             total_lines=len(lines),
@@ -817,12 +827,12 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         # Detect headers (Markdown style and common patterns)
         header_patterns = [
-            (r'^#{1,6}\s+(.+)$', 'md'),  # Markdown headers
-            (r'^(.+)\n[=]+$', 'setext1'),  # Setext H1
-            (r'^(.+)\n[-]+$', 'setext2'),  # Setext H2
-            (r'^[一二三四五六七八九十]+[、.]\s*(.+)$', 'cn_num'),  # Chinese numbered
-            (r'^第[一二三四五六七八九十]+[章节部分]+\s*(.+)$', 'cn_chapter'),  # Chinese chapter
-            (r'^\d+[.、]\s*(.+)$', 'numbered'),  # Numbered sections
+            (r"^#{1,6}\s+(.+)$", "md"),  # Markdown headers
+            (r"^(.+)\n[=]+$", "setext1"),  # Setext H1
+            (r"^(.+)\n[-]+$", "setext2"),  # Setext H2
+            (r"^[一二三四五六七八九十]+[、.]\s*(.+)$", "cn_num"),  # Chinese numbered
+            (r"^第[一二三四五六七八九十]+[章节部分]+\s*(.+)$", "cn_chapter"),  # Chinese chapter
+            (r"^\d+[.、]\s*(.+)$", "numbered"),  # Numbered sections
         ]
 
         for i, line in enumerate(lines):
@@ -834,17 +844,23 @@ The description should be detailed enough for someone who hasn't seen the image 
             for pattern, style in header_patterns:
                 match = re.match(pattern, line)
                 if match:
-                    title = match.group(1).strip() if match.groups() else line.strip('#').strip()
-                    level = 1 if style in ('setext1', 'cn_chapter') else (
-                        2 if style == 'setext2' else (
-                            len(line) - len(line.lstrip('#')) if style == 'md' else 2
+                    title = match.group(1).strip() if match.groups() else line.strip("#").strip()
+                    level = (
+                        1
+                        if style in ("setext1", "cn_chapter")
+                        else (
+                            2
+                            if style == "setext2"
+                            else (len(line) - len(line.lstrip("#")) if style == "md" else 2)
                         )
                     )
-                    structure.sections.append({
-                        "level": level,
-                        "title": title[:100],  # Limit title length
-                        "line": i + 1,
-                    })
+                    structure.sections.append(
+                        {
+                            "level": level,
+                            "title": title[:100],  # Limit title length
+                            "line": i + 1,
+                        }
+                    )
                     structure.has_headers = True
                     if title and len(title) > 2:
                         structure.key_topics.append(title[:50])
@@ -852,17 +868,16 @@ The description should be detailed enough for someone who hasn't seen the image 
 
             # Check for lists
             if not structure.has_lists:
-                if re.match(r'^[-*+]\s+', line) or re.match(r'^\d+[.)]\s+', line):
+                if re.match(r"^[-*+]\s+", line) or re.match(r"^\d+[.)]\s+", line):
                     structure.has_lists = True
 
             # Check for tables (simple heuristic)
-            if not structure.has_tables:
-                if '|' in line and line.count('|') >= 2:
-                    structure.has_tables = True
+            if not structure.has_tables and "|" in line and line.count("|") >= 2:
+                structure.has_tables = True
 
             # Check for code blocks
             if not structure.has_code_blocks:
-                if line.startswith('```') or line.startswith('~~~'):
+                if line.startswith("```") or line.startswith("~~~"):
                     structure.has_code_blocks = True
 
         # Estimate reading time (assuming 250 words/min for English, 400 chars/min for Chinese)
@@ -887,8 +902,8 @@ The description should be detailed enough for someone who hasn't seen the image 
         self,
         file_path: Path,
         api_path: str,
-        on_progress: Optional[ProgressCallback] = None,
-    ) -> tuple[List[PDFPageContent], Dict[str, Any]]:
+        on_progress: ProgressCallback | None = None,
+    ) -> tuple[list[PDFPageContent], dict[str, Any]]:
         """
         Process a PDF file by converting pages to images for vision models.
 
@@ -928,15 +943,17 @@ The description should be detailed enough for someone who hasn't seen the image 
             # Convert to PDFPageContent objects
             pdf_pages = []
             for page in result.page_images:
-                pdf_pages.append(PDFPageContent(
-                    page_number=page.page_number,
-                    base64_data=page.base64_data,
-                    media_type=page.media_type,
-                    width=page.width,
-                    height=page.height,
-                    size_bytes=page.size_bytes,
-                    file_path=api_path,
-                ))
+                pdf_pages.append(
+                    PDFPageContent(
+                        page_number=page.page_number,
+                        base64_data=page.base64_data,
+                        media_type=page.media_type,
+                        width=page.width,
+                        height=page.height,
+                        size_bytes=page.size_bytes,
+                        file_path=api_path,
+                    )
+                )
 
             metadata["total_pages"] = result.total_pages
             metadata["converted_pages"] = len(pdf_pages)
@@ -946,8 +963,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             if result.total_pages > self.max_pdf_pages:
                 metadata["truncated"] = True
                 metadata["truncated_message"] = (
-                    f"PDF has {result.total_pages} pages, "
-                    f"only first {self.max_pdf_pages} converted"
+                    f"PDF has {result.total_pages} pages, only first {self.max_pdf_pages} converted"
                 )
 
             logger.info(
@@ -974,12 +990,12 @@ The description should be detailed enough for someone who hasn't seen the image 
 
     async def process_files(
         self,
-        file_paths: List[str],
+        file_paths: list[str],
         session_id: str,
         user: UserContext,
         model_supports_vision: bool,
         max_text_chars: int = 32000,
-        on_progress: Optional[ProgressCallback] = None,
+        on_progress: ProgressCallback | None = None,
     ) -> ProcessedFiles:
         """
         Process multiple uploaded files for model consumption.
@@ -1016,7 +1032,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             )
         """
         result = ProcessedFiles()
-        text_parts: List[str] = []
+        text_parts: list[str] = []
 
         # Log file storage status for diagnostics
         logger.info(
@@ -1031,7 +1047,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             # Try cache first
             cache_key = self._get_cache_key(api_path, model_supports_vision)
             cached = await self._get_cached_result(cache_key)
-            
+
             if cached:
                 logger.info(f"[FileProcessor] Cache hit for {api_path}")
                 # Restore from cache
@@ -1101,32 +1117,38 @@ The description should be detailed enough for someone who hasn't seen the image 
                 else:
                     # Unknown file type
                     logger.warning(f"[FileProcessor] Unknown file type: {api_path}")
-                    result.file_metadata.append({
-                        "file_path": api_path,
-                        "file_name": actual_path.name,
-                        "file_type": "unknown",
-                        "error": "Unsupported file type",
-                    })
+                    result.file_metadata.append(
+                        {
+                            "file_path": api_path,
+                            "file_name": actual_path.name,
+                            "file_type": "unknown",
+                            "error": "Unsupported file type",
+                        }
+                    )
 
             except FileProcessError as e:
                 logger.error(f"[FileProcessor] Error processing file: {e}")
                 file_name = Path(api_path).name
-                result.file_metadata.append({
-                    "file_path": api_path,
-                    "file_name": file_name,
-                    "error": str(e),
-                })
+                result.file_metadata.append(
+                    {
+                        "file_path": api_path,
+                        "file_name": file_name,
+                        "error": str(e),
+                    }
+                )
                 # Add error as text content so model can explain to user
                 error_text = f"[文件处理失败: {file_name}]\n错误: {str(e)}"
                 text_parts.append(error_text)
             except Exception as e:
                 logger.exception(f"[FileProcessor] Unexpected error: {api_path}")
                 file_name = Path(api_path).name
-                result.file_metadata.append({
-                    "file_path": api_path,
-                    "file_name": file_name,
-                    "error": f"Unexpected error: {str(e)}",
-                })
+                result.file_metadata.append(
+                    {
+                        "file_path": api_path,
+                        "file_name": file_name,
+                        "error": f"Unexpected error: {str(e)}",
+                    }
+                )
                 # Add error as text content so model can explain to user
                 error_text = f"[文件处理失败: {file_name}]\n错误: {str(e)}"
                 text_parts.append(error_text)
@@ -1158,9 +1180,9 @@ The description should be detailed enough for someone who hasn't seen the image 
         provider: str,
         model_id: str,
         content_type: str,
-        google_api_key: Optional[str] = None,
-        force_strategy: Optional[ProcessingStrategy] = None,
-        on_progress: Optional[ProgressCallback] = None,
+        google_api_key: str | None = None,
+        force_strategy: ProcessingStrategy | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> ProcessedContent:
         """
         Process a single file using provider-specific strategy.
@@ -1240,8 +1262,8 @@ The description should be detailed enough for someone who hasn't seen the image 
         self,
         session_id: str,
         user: UserContext,
-        documents: List[str],
-    ) -> Optional[str]:
+        documents: list[str],
+    ) -> str | None:
         """
         Create a session-level temporary knowledge base for long documents.
 
@@ -1263,9 +1285,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         # 3. Return the dataset_id for RAG retrieval
 
         if not self.knowledge_service:
-            logger.warning(
-                "[FileProcessor] Cannot create session KB: no knowledge service"
-            )
+            logger.warning("[FileProcessor] Cannot create session KB: no knowledge service")
             return None
 
         logger.info(
@@ -1279,11 +1299,11 @@ The description should be detailed enough for someone who hasn't seen the image 
 
 
 def create_file_processor(
-    vlm_service: Optional["DashScopeVLMService"] = None,
-    knowledge_service: Optional["KnowledgeService"] = None,
-    storage_base_path: Optional[Path] = None,
-    file_storage: Optional["FileStorageService"] = None,
-    redis_client: Optional[Any] = None,
+    vlm_service: DashScopeVLMService | None = None,
+    knowledge_service: KnowledgeService | None = None,
+    storage_base_path: Path | None = None,
+    file_storage: FileStorageService | None = None,
+    redis_client: Any | None = None,
 ) -> FileProcessor:
     """
     Factory function to create a FileProcessor instance.

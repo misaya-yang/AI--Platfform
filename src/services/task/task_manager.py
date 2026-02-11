@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -24,13 +25,13 @@ class TaskStorage:
     async def get(self, task_id: str) -> Task:
         raise NotImplementedError
 
-    async def list(self) -> List[Task]:
+    async def list(self) -> builtins.list[Task]:
         raise NotImplementedError
 
 
 class MemoryTaskStorage(TaskStorage):
     def __init__(self):
-        self._tasks: Dict[str, Task] = {}
+        self._tasks: dict[str, Task] = {}
 
     async def save(self, task: Task) -> None:
         self._tasks[task.task_id] = task
@@ -41,7 +42,7 @@ class MemoryTaskStorage(TaskStorage):
             raise TaskNotFoundError(task_id)
         return task
 
-    async def list(self) -> List[Task]:
+    async def list(self) -> builtins.list[Task]:
         return list(self._tasks.values())
 
 
@@ -69,7 +70,7 @@ class TaskManager:
         self.callback_retries = callback_retries
         self.callback_retry_delay = callback_retry_delay
         # 共享 HTTP client 以复用连接
-        self._callback_client: Optional[httpx.AsyncClient] = None
+        self._callback_client: httpx.AsyncClient | None = None
         # 保护 HTTP client 创建的锁
         self._client_lock = asyncio.Lock()
 
@@ -88,8 +89,8 @@ class TaskManager:
     async def create_task(
         self,
         request: UnifiedRequest,
-        roles: List[str],
-        client_ip: Optional[str],
+        roles: list[str],
+        client_ip: str | None,
     ) -> Task:
         task = Task(
             task_id=str(uuid.uuid4()),
@@ -113,7 +114,7 @@ class TaskManager:
         task_id: str,
         status: TaskStatus,
         result: Any = None,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         task = await self.storage.get(task_id)
         task.status = status
@@ -124,10 +125,7 @@ class TaskManager:
             task.error = error
         await self.storage.save(task)
 
-        if (
-            status in {TaskStatus.COMPLETED, TaskStatus.FAILED}
-            and task.callback_url
-        ):
+        if status in {TaskStatus.COMPLETED, TaskStatus.FAILED} and task.callback_url:
             await self._send_callback(task)
 
     async def cancel(self, task_id: str) -> None:
@@ -186,7 +184,7 @@ class TaskManager:
 
             # 指数退避重试
             if attempt < self.callback_retries - 1:
-                delay = self.callback_retry_delay * (2 ** attempt)
+                delay = self.callback_retry_delay * (2**attempt)
                 await asyncio.sleep(delay)
 
         # 所有重试都失败

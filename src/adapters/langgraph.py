@@ -2,31 +2,32 @@ from __future__ import annotations
 
 import importlib
 import json
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from collections.abc import AsyncIterator, Callable
+
+# 定义流事件的结构
+from dataclasses import dataclass
+from typing import Any
 
 from ..core.exceptions import ValidationFailedError
-from ..models.enums import ContentType, ConnectorType, StreamEventType
+from ..models.enums import ConnectorType, ContentType, StreamEventType
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, ToolCall, UnifiedResponse
 from .base import ProtocolAdapter
 
 
-# 定义流事件的结构
-from dataclasses import dataclass
-
-
 @dataclass
 class StreamEvent:
     """流事件封装"""
+
     event_type: StreamEventType
-    text: Optional[str] = None
-    tool_call: Optional[ToolCall] = None
+    text: str | None = None
+    tool_call: ToolCall | None = None
 
 
 class LangGraphAdapter(ProtocolAdapter):
     # 类级别的 session_id -> thread_id (UUID) 映射缓存
-    _session_to_thread_map: Dict[str, str] = {}
-    
+    _session_to_thread_map: dict[str, str] = {}
+
     def __init__(self, service):
         super().__init__(service)
         config = service.connector_config or {}
@@ -64,46 +65,48 @@ class LangGraphAdapter(ProtocolAdapter):
             self.auth_user_type = config.get("auth_user_type", "user")  # 用户类型
             self.forward_auth = config.get("forward_auth", True)  # 是否转发认证信息
 
-    def _build_auth_headers(self, request: UnifiedRequest) -> Dict[str, str]:
+    def _build_auth_headers(self, request: UnifiedRequest) -> dict[str, str]:
         """
         构建认证头部，用于转发给 LangGraph Agent。
-        
+
         LangGraph Agent 的 auth 模块支持两种认证方式：
         1. X-User-Id 头部（网关转发）
         2. Authorization Bearer token（直接访问）
-        
+
         为确保兼容性，同时发送两种认证方式。
         """
         if not self.forward_auth:
             return {}
-        
+
         # 使用配置的静态用户 ID 或请求中的用户 ID
         user_id = self.auth_user_id or request.user_id or "gateway-user"
         user_type = self.auth_user_type
         user_name = f"User-{request.user_id}" if request.user_id else "Gateway User"
-        
-        headers: Dict[str, str] = {
+
+        headers: dict[str, str] = {
             # 方式1: X-User-Id 头部（LangGraph SDK 会自动映射到 x_user_id 参数）
             "x-user-id": str(user_id),
             "x-user-type": user_type,
             "x-user-name": user_name,
             "x-user-permissions": "read,write",
         }
-        
+
         # 方式2: 同时发送 Bearer token 作为备用认证
         # 使用 user_id 作为简单 token，LangGraph auth 会在 DEV_MODE 下接受任何 token
         headers["Authorization"] = f"Bearer gateway-{user_id}"
-        
+
         # 如果有租户 ID，也传递
         if request.tenant_id:
             headers["x-tenant-id"] = str(request.tenant_id)
-        
+
         return headers
 
-    def _build_run_config(self, request: UnifiedRequest, thread_id: Optional[str] = None) -> Dict[str, Any]:
+    def _build_run_config(
+        self, request: UnifiedRequest, thread_id: str | None = None
+    ) -> dict[str, Any]:
         """Build LangGraph run config with gateway-injected `configurable` values."""
         params = request.parameters or {}
-        run_config: Dict[str, Any] = {}
+        run_config: dict[str, Any] = {}
         if isinstance(params.get("config"), dict):
             run_config = dict(params["config"])
 
@@ -153,7 +156,7 @@ class LangGraphAdapter(ProtocolAdapter):
     async def stream(self, request: UnifiedRequest) -> AsyncIterator[StreamChunk]:
         messages = self._build_messages(request.inputs)
         idx = 0
-        usage_metadata: Optional[Dict[str, Any]] = None
+        usage_metadata: dict[str, Any] | None = None
         if not self.remote:
             if not hasattr(self.graph, "astream_events"):
                 raise ValidationFailedError("graph does not support streaming")
@@ -161,7 +164,9 @@ class LangGraphAdapter(ProtocolAdapter):
             # 追踪已处理的内容，用于去重
             seen_content_ids: set = set()
 
-            async for event in self.graph.astream_events({"messages": messages}, run_config, version="v2"):
+            async for event in self.graph.astream_events(
+                {"messages": messages}, run_config, version="v2"
+            ):
                 if isinstance(event, dict) and event.get("event") == "metadata":
                     data = event.get("data") or {}
                     if isinstance(data, dict) and isinstance(data.get("usage"), dict):
@@ -181,11 +186,14 @@ class LangGraphAdapter(ProtocolAdapter):
                     )
                     idx += 1
         else:
-            def _capture_usage(usage: Dict[str, Any]) -> None:
+
+            def _capture_usage(usage: dict[str, Any]) -> None:
                 nonlocal usage_metadata
                 usage_metadata = usage
 
-            async for stream_event in self._remote_stream(request, messages, usage_handler=_capture_usage):
+            async for stream_event in self._remote_stream(
+                request, messages, usage_handler=_capture_usage
+            ):
                 if stream_event:
                     yield StreamChunk(
                         request_id=request.request_id,
@@ -214,6 +222,7 @@ class LangGraphAdapter(ProtocolAdapter):
         # 为远程健康检查构建认证头部
         # 使用虚拟请求构建头部（因为健康检查没有实际请求上下文）
         from ..models.request import UnifiedRequest
+
         dummy_request = UnifiedRequest(
             request_id="health-check",
             service_id=self.service.service_id,
@@ -224,7 +233,7 @@ class LangGraphAdapter(ProtocolAdapter):
         auth_headers = self._build_auth_headers(dummy_request)
         return await self.connector.health_check(headers=auth_headers)
 
-    def _build_messages(self, inputs: List[ContentItem]) -> List[Dict[str, Any]]:
+    def _build_messages(self, inputs: list[ContentItem]) -> list[dict[str, Any]]:
         texts = [str(i.data) for i in inputs if i.type == ContentType.TEXT and i.data]
         if not texts:
             raise ValidationFailedError("text input required")
@@ -261,7 +270,7 @@ class LangGraphAdapter(ProtocolAdapter):
                         return str(getattr(last, "content", last))
         return str(result)
 
-    def _extract_stream_event(self, event: Any, seen_ids: set) -> Optional[StreamEvent]:
+    def _extract_stream_event(self, event: Any, seen_ids: set) -> StreamEvent | None:
         """从本地 LangGraph 的 astream_events 中提取流事件"""
         if not isinstance(event, dict):
             return None
@@ -395,16 +404,14 @@ class LangGraphAdapter(ProtocolAdapter):
 
         return None
 
-    async def _remote_wait(
-        self, request: UnifiedRequest, messages: List[Dict[str, Any]]
-    ) -> Any:
-        input_payload: Dict[str, Any] = {"messages": messages}
+    async def _remote_wait(self, request: UnifiedRequest, messages: list[dict[str, Any]]) -> Any:
+        input_payload: dict[str, Any] = {"messages": messages}
         params = request.parameters or {}
         extra_input = params.get("input")
         if isinstance(extra_input, dict):
             input_payload.update(extra_input)
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "assistant_id": self.assistant_id,
             "input": input_payload,
             "metadata": {
@@ -447,10 +454,10 @@ class LangGraphAdapter(ProtocolAdapter):
     async def _remote_stream(
         self,
         request: UnifiedRequest,
-        messages: List[Dict[str, Any]],
-        usage_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+        messages: list[dict[str, Any]],
+        usage_handler: Callable[[dict[str, Any]], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        input_payload: Dict[str, Any] = {"messages": messages}
+        input_payload: dict[str, Any] = {"messages": messages}
         params = request.parameters or {}
         extra_input = params.get("input")
         if isinstance(extra_input, dict):
@@ -469,7 +476,7 @@ class LangGraphAdapter(ProtocolAdapter):
             if "," in stream_mode:
                 stream_mode = [s.strip() for s in stream_mode.split(",") if s.strip()]
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "assistant_id": self.assistant_id,
             "input": input_payload,
             "stream_mode": stream_mode,  # allow string or list
@@ -488,9 +495,11 @@ class LangGraphAdapter(ProtocolAdapter):
         if stream_subgraphs is not None:
             payload["stream_subgraphs"] = stream_subgraphs
 
-        import httpx
-        import time
         import logging
+        import time
+
+        import httpx
+
         logger = logging.getLogger(__name__)
 
         # 详细时间追踪：帮助定位首 token 延迟来源
@@ -501,7 +510,7 @@ class LangGraphAdapter(ProtocolAdapter):
             t_ensure_start = time.perf_counter()
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             t_ensure_end = time.perf_counter()
-            logger.info(f"[TIMING] _ensure_thread: {(t_ensure_end - t_ensure_start)*1000:.2f}ms")
+            logger.info(f"[TIMING] _ensure_thread: {(t_ensure_end - t_ensure_start) * 1000:.2f}ms")
             endpoint = self.thread_stream_endpoint.format(thread_id=valid_thread_id)
             payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
         else:
@@ -511,13 +520,15 @@ class LangGraphAdapter(ProtocolAdapter):
         client = getattr(self.connector, "_client", None)
         if client is None:
             raise ValidationFailedError("remote streaming requires HTTPConnector")
-        
+
         # Use shorter connect timeout, longer read timeout for streaming
         stream_timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0)
         auth_headers = self._build_auth_headers(request)
 
         t_pre_stream = time.perf_counter()
-        logger.info(f"[TIMING] Pre-stream setup: {(t_pre_stream - t_method_start)*1000:.2f}ms (includes _ensure_thread if applicable)")
+        logger.info(
+            f"[TIMING] Pre-stream setup: {(t_pre_stream - t_method_start) * 1000:.2f}ms (includes _ensure_thread if applicable)"
+        )
 
         t_start = time.perf_counter()
         first_data_time = None
@@ -528,9 +539,13 @@ class LangGraphAdapter(ProtocolAdapter):
                 "POST", endpoint, json=payload, timeout=stream_timeout, headers=auth_headers
             ) as resp:
                 t_response = time.perf_counter()
-                logger.info(f"[TIMING] LangGraph HTTP response: {(t_response - t_start)*1000:.2f}ms (connect+server processing), status={resp.status_code}")
-                logger.info(f"[TIMING] Total to HTTP response: {(t_response - t_method_start)*1000:.2f}ms from method start")
-                
+                logger.info(
+                    f"[TIMING] LangGraph HTTP response: {(t_response - t_start) * 1000:.2f}ms (connect+server processing), status={resp.status_code}"
+                )
+                logger.info(
+                    f"[TIMING] Total to HTTP response: {(t_response - t_method_start) * 1000:.2f}ms from method start"
+                )
+
                 if resp.status_code != 200:
                     error_text = await resp.aread()
                     logger.error(f"LangGraph stream error: {resp.status_code} - {error_text}")
@@ -540,11 +555,13 @@ class LangGraphAdapter(ProtocolAdapter):
 
                 current_event_type = ""
                 last_content_length = 0
-                last_tool_args: Dict[str, str] = {}  # Store actual args text, not just length
+                last_tool_args: dict[str, str] = {}  # Store actual args text, not just length
                 current_tool_call_id = ""
                 current_tool_name = ""
-                sent_tool_call_starts: set = set()  # Track tool calls that have sent TOOL_CALL_START
-                
+                sent_tool_call_starts: set = (
+                    set()
+                )  # Track tool calls that have sent TOOL_CALL_START
+
                 # Use aiter_bytes for real-time streaming (aiter_lines can buffer)
                 line_count = 0
                 buffer = ""
@@ -554,7 +571,9 @@ class LangGraphAdapter(ProtocolAdapter):
                         break
                     if first_data_time is None:
                         first_data_time = time.perf_counter()
-                        logger.info(f"[TIMING] LangGraph first chunk: {(first_data_time - t_start)*1000:.2f}ms")
+                        logger.info(
+                            f"[TIMING] LangGraph first chunk: {(first_data_time - t_start) * 1000:.2f}ms"
+                        )
 
                     # Decode and buffer
                     buffer += chunk.decode("utf-8", errors="ignore")
@@ -596,18 +615,24 @@ class LangGraphAdapter(ProtocolAdapter):
                                 if isinstance(usage, dict) and usage_handler:
                                     usage_handler(usage)
                             continue
-                        
+
                         # Debug: log received event type and content preview
                         if current_event_type:
                             content_preview = ""
                             msg_type_info = ""
-                            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                            if (
+                                isinstance(data, list)
+                                and len(data) > 0
+                                and isinstance(data[0], dict)
+                            ):
                                 msg = data[0]
                                 c = msg.get("content", "")
                                 msg_type_info = f", msg_type={msg.get('type', 'unknown')}"
                                 if isinstance(c, str):
                                     content_preview = f", content_len={len(c)}"
-                            logger.debug(f"[SSE] event={current_event_type}{msg_type_info}{content_preview}")
+                            logger.debug(
+                                f"[SSE] event={current_event_type}{msg_type_info}{content_preview}"
+                            )
 
                         # messages/complete indicates a message boundary, not a stream end.
 
@@ -620,9 +645,11 @@ class LangGraphAdapter(ProtocolAdapter):
                         # 立即发送 thinking 事件让前端知道我们在处理
                         if first_yield_time is None and current_event_type:
                             first_yield_time = time.perf_counter()
-                            logger.info(f"[TIMING] LangGraph sending thinking signal: {(first_yield_time - t_start)*1000:.2f}ms, event_type={current_event_type}")
+                            logger.info(
+                                f"[TIMING] LangGraph sending thinking signal: {(first_yield_time - t_start) * 1000:.2f}ms, event_type={current_event_type}"
+                            )
                             yield StreamEvent(event_type=StreamEventType.THINKING)
-                        
+
                         result = self._extract_remote_stream_event(
                             event,
                             last_content_length,
@@ -639,34 +666,43 @@ class LangGraphAdapter(ProtocolAdapter):
                             current_tool_name,
                         ) = result
                         if stream_event:
-                            logger.debug(f"[TIMING] LangGraph yield: event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}")
+                            logger.debug(
+                                f"[TIMING] LangGraph yield: event_type={stream_event.event_type}, text_len={len(stream_event.text) if stream_event.text else 0}"
+                            )
                             yield stream_event
         except httpx.RequestError as exc:
             raise ValidationFailedError(
                 f"LangGraph stream request error at {endpoint}: {exc}"
             ) from exc
-        
+
         logger.debug("LangGraph stream completed")
 
     def _extract_remote_stream_event(
         self,
         event: Any,
         last_content_length: int,
-        last_tool_args: Dict[str, str],  # Changed: stores actual args text, not just length
+        last_tool_args: dict[str, str],  # Changed: stores actual args text, not just length
         current_tool_call_id: str,
         current_tool_name: str,
         sent_tool_call_starts: set,  # Track tool calls that have sent TOOL_CALL_START
-    ) -> tuple[Optional[StreamEvent], int, Dict[str, str], str, str]:
+    ) -> tuple[StreamEvent | None, int, dict[str, str], str, str]:
         """从远程 LangGraph API 的流式事件中提取流事件（返回增量）"""
         import logging
+
         logger = logging.getLogger(__name__)
 
         if not isinstance(event, dict):
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
 
         event_type = event.get("event", "")
         data = event.get("data") if "event" in event else event
-        
+
         # 详细调试日志 - 显示每个收到的事件
         if event_type:
             # 提取消息类型和内容长度用于调试
@@ -683,35 +719,55 @@ class LangGraphAdapter(ProtocolAdapter):
         if event_type == "messages/complete":
             # 消息完成，重置累积长度以准备下一条消息
             return None, 0, {}, "", ""
-        
+
         # 处理 end 事件
         if event_type == "end":
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
-        
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
+
         # 处理 error 事件
         if event_type == "error":
             import logging
+
             logging.getLogger(__name__).error(f"LangGraph stream error event: {data}")
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
-        
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
+
         # 处理 metadata 事件（忽略）
         if event_type == "metadata":
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
-        
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
+
         # LangGraph Cloud API 的 messages/partial 事件类型
         if event_type in ("messages", "messages/partial"):
             # 格式: data: [message, metadata] 或 data: message
-            if isinstance(data, list) and len(data) >= 1:
-                msg = data[0]
-            else:
-                msg = data
+            msg = data[0] if isinstance(data, list) and len(data) >= 1 else data
 
             if isinstance(msg, dict):
                 msg_type = msg.get("type", "")
 
                 # 优先处理 tool_call_chunks
                 tool_call_chunks = msg.get("tool_call_chunks")
-                if tool_call_chunks and isinstance(tool_call_chunks, list) and len(tool_call_chunks) > 0:
+                if (
+                    tool_call_chunks
+                    and isinstance(tool_call_chunks, list)
+                    and len(tool_call_chunks) > 0
+                ):
                     tc = tool_call_chunks[0]
                     # id 和 name 可能只在第一个 chunk 中有值
                     tc_id = tc.get("id") or tc.get("tool_call_id") or ""
@@ -728,22 +784,24 @@ class LangGraphAdapter(ProtocolAdapter):
                     if isinstance(tc_args, dict):
                         tc_args = json.dumps(tc_args, ensure_ascii=False)
 
-                    logger.debug(f"[tool_call_chunks] id={tc_id}, name={tc_name}, args={tc_args!r}, tracked_id={current_tool_call_id}")
+                    logger.debug(
+                        f"[tool_call_chunks] id={tc_id}, name={tc_name}, args={tc_args!r}, tracked_id={current_tool_call_id}"
+                    )
 
                     key = current_tool_call_id or "default"
 
                     # 检测是否是完整 JSON 对象（累积格式）
                     args_stripped = tc_args.strip()
-                    is_complete_json = (
-                        args_stripped.startswith("{") and args_stripped.endswith("}")
-                    )
+                    is_complete_json = args_stripped.startswith("{") and args_stripped.endswith("}")
 
                     if is_complete_json:
                         # 累积格式：发送完整值，前端会处理
                         # 使用实际 args 长度来判断是否有更新
                         prev_args = last_tool_args.get(key, "")
                         prev_len = len(prev_args)
-                        logger.debug(f"[tool_call_chunks] Complete JSON detected, len={len(tc_args)}, prev_len={prev_len}")
+                        logger.debug(
+                            f"[tool_call_chunks] Complete JSON detected, len={len(tc_args)}, prev_len={prev_len}"
+                        )
 
                         # 检查是否是空占位符（如 {"query": ""}）
                         is_empty_placeholder = False
@@ -752,20 +810,33 @@ class LangGraphAdapter(ProtocolAdapter):
                             if isinstance(parsed, dict):
                                 # 检查所有值是否为空
                                 is_empty_placeholder = all(
-                                    v == "" or v is None or v == []
-                                    for v in parsed.values()
+                                    v == "" or v is None or v == [] for v in parsed.values()
                                 )
                         except json.JSONDecodeError:
                             pass
 
                         if len(tc_args) <= prev_len:
                             # 没有新内容，跳过
-                            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                            return (
+                                None,
+                                last_content_length,
+                                last_tool_args,
+                                current_tool_call_id,
+                                current_tool_name,
+                            )
 
                         # 如果是空占位符，不存储（让后续真实值可以覆盖）
                         if is_empty_placeholder:
-                            logger.debug(f"[tool_call_chunks] Skipping empty placeholder: {tc_args!r}")
-                            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                            logger.debug(
+                                f"[tool_call_chunks] Skipping empty placeholder: {tc_args!r}"
+                            )
+                            return (
+                                None,
+                                last_content_length,
+                                last_tool_args,
+                                current_tool_call_id,
+                                current_tool_name,
+                            )
 
                         # 存储实际 args 文本
                         last_tool_args[key] = tc_args
@@ -779,21 +850,37 @@ class LangGraphAdapter(ProtocolAdapter):
                         if tool_key not in sent_tool_call_starts:
                             sent_tool_call_starts.add(tool_key)
                             event_type = StreamEventType.TOOL_CALL_START
-                            logger.debug(f"[tool_call_chunks] Sending TOOL_CALL_START: name={current_tool_name}, args={tc_args!r}")
+                            logger.debug(
+                                f"[tool_call_chunks] Sending TOOL_CALL_START: name={current_tool_name}, args={tc_args!r}"
+                            )
                         else:
                             event_type = StreamEventType.TOOL_CALL_DELTA
-                            logger.debug(f"[tool_call_chunks] Sending TOOL_CALL_DELTA: name={current_tool_name}, args={tc_args!r}")
-                        return StreamEvent(
-                            event_type=event_type,
-                            tool_call=ToolCall(
-                                tool_call_id=current_tool_call_id,
-                                name=current_tool_name,
-                                arguments=tc_args,
-                                status="running",
+                            logger.debug(
+                                f"[tool_call_chunks] Sending TOOL_CALL_DELTA: name={current_tool_name}, args={tc_args!r}"
+                            )
+                        return (
+                            StreamEvent(
+                                event_type=event_type,
+                                tool_call=ToolCall(
+                                    tool_call_id=current_tool_call_id,
+                                    name=current_tool_name,
+                                    arguments=tc_args,
+                                    status="running",
+                                ),
                             ),
-                        ), last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                            last_content_length,
+                            last_tool_args,
+                            current_tool_call_id,
+                            current_tool_name,
+                        )
 
-                    return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                    return (
+                        None,
+                        last_content_length,
+                        last_tool_args,
+                        current_tool_call_id,
+                        current_tool_name,
+                    )
 
                 # 处理完整的 tool_calls（累积格式，需要计算增量）
                 tool_calls = msg.get("tool_calls")
@@ -822,8 +909,7 @@ class LangGraphAdapter(ProtocolAdapter):
                             parsed_prev = json.loads(prev_args)
                             if isinstance(parsed_prev, dict):
                                 is_empty_prev = all(
-                                    v == "" or v is None or v == []
-                                    for v in parsed_prev.values()
+                                    v == "" or v is None or v == [] for v in parsed_prev.values()
                                 )
                         except json.JSONDecodeError:
                             pass
@@ -839,23 +925,39 @@ class LangGraphAdapter(ProtocolAdapter):
                         if tool_key not in sent_tool_call_starts:
                             sent_tool_call_starts.add(tool_key)
                             event_type = StreamEventType.TOOL_CALL_START
-                            logger.debug(f"[tool_calls] Sending TOOL_CALL_START: name={current_tool_name}")
+                            logger.debug(
+                                f"[tool_calls] Sending TOOL_CALL_START: name={current_tool_name}"
+                            )
                         else:
                             event_type = StreamEventType.TOOL_CALL_DELTA
-                            logger.debug(f"[tool_calls] Sending TOOL_CALL_DELTA: name={current_tool_name}")
+                            logger.debug(
+                                f"[tool_calls] Sending TOOL_CALL_DELTA: name={current_tool_name}"
+                            )
 
                         # 发送完整累积值（不是增量），前端会处理
-                        return StreamEvent(
-                            event_type=event_type,
-                            tool_call=ToolCall(
-                                tool_call_id=current_tool_call_id,
-                                name=current_tool_name,
-                                arguments=tc_args,  # 发送完整值
-                                status="running",
+                        return (
+                            StreamEvent(
+                                event_type=event_type,
+                                tool_call=ToolCall(
+                                    tool_call_id=current_tool_call_id,
+                                    name=current_tool_name,
+                                    arguments=tc_args,  # 发送完整值
+                                    status="running",
+                                ),
                             ),
-                        ), last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                            last_content_length,
+                            last_tool_args,
+                            current_tool_call_id,
+                            current_tool_name,
+                        )
 
-                    return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                    return (
+                        None,
+                        last_content_length,
+                        last_tool_args,
+                        current_tool_call_id,
+                        current_tool_name,
+                    )
 
                 # 处理工具结果消息（完整内容，不需要增量）
                 if msg_type in ("tool", "ToolMessage"):
@@ -866,7 +968,9 @@ class LangGraphAdapter(ProtocolAdapter):
                         content = json.dumps(content, ensure_ascii=False)
 
                     logger.debug(f"[ToolMessage] keys: {list(msg.keys())}")
-                    logger.debug(f"[ToolMessage] tool_name={tool_name}, tool_call_id={tool_call_id}")
+                    logger.debug(
+                        f"[ToolMessage] tool_name={tool_name}, tool_call_id={tool_call_id}"
+                    )
 
                     # 尝试从多个位置提取实际使用的查询参数
                     final_args = ""
@@ -874,20 +978,30 @@ class LangGraphAdapter(ProtocolAdapter):
                     # 1. 尝试从 artifact 中提取
                     artifact = msg.get("artifact")
                     if artifact:
-                        logger.debug(f"[ToolMessage] artifact type={type(artifact).__name__}, value={artifact}")
+                        logger.debug(
+                            f"[ToolMessage] artifact type={type(artifact).__name__}, value={artifact}"
+                        )
                     if isinstance(artifact, dict):
                         # RAG 工具的 artifact 可能包含 {"query": "...", ...}
                         if "query" in artifact:
-                            final_args = json.dumps({"query": artifact["query"]}, ensure_ascii=False)
-                            logger.debug(f"[ToolMessage] Extracted query from artifact: {final_args}")
+                            final_args = json.dumps(
+                                {"query": artifact["query"]}, ensure_ascii=False
+                            )
+                            logger.debug(
+                                f"[ToolMessage] Extracted query from artifact: {final_args}"
+                            )
 
                     # 2. 尝试从 additional_kwargs 获取
                     if not final_args:
                         additional_kwargs = msg.get("additional_kwargs", {})
                         logger.debug(f"[ToolMessage] additional_kwargs: {additional_kwargs}")
                         if isinstance(additional_kwargs, dict) and "query" in additional_kwargs:
-                            final_args = json.dumps({"query": additional_kwargs["query"]}, ensure_ascii=False)
-                            logger.debug(f"[ToolMessage] Extracted query from additional_kwargs: {final_args}")
+                            final_args = json.dumps(
+                                {"query": additional_kwargs["query"]}, ensure_ascii=False
+                            )
+                            logger.debug(
+                                f"[ToolMessage] Extracted query from additional_kwargs: {final_args}"
+                            )
 
                     # 3. 尝试从 tool_input 获取（某些 LangGraph 版本使用此字段）
                     if not final_args:
@@ -896,7 +1010,9 @@ class LangGraphAdapter(ProtocolAdapter):
                             logger.debug(f"[ToolMessage] tool_input: {tool_input}")
                         if isinstance(tool_input, dict):
                             if "query" in tool_input:
-                                final_args = json.dumps({"query": tool_input["query"]}, ensure_ascii=False)
+                                final_args = json.dumps(
+                                    {"query": tool_input["query"]}, ensure_ascii=False
+                                )
                             else:
                                 # 使用整个 tool_input 作为 args
                                 final_args = json.dumps(tool_input, ensure_ascii=False)
@@ -920,16 +1036,24 @@ class LangGraphAdapter(ProtocolAdapter):
                                     )
                                     if has_content:
                                         final_args = stored_args
-                                        logger.debug(f"[ToolMessage] Using stored args: {final_args}")
+                                        logger.debug(
+                                            f"[ToolMessage] Using stored args: {final_args}"
+                                        )
                                     else:
-                                        logger.debug(f"[ToolMessage] Stored args is empty placeholder: {stored_args}")
+                                        logger.debug(
+                                            f"[ToolMessage] Stored args is empty placeholder: {stored_args}"
+                                        )
                                 else:
                                     final_args = stored_args
-                                    logger.debug(f"[ToolMessage] Using stored args (non-dict): {final_args}")
+                                    logger.debug(
+                                        f"[ToolMessage] Using stored args (non-dict): {final_args}"
+                                    )
                             except json.JSONDecodeError:
                                 # 如果不是有效 JSON，仍然使用它
                                 final_args = stored_args
-                                logger.debug(f"[ToolMessage] Using stored args (non-JSON): {final_args}")
+                                logger.debug(
+                                    f"[ToolMessage] Using stored args (non-JSON): {final_args}"
+                                )
 
                     logger.debug(f"[ToolMessage] Final args to send: {final_args or '(empty)'}")
 
@@ -937,21 +1061,27 @@ class LangGraphAdapter(ProtocolAdapter):
                     current_tool_call_id = ""
                     current_tool_name = ""
 
-                    return StreamEvent(
-                        event_type=StreamEventType.TOOL_RESULT,
-                        text=str(content),
-                        tool_call=ToolCall(
-                            tool_call_id=tool_call_id,
-                            name=tool_name,
-                            arguments=final_args,
-                            status="completed",
+                    return (
+                        StreamEvent(
+                            event_type=StreamEventType.TOOL_RESULT,
+                            text=str(content),
+                            tool_call=ToolCall(
+                                tool_call_id=tool_call_id,
+                                name=tool_name,
+                                arguments=final_args,
+                                status="completed",
+                            ),
                         ),
-                    ), last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                        last_content_length,
+                        last_tool_args,
+                        current_tool_call_id,
+                        current_tool_name,
+                    )
 
                 # 处理 AI 消息类型的文本（累积内容，需要计算增量）
                 if msg_type in ("ai", "AIMessage", "AIMessageChunk"):
                     content = msg.get("content", "")
-                    
+
                     # 处理 content 为 list 的情况（多模态内容）
                     if isinstance(content, list):
                         # 提取文本部分
@@ -962,18 +1092,32 @@ class LangGraphAdapter(ProtocolAdapter):
                             elif isinstance(item, dict) and item.get("type") == "text":
                                 text_parts.append(item.get("text", ""))
                         content = "".join(text_parts)
-                    
+
                     if isinstance(content, str) and len(content) > last_content_length:
                         # 只返回新增的部分
                         delta = content[last_content_length:]
                         new_length = len(content)
-                        logger.debug(f"[STREAM] TEXT_DELTA: delta_len={len(delta)}, total_len={new_length}")
-                        return StreamEvent(
-                            event_type=StreamEventType.TEXT_DELTA,
-                            text=delta,
-                        ), new_length, last_tool_args, current_tool_call_id, current_tool_name
+                        logger.debug(
+                            f"[STREAM] TEXT_DELTA: delta_len={len(delta)}, total_len={new_length}"
+                        )
+                        return (
+                            StreamEvent(
+                                event_type=StreamEventType.TEXT_DELTA,
+                                text=delta,
+                            ),
+                            new_length,
+                            last_tool_args,
+                            current_tool_call_id,
+                            current_tool_name,
+                        )
 
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
 
         # 处理 updates 事件（节点更新）- 这些是完整内容，不需要增量计算
         if event_type == "updates":
@@ -984,7 +1128,10 @@ class LangGraphAdapter(ProtocolAdapter):
                         messages = node_data.get("messages", [])
                         if isinstance(messages, list):
                             for msg in messages:
-                                if isinstance(msg, dict) and msg.get("type") in ("tool", "ToolMessage"):
+                                if isinstance(msg, dict) and msg.get("type") in (
+                                    "tool",
+                                    "ToolMessage",
+                                ):
                                     tool_call_id = msg.get("tool_call_id", "")
                                     tool_name = msg.get("name", "")
                                     content = msg.get("content", "")
@@ -992,20 +1139,36 @@ class LangGraphAdapter(ProtocolAdapter):
                                         content = json.dumps(content, ensure_ascii=False)
 
                                     # 尝试使用存储的 args
-                                    stored_args = last_tool_args.get(tool_call_id, "") or last_tool_args.get(current_tool_call_id, "")
-                                    logger.debug(f"[updates] TOOL_RESULT: tool_call_id={tool_call_id}, stored_args={stored_args!r}")
+                                    stored_args = last_tool_args.get(
+                                        tool_call_id, ""
+                                    ) or last_tool_args.get(current_tool_call_id, "")
+                                    logger.debug(
+                                        f"[updates] TOOL_RESULT: tool_call_id={tool_call_id}, stored_args={stored_args!r}"
+                                    )
 
-                                    return StreamEvent(
-                                        event_type=StreamEventType.TOOL_RESULT,
-                                        text=str(content),
-                                        tool_call=ToolCall(
-                                            tool_call_id=tool_call_id,
-                                            name=tool_name,
-                                            arguments=stored_args,
-                                            status="completed",
+                                    return (
+                                        StreamEvent(
+                                            event_type=StreamEventType.TOOL_RESULT,
+                                            text=str(content),
+                                            tool_call=ToolCall(
+                                                tool_call_id=tool_call_id,
+                                                name=tool_name,
+                                                arguments=stored_args,
+                                                status="completed",
+                                            ),
                                         ),
-                                    ), last_content_length, last_tool_args, current_tool_call_id, current_tool_name
-            return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
+                                        last_content_length,
+                                        last_tool_args,
+                                        current_tool_call_id,
+                                        current_tool_name,
+                                    )
+            return (
+                None,
+                last_content_length,
+                last_tool_args,
+                current_tool_call_id,
+                current_tool_name,
+            )
 
         return None, last_content_length, last_tool_args, current_tool_call_id, current_tool_name
 
@@ -1021,9 +1184,10 @@ class LangGraphAdapter(ProtocolAdapter):
         重要：此方法会同步等待 thread 创建完成，以避免后续请求因 thread 不存在而失败。
         使用缓存来减少后续请求的开销。
         """
-        import uuid
-        import time
         import logging
+        import time
+        import uuid
+
         logger = logging.getLogger(__name__)
 
         t_start = time.perf_counter()
@@ -1043,7 +1207,9 @@ class LangGraphAdapter(ProtocolAdapter):
                     # 回填 L1 缓存
                     self._session_to_thread_map[session_id] = cached_thread_id
                     t_end = time.perf_counter()
-                    logger.debug(f"[TIMING] _ensure_thread: L2 cache hit, {(t_end - t_start)*1000:.2f}ms")
+                    logger.debug(
+                        f"[TIMING] _ensure_thread: L2 cache hit, {(t_end - t_start) * 1000:.2f}ms"
+                    )
                     return cached_thread_id
             except Exception as e:
                 logger.warning(f"Redis cache lookup failed: {e}")
@@ -1093,7 +1259,7 @@ class LangGraphAdapter(ProtocolAdapter):
                 logger.warning(f"Redis cache write failed: {e}")
 
         t_end = time.perf_counter()
-        logger.info(f"[TIMING] _ensure_thread: {(t_end - t_start)*1000:.2f}ms (new thread)")
+        logger.info(f"[TIMING] _ensure_thread: {(t_end - t_start) * 1000:.2f}ms (new thread)")
 
         return valid_thread_id
 
@@ -1106,6 +1272,7 @@ class LangGraphAdapter(ProtocolAdapter):
         """
         try:
             from ..container import get_container
+
             container = get_container()
             redis = container.redis
             if redis and redis.enabled:

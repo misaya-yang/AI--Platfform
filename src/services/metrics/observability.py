@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any, Dict, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 ERROR_TYPE_TIMEOUT = "timeout"
 ERROR_TYPE_PROVIDER = "provider_error"
@@ -26,10 +27,10 @@ KNOWN_ERROR_TYPES = {
 def classify_error_type(
     *,
     status: str,
-    status_code: Optional[int] = None,
+    status_code: int | None = None,
     upstream_error_type: str = "",
     upstream_error_message: str = "",
-) -> Optional[str]:
+) -> str | None:
     """Classify request errors into dashboard-friendly buckets."""
     normalized_status = (status or "").lower().strip()
     if normalized_status == "success" and (status_code is None or status_code < 400):
@@ -39,7 +40,9 @@ def classify_error_type(
     msg = (upstream_error_message or "").lower()
     combined = f"{et} {msg}"
 
-    if status_code in {408, 504} or _contains_any(combined, ("timeout", "timed out", "deadline exceeded")):
+    if status_code in {408, 504} or _contains_any(
+        combined, ("timeout", "timed out", "deadline exceeded")
+    ):
         return ERROR_TYPE_TIMEOUT
 
     if status_code == 429 or _contains_any(
@@ -73,13 +76,15 @@ def classify_error_type(
     if status_code is not None and status_code >= 500:
         return ERROR_TYPE_PROVIDER
 
-    if _contains_any(combined, ("upstream", "provider", "gateway", "bad gateway", "service unavailable")):
+    if _contains_any(
+        combined, ("upstream", "provider", "gateway", "bad gateway", "service unavailable")
+    ):
         return ERROR_TYPE_PROVIDER
 
     return ERROR_TYPE_UNKNOWN
 
 
-def extract_duration_breakdown(payload: Any) -> Dict[str, Any]:
+def extract_duration_breakdown(payload: Any) -> dict[str, Any]:
     """
     Extract latency breakdown fields from nested payload structures.
 
@@ -88,55 +93,70 @@ def extract_duration_breakdown(payload: Any) -> Dict[str, Any]:
     if payload is None:
         return {}
 
-    flat: Dict[str, Any] = {}
+    flat: dict[str, Any] = {}
     _flatten(payload, flat)
 
     tool_breakdown = _extract_tool_breakdown(payload)
 
-    result: Dict[str, Any] = {}
-    first_token = _pick_number(flat, (
-        "first_token_latency_ms",
-        "first_token_ms",
-        "ttfb_ms",
-        "time_to_first_token_ms",
-    ))
+    result: dict[str, Any] = {}
+    first_token = _pick_number(
+        flat,
+        (
+            "first_token_latency_ms",
+            "first_token_ms",
+            "ttfb_ms",
+            "time_to_first_token_ms",
+        ),
+    )
     if first_token is not None:
         result["first_token_latency_ms"] = first_token
 
-    llm = _pick_number(flat, (
-        "llm_inference_duration_ms",
-        "llm_inference_ms",
-        "model_inference_ms",
-        "llm_latency_ms",
-    ))
+    llm = _pick_number(
+        flat,
+        (
+            "llm_inference_duration_ms",
+            "llm_inference_ms",
+            "model_inference_ms",
+            "llm_latency_ms",
+        ),
+    )
     if llm is not None:
         result["llm_inference_duration_ms"] = llm
 
-    retrieval = _pick_number(flat, (
-        "retrieval_duration_ms",
-        "retrieval_ms",
-        "knowledge_retrieval_ms",
-        "search_knowledge_duration_ms",
-        "rag_retrieval_ms",
-    ))
+    retrieval = _pick_number(
+        flat,
+        (
+            "retrieval_duration_ms",
+            "retrieval_ms",
+            "knowledge_retrieval_ms",
+            "search_knowledge_duration_ms",
+            "rag_retrieval_ms",
+        ),
+    )
     if retrieval is not None:
         result["retrieval_duration_ms"] = retrieval
 
-    tool_total = _pick_number(flat, (
-        "tool_call_duration_ms",
-        "tool_duration_ms",
-        "tools_duration_ms",
-        "tool_calls_duration_ms",
-    ))
+    tool_total = _pick_number(
+        flat,
+        (
+            "tool_call_duration_ms",
+            "tool_duration_ms",
+            "tools_duration_ms",
+            "tool_calls_duration_ms",
+        ),
+    )
     if tool_total is not None:
         result["tool_call_duration_ms"] = tool_total
 
-    overhead = _pick_number(flat, (
-        "agent_or_graph_overhead_ms",
-        "agent_overhead_ms",
-        "graph_overhead_ms",
-        "orchestration_overhead_ms",
-    ))
+    overhead = _pick_number(
+        flat,
+        (
+            "agent_or_graph_overhead_ms",
+            "agent_overhead_ms",
+            "graph_overhead_ms",
+            "orchestration_overhead_ms",
+        ),
+    )
     if overhead is not None:
         result["agent_or_graph_overhead_ms"] = overhead
 
@@ -156,7 +176,7 @@ def ensure_duration_breakdown(
     retrieval_duration_ms: int = 0,
     tool_call_duration_ms: int = 0,
     agent_or_graph_overhead_ms: int = 0,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Normalize and fill duration breakdown values."""
     total = max(int(request_total_duration_ms or 0), 0)
     first = _normalize_int(first_token_latency_ms)
@@ -223,7 +243,7 @@ def _normalize_int(value: Any) -> int:
         return 0
 
 
-def _flatten(value: Any, output: Dict[str, Any], prefix: str = "") -> None:
+def _flatten(value: Any, output: dict[str, Any], prefix: str = "") -> None:
     if isinstance(value, dict):
         for k, v in value.items():
             key = str(k).strip().lower()
@@ -237,7 +257,7 @@ def _flatten(value: Any, output: Dict[str, Any], prefix: str = "") -> None:
             _flatten(item, output, f"{prefix}[{idx}]")
 
 
-def _pick_number(flat: Dict[str, Any], keys: Iterable[str]) -> Optional[int]:
+def _pick_number(flat: dict[str, Any], keys: Iterable[str]) -> int | None:
     normalized = {k.lower() for k in keys}
     for key, value in flat.items():
         base = key.split(".")[-1]
@@ -250,8 +270,8 @@ def _pick_number(flat: Dict[str, Any], keys: Iterable[str]) -> Optional[int]:
     return None
 
 
-def _extract_tool_breakdown(payload: Any) -> Dict[str, int]:
-    result: Dict[str, int] = {}
+def _extract_tool_breakdown(payload: Any) -> dict[str, int]:
+    result: dict[str, int] = {}
 
     def _walk(node: Any) -> None:
         if isinstance(node, dict):

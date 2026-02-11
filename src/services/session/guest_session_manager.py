@@ -11,11 +11,10 @@
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any
 
 from ...core.observability.logging import get_logger
 
@@ -25,6 +24,7 @@ logger = get_logger(__name__)
 @dataclass
 class GuestSessionConfig:
     """游客会话配置"""
+
     session_ttl: int = 7 * 24 * 3600  # 7 天过期
     max_threads_per_session: int = 5  # 每个游客最多 5 个对话
     memory_enabled: bool = False  # 是否启用跨会话记忆
@@ -34,13 +34,14 @@ class GuestSessionConfig:
 @dataclass
 class GuestSession:
     """游客会话"""
+
     session_id: str
     created_at: datetime
     last_active_at: datetime
-    thread_ids: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    thread_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat(),
@@ -50,7 +51,7 @@ class GuestSession:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GuestSession":
+    def from_dict(cls, data: dict[str, Any]) -> GuestSession:
         return cls(
             session_id=data["session_id"],
             created_at=datetime.fromisoformat(data["created_at"]),
@@ -71,17 +72,17 @@ class GuestSessionManager:
     def __init__(
         self,
         config: GuestSessionConfig,
-        redis_client: Optional[Any] = None,
+        redis_client: Any | None = None,
     ):
         self.config = config
         self.redis = redis_client
 
         # 内存存储（当 Redis 不可用时）
-        self._sessions: Dict[str, GuestSession] = {}
+        self._sessions: dict[str, GuestSession] = {}
 
     async def create_session(
         self,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> GuestSession:
         """
         创建游客会话
@@ -110,7 +111,7 @@ class GuestSessionManager:
         session = await self._get_session(session_id)
         return session is not None
 
-    async def get_session(self, session_id: str) -> Optional[GuestSession]:
+    async def get_session(self, session_id: str) -> GuestSession | None:
         """获取会话信息"""
         return await self._get_session(session_id)
 
@@ -178,7 +179,7 @@ class GuestSessionManager:
 
         return True
 
-    async def get_session_threads(self, session_id: str) -> List[str]:
+    async def get_session_threads(self, session_id: str) -> list[str]:
         """获取会话关联的所有 Thread"""
         session = await self._get_session(session_id)
         if not session:
@@ -189,8 +190,8 @@ class GuestSessionManager:
         self,
         session_id: str,
         user_id: str,
-        langgraph_proxy: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        langgraph_proxy: Any | None = None,
+    ) -> dict[str, Any]:
         """
         游客转正式用户
 
@@ -236,9 +237,7 @@ class GuestSessionManager:
                     )
                     migrated_threads.append(thread_id)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to migrate thread {thread_id}: {e}"
-                    )
+                    logger.warning(f"Failed to migrate thread {thread_id}: {e}")
                     failed_threads.append(thread_id)
         else:
             # 没有代理时，只记录 thread_ids
@@ -293,7 +292,7 @@ class GuestSessionManager:
         """生成 Redis key"""
         return f"{self.config.key_prefix}:{session_id}"
 
-    async def _get_session(self, session_id: str) -> Optional[GuestSession]:
+    async def _get_session(self, session_id: str) -> GuestSession | None:
         """获取会话"""
         key = self._session_key(session_id)
 
@@ -334,12 +333,13 @@ class GuestSessionManager:
 
 # ============ 游客会话验证器 ============
 
+
 async def create_guest_session_validator(
     manager: GuestSessionManager,
 ):
     """创建游客会话验证器（用于 AuthMiddleware）"""
 
-    async def validator(session_id: str) -> Optional[Dict[str, Any]]:
+    async def validator(session_id: str) -> dict[str, Any] | None:
         session = await manager.get_session(session_id)
         if not session:
             return None

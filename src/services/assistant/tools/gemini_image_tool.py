@@ -12,9 +12,10 @@ from __future__ import annotations
 import base64
 import os
 import time
-import httpx
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
 
 from ....core.observability.logging import get_logger
 
@@ -24,12 +25,13 @@ logger = get_logger(__name__)
 @dataclass
 class GeminiImageResult:
     """Result of Gemini image generation."""
+
     success: bool
-    images: List[Dict[str, Any]] = field(default_factory=list)
-    error: Optional[str] = None
-    error_code: Optional[str] = None
+    images: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    error_code: str | None = None
     blocked: bool = False
-    block_reason: Optional[str] = None
+    block_reason: str | None = None
     duration_ms: float = 0
 
 
@@ -41,10 +43,10 @@ class GeminiImageGenerator:
     # Nano Banana Pro: gemini-3-pro-image-preview - 高质量、贵
     DEFAULT_MODEL = "gemini-2.5-flash-image"
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         # Prefer GEMINI_API_KEY, fallback to GOOGLE_API_KEY for backward compatibility.
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -70,10 +72,7 @@ class GeminiImageGenerator:
             aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         """
         if not self.is_configured:
-            return GeminiImageResult(
-                success=False,
-                error="Google API key not configured"
-            )
+            return GeminiImageResult(success=False, error="Google API key not configured")
 
         start_time = time.time()
 
@@ -90,13 +89,7 @@ class GeminiImageGenerator:
             # Docs are inconsistent across SDKs/REST examples regarding modality casing.
             # For robustness we request IMAGE-only output (no text) using the REST example casing.
             body = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": prompt}
-                        ]
-                    }
-                ],
+                "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     # Force image output to avoid text-only responses.
                     "responseModalities": ["Image"],
@@ -122,7 +115,9 @@ class GeminiImageGenerator:
 
             if response.status_code != 200:
                 error_text = response.text
-                logger.error(f"Gemini image generation failed: {response.status_code} - {error_text[:500]}")
+                logger.error(
+                    f"Gemini image generation failed: {response.status_code} - {error_text[:500]}"
+                )
                 # Parse error for user-friendly message
                 try:
                     error_json = response.json()
@@ -177,7 +172,9 @@ class GeminiImageGenerator:
                         if "text" in part:
                             text_parts.append(part["text"])
                 if text_parts:
-                    logger.warning(f"Gemini returned text instead of images: {text_parts[0][:200]}...")
+                    logger.warning(
+                        f"Gemini returned text instead of images: {text_parts[0][:200]}..."
+                    )
                 else:
                     logger.warning("Gemini did not return images or text")
                 return GeminiImageResult(
@@ -204,7 +201,7 @@ class GeminiImageGenerator:
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
-    def _extract_images(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _extract_images(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract images from Gemini response."""
         images = []
 
@@ -223,9 +220,7 @@ class GeminiImageGenerator:
 
                 if inline_data:
                     mime_type = (
-                        inline_data.get("mimeType")
-                        or inline_data.get("mime_type")
-                        or "image/png"
+                        inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
                     )
                     data = inline_data.get("data", "") or ""
 
@@ -237,12 +232,14 @@ class GeminiImageGenerator:
                         except Exception:
                             size_bytes = len(data) * 3 // 4  # Approximate
 
-                        images.append({
-                            "filename": f"gemini_image_{i+1}.png",
-                            "content_base64": data,
-                            "mime_type": mime_type,
-                            "size_bytes": size_bytes,
-                        })
+                        images.append(
+                            {
+                                "filename": f"gemini_image_{i + 1}.png",
+                                "content_base64": data,
+                                "mime_type": mime_type,
+                                "size_bytes": size_bytes,
+                            }
+                        )
 
         return images
 
@@ -254,7 +251,7 @@ class GeminiImageGenerator:
 
 
 # Global instance
-_gemini_generator: Optional[GeminiImageGenerator] = None
+_gemini_generator: GeminiImageGenerator | None = None
 
 
 def get_gemini_image_generator() -> GeminiImageGenerator:

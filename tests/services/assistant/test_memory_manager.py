@@ -10,18 +10,16 @@ Tests for the three-layer memory system:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Any, Dict, List, Optional
 
 from src.services.assistant.memory.memory_manager import (
-    MemoryLayer,
-    WorkingMemoryLayer,
-    SessionMemoryLayer,
     LongTermMemoryLayer,
     MemoryManager,
+    SessionMemoryLayer,
+    WorkingMemoryLayer,
 )
-
 
 # =============================================================================
 # WorkingMemoryLayer Tests
@@ -295,9 +293,7 @@ class TestSessionMemoryLayerSearch:
     async def test_search_calls_db_method(self):
         """Test search calls the correct database method."""
         mock_db = MagicMock()
-        mock_db.search_session_memory = AsyncMock(
-            return_value=[{"key": "task_1", "value": "data"}]
-        )
+        mock_db.search_session_memory = AsyncMock(return_value=[{"key": "task_1", "value": "data"}])
 
         layer = SessionMemoryLayer(db=mock_db, tenant_id="t1", session_id="s1")
         results = await layer.search("task", limit=5)
@@ -395,9 +391,7 @@ class TestLongTermMemoryLayerSearch:
     async def test_search_calls_db_method(self):
         """Test search calls the correct database method."""
         mock_db = MagicMock()
-        mock_db.search_user_memory = AsyncMock(
-            return_value=[{"key": "pref_1", "value": "dark"}]
-        )
+        mock_db.search_user_memory = AsyncMock(return_value=[{"key": "pref_1", "value": "dark"}])
 
         layer = LongTermMemoryLayer(db=mock_db, tenant_id="t1", user_id="u1")
         results = await layer.search("pref", limit=5)

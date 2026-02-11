@@ -1,22 +1,21 @@
-import jwt
-import pytest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import jwt
+import pytest
 from fastapi import HTTPException
 
 from src.api.deps import get_auth_context
 from src.api.v1.users import ProfileUpdate, update_user_profile
 from src.config.settings import (
-    Settings,
+    AuthAPIKeySettings,
     AuthenticationSettings,
     AuthJWTSettings,
-    AuthAPIKeySettings,
+    Settings,
 )
 from src.core.auth.rbac import RBAC
 from src.core.auth.user_resolver import UserContext
 from src.core.exceptions import AuthError
-
 
 TEST_JWT_SECRET = "test-secret-key"
 TEST_JWT_ALGORITHM = "HS256"

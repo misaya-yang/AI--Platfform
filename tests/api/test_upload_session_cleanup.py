@@ -3,8 +3,8 @@ Tests for upload session memory management.
 
 Ensures upload sessions are properly cleaned up to prevent memory leaks.
 """
-import pytest
-from datetime import datetime, timezone, timedelta
+
+from datetime import datetime, timedelta, timezone
 
 
 class TestUploadSessionCleanup:
@@ -12,7 +12,7 @@ class TestUploadSessionCleanup:
 
     def test_expired_sessions_are_cleaned(self):
         """Expired upload sessions should be removed during cleanup."""
-        from src.api.v1.presign import _upload_sessions, _cleanup_expired_sessions
+        from src.api.v1.presign import _cleanup_expired_sessions, _upload_sessions
 
         # Clear any existing sessions
         _upload_sessions.clear()
@@ -46,7 +46,6 @@ class TestUploadSessionCleanup:
 
     def test_session_has_expiry_timestamp(self):
         """Sessions should have expires_at timestamp set."""
-        from src.api.v1.presign import _upload_sessions
 
         # When a session is created, it should have expires_at
         # This is a structural test - actual creation tested in integration tests
@@ -63,7 +62,7 @@ class TestUploadSessionCleanup:
 
     def test_cleanup_handles_missing_expires_at(self):
         """Cleanup should handle sessions without expires_at gracefully."""
-        from src.api.v1.presign import _upload_sessions, _cleanup_expired_sessions
+        from src.api.v1.presign import _cleanup_expired_sessions, _upload_sessions
 
         # Clear any existing sessions
         _upload_sessions.clear()
@@ -87,7 +86,7 @@ class TestUploadSessionCleanup:
 
     def test_multiple_expired_sessions_cleaned(self):
         """Multiple expired sessions should all be cleaned."""
-        from src.api.v1.presign import _upload_sessions, _cleanup_expired_sessions
+        from src.api.v1.presign import _cleanup_expired_sessions, _upload_sessions
 
         _upload_sessions.clear()
 
@@ -162,9 +161,8 @@ class TestUploadSessionSizeLimit:
     def test_cleanup_enforces_max_size(self):
         """Cleanup should evict old sessions when over limit."""
         from src.api.v1.presign import (
-            _upload_sessions,
             _cleanup_expired_sessions,
-            MAX_UPLOAD_SESSIONS,
+            _upload_sessions,
         )
 
         _upload_sessions.clear()
@@ -173,6 +171,7 @@ class TestUploadSessionSizeLimit:
 
         # Temporarily set a small max for testing
         import src.api.v1.presign as presign_module
+
         original_max = presign_module.MAX_UPLOAD_SESSIONS
         presign_module.MAX_UPLOAD_SESSIONS = 10
 

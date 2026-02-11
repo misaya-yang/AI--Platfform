@@ -12,9 +12,10 @@ ACL 权限管理单元测试
 - admin_user: 管理员用户
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.core.auth.user_resolver import UserContext
 from src.core.exceptions import AuthenticationRequiredError
@@ -35,6 +36,7 @@ def _rbac_has_permission(subjects, permission: str) -> bool:
 
 
 # ============ 测试账号 Fixtures ============
+
 
 @pytest.fixture
 def user_alice():
@@ -86,6 +88,7 @@ def guest_user():
 
 # ============ Agent/Assistant 权限测试 ============
 
+
 class TestAssistantOwnership:
     """Assistant 所有权验证测试"""
 
@@ -93,10 +96,10 @@ class TestAssistantOwnership:
     def mock_proxy(self):
         """创建 Mock LangGraphProxy"""
         from src.adapters.langgraph_proxy import (
-            LangGraphProxy,
-            LangGraphLoadBalancer,
-            LoadBalancerConfig,
             LangGraphInstance,
+            LangGraphLoadBalancer,
+            LangGraphProxy,
+            LoadBalancerConfig,
         )
 
         # 创建最小化的 LoadBalancer
@@ -157,7 +160,9 @@ class TestAssistantOwnership:
         mock_proxy._verify_assistant_ownership(assistant, admin_user, require_write=False)
         mock_proxy._verify_assistant_ownership(assistant, admin_user, require_write=True)
 
-    def test_verify_assistant_ownership_shared_user_read_only(self, mock_proxy, user_alice, user_bob):
+    def test_verify_assistant_ownership_shared_user_read_only(
+        self, mock_proxy, user_alice, user_bob
+    ):
         """测试：共享用户只能读取，不能写入"""
         from src.adapters.langgraph_proxy import AssistantAccessDeniedError
 
@@ -205,10 +210,10 @@ class TestThreadOwnership:
     def mock_proxy(self):
         """创建 Mock LangGraphProxy"""
         from src.adapters.langgraph_proxy import (
-            LangGraphProxy,
-            LangGraphLoadBalancer,
-            LoadBalancerConfig,
             LangGraphInstance,
+            LangGraphLoadBalancer,
+            LangGraphProxy,
+            LoadBalancerConfig,
         )
 
         config = LoadBalancerConfig(
@@ -268,6 +273,7 @@ class TestThreadOwnership:
 
 
 # ============ 知识库 ACL 测试 ============
+
 
 class TestKnowledgeRetrieverACL:
     """知识库检索器 ACL 测试"""
@@ -434,6 +440,7 @@ class TestCreateRetrievalToolACL:
 
 # ============ Confluence ACL 测试 ============
 
+
 class TestConfluenceAccessControl:
     """Confluence 资源访问控制测试"""
 
@@ -467,7 +474,9 @@ class TestConfluenceAccessControl:
         # 不应抛出异常
         mock_sync_service._verify_confluence_access(resource, "connection", user_alice)
 
-    def test_verify_confluence_access_non_owner_denied(self, mock_sync_service, user_alice, user_bob):
+    def test_verify_confluence_access_non_owner_denied(
+        self, mock_sync_service, user_alice, user_bob
+    ):
         """测试：非所有者无法访问"""
         from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
 
@@ -482,7 +491,9 @@ class TestConfluenceAccessControl:
             mock_sync_service._verify_confluence_access(resource, "connection", user_bob)
         assert "connection" in str(exc_info.value)
 
-    def test_verify_confluence_access_admin_allowed(self, mock_sync_service, user_alice, admin_user):
+    def test_verify_confluence_access_admin_allowed(
+        self, mock_sync_service, user_alice, admin_user
+    ):
         """测试：管理员可以访问任何资源"""
         resource = {
             "connection_id": "conn_001",
@@ -530,28 +541,34 @@ class TestConfluenceBindingAccess:
     @pytest.mark.asyncio
     async def test_verify_binding_access_owner_allowed(self, mock_sync_service, user_alice):
         """测试：Binding 所有者可以访问"""
-        mock_sync_service.db.get_confluence_binding = AsyncMock(return_value={
-            "binding_id": "bind_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "space_key": "TEST",
-        })
+        mock_sync_service.db.get_confluence_binding = AsyncMock(
+            return_value={
+                "binding_id": "bind_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "space_key": "TEST",
+            }
+        )
 
         # 不应抛出异常
         binding = await mock_sync_service._verify_binding_access("bind_001", user_alice)
         assert binding["binding_id"] == "bind_001"
 
     @pytest.mark.asyncio
-    async def test_verify_binding_access_non_owner_denied(self, mock_sync_service, user_alice, user_bob):
+    async def test_verify_binding_access_non_owner_denied(
+        self, mock_sync_service, user_alice, user_bob
+    ):
         """测试：非所有者无法访问 Binding"""
         from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
 
-        mock_sync_service.db.get_confluence_binding = AsyncMock(return_value={
-            "binding_id": "bind_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "space_key": "TEST",
-        })
+        mock_sync_service.db.get_confluence_binding = AsyncMock(
+            return_value={
+                "binding_id": "bind_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "space_key": "TEST",
+            }
+        )
 
         with pytest.raises(ConfluenceAccessDeniedError):
             await mock_sync_service._verify_binding_access("bind_001", user_bob)
@@ -593,40 +610,50 @@ class TestConfluenceConnectionAccess:
     @pytest.mark.asyncio
     async def test_verify_connection_access_owner_allowed(self, mock_sync_service, user_alice):
         """测试：Connection 所有者可以访问"""
-        mock_sync_service.db.get_confluence_connection = AsyncMock(return_value={
-            "connection_id": "conn_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "domain": "test.atlassian.net",
-        })
+        mock_sync_service.db.get_confluence_connection = AsyncMock(
+            return_value={
+                "connection_id": "conn_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "domain": "test.atlassian.net",
+            }
+        )
 
         connection = await mock_sync_service._verify_connection_access("conn_001", user_alice)
         assert connection["connection_id"] == "conn_001"
 
     @pytest.mark.asyncio
-    async def test_verify_connection_access_non_owner_denied(self, mock_sync_service, user_alice, user_bob):
+    async def test_verify_connection_access_non_owner_denied(
+        self, mock_sync_service, user_alice, user_bob
+    ):
         """测试：非所有者无法访问 Connection"""
         from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
 
-        mock_sync_service.db.get_confluence_connection = AsyncMock(return_value={
-            "connection_id": "conn_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "domain": "test.atlassian.net",
-        })
+        mock_sync_service.db.get_confluence_connection = AsyncMock(
+            return_value={
+                "connection_id": "conn_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "domain": "test.atlassian.net",
+            }
+        )
 
         with pytest.raises(ConfluenceAccessDeniedError):
             await mock_sync_service._verify_connection_access("conn_001", user_bob)
 
     @pytest.mark.asyncio
-    async def test_verify_connection_access_admin_allowed(self, mock_sync_service, user_alice, admin_user):
+    async def test_verify_connection_access_admin_allowed(
+        self, mock_sync_service, user_alice, admin_user
+    ):
         """测试：管理员可以访问任何 Connection"""
-        mock_sync_service.db.get_confluence_connection = AsyncMock(return_value={
-            "connection_id": "conn_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "domain": "test.atlassian.net",
-        })
+        mock_sync_service.db.get_confluence_connection = AsyncMock(
+            return_value={
+                "connection_id": "conn_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "domain": "test.atlassian.net",
+            }
+        )
 
         connection = await mock_sync_service._verify_connection_access("conn_001", admin_user)
         assert connection["connection_id"] == "conn_001"
@@ -658,48 +685,59 @@ class TestConfluencePageAccess:
     async def test_verify_page_access_via_binding(self, mock_sync_service, user_alice):
         """测试：通过 Binding 验证 Page 访问权限"""
         # Mock page record
-        mock_sync_service.db.get_confluence_page = AsyncMock(return_value={
-            "id": "page_001",
-            "binding_id": "bind_001",
-            "page_id": "12345",
-            "title": "Test Page",
-        })
+        mock_sync_service.db.get_confluence_page = AsyncMock(
+            return_value={
+                "id": "page_001",
+                "binding_id": "bind_001",
+                "page_id": "12345",
+                "title": "Test Page",
+            }
+        )
 
         # Mock binding (owned by Alice)
-        mock_sync_service.db.get_confluence_binding = AsyncMock(return_value={
-            "binding_id": "bind_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "space_key": "TEST",
-        })
+        mock_sync_service.db.get_confluence_binding = AsyncMock(
+            return_value={
+                "binding_id": "bind_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "space_key": "TEST",
+            }
+        )
 
         page = await mock_sync_service._verify_page_access("page_001", user_alice)
         assert page["id"] == "page_001"
 
     @pytest.mark.asyncio
-    async def test_verify_page_access_non_owner_denied(self, mock_sync_service, user_alice, user_bob):
+    async def test_verify_page_access_non_owner_denied(
+        self, mock_sync_service, user_alice, user_bob
+    ):
         """测试：非所有者无法访问 Page"""
         from src.services.knowledge.confluence.sync_service import ConfluenceAccessDeniedError
 
-        mock_sync_service.db.get_confluence_page = AsyncMock(return_value={
-            "id": "page_001",
-            "binding_id": "bind_001",
-            "page_id": "12345",
-            "title": "Test Page",
-        })
+        mock_sync_service.db.get_confluence_page = AsyncMock(
+            return_value={
+                "id": "page_001",
+                "binding_id": "bind_001",
+                "page_id": "12345",
+                "title": "Test Page",
+            }
+        )
 
-        mock_sync_service.db.get_confluence_binding = AsyncMock(return_value={
-            "binding_id": "bind_001",
-            "owner_id": "user_alice_001",
-            "created_by": "user_alice_001",
-            "space_key": "TEST",
-        })
+        mock_sync_service.db.get_confluence_binding = AsyncMock(
+            return_value={
+                "binding_id": "bind_001",
+                "owner_id": "user_alice_001",
+                "created_by": "user_alice_001",
+                "space_key": "TEST",
+            }
+        )
 
         with pytest.raises(ConfluenceAccessDeniedError):
             await mock_sync_service._verify_page_access("page_001", user_bob)
 
 
 # ============ 跨模块权限隔离测试 ============
+
 
 class TestCrossUserIsolation:
     """跨用户隔离测试"""
@@ -708,10 +746,10 @@ class TestCrossUserIsolation:
     def mock_proxy(self):
         """创建 Mock LangGraphProxy"""
         from src.adapters.langgraph_proxy import (
-            LangGraphProxy,
-            LangGraphLoadBalancer,
-            LoadBalancerConfig,
             LangGraphInstance,
+            LangGraphLoadBalancer,
+            LangGraphProxy,
+            LoadBalancerConfig,
         )
 
         config = LoadBalancerConfig(
@@ -790,6 +828,7 @@ class TestCrossUserIsolation:
 
 # ============ 缓存键隔离测试 ============
 
+
 class TestCacheKeyIsolation:
     """缓存键隔离测试"""
 
@@ -797,10 +836,10 @@ class TestCacheKeyIsolation:
     def mock_proxy(self):
         """创建 Mock LangGraphProxy"""
         from src.adapters.langgraph_proxy import (
-            LangGraphProxy,
-            LangGraphLoadBalancer,
-            LoadBalancerConfig,
             LangGraphInstance,
+            LangGraphLoadBalancer,
+            LangGraphProxy,
+            LoadBalancerConfig,
         )
 
         config = LoadBalancerConfig(
@@ -853,6 +892,7 @@ class TestCacheKeyIsolation:
 
 # ============ 透明代理服务级授权测试 ============
 
+
 class TestProxyServiceAuthorization:
     """透明代理服务级授权测试
 
@@ -883,29 +923,29 @@ class TestProxyServiceAuthorization:
     def mock_auth_context(self):
         """创建模拟 AuthContext"""
         from src.api.deps import AuthContext
+
         return AuthContext(
             user_id="user_alice_001",
             tenant_id="tenant_test",
             roles=["user", "service:invoke"],
-            permissions=[]
+            permissions=[],
         )
 
     @pytest.fixture
     def mock_guest_auth_context(self):
         """创建模拟 guest AuthContext"""
         from src.api.deps import AuthContext
-        return AuthContext(
-            user_id="",
-            tenant_id="",
-            roles=["guest"],
-            permissions=[]
-        )
+
+        return AuthContext(user_id="", tenant_id="", roles=["guest"], permissions=[])
 
     @pytest.mark.asyncio
-    async def test_rbac_permission_required(self, mock_request, guest_user, mock_guest_auth_context):
+    async def test_rbac_permission_required(
+        self, mock_request, guest_user, mock_guest_auth_context
+    ):
         """测试：缺少 AgentInvoke capability 权限应被拒绝"""
-        from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
+
+        from src.api.v1.proxy import check_service_authorization
 
         with pytest.raises(HTTPException) as exc_info:
             await check_service_authorization(
@@ -916,10 +956,13 @@ class TestProxyServiceAuthorization:
         assert exc_info.value.detail["required_permission"] == "conversation:playground:access"
 
     @pytest.mark.asyncio
-    async def test_service_require_auth_unauthenticated_denied(self, mock_request, guest_user, mock_guest_auth_context):
+    async def test_service_require_auth_unauthenticated_denied(
+        self, mock_request, guest_user, mock_guest_auth_context
+    ):
         """测试：require_auth=True 时未认证用户被拒绝"""
-        from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
+
+        from src.api.v1.proxy import check_service_authorization
 
         capability_guest_auth = mock_guest_auth_context.model_copy(
             update={"roles": ["guest", "service:invoke"]}
@@ -951,8 +994,9 @@ class TestProxyServiceAuthorization:
     @pytest.mark.asyncio
     async def test_service_allowed_roles_denied(self, mock_request, user_alice, mock_auth_context):
         """测试：用户角色不在 allowed_roles 中被拒绝"""
-        from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
+
+        from src.api.v1.proxy import check_service_authorization
 
         # 模拟服务配置：allowed_roles=["premium", "enterprise"]
         mock_service = MagicMock()
@@ -964,7 +1008,10 @@ class TestProxyServiceAuthorization:
         service_config.auth.enabled = True
         service_config.auth.public = False
         service_config.auth.require_auth = False
-        service_config.auth.allowed_roles = ["premium", "enterprise"]  # Alice 只有 user, service:invoke
+        service_config.auth.allowed_roles = [
+            "premium",
+            "enterprise",
+        ]  # Alice 只有 user, service:invoke
         service_config.auth.allowed_api_keys = []
 
         mock_service.get_service_config.return_value = service_config
@@ -980,14 +1027,14 @@ class TestProxyServiceAuthorization:
     @pytest.mark.asyncio
     async def test_service_allowed_roles_admin_bypass(self, mock_request, admin_user):
         """测试：admin 角色可绕过 allowed_roles 限制"""
-        from src.api.v1.proxy import check_service_authorization
         from src.api.deps import AuthContext
+        from src.api.v1.proxy import check_service_authorization
 
         admin_auth = AuthContext(
             user_id="admin_001",
             tenant_id="tenant_test",
             roles=["user", "admin", "service:invoke"],
-            permissions=[]
+            permissions=[],
         )
 
         # 模拟服务配置：allowed_roles=["premium"]（admin 不在列表中）
@@ -1009,15 +1056,14 @@ class TestProxyServiceAuthorization:
         mock_request.app.state.database.get_tenant = AsyncMock(return_value=None)
 
         # Admin 应该可以访问
-        await check_service_authorization(
-            mock_request, "test_service", admin_user, admin_auth
-        )
+        await check_service_authorization(mock_request, "test_service", admin_user, admin_auth)
 
     @pytest.mark.asyncio
     async def test_allowed_services_restriction(self, mock_request, user_alice, mock_auth_context):
         """测试：allowed_services 限制用户可访问的服务"""
-        from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
+
+        from src.api.v1.proxy import check_service_authorization
 
         # 无服务级配置
         mock_request.app.state.registry.get = AsyncMock(return_value=None)
@@ -1036,7 +1082,9 @@ class TestProxyServiceAuthorization:
         assert "not in allowed services" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_allowed_services_wildcard_allowed(self, mock_request, user_alice, mock_auth_context):
+    async def test_allowed_services_wildcard_allowed(
+        self, mock_request, user_alice, mock_auth_context
+    ):
         """测试：allowed_services=["*"] 允许所有服务"""
         from src.api.v1.proxy import check_service_authorization
 
@@ -1044,9 +1092,7 @@ class TestProxyServiceAuthorization:
         mock_request.app.state.registry.get = AsyncMock(return_value=None)
 
         # 模拟 API Key 的 allowed_services=["*"]
-        mock_request.state.api_key_info = {
-            "allowed_services": ["*"]
-        }
+        mock_request.state.api_key_info = {"allowed_services": ["*"]}
         mock_request.app.state.database.get_tenant = AsyncMock(return_value=None)
 
         # 应该成功
@@ -1080,20 +1126,25 @@ class TestProxyServiceAuthorization:
         )
 
     @pytest.mark.asyncio
-    async def test_tenant_allowed_services_restriction(self, mock_request, user_alice, mock_auth_context):
+    async def test_tenant_allowed_services_restriction(
+        self, mock_request, user_alice, mock_auth_context
+    ):
         """测试：租户级别的 allowed_services 限制"""
-        from src.api.v1.proxy import check_service_authorization
         from fastapi import HTTPException
+
+        from src.api.v1.proxy import check_service_authorization
 
         # 无服务级配置
         mock_request.app.state.registry.get = AsyncMock(return_value=None)
         mock_request.state.api_key_info = None
 
         # 模拟租户的 allowed_services
-        mock_request.app.state.database.get_tenant = AsyncMock(return_value={
-            "tenant_id": "tenant_test",
-            "allowed_services": ["service_x", "service_y"]  # 不包含 test_service
-        })
+        mock_request.app.state.database.get_tenant = AsyncMock(
+            return_value={
+                "tenant_id": "tenant_test",
+                "allowed_services": ["service_x", "service_y"],  # 不包含 test_service
+            }
+        )
 
         with pytest.raises(HTTPException) as exc_info:
             await check_service_authorization(
@@ -1107,8 +1158,9 @@ class TestProxyRateLimitHeaders:
 
     def test_rate_limit_headers_build(self):
         """测试：限流响应头正确构建"""
+        from datetime import timedelta
+
         from src.core.gateway.multi_dimension_rate_limiter import RateLimitHeaders, RateLimitResult
-        from datetime import datetime, timedelta
 
         reset_time = datetime.now() + timedelta(seconds=60)
         result = RateLimitResult(
@@ -1130,8 +1182,9 @@ class TestProxyRateLimitHeaders:
 
     def test_rate_limit_exceeded_response(self):
         """测试：限流超限响应正确构建"""
+        from datetime import timedelta
+
         from src.core.gateway.multi_dimension_rate_limiter import RateLimitHeaders, RateLimitResult
-        from datetime import datetime, timedelta
 
         reset_time = datetime.now() + timedelta(seconds=60)
         result = RateLimitResult(

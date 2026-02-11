@@ -8,18 +8,16 @@ Tests for the context compression functionality:
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock
-from typing import Any, Dict, List
-
 import importlib.util
 import sys
+from typing import Any
+
+import pytest
 
 # Load the compressor module directly without going through __init__.py
 # This avoids importing the entire assistant package which has many dependencies
 _spec = importlib.util.spec_from_file_location(
-    "src.services.assistant.memory.compressor",
-    "src/services/assistant/memory/compressor.py"
+    "src.services.assistant.memory.compressor", "src/services/assistant/memory/compressor.py"
 )
 _compressor_module = importlib.util.module_from_spec(_spec)
 sys.modules["src.services.assistant.memory.compressor"] = _compressor_module
@@ -44,7 +42,7 @@ class MockLLMService:
 
     def __init__(self, response: str = "Test summary of the conversation."):
         self.response = response
-        self.calls: List[Dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
 
     async def complete(self, prompt: str, max_tokens: int = 200) -> str:
         """Record the call and return mock response."""
@@ -164,45 +162,31 @@ class TestContextCompressorCompress:
             {"role": "assistant", "content": "Hi there!"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=6
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=6)
 
         assert result.summary == ""
         assert len(result.recent_messages) == 2
         assert result.recent_messages[0]["content"] == "Hello"
 
     @pytest.mark.asyncio
-    async def test_compress_exact_preserve_recent_count(
-        self, compressor: ContextCompressor
-    ):
+    async def test_compress_exact_preserve_recent_count(self, compressor: ContextCompressor):
         """Test when message count equals preserve_recent."""
-        messages = [
-            {"role": "user", "content": f"Message {i}"} for i in range(6)
-        ]
+        messages = [{"role": "user", "content": f"Message {i}"} for i in range(6)]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=6
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=6)
 
         assert result.summary == ""
         assert len(result.recent_messages) == 6
 
     @pytest.mark.asyncio
-    async def test_compress_more_messages_than_preserve_recent(
-        self, mock_llm: MockLLMService
-    ):
+    async def test_compress_more_messages_than_preserve_recent(self, mock_llm: MockLLMService):
         """Test compressing when there are more messages than preserve_recent."""
         mock_llm.response = "User discussed tasks 1-4 with the assistant."
         compressor = ContextCompressor(llm_service=mock_llm)
 
-        messages = [
-            {"role": "user", "content": f"Message {i}"} for i in range(10)
-        ]
+        messages = [{"role": "user", "content": f"Message {i}"} for i in range(10)]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=6
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=6)
 
         assert result.summary != ""
         assert len(result.recent_messages) == 6
@@ -226,9 +210,7 @@ class TestContextCompressorCompress:
             {"role": "user", "content": "Message 8"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert "https://example.com" in result.preserved_urls
         assert "https://test.org" in result.preserved_urls
@@ -240,8 +222,14 @@ class TestContextCompressorCompress:
         compressor = ContextCompressor(llm_service=mock_llm)
 
         messages = [
-            {"role": "user", "content": "Here is my code:\n```python\ndef hello():\n    print('world')\n```"},
-            {"role": "assistant", "content": "Fixed:\n```python\ndef hello():\n    return 'world'\n```"},
+            {
+                "role": "user",
+                "content": "Here is my code:\n```python\ndef hello():\n    print('world')\n```",
+            },
+            {
+                "role": "assistant",
+                "content": "Fixed:\n```python\ndef hello():\n    return 'world'\n```",
+            },
             {"role": "user", "content": "Message 3"},
             {"role": "user", "content": "Message 4"},
             {"role": "user", "content": "Message 5"},
@@ -250,9 +238,7 @@ class TestContextCompressorCompress:
             {"role": "user", "content": "Message 8"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert len(result.preserved_code_blocks) == 2
 
@@ -267,16 +253,12 @@ class TestContextCompressorCompress:
             {"role": "user", "content": urls},
         ] + [{"role": "user", "content": f"Message {i}"} for i in range(7)]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert len(result.preserved_urls) <= MAX_PRESERVED_URLS
 
     @pytest.mark.asyncio
-    async def test_compress_limits_preserved_code_blocks(
-        self, mock_llm: MockLLMService
-    ):
+    async def test_compress_limits_preserved_code_blocks(self, mock_llm: MockLLMService):
         """Test that preserved code blocks are limited to MAX_PRESERVED_CODE_BLOCKS."""
         compressor = ContextCompressor(llm_service=mock_llm)
 
@@ -286,9 +268,7 @@ class TestContextCompressorCompress:
             {"role": "user", "content": code_blocks},
         ] + [{"role": "user", "content": f"Message {i}"} for i in range(7)]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert len(result.preserved_code_blocks) <= MAX_PRESERVED_CODE_BLOCKS
 
@@ -308,9 +288,7 @@ class TestContextCompressorCompress:
             {"role": "user", "content": "Message 8"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert "my_chart_v1" in result.key_artifacts
         assert "my_chart_v2" in result.key_artifacts
@@ -325,9 +303,7 @@ class TestContextCompressorCompress:
             {"role": "user", "content": f"Message {i} with some content"} for i in range(10)
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         assert result.token_count > 0
 
@@ -502,9 +478,7 @@ class TestContextCompressorGenerateSummary:
         assert result == ""
 
     @pytest.mark.asyncio
-    async def test_generate_summary_truncates_long_messages(
-        self, mock_llm: MockLLMService
-    ):
+    async def test_generate_summary_truncates_long_messages(self, mock_llm: MockLLMService):
         """Test that long messages are truncated before summarization."""
         compressor = ContextCompressor(llm_service=mock_llm)
         long_content = "A" * 2000  # Longer than 1000 char limit
@@ -520,6 +494,7 @@ class TestContextCompressorGenerateSummary:
     @pytest.mark.asyncio
     async def test_generate_summary_handles_llm_error(self, mock_llm: MockLLMService):
         """Test fallback when LLM fails."""
+
         async def failing_complete(prompt: str, max_tokens: int = 200) -> str:
             raise Exception("LLM error")
 
@@ -735,12 +710,9 @@ class TestLLMServiceProtocol:
 
     def test_protocol_is_runtime_checkable(self):
         """Test that LLMService is runtime checkable."""
-        from typing import runtime_checkable
 
         # The protocol should be decorated with @runtime_checkable
-        assert hasattr(LLMService, "__protocol_attrs__") or isinstance(
-            MockLLMService(), LLMService
-        )
+        assert hasattr(LLMService, "__protocol_attrs__") or isinstance(MockLLMService(), LLMService)
 
 
 # =============================================================================
@@ -758,21 +730,28 @@ class TestContextCompressorIntegration:
         compressor = ContextCompressor(llm_service=mock_llm)
 
         messages = [
-            {"role": "user", "content": "I need help with Python. Here's my code:\n```python\ndef broken():\n    pass\n```"},
-            {"role": "assistant", "content": "I see the issue. Check https://docs.python.org for reference."},
+            {
+                "role": "user",
+                "content": "I need help with Python. Here's my code:\n```python\ndef broken():\n    pass\n```",
+            },
+            {
+                "role": "assistant",
+                "content": "I see the issue. Check https://docs.python.org for reference.",
+            },
             {"role": "user", "content": "Thanks! Created artifact_id: fixed_code_v1"},
             {"role": "assistant", "content": "Great! Let me know if you need more help."},
             {"role": "user", "content": "One more question about testing."},
             {"role": "assistant", "content": "Sure, what would you like to know?"},
             {"role": "user", "content": "How do I write unit tests?"},
-            {"role": "assistant", "content": "Use pytest. Here's an example:\n```python\ndef test_example():\n    assert True\n```"},
+            {
+                "role": "assistant",
+                "content": "Use pytest. Here's an example:\n```python\ndef test_example():\n    assert True\n```",
+            },
             {"role": "user", "content": "That's helpful!"},
             {"role": "assistant", "content": "You're welcome!"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         # Verify summary was generated
         assert "Python" in result.summary or "bugs" in result.summary
@@ -809,9 +788,7 @@ class TestContextCompressorIntegration:
             {"role": "assistant", "content": "Response 4 - recent"},
         ]
 
-        result = await compressor.compress(
-            messages=messages, target_tokens=4000, preserve_recent=4
-        )
+        result = await compressor.compress(messages=messages, target_tokens=4000, preserve_recent=4)
 
         # Should compress first 4 messages (indices 0-3)
         assert result.summary != ""

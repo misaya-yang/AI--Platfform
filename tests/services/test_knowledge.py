@@ -9,10 +9,10 @@
 """
 
 from src.services.knowledge.retrieval import (
-    tokenize,
     bm25_scores,
-    reciprocal_rank_fusion,
     mmr_select,
+    reciprocal_rank_fusion,
+    tokenize,
 )
 
 

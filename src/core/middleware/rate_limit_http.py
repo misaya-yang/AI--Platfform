@@ -14,7 +14,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Optional
+from typing import Any
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -28,6 +28,7 @@ logger = get_logger(__name__)
 @dataclass
 class RateLimitConfig:
     """限流配置"""
+
     enabled: bool = True
 
     # 全局限流
@@ -47,17 +48,20 @@ class RateLimitConfig:
     ip_window: int = 60
 
     # 白名单路径
-    whitelist_paths: list = field(default_factory=lambda: [
-        "/health",
-        "/health/live",
-        "/health/ready",
-        "/metrics",
-    ])
+    whitelist_paths: list = field(
+        default_factory=lambda: [
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+        ]
+    )
 
 
 @dataclass
 class RateLimitInfo:
     """限流信息"""
+
     allowed: bool
     dimension: str  # "global" | "user" | "guest" | "ip"
     limit: int
@@ -74,10 +78,10 @@ class SlidingWindowRateLimiter:
     当 Redis 不可用时回退到内存实现
     """
 
-    def __init__(self, redis_client: Optional[Any] = None):
+    def __init__(self, redis_client: Any | None = None):
         self.redis = redis_client
         # 内存存储（Redis 不可用时）
-        self._requests: Dict[str, Deque[float]] = {}
+        self._requests: dict[str, deque[float]] = {}
 
     async def check(
         self,
@@ -205,7 +209,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self,
         app,
         config: RateLimitConfig,
-        redis_client: Optional[Any] = None,
+        redis_client: Any | None = None,
     ):
         super().__init__(app)
         self.config = config
@@ -236,28 +240,34 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if user_info:
             if user_info.user_type == "user":
                 # 登录用户限流
-                checks.append((
-                    "user",
-                    f"ratelimit:user:{user_info.user_id}",
-                    self.config.user_limit,
-                    self.config.user_window,
-                ))
+                checks.append(
+                    (
+                        "user",
+                        f"ratelimit:user:{user_info.user_id}",
+                        self.config.user_limit,
+                        self.config.user_window,
+                    )
+                )
             elif user_info.user_type in ("guest", "anonymous"):
                 # 游客/匿名用户限流（更严格）
-                checks.append((
-                    "guest",
-                    f"ratelimit:guest:{user_info.user_id}",
-                    self.config.guest_limit,
-                    self.config.guest_window,
-                ))
+                checks.append(
+                    (
+                        "guest",
+                        f"ratelimit:guest:{user_info.user_id}",
+                        self.config.guest_limit,
+                        self.config.guest_window,
+                    )
+                )
 
         # IP 限流
-        checks.append((
-            "ip",
-            f"ratelimit:ip:{client_ip}",
-            self.config.ip_limit,
-            self.config.ip_window,
-        ))
+        checks.append(
+            (
+                "ip",
+                f"ratelimit:ip:{client_ip}",
+                self.config.ip_limit,
+                self.config.ip_window,
+            )
+        )
 
         # 执行所有检查
         for dimension, key, limit, window in checks:

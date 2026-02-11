@@ -11,7 +11,7 @@ Tests:
 
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -42,7 +42,9 @@ def sample_txt_file(temp_storage):
     user_dir.mkdir(parents=True, exist_ok=True)
 
     file_path = user_dir / "abc123_20240101_120000.txt"
-    file_path.write_text("This is a test document.\n\nIt has multiple paragraphs.\n\nEnd of document.")
+    file_path.write_text(
+        "This is a test document.\n\nIt has multiple paragraphs.\n\nEnd of document."
+    )
     return file_path
 
 
@@ -53,7 +55,9 @@ def sample_md_file(temp_storage):
     user_dir.mkdir(parents=True, exist_ok=True)
 
     file_path = user_dir / "doc456_20240101_120000.md"
-    file_path.write_text("# Heading\n\nThis is **bold** text.\n\n## Subheading\n\n- Item 1\n- Item 2")
+    file_path.write_text(
+        "# Heading\n\nThis is **bold** text.\n\n## Subheading\n\n- Item 1\n- Item 2"
+    )
     return file_path
 
 
@@ -62,7 +66,7 @@ class TestDocumentParser:
 
     def test_init_default_storage_path(self):
         """Test initialization with default storage path."""
-        from src.services.assistant.document_parser import DocumentParser, FILE_STORAGE_PATH
+        from src.services.assistant.document_parser import FILE_STORAGE_PATH, DocumentParser
 
         parser = DocumentParser()
         assert parser.storage_base_path == FILE_STORAGE_PATH
@@ -154,7 +158,9 @@ class TestPathResolution:
             with pytest.raises(DocumentParseError) as exc_info:
                 parser._resolve_path("/uploads/../outside_file.txt")
 
-            assert "Invalid file path" in str(exc_info.value) or "File not found" in str(exc_info.value)
+            assert "Invalid file path" in str(exc_info.value) or "File not found" in str(
+                exc_info.value
+            )
         finally:
             outside_file.unlink(missing_ok=True)
 
@@ -272,7 +278,12 @@ class TestParsing:
             mock_element4 = MagicMock()
             mock_element4.text = ""  # Empty text
 
-            mock_partition.return_value = [mock_element1, mock_element2, mock_element3, mock_element4]
+            mock_partition.return_value = [
+                mock_element1,
+                mock_element2,
+                mock_element3,
+                mock_element4,
+            ]
 
             result = await parser.parse("/uploads/test_user/abc123_20240101_120000.txt")
 
@@ -284,7 +295,10 @@ class TestParsing:
         from src.services.assistant.document_parser import DocumentParseError
 
         with patch.dict("sys.modules", {"unstructured.partition.auto": None}):
-            with patch("src.services.assistant.document_parser.partition", side_effect=ImportError("No module")):
+            with patch(
+                "src.services.assistant.document_parser.partition",
+                side_effect=ImportError("No module"),
+            ):
                 with pytest.raises(DocumentParseError) as exc_info:
                     await parser.parse("/uploads/test_user/abc123_20240101_120000.txt")
 

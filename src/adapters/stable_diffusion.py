@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict
+from typing import Any
 
 from ..core.exceptions import ValidationFailedError
 from ..models.enums import ContentType
@@ -14,7 +14,7 @@ class Text2ImageAdapter(ProtocolAdapter):
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         prompt = self._extract_prompt(request.inputs)
         params = request.parameters or {}
-        service_request: Dict[str, Any] = {
+        service_request: dict[str, Any] = {
             "prompt": prompt,
             "negative_prompt": params.get("negative_prompt", ""),
             "width": params.get("width", 512),

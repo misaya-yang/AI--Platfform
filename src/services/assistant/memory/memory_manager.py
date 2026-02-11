@@ -46,7 +46,7 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -63,42 +63,34 @@ class MemoryDatabase(Protocol):
     """
 
     async def store_session_memory(
-        self, tenant_id: str, session_id: str, key: str, value: Any, metadata: Optional[dict]
+        self, tenant_id: str, session_id: str, key: str, value: Any, metadata: dict | None
     ) -> None: ...
 
-    async def get_session_memory(
-        self, tenant_id: str, session_id: str, key: str
-    ) -> Optional[Any]: ...
+    async def get_session_memory(self, tenant_id: str, session_id: str, key: str) -> Any | None: ...
 
     async def search_session_memory(
         self, tenant_id: str, session_id: str, query: str, limit: int
-    ) -> List[Dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]: ...
 
-    async def delete_session_memory(
-        self, tenant_id: str, session_id: str, key: str
-    ) -> bool: ...
+    async def delete_session_memory(self, tenant_id: str, session_id: str, key: str) -> bool: ...
 
     async def clear_session_memory(self, tenant_id: str, session_id: str) -> None: ...
 
     async def store_user_memory(
-        self, tenant_id: str, user_id: str, key: str, value: Any, metadata: Optional[dict]
+        self, tenant_id: str, user_id: str, key: str, value: Any, metadata: dict | None
     ) -> None: ...
 
-    async def get_user_memory(
-        self, tenant_id: str, user_id: str, key: str
-    ) -> Optional[Any]: ...
+    async def get_user_memory(self, tenant_id: str, user_id: str, key: str) -> Any | None: ...
 
     async def search_user_memory(
         self, tenant_id: str, user_id: str, query: str, limit: int
-    ) -> List[Dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]: ...
 
-    async def delete_user_memory(
-        self, tenant_id: str, user_id: str, key: str
-    ) -> bool: ...
+    async def delete_user_memory(self, tenant_id: str, user_id: str, key: str) -> bool: ...
 
     async def get_frequently_accessed_user_memory(
         self, tenant_id: str, user_id: str, limit: int
-    ) -> List[Dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]: ...
 
 
 class MemoryLayer(ABC):
@@ -110,7 +102,7 @@ class MemoryLayer(ABC):
     """
 
     @abstractmethod
-    async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
+    async def store(self, key: str, value: Any, metadata: dict | None = None) -> None:
         """
         Store a value with the given key.
 
@@ -122,7 +114,7 @@ class MemoryLayer(ABC):
         pass
 
     @abstractmethod
-    async def retrieve(self, key: str) -> Optional[Any]:
+    async def retrieve(self, key: str) -> Any | None:
         """
         Retrieve a value by key.
 
@@ -135,7 +127,7 @@ class MemoryLayer(ABC):
         pass
 
     @abstractmethod
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """
         Search for entries matching the query.
 
@@ -163,11 +155,11 @@ class WorkingMemoryLayer(MemoryLayer):
 
     def __init__(self) -> None:
         """Initialize an empty working memory layer."""
-        self._storage: Dict[str, Any] = {}
-        self._metadata: Dict[str, dict] = {}
-        self._timestamps: Dict[str, datetime] = {}
+        self._storage: dict[str, Any] = {}
+        self._metadata: dict[str, dict] = {}
+        self._timestamps: dict[str, datetime] = {}
 
-    async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
+    async def store(self, key: str, value: Any, metadata: dict | None = None) -> None:
         """
         Store a value in working memory.
 
@@ -180,7 +172,7 @@ class WorkingMemoryLayer(MemoryLayer):
         self._metadata[key] = metadata or {}
         self._timestamps[key] = datetime.now()
 
-    async def retrieve(self, key: str) -> Optional[Any]:
+    async def retrieve(self, key: str) -> Any | None:
         """
         Retrieve a value from working memory.
 
@@ -192,7 +184,7 @@ class WorkingMemoryLayer(MemoryLayer):
         """
         return self._storage.get(key)
 
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """
         Search working memory using simple keyword matching.
 
@@ -206,7 +198,7 @@ class WorkingMemoryLayer(MemoryLayer):
         Returns:
             List of matching entries with key, value, and metadata
         """
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         query_lower = query.lower()
 
         for key, value in self._storage.items():
@@ -214,20 +206,15 @@ class WorkingMemoryLayer(MemoryLayer):
             value_str = json.dumps(value) if not isinstance(value, str) else value
 
             # Check if query matches key or value (not both to avoid duplicates)
-            if query_lower in key.lower():
-                results.append({
-                    "key": key,
-                    "value": value,
-                    "metadata": self._metadata.get(key, {}),
-                    "timestamp": self._timestamps.get(key),
-                })
-            elif query_lower in value_str.lower():
-                results.append({
-                    "key": key,
-                    "value": value,
-                    "metadata": self._metadata.get(key, {}),
-                    "timestamp": self._timestamps.get(key),
-                })
+            if query_lower in key.lower() or query_lower in value_str.lower():
+                results.append(
+                    {
+                        "key": key,
+                        "value": value,
+                        "metadata": self._metadata.get(key, {}),
+                        "timestamp": self._timestamps.get(key),
+                    }
+                )
 
             # Check limit after both conditions
             if len(results) >= limit:
@@ -241,7 +228,7 @@ class WorkingMemoryLayer(MemoryLayer):
         self._metadata.clear()
         self._timestamps.clear()
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         """Return all keys in working memory."""
         return list(self._storage.keys())
 
@@ -276,7 +263,7 @@ class SessionMemoryLayer(MemoryLayer):
         self.tenant_id = tenant_id
         self.session_id = session_id
 
-    async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
+    async def store(self, key: str, value: Any, metadata: dict | None = None) -> None:
         """
         Store a value in session memory (database-backed).
 
@@ -293,7 +280,7 @@ class SessionMemoryLayer(MemoryLayer):
             metadata=metadata,
         )
 
-    async def retrieve(self, key: str) -> Optional[Any]:
+    async def retrieve(self, key: str) -> Any | None:
         """
         Retrieve a value from session memory.
 
@@ -309,7 +296,7 @@ class SessionMemoryLayer(MemoryLayer):
             key=key,
         )
 
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """
         Search session memory.
 
@@ -366,7 +353,7 @@ class LongTermMemoryLayer(MemoryLayer):
     """
 
     # Default user preferences
-    DEFAULT_PREFERENCES: Dict[str, Any] = {
+    DEFAULT_PREFERENCES: dict[str, Any] = {
         "language": "zh-CN",
         "response_style": "professional",
         "preferred_tools": [],
@@ -386,7 +373,7 @@ class LongTermMemoryLayer(MemoryLayer):
         self.tenant_id = tenant_id
         self.user_id = user_id
 
-    async def store(self, key: str, value: Any, metadata: Optional[dict] = None) -> None:
+    async def store(self, key: str, value: Any, metadata: dict | None = None) -> None:
         """
         Store a value in long-term memory (database-backed).
 
@@ -403,7 +390,7 @@ class LongTermMemoryLayer(MemoryLayer):
             metadata=metadata,
         )
 
-    async def retrieve(self, key: str) -> Optional[Any]:
+    async def retrieve(self, key: str) -> Any | None:
         """
         Retrieve a value from long-term memory.
 
@@ -421,7 +408,7 @@ class LongTermMemoryLayer(MemoryLayer):
             key=key,
         )
 
-    async def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         """
         Search long-term memory.
 
@@ -455,7 +442,7 @@ class LongTermMemoryLayer(MemoryLayer):
             key=key,
         )
 
-    async def get_preferences(self) -> Dict[str, Any]:
+    async def get_preferences(self) -> dict[str, Any]:
         """
         Get user preferences from long-term memory.
 
@@ -470,7 +457,7 @@ class LongTermMemoryLayer(MemoryLayer):
         merged.update(preferences)
         return merged
 
-    async def update_preferences(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+    async def update_preferences(self, updates: dict[str, Any]) -> dict[str, Any]:
         """
         Update user preferences.
 
@@ -485,7 +472,7 @@ class LongTermMemoryLayer(MemoryLayer):
         await self.store("user_preferences", current, metadata={"type": "preferences"})
         return current
 
-    async def get_frequently_accessed(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_frequently_accessed(self, limit: int = 10) -> list[dict[str, Any]]:
         """
         Get the most frequently accessed memory entries.
 
@@ -520,9 +507,7 @@ class MemoryManager:
         long_term: LongTermMemoryLayer instance
     """
 
-    def __init__(
-        self, db: MemoryDatabase, tenant_id: str, user_id: str, session_id: str
-    ) -> None:
+    def __init__(self, db: MemoryDatabase, tenant_id: str, user_id: str, session_id: str) -> None:
         """
         Initialize the memory manager with all three layers.
 
@@ -546,7 +531,7 @@ class MemoryManager:
         key: str,
         value: Any,
         layer: str = "working",
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         """
         Store a value in the specified memory layer.
@@ -568,11 +553,10 @@ class MemoryManager:
             await self.long_term.store(key, value, metadata)
         else:
             raise ValueError(
-                f"Invalid memory layer: {layer}. "
-                f"Must be 'working', 'session', or 'long_term'."
+                f"Invalid memory layer: {layer}. Must be 'working', 'session', or 'long_term'."
             )
 
-    async def recall(self, key: str) -> Optional[Any]:
+    async def recall(self, key: str) -> Any | None:
         """
         Retrieve a value, checking layers in priority order.
 
@@ -603,7 +587,7 @@ class MemoryManager:
         self,
         query: str,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Search across all memory layers.
 
@@ -618,7 +602,7 @@ class MemoryManager:
             List of matching entries with layer annotation:
             [{"key": ..., "value": ..., "metadata": ..., "layer": "working"}, ...]
         """
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
 
         # Search working memory
         working_results = await self.working.search(query, limit=limit)
@@ -644,7 +628,7 @@ class MemoryManager:
 
         return results[:limit]
 
-    async def get_user_preferences(self) -> Dict[str, Any]:
+    async def get_user_preferences(self) -> dict[str, Any]:
         """
         Get user preferences from long-term memory.
 
@@ -655,7 +639,7 @@ class MemoryManager:
         """
         return await self.long_term.get_preferences()
 
-    async def update_user_preferences(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+    async def update_user_preferences(self, updates: dict[str, Any]) -> dict[str, Any]:
         """
         Update user preferences in long-term memory.
 

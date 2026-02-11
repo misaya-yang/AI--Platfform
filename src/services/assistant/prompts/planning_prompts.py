@@ -29,8 +29,7 @@ References:
 - https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
 """
 
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 # =============================================================================
 # Intent Types Definition
@@ -523,6 +522,7 @@ Respond with valid JSON only (no markdown code blocks):
 # Helper Functions
 # =============================================================================
 
+
 def get_intent_types_description() -> str:
     """Get formatted description of all intent types."""
     lines = []
@@ -531,17 +531,17 @@ def get_intent_types_description() -> str:
     return "\n".join(lines)
 
 
-def get_intent_type_info(intent_type: str) -> Dict[str, Any]:
+def get_intent_type_info(intent_type: str) -> dict[str, Any]:
     """Get information about a specific intent type."""
     return INTENT_TYPES.get(intent_type, INTENT_TYPES["conversational"])
 
 
-def get_complexity_info(complexity: str) -> Dict[str, Any]:
+def get_complexity_info(complexity: str) -> dict[str, Any]:
     """Get information about a complexity level."""
     return COMPLEXITY_LEVELS.get(complexity, COMPLEXITY_LEVELS["moderate"])
 
 
-def _format_tools(tools: List[Any]) -> str:
+def _format_tools(tools: list[Any]) -> str:
     """Format tool list for prompts."""
     tool_descriptions = []
     for tool in tools:
@@ -557,7 +557,7 @@ def _format_tools(tools: List[Any]) -> str:
     return "\n".join(tool_descriptions) if tool_descriptions else "No specific tools available"
 
 
-def _format_task_list(tasks: List[Dict[str, Any]]) -> str:
+def _format_task_list(tasks: list[dict[str, Any]]) -> str:
     """Format task list for prompts."""
     if not tasks:
         return "None"
@@ -577,10 +577,11 @@ def _format_task_list(tasks: List[Dict[str, Any]]) -> str:
 # Prompt Builder Functions
 # =============================================================================
 
+
 def build_planning_prompt(
     user_request: str,
-    available_tools: List[Dict[str, Any]],
-    tool_constraints: Optional[Dict[str, Dict[str, Any]]] = None,
+    available_tools: list[dict[str, Any]],
+    tool_constraints: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """
     Build task planning prompt with guardrails.
@@ -642,7 +643,7 @@ def build_intent_analysis_prompt(request: str) -> str:
 
 def build_task_decomposition_prompt(
     task_description: str,
-    available_tools: List[str],
+    available_tools: list[str],
     current_state: str = "Initial state - no prior work completed",
 ) -> str:
     """
@@ -667,10 +668,10 @@ def build_task_decomposition_prompt(
 
 def build_todo_tracking_prompt(
     original_goal: str,
-    completed_tasks: List[Dict[str, Any]],
-    in_progress_tasks: List[Dict[str, Any]],
-    pending_tasks: List[Dict[str, Any]],
-    blocked_tasks: Optional[List[Dict[str, Any]]] = None,
+    completed_tasks: list[dict[str, Any]],
+    in_progress_tasks: list[dict[str, Any]],
+    pending_tasks: list[dict[str, Any]],
+    blocked_tasks: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build TODO tracking prompt for progress management.
@@ -696,8 +697,8 @@ def build_todo_tracking_prompt(
 
 def build_task_refinement_prompt(
     original_plan: str,
-    completed_steps: List[Dict[str, Any]],
-    failed_steps: List[Dict[str, Any]],
+    completed_steps: list[dict[str, Any]],
+    failed_steps: list[dict[str, Any]],
     new_information: str = "",
 ) -> str:
     """
@@ -738,7 +739,7 @@ def build_task_refinement_prompt(
 def build_execution_reflection_prompt(
     original_goal: str,
     plan_summary: str,
-    execution_timeline: List[Dict[str, Any]],
+    execution_timeline: list[dict[str, Any]],
     final_outcome: str,
 ) -> str:
     """

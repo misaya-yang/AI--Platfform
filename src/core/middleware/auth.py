@@ -13,12 +13,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
-from fastapi import Request, HTTPException
+from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response, JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from ..auth.user_resolver import UserContext
 from ..observability.logging import get_logger
@@ -29,12 +30,13 @@ logger = get_logger(__name__)
 @dataclass
 class AuthConfig:
     """鉴权配置"""
+
     # JWT 配置
     jwt_enabled: bool = False
     jwt_secret: str = ""
-    jwt_algorithms: List[str] = field(default_factory=lambda: ["HS256"])
-    jwt_audience: Optional[str] = None
-    jwt_issuer: Optional[str] = None
+    jwt_algorithms: list[str] = field(default_factory=lambda: ["HS256"])
+    jwt_audience: str | None = None
+    jwt_issuer: str | None = None
 
     # API Key 配置
     api_key_enabled: bool = False
@@ -50,28 +52,31 @@ class AuthConfig:
     anonymous_header: str = "X-AG-Anonymous-Id"
 
     # 白名单路径（不需要认证）
-    whitelist_paths: List[str] = field(default_factory=lambda: [
-        "/health",
-        "/health/live",
-        "/health/ready",
-        "/metrics",
-        "/docs",
-        "/openapi.json",
-    ])
+    whitelist_paths: list[str] = field(
+        default_factory=lambda: [
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
+        ]
+    )
 
 
 @dataclass
 class UserInfo:
     """认证后的用户信息"""
+
     user_id: str
     user_type: str  # "user" | "guest" | "anonymous"
     tenant_id: str = ""
     tier: str = "anonymous"
     is_authenticated: bool = False
-    roles: List[str] = field(default_factory=list)
-    session_id: Optional[str] = None  # 游客 session ID
+    roles: list[str] = field(default_factory=list)
+    session_id: str | None = None  # 游客 session ID
     ip: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_user_context(self) -> UserContext:
         """转换为 UserContext"""
@@ -100,9 +105,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self,
         app,
         config: AuthConfig,
-        jwt_decoder: Optional[Callable] = None,
-        api_key_validator: Optional[Callable] = None,
-        guest_session_validator: Optional[Callable] = None,
+        jwt_decoder: Callable | None = None,
+        api_key_validator: Callable | None = None,
+        guest_session_validator: Callable | None = None,
     ):
         super().__init__(app)
         self.config = config
@@ -217,7 +222,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self,
         token: str,
         client_ip: str,
-    ) -> Optional[UserInfo]:
+    ) -> UserInfo | None:
         """JWT Token 认证"""
         if not self.jwt_decoder:
             return None
@@ -269,7 +274,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self,
         api_key: str,
         client_ip: str,
-    ) -> Optional[UserInfo]:
+    ) -> UserInfo | None:
         """API Key 认证"""
         if not self.api_key_validator:
             return None
@@ -301,7 +306,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self,
         session_id: str,
         client_ip: str,
-    ) -> Optional[UserInfo]:
+    ) -> UserInfo | None:
         """Guest Session 认证"""
         if not self.guest_session_validator:
             # 没有验证器时，简单信任 session_id
@@ -361,13 +366,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 # ============ JWT 解码辅助函数 ============
 
+
 async def default_jwt_decoder(
     token: str,
     secret: str,
-    algorithms: List[str],
-    audience: Optional[str] = None,
-    issuer: Optional[str] = None,
-) -> Dict[str, Any]:
+    algorithms: list[str],
+    audience: str | None = None,
+    issuer: str | None = None,
+) -> dict[str, Any]:
     """默认 JWT 解码器"""
     import jwt
 
@@ -381,6 +387,7 @@ async def default_jwt_decoder(
 
 
 # ============ 远程 JWT 验证器 ============
+
 
 class RemoteJWTValidator:
     """
@@ -398,13 +405,13 @@ class RemoteJWTValidator:
         self.verify_url = verify_url
         self.timeout = timeout
         self.cache_ttl = cache_ttl
-        self._cache: Dict[str, tuple] = {}  # token -> (payload, expire_time)
+        self._cache: dict[str, tuple] = {}  # token -> (payload, expire_time)
 
     async def __call__(
         self,
         token: str,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """验证 JWT"""
         import httpx
 

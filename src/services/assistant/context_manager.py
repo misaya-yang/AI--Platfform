@@ -13,9 +13,10 @@ References:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import tiktoken
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.observability.logging import get_logger
 
@@ -25,6 +26,7 @@ logger = get_logger(__name__)
 @dataclass
 class ContextConfig:
     """Configuration for context management."""
+
     # Sliding window settings
     max_messages: int = 30  # Keep last N messages in full
     min_recent_messages: int = 6  # Always keep at least N recent messages
@@ -42,8 +44,9 @@ class ContextConfig:
 @dataclass
 class ContextResult:
     """Result of context processing."""
-    messages: List[Dict[str, str]]  # Processed message history
-    summary: Optional[str] = None  # Summary of older messages (if enabled)
+
+    messages: list[dict[str, str]]  # Processed message history
+    summary: str | None = None  # Summary of older messages (if enabled)
     total_tokens: int = 0  # Estimated token count
     truncated_count: int = 0  # Number of messages truncated
     original_count: int = 0  # Original message count
@@ -66,8 +69,8 @@ class ContextManager:
 
     def __init__(
         self,
-        model_registry: Optional[Any] = None,  # For summarization
-        default_config: Optional[ContextConfig] = None,
+        model_registry: Any | None = None,  # For summarization
+        default_config: ContextConfig | None = None,
     ):
         self.model_registry = model_registry
         self.default_config = default_config or ContextConfig()
@@ -81,11 +84,11 @@ class ContextManager:
 
     def process_history(
         self,
-        history: List[Dict[str, str]],
+        history: list[dict[str, str]],
         model_context_window: int = 128000,
         system_prompt_tokens: int = 0,
         kb_context_tokens: int = 0,
-        config: Optional[ContextConfig] = None,
+        config: ContextConfig | None = None,
     ) -> ContextResult:
         """
         Process conversation history to fit within context limits.
@@ -119,7 +122,9 @@ class ContextManager:
         # Step 1: Calculate available token budget
         # Best practice: Use 85% of context window for optimal performance
         effective_window = int(model_context_window * 0.85)
-        available_tokens = effective_window - system_prompt_tokens - kb_context_tokens - config.reserved_tokens
+        available_tokens = (
+            effective_window - system_prompt_tokens - kb_context_tokens - config.reserved_tokens
+        )
         # Clamp to reasonable bounds: at least 0, at most max_context_tokens
         available_tokens = max(0, min(available_tokens, config.max_context_tokens))
 
@@ -130,7 +135,9 @@ class ContextManager:
         )
 
         # Step 2: Apply sliding window
-        messages = history[-config.max_messages:] if len(history) > config.max_messages else list(history)
+        messages = (
+            history[-config.max_messages :] if len(history) > config.max_messages else list(history)
+        )
 
         # Step 3: Token-aware truncation
         messages, total_tokens = self._truncate_by_tokens(
@@ -156,10 +163,10 @@ class ContextManager:
 
     def _truncate_by_tokens(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         max_tokens: int,
         min_messages: int = 6,
-    ) -> Tuple[List[Dict[str, str]], int]:
+    ) -> tuple[list[dict[str, str]], int]:
         """
         Truncate messages to fit within token budget.
 
@@ -209,7 +216,7 @@ class ContextManager:
         # Use conservative estimate
         return len(text) // 3
 
-    def estimate_tokens(self, messages: List[Dict[str, str]]) -> int:
+    def estimate_tokens(self, messages: list[dict[str, str]]) -> int:
         """Estimate total tokens for a message list."""
         total = 0
         for msg in messages:
@@ -218,7 +225,7 @@ class ContextManager:
 
 
 # Global instance for convenience
-_context_manager: Optional[ContextManager] = None
+_context_manager: ContextManager | None = None
 
 
 def get_context_manager() -> ContextManager:

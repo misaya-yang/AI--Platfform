@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional, Tuple
 
 
 def compute_data_status(
-    last_ingested_at: Optional[datetime],
-    now: Optional[datetime] = None,
-    total_requests: Optional[int] = None,
+    last_ingested_at: datetime | None,
+    now: datetime | None = None,
+    total_requests: int | None = None,
     max_age_minutes: int = 60,
-) -> Tuple[str, int]:
+) -> tuple[str, int]:
     if now is None:
         now = datetime.now(timezone.utc)
 

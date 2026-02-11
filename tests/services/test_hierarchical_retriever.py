@@ -1,5 +1,4 @@
 import pytest
-from qdrant_client.http import models as qmodels
 
 from src.services.knowledge.hierarchical_retriever import HierarchicalRetriever
 from src.services.knowledge.vector_store import VectorSearchHit
@@ -14,29 +13,57 @@ class StubVectorStore:
     def __init__(self):
         self.calls = []
 
-    async def search(self, collection_name, query_vector, top_k=5, query_filter=None, score_threshold=None, **kwargs):
-        self.calls.append({"collection": collection_name, "query_filter": query_filter, "top_k": top_k})
+    async def search(
+        self,
+        collection_name,
+        query_vector,
+        top_k=5,
+        query_filter=None,
+        score_threshold=None,
+        **kwargs,
+    ):
+        self.calls.append(
+            {"collection": collection_name, "query_filter": query_filter, "top_k": top_k}
+        )
         if collection_name.endswith("_summary"):
-            return [VectorSearchHit(point_id="sum1", score=0.9, payload={
-                "document_id": "doc1",
-                "summary": "doc summary",
-                "text": "doc summary",
-                "level": 1,
-            })]
+            return [
+                VectorSearchHit(
+                    point_id="sum1",
+                    score=0.9,
+                    payload={
+                        "document_id": "doc1",
+                        "summary": "doc summary",
+                        "text": "doc summary",
+                        "level": 1,
+                    },
+                )
+            ]
         if collection_name.endswith("_sections"):
-            return [VectorSearchHit(point_id="sec1", score=0.8, payload={
-                "document_id": "doc1",
-                "segment_id": "sec1",
-                "text": "section text",
-                "level": 2,
-            })]
-        return [VectorSearchHit(point_id="seg1", score=0.7, payload={
-            "document_id": "doc1",
-            "segment_id": "seg1",
-            "text": "para",
-            "level": 3,
-            "parent_segment_id": "sec1",
-        })]
+            return [
+                VectorSearchHit(
+                    point_id="sec1",
+                    score=0.8,
+                    payload={
+                        "document_id": "doc1",
+                        "segment_id": "sec1",
+                        "text": "section text",
+                        "level": 2,
+                    },
+                )
+            ]
+        return [
+            VectorSearchHit(
+                point_id="seg1",
+                score=0.7,
+                payload={
+                    "document_id": "doc1",
+                    "segment_id": "seg1",
+                    "text": "para",
+                    "level": 3,
+                    "parent_segment_id": "sec1",
+                },
+            )
+        ]
 
 
 class StubDb:

@@ -11,9 +11,10 @@ Supports:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -24,6 +25,7 @@ logger = get_logger(__name__)
 
 class ModelProvider(str, Enum):
     """Supported LLM providers."""
+
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     DEEPSEEK = "deepseek"
@@ -33,14 +35,16 @@ class ModelProvider(str, Enum):
 
 class ModelAccessLevel(str, Enum):
     """Model access permission levels."""
-    PUBLIC = "public"      # Available to all authenticated users
-    PREMIUM = "premium"    # Available to premium/paid users only
-    ADMIN = "admin"        # Admin-only models (expensive or experimental)
+
+    PUBLIC = "public"  # Available to all authenticated users
+    PREMIUM = "premium"  # Available to premium/paid users only
+    ADMIN = "admin"  # Admin-only models (expensive or experimental)
 
 
 @dataclass
 class ModelInfo:
     """Model metadata."""
+
     id: str
     name: str
     provider: ModelProvider
@@ -53,7 +57,7 @@ class ModelInfo:
     access_level: ModelAccessLevel = ModelAccessLevel.PUBLIC  # Permission level required
 
 
-def _sanitize_usage(raw_usage: Dict[str, Any]) -> Dict[str, int]:
+def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
     """
     Sanitize and normalize usage dict.
 
@@ -63,7 +67,7 @@ def _sanitize_usage(raw_usage: Dict[str, Any]) -> Dict[str, int]:
     Some providers (e.g., DashScope) return nested dicts like:
     {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0}}
     """
-    result: Dict[str, int] = {}
+    result: dict[str, int] = {}
     for k, v in raw_usage.items():
         if not isinstance(v, int):
             continue
@@ -80,26 +84,28 @@ def _sanitize_usage(raw_usage: Dict[str, Any]) -> Dict[str, int]:
 @dataclass
 class StreamDelta:
     """A single streaming delta from the model."""
+
     content: str = ""
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    finish_reason: Optional[str] = None
-    usage: Optional[Dict[str, int]] = None
-    thought_signature: Optional[str] = None  # Gemini 3 thought signature
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str | None = None
+    usage: dict[str, int] | None = None
+    thought_signature: str | None = None  # Gemini 3 thought signature
 
 
 @dataclass
 class ChatMessage:
     """A chat message."""
+
     role: str  # system, user, assistant, tool
     content: str
-    name: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    tool_call_id: Optional[str] = None
-    images: Optional[List[str]] = None  # Base64 or URLs for vision models
-    thought_signature: Optional[str] = None  # Gemini 3 thought signature
+    name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    images: list[str] | None = None  # Base64 or URLs for vision models
+    thought_signature: str | None = None  # Gemini 3 thought signature
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ChatMessage":
+    def from_dict(cls, data: dict[str, Any]) -> ChatMessage:
         """Create ChatMessage from dictionary."""
         return cls(
             role=data.get("role", "user"),
@@ -125,14 +131,15 @@ def _normalize_message(msg) -> ChatMessage:
 @dataclass
 class ModelConfig:
     """Configuration for a model provider."""
+
     api_key: str
-    base_url: Optional[str] = None
+    base_url: str | None = None
     timeout: float = 300.0
     max_retries: int = 2
 
 
 # Default model catalog
-DEFAULT_MODELS: Dict[ModelProvider, List[ModelInfo]] = {
+DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
     ModelProvider.OPENAI: [
         ModelInfo(
             id="gpt-4o",
@@ -353,14 +360,14 @@ class ModelRegistry:
     }
 
     def __init__(self, use_default_models: bool = True):
-        self._configs: Dict[ModelProvider, ModelConfig] = {}
-        self._models: Dict[str, ModelInfo] = {}
-        self._clients: Dict[ModelProvider, httpx.AsyncClient] = {}
+        self._configs: dict[ModelProvider, ModelConfig] = {}
+        self._models: dict[str, ModelInfo] = {}
+        self._clients: dict[ModelProvider, httpx.AsyncClient] = {}
         self._db_models_loaded: bool = False
 
         # Initialize default model catalog (fallback)
         if use_default_models:
-            for provider, models in DEFAULT_MODELS.items():
+            for _provider, models in DEFAULT_MODELS.items():
                 for model in models:
                     self._models[model.id] = model
 
@@ -396,7 +403,9 @@ class ModelRegistry:
                         provider = ModelProvider(provider_id)
                     except ValueError:
                         # Unknown provider, skip
-                        logger.warning(f"Unknown provider {provider_id} for model {row.get('model_id')}")
+                        logger.warning(
+                            f"Unknown provider {provider_id} for model {row.get('model_id')}"
+                        )
                         continue
 
                     # Map access_level string to enum
@@ -440,7 +449,7 @@ class ModelRegistry:
         self,
         provider: ModelProvider,
         api_key: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         timeout: float = 120.0,
     ) -> None:
         """Configure a provider with API credentials."""
@@ -458,7 +467,7 @@ class ModelRegistry:
         """Check if a provider is configured."""
         return provider in self._configs and bool(self._configs[provider].api_key)
 
-    def get_available_models(self) -> List[ModelInfo]:
+    def get_available_models(self) -> list[ModelInfo]:
         """Get all models from configured providers."""
         available = []
         for model in self._models.values():
@@ -466,7 +475,7 @@ class ModelRegistry:
                 available.append(model)
         return available
 
-    def get_model(self, model_id: str) -> Optional[ModelInfo]:
+    def get_model(self, model_id: str) -> ModelInfo | None:
         """Get model info by ID."""
         return self._models.get(model_id)
 
@@ -489,7 +498,7 @@ class ModelRegistry:
             )
         return self._clients[provider]
 
-    def _build_headers(self, provider: ModelProvider, api_key: str) -> Dict[str, str]:
+    def _build_headers(self, provider: ModelProvider, api_key: str) -> dict[str, str]:
         """Build headers for API requests."""
         if provider == ModelProvider.ANTHROPIC:
             return {
@@ -513,14 +522,14 @@ class ModelRegistry:
         self,
         provider: ModelProvider,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
-        thinking_level: Optional[str] = None,
-        tool_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        thinking_level: str | None = None,
+        tool_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Build request body for the provider's API."""
         if provider == ModelProvider.ANTHROPIC:
             return self._build_anthropic_body(
@@ -528,7 +537,14 @@ class ModelRegistry:
             )
         elif provider == ModelProvider.GOOGLE:
             return self._build_google_body(
-                model_id, messages, temperature, max_tokens, tools, stream, thinking_level, tool_config
+                model_id,
+                messages,
+                temperature,
+                max_tokens,
+                tools,
+                stream,
+                thinking_level,
+                tool_config,
             )
         else:
             return self._build_openai_body(
@@ -538,17 +554,17 @@ class ModelRegistry:
     def _build_openai_body(
         self,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float,
-        max_tokens: Optional[int],
-        tools: Optional[List[Dict[str, Any]]],
+        max_tokens: int | None,
+        tools: list[dict[str, Any]] | None,
         stream: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
         formatted_messages = []
         for raw_msg in messages:
             msg = _normalize_message(raw_msg)
-            m: Dict[str, Any] = {"role": msg.role, "content": msg.content}
+            m: dict[str, Any] = {"role": msg.role, "content": msg.content}
             if msg.name:
                 m["name"] = msg.name
             if msg.tool_calls:
@@ -561,20 +577,19 @@ class ModelRegistry:
                 for img in msg.images:
                     if img.startswith("http") or img.startswith("data:"):
                         # URL or data URL - use as-is
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": img}
-                        })
+                        content_parts.append({"type": "image_url", "image_url": {"url": img}})
                     else:
                         # Raw base64 - assume jpeg
-                        content_parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{img}"}
-                        })
+                        content_parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{img}"},
+                            }
+                        )
                 m["content"] = content_parts
             formatted_messages.append(m)
 
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "model": model_id,
             "messages": formatted_messages,
             "temperature": temperature,
@@ -591,12 +606,12 @@ class ModelRegistry:
     def _build_anthropic_body(
         self,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float,
-        max_tokens: Optional[int],
-        tools: Optional[List[Dict[str, Any]]],
+        max_tokens: int | None,
+        tools: list[dict[str, Any]] | None,
         stream: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build Anthropic-specific request body."""
         system_prompt = None
         formatted_messages = []
@@ -607,7 +622,7 @@ class ModelRegistry:
                 system_prompt = msg.content
                 continue
 
-            m: Dict[str, Any] = {"role": msg.role}
+            m: dict[str, Any] = {"role": msg.role}
 
             # Handle vision content
             if msg.images and msg.role == "user":
@@ -615,13 +630,15 @@ class ModelRegistry:
                 for img in msg.images:
                     if img.startswith("http"):
                         # Anthropic supports URL source
-                        content_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "url",
-                                "url": img,
+                        content_parts.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": img,
+                                },
                             }
-                        })
+                        )
                     elif img.startswith("data:"):
                         # Parse data URL: data:{mime_type};base64,{base64_data}
                         try:
@@ -630,24 +647,28 @@ class ModelRegistry:
                         except (ValueError, IndexError):
                             media_type = "image/jpeg"
                             base64_data = img
-                        content_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": base64_data,
+                        content_parts.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": base64_data,
+                                },
                             }
-                        })
+                        )
                     else:
                         # Raw base64 - assume jpeg
-                        content_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": img,
+                        content_parts.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": img,
+                                },
                             }
-                        })
+                        )
                 content_parts.append({"type": "text", "text": msg.content})
                 m["content"] = content_parts
             else:
@@ -655,7 +676,7 @@ class ModelRegistry:
 
             formatted_messages.append(m)
 
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "model": model_id,
             "messages": formatted_messages,
             "temperature": temperature,
@@ -670,11 +691,15 @@ class ModelRegistry:
             for tool in tools:
                 if tool.get("type") == "function":
                     func = tool["function"]
-                    anthropic_tools.append({
-                        "name": func["name"],
-                        "description": func.get("description", ""),
-                        "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
-                    })
+                    anthropic_tools.append(
+                        {
+                            "name": func["name"],
+                            "description": func.get("description", ""),
+                            "input_schema": func.get(
+                                "parameters", {"type": "object", "properties": {}}
+                            ),
+                        }
+                    )
             if anthropic_tools:
                 body["tools"] = anthropic_tools
         return body
@@ -682,14 +707,14 @@ class ModelRegistry:
     def _build_google_body(
         self,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float,
-        max_tokens: Optional[int],
-        tools: Optional[List[Dict[str, Any]]],
+        max_tokens: int | None,
+        tools: list[dict[str, Any]] | None,
         stream: bool,
-        thinking_level: Optional[str] = None,
-        tool_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        thinking_level: str | None = None,
+        tool_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Build Google Gemini API request body."""
         contents = []
         system_instruction = None
@@ -713,15 +738,14 @@ class ModelRegistry:
                 except json.JSONDecodeError:
                     response_data = {"result": msg.content}
 
-                contents.append({
-                    "role": "user",  # Google uses "user" role for function responses
-                    "parts": [{
-                        "functionResponse": {
-                            "name": func_name,
-                            "response": response_data
-                        }
-                    }]
-                })
+                contents.append(
+                    {
+                        "role": "user",  # Google uses "user" role for function responses
+                        "parts": [
+                            {"functionResponse": {"name": func_name, "response": response_data}}
+                        ],
+                    }
+                )
                 continue
 
             role = "user" if msg.role == "user" else "model"
@@ -742,30 +766,27 @@ class ModelRegistry:
                     for tc in msg.tool_calls:
                         func = tc.get("function", {})
                         func_name = func.get("name", "")
-    
+
                         # Parse arguments
                         try:
                             args = json.loads(func.get("arguments", "{}"))
                         except json.JSONDecodeError:
                             args = {}
-    
-                        func_call_part: Dict[str, Any] = {
-                            "functionCall": {
-                                "name": func_name,
-                                "args": args
-                            }
+
+                        func_call_part: dict[str, Any] = {
+                            "functionCall": {"name": func_name, "args": args}
                         }
-    
+
                         # CRITICAL: Include thoughtSignature if present (required for Gemini 3)
                         if "thoughtSignature" in tc:
                             func_call_part["thoughtSignature"] = tc["thoughtSignature"]
                             logger.debug(f"[GEMINI3] Including thoughtSignature for {func_name}")
-    
+
                         parts.append(func_call_part)
-                
+
                 # If only thoughtSignature is present without content or tool calls (unlikely but possible)
                 if not msg.content and not msg.tool_calls and msg.thought_signature:
-                     parts.append({"text": "", "thoughtSignature": msg.thought_signature})
+                    parts.append({"text": "", "thoughtSignature": msg.thought_signature})
 
                 if parts:
                     contents.append({"role": role, "parts": parts})
@@ -783,12 +804,7 @@ class ModelRegistry:
                             mime_type = "image/gif"
                         elif ".webp" in img.lower():
                             mime_type = "image/webp"
-                        parts.append({
-                            "fileData": {
-                                "fileUri": img,
-                                "mimeType": mime_type
-                            }
-                        })
+                        parts.append({"fileData": {"fileUri": img, "mimeType": mime_type}})
                     elif img.startswith("data:"):
                         # Parse data URL: data:{mime_type};base64,{base64_data}
                         try:
@@ -798,32 +814,22 @@ class ModelRegistry:
                             mime_type = "image/jpeg"
                             base64_data = img
                         # Gemini REST API uses camelCase
-                        parts.append({
-                            "inlineData": {
-                                "mimeType": mime_type,
-                                "data": base64_data
-                            }
-                        })
+                        parts.append({"inlineData": {"mimeType": mime_type, "data": base64_data}})
                     else:
                         # Raw base64 data, assume jpeg
-                        parts.append({
-                            "inlineData": {
-                                "mimeType": "image/jpeg",
-                                "data": img
-                            }
-                        })
+                        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": img}})
                 parts.append({"text": msg.content})
             else:
                 parts.append({"text": msg.content})
 
             contents.append({"role": role, "parts": parts})
 
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {
                 "temperature": temperature,
                 "maxOutputTokens": max_tokens or 8192,
-            }
+            },
         }
 
         if thinking_level:
@@ -839,15 +845,19 @@ class ModelRegistry:
             for tool in tools:
                 if tool.get("type") == "function":
                     func = tool["function"]
-                    function_declarations.append({
-                        "name": func["name"],
-                        "description": func.get("description", ""),
-                        "parameters": func.get("parameters", {"type": "object", "properties": {}}),
-                    })
+                    function_declarations.append(
+                        {
+                            "name": func["name"],
+                            "description": func.get("description", ""),
+                            "parameters": func.get(
+                                "parameters", {"type": "object", "properties": {}}
+                            ),
+                        }
+                    )
             if function_declarations:
                 google_tools.append({"functionDeclarations": function_declarations})
                 body["tools"] = google_tools
-        
+
         # Apply tool_config if provided
         if tool_config:
             body["toolConfig"] = tool_config
@@ -857,12 +867,12 @@ class ModelRegistry:
     async def chat(
         self,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        thinking_level: Optional[str] = None,
-    ) -> Tuple[str, Dict[str, int]]:
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        thinking_level: str | None = None,
+    ) -> tuple[str, dict[str, int]]:
         """
         Non-streaming chat completion.
 
@@ -875,7 +885,14 @@ class ModelRegistry:
 
         client = await self._get_client(model.provider)
         body = self._build_request_body(
-            model.provider, model_id, messages, temperature, max_tokens, tools, stream=False, thinking_level=thinking_level
+            model.provider,
+            model_id,
+            messages,
+            temperature,
+            max_tokens,
+            tools,
+            stream=False,
+            thinking_level=thinking_level,
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -923,12 +940,12 @@ class ModelRegistry:
     async def chat_stream(
         self,
         model_id: str,
-        messages: List[ChatMessage],
+        messages: list[ChatMessage],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        thinking_level: Optional[str] = None,
-        tool_config: Optional[Dict[str, Any]] = None,
+        max_tokens: int | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        thinking_level: str | None = None,
+        tool_config: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """
         Streaming chat completion.
@@ -941,12 +958,22 @@ class ModelRegistry:
 
         client = await self._get_client(model.provider)
         body = self._build_request_body(
-            model.provider, model_id, messages, temperature, max_tokens, tools, stream=True, thinking_level=thinking_level, tool_config=tool_config
+            model.provider,
+            model_id,
+            messages,
+            temperature,
+            max_tokens,
+            tools,
+            stream=True,
+            thinking_level=thinking_level,
+            tool_config=tool_config,
         )
 
         if model.provider == ModelProvider.GOOGLE:
             config = self._configs.get(model.provider)
-            endpoint = f"/v1beta/models/{model_id}:streamGenerateContent?key={config.api_key}&alt=sse"
+            endpoint = (
+                f"/v1beta/models/{model_id}:streamGenerateContent?key={config.api_key}&alt=sse"
+            )
             async for delta in self._stream_google(client, endpoint, body):
                 yield delta
         elif model.provider == ModelProvider.ANTHROPIC:
@@ -962,7 +989,7 @@ class ModelRegistry:
         self,
         client: httpx.AsyncClient,
         endpoint: str,
-        body: Dict[str, Any],
+        body: dict[str, Any],
     ) -> AsyncIterator[StreamDelta]:
         """Stream from OpenAI-compatible API."""
         async with client.stream("POST", endpoint, json=body) as response:
@@ -1008,7 +1035,7 @@ class ModelRegistry:
         self,
         client: httpx.AsyncClient,
         endpoint: str,
-        body: Dict[str, Any],
+        body: dict[str, Any],
     ) -> AsyncIterator[StreamDelta]:
         """Stream from Anthropic API."""
         async with client.stream("POST", endpoint, json=body) as response:
@@ -1038,7 +1065,7 @@ class ModelRegistry:
                         finish_reason=evt.get("delta", {}).get("stop_reason"),
                         usage={
                             "output_tokens": usage.get("output_tokens", 0),
-                        }
+                        },
                     )
 
                 elif evt_type == "message_start":
@@ -1050,23 +1077,28 @@ class ModelRegistry:
         self,
         client: httpx.AsyncClient,
         endpoint: str,
-        body: Dict[str, Any],
+        body: dict[str, Any],
     ) -> AsyncIterator[StreamDelta]:
         """Stream from Google Gemini API."""
         # Debug: Log request body for troubleshooting
         import json as json_module
+
         tool_names = []
         for t in body.get("tools", []):
             for fd in t.get("functionDeclarations", []):
                 tool_names.append(fd.get("name", "unknown"))
         logger.info(f"[GEMINI] Tools in request: {tool_names}")
-        logger.debug(f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}")
+        logger.debug(
+            f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}"
+        )
 
         async with client.stream("POST", endpoint, json=body) as response:
             if response.status_code != 200:
                 # Read error response body for debugging
                 error_body = await response.aread()
-                logger.error(f"[GEMINI] Error response ({response.status_code}): {error_body.decode('utf-8', errors='replace')}")
+                logger.error(
+                    f"[GEMINI] Error response ({response.status_code}): {error_body.decode('utf-8', errors='replace')}"
+                )
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
@@ -1081,7 +1113,7 @@ class ModelRegistry:
 
                 # Parse Google Gemini streaming response
                 candidates = evt.get("candidates", [])
-                
+
                 # Check for promptFeedback (Safety blocking)
                 prompt_feedback = evt.get("promptFeedback")
                 if prompt_feedback and prompt_feedback.get("blockReason"):
@@ -1089,7 +1121,7 @@ class ModelRegistry:
                     logger.warning(f"[GEMINI] Response blocked: {block_reason}")
                     yield StreamDelta(
                         finish_reason="safety",
-                        content=f"\n\n[System: Response blocked due to safety reason: {block_reason}]"
+                        content=f"\n\n[System: Response blocked due to safety reason: {block_reason}]",
                     )
                     continue
 
@@ -1100,10 +1132,10 @@ class ModelRegistry:
 
                     # Check for finishReason in candidate even if parts are empty
                     finish_reason = candidate.get("finishReason")
-                    
+
                     if not parts and finish_reason:
-                         # Handle case where only finishReason is sent (e.g. SAFETY, STOP)
-                         yield StreamDelta(finish_reason=finish_reason.lower())
+                        # Handle case where only finishReason is sent (e.g. SAFETY, STOP)
+                        yield StreamDelta(finish_reason=finish_reason.lower())
 
                     tool_calls_batch = []
                     for part in parts:
@@ -1116,28 +1148,30 @@ class ModelRegistry:
                             # Gemini streaming does not provide a stable unique call id, so we generate one.
                             import uuid
 
-                            tool_call: Dict[str, Any] = {
+                            tool_call: dict[str, Any] = {
                                 "id": f"call_{fc.get('name', 'unknown')}_{uuid.uuid4().hex[:10]}",
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name"),
                                     "arguments": json.dumps(fc.get("args", {})),
-                                }
+                                },
                             }
                             # CRITICAL: Preserve thoughtSignature for Gemini 3
                             # This must be passed back in subsequent requests
                             if "thoughtSignature" in part:
                                 tool_call["thoughtSignature"] = part["thoughtSignature"]
-                                logger.debug(f"[GEMINI3] Captured thoughtSignature for {fc.get('name')}")
+                                logger.debug(
+                                    f"[GEMINI3] Captured thoughtSignature for {fc.get('name')}"
+                                )
                             tool_calls_batch.append(tool_call)
-                        
+
                         # Capture standalone thoughtSignature if present (rare but possible)
                         elif "thoughtSignature" in part and "functionCall" not in part:
-                             logger.debug(f"[GEMINI3] Captured standalone thoughtSignature")
-                             ts = part["thoughtSignature"]
-                             # If we have text content in the same part (which shouldn't happen based on API structure, but to be safe)
-                             # Or if we want to yield it attached to text
-                             yield StreamDelta(thought_signature=ts)
+                            logger.debug("[GEMINI3] Captured standalone thoughtSignature")
+                            ts = part["thoughtSignature"]
+                            # If we have text content in the same part (which shouldn't happen based on API structure, but to be safe)
+                            # Or if we want to yield it attached to text
+                            yield StreamDelta(thought_signature=ts)
 
                     # Yield all tool calls together
                     if tool_calls_batch:
@@ -1146,7 +1180,7 @@ class ModelRegistry:
                     # Check finish reason
                     if finish_reason:
                         yield StreamDelta(finish_reason=finish_reason.lower())
-                
+
                 else:
                     # No candidates - could be usage metadata only or keep-alive
                     pass

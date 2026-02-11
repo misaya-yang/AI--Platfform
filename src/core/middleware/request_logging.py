@@ -14,9 +14,10 @@ import asyncio
 import json
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -30,26 +31,32 @@ logger = get_logger(__name__)
 @dataclass
 class RequestLogConfig:
     """请求日志配置"""
+
     enabled: bool = True
     log_request_body: bool = False  # 是否记录请求体（可能含敏感数据）
     log_response_body: bool = False  # 是否记录响应体
     max_body_length: int = 1000  # 记录的最大 body 长度
-    exclude_paths: List[str] = field(default_factory=lambda: [
-        "/health",
-        "/health/live",
-        "/health/ready",
-        "/metrics",
-    ])
-    sensitive_headers: List[str] = field(default_factory=lambda: [
-        "authorization",
-        "x-api-key",
-        "cookie",
-    ])
+    exclude_paths: list[str] = field(
+        default_factory=lambda: [
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+        ]
+    )
+    sensitive_headers: list[str] = field(
+        default_factory=lambda: [
+            "authorization",
+            "x-api-key",
+            "cookie",
+        ]
+    )
 
 
 @dataclass
 class RequestLog:
     """请求日志数据"""
+
     request_id: str
     timestamp: str
     method: str
@@ -61,13 +68,13 @@ class RequestLog:
     user_agent: str = ""
     status_code: int = 0
     duration_ms: float = 0.0
-    error: Optional[str] = None
-    error_type: Optional[str] = None
+    error: str | None = None
+    error_type: str | None = None
     request_size: int = 0
     response_size: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -86,7 +93,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         self,
         app,
         config: RequestLogConfig,
-        log_writer: Optional[Callable] = None,
+        log_writer: Callable | None = None,
     ):
         super().__init__(app)
         self.config = config
@@ -222,6 +229,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
 # ============ 日志存储后端 ============
 
+
 class RedisLogWriter:
     """Redis 日志写入器"""
 
@@ -256,7 +264,8 @@ class RedisLogWriter:
                 )
                 await self.redis.ltrim(
                     f"{self.key_prefix}:user:{log_data.user_id}",
-                    0, 999,  # 保留最近 1000 条
+                    0,
+                    999,  # 保留最近 1000 条
                 )
         except Exception as e:
             logger.warning(f"Failed to write log to Redis: {e}")

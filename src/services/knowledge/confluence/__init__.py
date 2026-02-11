@@ -26,29 +26,29 @@ Phase 3 (Future):
 - Encrypted API token storage
 """
 
-from .client import ConfluenceClient, ConfluenceAPIError
+from .client import ConfluenceAPIError, ConfluenceClient
+from .image_processor import ConfluenceImageProcessor, create_image_processor
 from .models import (
+    ConfluenceAttachment,
+    ConfluenceConnection,
     ConfluenceCredentials,
     ConfluencePage,
-    ConfluenceSpace,
-    SyncResult,
-    ConfluenceConnection,
-    ConfluenceSpaceBinding,
     ConfluencePageRecord,
+    ConfluenceSpace,
+    ConfluenceSpaceBinding,
     ConfluenceSyncTask,
-    ConfluenceAttachment,
     ImageSegment,
+    SyncResult,
 )
 from .parser import (
-    parse_storage_format,
-    extract_plain_text,
-    extract_markdown,
-    extract_image_references,
-    extract_embeddable_images,
     ImageReference,
+    extract_embeddable_images,
+    extract_image_references,
+    extract_markdown,
+    extract_plain_text,
+    parse_storage_format,
 )
 from .scheduler import ConfluenceScheduler, SchedulerManager
-from .image_processor import ConfluenceImageProcessor, create_image_processor
 
 __all__ = [
     # Client

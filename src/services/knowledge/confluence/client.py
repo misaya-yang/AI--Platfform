@@ -11,12 +11,12 @@ import asyncio
 import base64
 import logging
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from collections.abc import AsyncIterator
+from datetime import datetime
+from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
-
-from datetime import datetime
 
 from .models import ConfluenceAttachment, ConfluenceCredentials, ConfluencePage, ConfluenceSpace
 
@@ -34,7 +34,7 @@ def _escape_cql_value(value: str) -> str:
         return value
     # Only allow alphanumeric, hyphens, and underscores for identifiers
     # This is stricter than full CQL escaping but safer for space keys
-    if not re.match(r'^[A-Za-z0-9_-]+$', value):
+    if not re.match(r"^[A-Za-z0-9_-]+$", value):
         raise ValueError(f"Invalid CQL identifier: {value}")
     return value
 
@@ -48,13 +48,15 @@ def _escape_cql_string(value: str) -> str:
     if not value:
         return value
     # Escape backslashes first, then quotes
-    return value.replace('\\', '\\\\').replace('"', '\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 class ConfluenceAPIError(Exception):
     """Confluence API 错误"""
 
-    def __init__(self, message: str, status_code: Optional[int] = None, response_body: Optional[str] = None):
+    def __init__(
+        self, message: str, status_code: int | None = None, response_body: str | None = None
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
@@ -81,7 +83,7 @@ class ConfluenceClient:
         self.credentials = credentials
         self.timeout = timeout
         self.max_retries = max_retries
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def _auth_header(self) -> str:
@@ -109,7 +111,7 @@ class ConfluenceClient:
             await self._client.aclose()
             self._client = None
 
-    async def __aenter__(self) -> "ConfluenceClient":
+    async def __aenter__(self) -> ConfluenceClient:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -119,10 +121,10 @@ class ConfluenceClient:
         self,
         method: str,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None,
+        params: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | None = None,
         use_v1: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         发送 API 请求 (带重试)
 
@@ -162,7 +164,7 @@ class ConfluenceClient:
 
                 if resp.status_code >= 500 and attempt < self.max_retries - 1:
                     # Server error, retry
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
 
                 if resp.status_code >= 400:
@@ -178,15 +180,17 @@ class ConfluenceClient:
                 last_error = e
                 if attempt < self.max_retries - 1:
                     logger.warning(f"Request error, retrying: {e}")
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                 else:
-                    raise ConfluenceAPIError(f"Request failed after {self.max_retries} retries: {e}")
+                    raise ConfluenceAPIError(
+                        f"Request failed after {self.max_retries} retries: {e}"
+                    )
 
         raise ConfluenceAPIError(f"Request failed: {last_error}")
 
     # ============ Connection Test ============
 
-    async def test_connection(self) -> Dict[str, Any]:
+    async def test_connection(self) -> dict[str, Any]:
         """
         测试连接是否有效
 
@@ -194,7 +198,7 @@ class ConfluenceClient:
             包含连接状态和可用空间数量的字典
         """
         try:
-            data = await self._request("GET", "/spaces", params={"limit": 1})
+            await self._request("GET", "/spaces", params={"limit": 1})
             return {
                 "status": "success",
                 "message": "Connection successful",
@@ -232,7 +236,9 @@ class ConfluenceClient:
         # 调试日志：检查 API 返回的数据结构
         logger.debug(f"Confluence API response for page {page_id}:")
         logger.debug(f"  - title: {data.get('title')}")
-        logger.debug(f"  - body keys: {list(data.get('body', {}).keys()) if data.get('body') else 'NO BODY'}")
+        logger.debug(
+            f"  - body keys: {list(data.get('body', {}).keys()) if data.get('body') else 'NO BODY'}"
+        )
         if data.get("body"):
             for key, val in data["body"].items():
                 if isinstance(val, dict):
@@ -283,7 +289,9 @@ class ConfluenceClient:
                         elif isinstance(format_data, str):
                             body_content = format_data
                         if body_content:
-                            logger.info(f"Used fallback format '{fallback_format}' for page {page_id}")
+                            logger.info(
+                                f"Used fallback format '{fallback_format}' for page {page_id}"
+                            )
                             break
 
         # 警告：body 为空
@@ -338,7 +346,7 @@ class ConfluenceClient:
         page_id: str,
         limit: int = 100,
         fetch_all: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         获取页面的子页面（支持分页）
 
@@ -350,11 +358,11 @@ class ConfluenceClient:
         Returns:
             子页面列表
         """
-        all_children: List[Dict[str, Any]] = []
-        cursor: Optional[str] = None
+        all_children: list[dict[str, Any]] = []
+        cursor: str | None = None
 
         while True:
-            params: Dict[str, Any] = {"limit": limit}
+            params: dict[str, Any] = {"limit": limit}
             if cursor:
                 params["cursor"] = cursor
 
@@ -390,9 +398,9 @@ class ConfluenceClient:
         space_id: str,
         status: str = "current",
         limit: int = 25,
-        cursor: Optional[str] = None,
-        body_format: Optional[str] = None,
-    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        cursor: str | None = None,
+        body_format: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         """
         列出空间中的页面 (分页)
 
@@ -406,7 +414,7 @@ class ConfluenceClient:
         Returns:
             (页面列表, 下一页游标)
         """
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "status": status,
             "limit": min(limit, 250),
         }
@@ -434,8 +442,8 @@ class ConfluenceClient:
         space_id: str,
         status: str = "current",
         batch_size: int = 25,
-        body_format: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        body_format: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         迭代空间中的所有页面
 
@@ -515,10 +523,10 @@ class ConfluenceClient:
 
     async def list_spaces(
         self,
-        type_filter: Optional[str] = None,
+        type_filter: str | None = None,
         status: str = "current",
         limit: int = 25,
-    ) -> List[ConfluenceSpace]:
+    ) -> list[ConfluenceSpace]:
         """
         列出所有可访问的空间
 
@@ -530,7 +538,7 @@ class ConfluenceClient:
         Returns:
             空间列表
         """
-        params: Dict[str, Any] = {"status": status, "limit": limit}
+        params: dict[str, Any] = {"status": status, "limit": limit}
         if type_filter:
             params["type"] = type_filter
 
@@ -554,7 +562,7 @@ class ConfluenceClient:
         cql: str,
         limit: int = 25,
         start: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         使用 CQL 搜索页面 (使用 v1 API)
 
@@ -617,7 +625,7 @@ class ConfluenceClient:
         raise ValueError(f"Cannot parse page ID from URL: {url}")
 
     @staticmethod
-    def parse_space_key_from_url(url: str) -> Optional[str]:
+    def parse_space_key_from_url(url: str) -> str | None:
         """
         从 URL 中解析 Space Key
 
@@ -659,7 +667,7 @@ class ConfluenceClient:
         space_key: str,
         since: datetime,
         limit: int = 100,
-    ) -> List[ConfluencePage]:
+    ) -> list[ConfluencePage]:
         """
         搜索指定日期之后修改的页面（用于增量同步）
 
@@ -681,7 +689,7 @@ class ConfluenceClient:
 
         logger.info(f"Searching pages modified since {since_str} in space {space_key}")
 
-        all_pages: List[ConfluencePage] = []
+        all_pages: list[ConfluencePage] = []
         start = 0
 
         while True:
@@ -729,7 +737,7 @@ class ConfluenceClient:
         self,
         space_key: str,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         获取空间中已删除的页面（用于同步删除操作）
 
@@ -742,7 +750,7 @@ class ConfluenceClient:
         """
         # Escape space_key to prevent CQL injection
         safe_space_key = _escape_cql_value(space_key)
-        cql = f'space={safe_space_key} AND type=page'
+        cql = f"space={safe_space_key} AND type=page"
 
         data = await self._request(
             "GET",
@@ -761,9 +769,9 @@ class ConfluenceClient:
     async def get_page_attachments(
         self,
         page_id: str,
-        media_type_filter: Optional[str] = None,
+        media_type_filter: str | None = None,
         limit: int = 50,
-    ) -> List[ConfluenceAttachment]:
+    ) -> list[ConfluenceAttachment]:
         """
         获取页面的所有附件
 
@@ -775,11 +783,11 @@ class ConfluenceClient:
         Returns:
             附件列表
         """
-        all_attachments: List[ConfluenceAttachment] = []
-        cursor: Optional[str] = None
+        all_attachments: list[ConfluenceAttachment] = []
+        cursor: str | None = None
 
         while True:
-            params: Dict[str, Any] = {"limit": min(limit, 250)}
+            params: dict[str, Any] = {"limit": min(limit, 250)}
             if cursor:
                 params["cursor"] = cursor
             if media_type_filter:
@@ -830,7 +838,7 @@ class ConfluenceClient:
         self,
         page_id: str,
         embeddable_only: bool = True,
-    ) -> List[ConfluenceAttachment]:
+    ) -> list[ConfluenceAttachment]:
         """
         获取页面的图片附件
 

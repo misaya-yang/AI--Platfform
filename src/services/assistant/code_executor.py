@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
+import contextlib
 import shutil
 import tempfile
 import time
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any
 
 from ...core.observability.logging import get_logger
 
@@ -36,6 +36,7 @@ logger = get_logger(__name__)
 
 class ExecutionStatus(str, Enum):
     """Status of code execution."""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -47,6 +48,7 @@ class ExecutionStatus(str, Enum):
 @dataclass
 class CodeExecutionConfig:
     """Configuration for code execution environment."""
+
     # Resource limits
     memory_limit: str = "512m"
     cpu_limit: float = 0.5
@@ -67,28 +69,31 @@ class CodeExecutionConfig:
     main_script_path: str = "/workspace/main.py"
 
     # Additional packages to install (pip install)
-    packages: List[str] = field(default_factory=lambda: [
-        "numpy",
-        "pandas",
-        "matplotlib",
-    ])
+    packages: list[str] = field(
+        default_factory=lambda: [
+            "numpy",
+            "pandas",
+            "matplotlib",
+        ]
+    )
 
 
 @dataclass
 class InputFile:
     """Input file to be provided to the code execution."""
+
     filename: str
     content: bytes
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
 
     @classmethod
-    def from_base64(cls, filename: str, data: str, mime_type: Optional[str] = None) -> "InputFile":
+    def from_base64(cls, filename: str, data: str, mime_type: str | None = None) -> InputFile:
         """Create InputFile from base64 encoded data."""
         content = base64.b64decode(data)
         return cls(filename=filename, content=content, mime_type=mime_type)
 
     @classmethod
-    def from_text(cls, filename: str, text: str, encoding: str = "utf-8") -> "InputFile":
+    def from_text(cls, filename: str, text: str, encoding: str = "utf-8") -> InputFile:
         """Create InputFile from text content."""
         content = text.encode(encoding)
         return cls(filename=filename, content=content, mime_type="text/plain")
@@ -97,9 +102,10 @@ class InputFile:
 @dataclass
 class OutputFile:
     """Output file produced by code execution."""
+
     filename: str
     content: bytes
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
     size_bytes: int = 0
 
     def to_base64(self) -> str:
@@ -114,40 +120,42 @@ class OutputFile:
 @dataclass
 class KBDocument:
     """Knowledge base document to be provided to code execution."""
+
     filename: str
     content: str
-    document_id: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    document_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CodeExecutionResult:
     """Result of code execution."""
+
     execution_id: str
     status: ExecutionStatus
 
     # Output
     stdout: str = ""
     stderr: str = ""
-    output_files: List[OutputFile] = field(default_factory=list)
+    output_files: list[OutputFile] = field(default_factory=list)
 
     # Timing
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
     duration_ms: float = 0.0
 
     # Error info
-    error_message: Optional[str] = None
-    exit_code: Optional[int] = None
+    error_message: str | None = None
+    exit_code: int | None = None
 
     # Resource usage
-    memory_used_bytes: Optional[int] = None
+    memory_used_bytes: int | None = None
 
     def is_success(self) -> bool:
         """Check if execution was successful."""
         return self.status == ExecutionStatus.SUCCESS
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "execution_id": self.execution_id,
@@ -178,11 +186,11 @@ class CodeExecutionResult:
 
 
 # Matplotlib backend setup code to inject before user code
-MATPLOTLIB_SETUP = '''
+MATPLOTLIB_SETUP = """
 # Setup matplotlib for non-interactive backend (required in container)
 import matplotlib
 matplotlib.use('Agg')
-'''
+"""
 
 
 class CodeExecutorService:
@@ -209,7 +217,7 @@ class CodeExecutorService:
 
     def __init__(
         self,
-        config: Optional[CodeExecutionConfig] = None,
+        config: CodeExecutionConfig | None = None,
     ):
         """
         Initialize the code executor service.
@@ -219,7 +227,7 @@ class CodeExecutorService:
         """
         self.config = config or CodeExecutionConfig()
         self._docker_client = None
-        self._docker_available: Optional[bool] = None
+        self._docker_available: bool | None = None
 
     @property
     def docker_client(self):
@@ -232,6 +240,7 @@ class CodeExecutorService:
         if self._docker_client is None:
             try:
                 import docker
+
                 self._docker_client = docker.from_env()
                 # Test connection
                 self._docker_client.ping()
@@ -268,9 +277,9 @@ class CodeExecutorService:
     async def execute(
         self,
         code: str,
-        input_files: Optional[List[InputFile]] = None,
-        kb_documents: Optional[List[KBDocument]] = None,
-        config: Optional[CodeExecutionConfig] = None,
+        input_files: list[InputFile] | None = None,
+        kb_documents: list[KBDocument] | None = None,
+        config: CodeExecutionConfig | None = None,
     ) -> CodeExecutionResult:
         """
         Execute Python code in a Docker sandbox container.
@@ -347,7 +356,9 @@ class CodeExecutorService:
 
         except asyncio.TimeoutError:
             result.status = ExecutionStatus.TIMEOUT
-            result.error_message = f"Execution timed out after {exec_config.timeout_seconds} seconds"
+            result.error_message = (
+                f"Execution timed out after {exec_config.timeout_seconds} seconds"
+            )
             logger.warning(f"Execution {execution_id} timed out")
 
         except Exception as e:
@@ -370,8 +381,8 @@ class CodeExecutorService:
     async def _setup_workspace(
         self,
         code: str,
-        input_files: List[InputFile],
-        kb_documents: List[KBDocument],
+        input_files: list[InputFile],
+        kb_documents: list[KBDocument],
         config: CodeExecutionConfig,
     ) -> Path:
         """
@@ -429,8 +440,7 @@ class CodeExecutorService:
         Returns:
             Tuple of (container, stdout, stderr, exit_code)
         """
-        import docker
-        from docker.errors import ContainerError, ImageNotFound, APIError
+        from docker.errors import APIError, ContainerError, ImageNotFound
 
         client = self.docker_client
 
@@ -474,10 +484,7 @@ class CodeExecutorService:
             # Wait for container with timeout
             loop = asyncio.get_event_loop()
             wait_result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: container.wait(timeout=config.timeout_seconds)
-                ),
+                loop.run_in_executor(None, lambda: container.wait(timeout=config.timeout_seconds)),
                 timeout=config.timeout_seconds + 5,  # Extra buffer
             )
 
@@ -490,10 +497,8 @@ class CodeExecutorService:
         except asyncio.TimeoutError:
             # Kill container on timeout
             if container:
-                try:
+                with contextlib.suppress(Exception):
                     container.kill()
-                except Exception:
-                    pass
             raise
 
         except ContainerError as e:
@@ -510,7 +515,7 @@ class CodeExecutorService:
         self,
         workspace_dir: Path,
         config: CodeExecutionConfig,
-    ) -> List[OutputFile]:
+    ) -> list[OutputFile]:
         """
         Collect output files from the workspace.
 
@@ -529,12 +534,14 @@ class CodeExecutorService:
                     content = file_path.read_bytes()
                     mime_type = self._guess_mime_type(file_path.name)
 
-                    output_files.append(OutputFile(
-                        filename=file_path.name,
-                        content=content,
-                        mime_type=mime_type,
-                        size_bytes=len(content),
-                    ))
+                    output_files.append(
+                        OutputFile(
+                            filename=file_path.name,
+                            content=content,
+                            mime_type=mime_type,
+                            size_bytes=len(content),
+                        )
+                    )
 
                 except Exception as e:
                     logger.warning(f"Failed to read output file {file_path}: {e}")
@@ -591,10 +598,7 @@ class CodeExecutorService:
         try:
             client = self.docker_client
             # Find containers created by this service
-            containers = client.containers.list(
-                all=True,
-                filters={"ancestor": self.config.image}
-            )
+            containers = client.containers.list(all=True, filters={"ancestor": self.config.image})
 
             removed_count = 0
             for container in containers:
@@ -628,10 +632,10 @@ class CodeExecutorService:
 # =============================================================================
 
 
-_code_executor: Optional[CodeExecutorService] = None
+_code_executor: CodeExecutorService | None = None
 
 
-def get_code_executor(config: Optional[CodeExecutionConfig] = None) -> CodeExecutorService:
+def get_code_executor(config: CodeExecutionConfig | None = None) -> CodeExecutorService:
     """
     Get the global CodeExecutorService instance.
 

@@ -12,21 +12,21 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from .logging import LogContext, set_log_context, clear_log_context, get_logger
+from .logging import LogContext, clear_log_context, get_logger, set_log_context
 
 logger = get_logger(__name__)
 
 # 追踪上下文
-_trace_context: ContextVar[Optional["TraceContext"]] = ContextVar("trace_context", default=None)
+_trace_context: ContextVar[TraceContext | None] = ContextVar("trace_context", default=None)
 
 
 def generate_trace_id() -> str:
@@ -43,43 +43,46 @@ def generate_span_id() -> str:
 class Span:
     """
     追踪 Span
-    
+
     表示一个操作的追踪单元。
     """
+
     span_id: str
     name: str
-    parent_span_id: Optional[str] = None
+    parent_span_id: str | None = None
     start_time: float = field(default_factory=time.time)
-    end_time: Optional[float] = None
+    end_time: float | None = None
     status: str = "ok"  # ok, error
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    events: List[Dict[str, Any]] = field(default_factory=list)
-    
+    attributes: dict[str, Any] = field(default_factory=dict)
+    events: list[dict[str, Any]] = field(default_factory=list)
+
     def end(self, status: str = "ok") -> None:
         """结束 Span"""
         self.end_time = time.time()
         self.status = status
-    
+
     @property
-    def duration_ms(self) -> Optional[float]:
+    def duration_ms(self) -> float | None:
         """获取持续时间（毫秒）"""
         if self.end_time is None:
             return None
         return (self.end_time - self.start_time) * 1000
-    
-    def add_event(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
+
+    def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
         """添加事件"""
-        self.events.append({
-            "name": name,
-            "timestamp": time.time(),
-            "attributes": attributes or {},
-        })
-    
+        self.events.append(
+            {
+                "name": name,
+                "timestamp": time.time(),
+                "attributes": attributes or {},
+            }
+        )
+
     def set_attribute(self, key: str, value: Any) -> None:
         """设置属性"""
         self.attributes[key] = value
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "span_id": self.span_id,
@@ -98,36 +101,37 @@ class Span:
 class TraceContext:
     """
     追踪上下文
-    
+
     在请求生命周期内维护追踪信息。
     """
+
     trace_id: str
     root_span: Span
     current_span: Span
-    spans: List[Span] = field(default_factory=list)
-    
+    spans: list[Span] = field(default_factory=list)
+
     # 请求元数据
     method: str = ""
     path: str = ""
     client_ip: str = ""
-    user_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    
+    user_id: str | None = None
+    tenant_id: str | None = None
+
     def __post_init__(self):
         self.spans.append(self.root_span)
-    
+
     def start_span(
         self,
         name: str,
-        attributes: Optional[Dict[str, Any]] = None,
+        attributes: dict[str, Any] | None = None,
     ) -> Span:
         """
         开始新的 Span
-        
+
         Args:
             name: Span 名称
             attributes: 初始属性
-        
+
         Returns:
             新创建的 Span
         """
@@ -140,18 +144,18 @@ class TraceContext:
         self.spans.append(span)
         self.current_span = span
         return span
-    
+
     def end_span(self, status: str = "ok") -> None:
         """结束当前 Span"""
         self.current_span.end(status)
-        
+
         # 返回到父 Span
         if self.current_span.parent_span_id:
             for span in reversed(self.spans):
                 if span.span_id == self.current_span.parent_span_id:
                     self.current_span = span
                     break
-    
+
     def to_log_context(self) -> LogContext:
         """转换为日志上下文"""
         return LogContext(
@@ -161,8 +165,8 @@ class TraceContext:
             tenant_id=self.tenant_id,
             client_ip=self.client_ip,
         )
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "trace_id": self.trace_id,
@@ -175,7 +179,7 @@ class TraceContext:
         }
 
 
-def get_trace_context() -> Optional[TraceContext]:
+def get_trace_context() -> TraceContext | None:
     """获取当前追踪上下文"""
     return _trace_context.get()
 
@@ -193,22 +197,22 @@ def clear_trace_context() -> None:
 class TracingMiddleware(BaseHTTPMiddleware):
     """
     追踪中间件
-    
+
     自动为每个请求创建追踪上下文，并传播到整个请求处理流程。
     """
-    
+
     # 追踪 ID 请求头名称
     TRACE_ID_HEADER = "X-Trace-ID"
     SPAN_ID_HEADER = "X-Span-ID"
     PARENT_SPAN_HEADER = "X-Parent-Span-ID"
-    
+
     def __init__(
         self,
         app: ASGIApp,
         service_name: str = "gateway",
         log_requests: bool = True,
         log_responses: bool = True,
-        exclude_paths: Optional[List[str]] = None,
+        exclude_paths: list[str] | None = None,
     ):
         """
         Args:
@@ -223,7 +227,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
         self.log_requests = log_requests
         self.log_responses = log_responses
         self.exclude_paths = set(exclude_paths or ["/health", "/health/live", "/health/ready"])
-    
+
     async def dispatch(
         self,
         request: Request,
@@ -233,11 +237,11 @@ class TracingMiddleware(BaseHTTPMiddleware):
         # 检查是否需要排除
         if request.url.path in self.exclude_paths:
             return await call_next(request)
-        
+
         # 获取或生成 trace_id
         trace_id = request.headers.get(self.TRACE_ID_HEADER) or generate_trace_id()
         parent_span_id = request.headers.get(self.PARENT_SPAN_HEADER)
-        
+
         # 创建根 Span
         root_span = Span(
             span_id=generate_span_id(),
@@ -254,7 +258,7 @@ class TracingMiddleware(BaseHTTPMiddleware):
                 "service.name": self.service_name,
             },
         )
-        
+
         # 创建追踪上下文
         trace_context = TraceContext(
             trace_id=trace_id,
@@ -264,15 +268,15 @@ class TracingMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
             client_ip=request.client.host if request.client else "",
         )
-        
+
         # 设置上下文
         set_trace_context(trace_context)
         set_log_context(trace_context.to_log_context())
-        
+
         # 存储到请求状态
         request.state.trace_id = trace_id
         request.state.trace_context = trace_context
-        
+
         # 记录请求日志
         if self.log_requests:
             logger.info(
@@ -283,20 +287,20 @@ class TracingMiddleware(BaseHTTPMiddleware):
                     "http.query": request.url.query,
                 },
             )
-        
+
         # 处理请求
         start_time = time.time()
         try:
             response = await call_next(request)
-            
+
             # 设置响应头
             response.headers[self.TRACE_ID_HEADER] = trace_id
             response.headers[self.SPAN_ID_HEADER] = root_span.span_id
-            
+
             # 结束 Span
             root_span.set_attribute("http.status_code", response.status_code)
             root_span.end("ok" if response.status_code < 400 else "error")
-            
+
             # 记录响应日志
             if self.log_responses:
                 duration_ms = (time.time() - start_time) * 1000
@@ -308,20 +312,23 @@ class TracingMiddleware(BaseHTTPMiddleware):
                         "duration_ms": duration_ms,
                     },
                 )
-            
+
             return response
-            
+
         except Exception as exc:
             # 记录异常
             root_span.set_attribute("error", True)
             root_span.set_attribute("error.type", type(exc).__name__)
             root_span.set_attribute("error.message", str(exc))
-            root_span.add_event("exception", {
-                "exception.type": type(exc).__name__,
-                "exception.message": str(exc),
-            })
+            root_span.add_event(
+                "exception",
+                {
+                    "exception.type": type(exc).__name__,
+                    "exception.message": str(exc),
+                },
+            )
             root_span.end("error")
-            
+
             duration_ms = (time.time() - start_time) * 1000
             logger.error(
                 f"Request failed: {request.method} {request.url.path} ({duration_ms:.2f}ms)",
@@ -332,9 +339,9 @@ class TracingMiddleware(BaseHTTPMiddleware):
                 },
                 exc_info=True,
             )
-            
+
             raise
-            
+
         finally:
             # 清理上下文
             clear_trace_context()
@@ -346,10 +353,10 @@ class TracingMiddleware(BaseHTTPMiddleware):
 
 def trace_langgraph_run(
     assistant_id: str,
-    thread_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-) -> Optional[Span]:
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    run_id: str | None = None,
+) -> Span | None:
     """
     Start tracing a LangGraph run
 
@@ -385,8 +392,8 @@ def trace_langgraph_run(
 def trace_llm_call(
     model: str,
     provider: str = "unknown",
-    user_id: Optional[str] = None,
-) -> Optional[Span]:
+    user_id: str | None = None,
+) -> Span | None:
     """
     Start tracing an LLM API call
 
@@ -416,10 +423,10 @@ def trace_llm_call(
 
 
 def record_token_usage(
-    span: Optional[Span],
+    span: Span | None,
     input_tokens: int,
     output_tokens: int,
-    model: Optional[str] = None,
+    model: str | None = None,
 ) -> None:
     """Record token usage on a span"""
     if span is None:
@@ -433,10 +440,10 @@ def record_token_usage(
 
 
 def record_run_completion(
-    span: Optional[Span],
+    span: Span | None,
     duration_ms: float,
     status: str = "success",
-    error_message: Optional[str] = None,
+    error_message: str | None = None,
 ) -> None:
     """Record LangGraph run completion"""
     if span is None:
@@ -453,7 +460,7 @@ def record_run_completion(
         span.end("ok")
 
 
-def inject_trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
+def inject_trace_headers(headers: dict[str, str]) -> dict[str, str]:
     """Inject trace context into headers for propagation to downstream services"""
     context = get_trace_context()
     if context:
@@ -464,7 +471,7 @@ def inject_trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return headers
 
 
-def trace_span(name: str, attributes: Optional[Dict[str, Any]] = None):
+def trace_span(name: str, attributes: dict[str, Any] | None = None):
     """
     追踪 Span 装饰器
 
@@ -520,4 +527,3 @@ def trace_span(name: str, attributes: Optional[Dict[str, Any]] = None):
         return sync_wrapper
 
     return decorator
-

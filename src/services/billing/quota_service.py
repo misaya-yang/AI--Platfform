@@ -10,14 +10,14 @@ This service handles:
 
 from __future__ import annotations
 
-import logging
 import inspect
+import logging
 import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
-_quota_service: Optional["QuotaService"] = None
+_quota_service: QuotaService | None = None
 
 
 class QuotaStatus(str, Enum):
@@ -53,14 +53,14 @@ class QuotaCheckResult:
     status: QuotaStatus
     message: str = ""
     daily_tokens_used: int = 0
-    daily_tokens_limit: Optional[int] = None
+    daily_tokens_limit: int | None = None
     monthly_cost_used: int = 0  # in cents
-    monthly_cost_limit: Optional[int] = None  # in cents
+    monthly_cost_limit: int | None = None  # in cents
     daily_requests_used: int = 0
-    daily_requests_limit: Optional[int] = None
+    daily_requests_limit: int | None = None
     warning_threshold: int = 80
     overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT
-    downgraded_model: Optional[str] = None
+    downgraded_model: str | None = None
 
     @property
     def can_proceed(self) -> bool:
@@ -86,7 +86,7 @@ class QuotaCheckResult:
             return 0.0
         return round(self.monthly_cost_used / self.monthly_cost_limit * 100, 1)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "status": self.status.value,
@@ -123,25 +123,25 @@ class UserQuota:
 
     tenant_id: str
     user_id: str
-    daily_token_limit: Optional[int] = None
-    monthly_token_limit: Optional[int] = None
-    monthly_cost_limit_cents: Optional[int] = None
-    requests_per_minute: Optional[int] = None
-    requests_per_day: Optional[int] = None
+    daily_token_limit: int | None = None
+    monthly_token_limit: int | None = None
+    monthly_cost_limit_cents: int | None = None
+    requests_per_minute: int | None = None
+    requests_per_day: int | None = None
     current_daily_tokens: int = 0
     current_monthly_tokens: int = 0
     current_monthly_cost_cents: int = 0
     current_daily_requests: int = 0
-    daily_reset_at: Optional[datetime] = None
-    monthly_reset_at: Optional[datetime] = None
+    daily_reset_at: datetime | None = None
+    monthly_reset_at: datetime | None = None
     is_blocked: bool = False
-    blocked_reason: Optional[str] = None
+    blocked_reason: str | None = None
     warning_threshold: int = 80
     overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT
-    downgraded_model: Optional[str] = None
+    downgraded_model: str | None = None
     temporary_extra_tokens: int = 0
     temporary_extra_cost_cents: int = 0
-    temporary_expires_at: Optional[datetime] = None
+    temporary_expires_at: datetime | None = None
 
 
 class QuotaService:
@@ -155,10 +155,10 @@ class QuotaService:
     - Alert generation for approaching limits
     """
 
-    def __init__(self, database: Optional["DatabaseStorage"] = None):
+    def __init__(self, database: DatabaseStorage | None = None):
         self.database = database
 
-    def set_database(self, database: "DatabaseStorage") -> None:
+    def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
         self.database = database
 
@@ -202,7 +202,7 @@ class QuotaService:
                     await released
 
     @staticmethod
-    def _normalize_limit(value: Optional[int]) -> Optional[int]:
+    def _normalize_limit(value: int | None) -> int | None:
         """Normalize quota limits: treat 0 as unlimited (None)."""
         if value is None:
             return None
@@ -226,6 +226,7 @@ class QuotaService:
         """Record a quota_exceeded security event for dashboard visibility."""
         try:
             from ...services.metrics.security_event_recorder import get_security_event_recorder
+
             recorder = get_security_event_recorder()
             await recorder.record_event(
                 tenant_id=tenant_id,
@@ -406,7 +407,7 @@ class QuotaService:
         self,
         tenant_id: str,
         user_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get user quota details."""
         quota = await self._get_or_create_quota(tenant_id, user_id)
         if not quota:
@@ -458,11 +459,11 @@ class QuotaService:
     def _projected_breach_date(
         *,
         current_value: float,
-        limit_value: Optional[float],
+        limit_value: float | None,
         average_daily_delta: float,
         today: date,
         days_remaining: int,
-    ) -> Optional[str]:
+    ) -> str | None:
         if not limit_value or limit_value <= 0:
             return None
         if current_value >= limit_value:
@@ -482,7 +483,7 @@ class QuotaService:
         tenant_id: str,
         user_id: str,
         lookback_days: int = 7,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Predict month-end quota usage based on recent daily trend.
 
@@ -600,7 +601,9 @@ class QuotaService:
                 "avg_daily": round(avg_daily_tokens, 2),
                 "projected_month_end": projected_tokens,
                 "limit": effective_monthly_token_limit,
-                "projected_usage_pct": round(projected_tokens / effective_monthly_token_limit * 100, 2)
+                "projected_usage_pct": round(
+                    projected_tokens / effective_monthly_token_limit * 100, 2
+                )
                 if effective_monthly_token_limit
                 else None,
                 "predicted_breach_date": token_breach_date,
@@ -615,7 +618,9 @@ class QuotaService:
                 "limit_usd": round(effective_monthly_cost_limit_cents / 100, 4)
                 if effective_monthly_cost_limit_cents
                 else None,
-                "projected_usage_pct": round(projected_cost_cents / effective_monthly_cost_limit_cents * 100, 2)
+                "projected_usage_pct": round(
+                    projected_cost_cents / effective_monthly_cost_limit_cents * 100, 2
+                )
                 if effective_monthly_cost_limit_cents
                 else None,
                 "predicted_breach_date": cost_breach_date,
@@ -626,18 +631,18 @@ class QuotaService:
         self,
         tenant_id: str,
         user_id: str,
-        daily_token_limit: Optional[int] = None,
-        monthly_token_limit: Optional[int] = None,
-        monthly_cost_limit_cents: Optional[int] = None,
-        requests_per_minute: Optional[int] = None,
-        requests_per_day: Optional[int] = None,
+        daily_token_limit: int | None = None,
+        monthly_token_limit: int | None = None,
+        monthly_cost_limit_cents: int | None = None,
+        requests_per_minute: int | None = None,
+        requests_per_day: int | None = None,
         warning_threshold: int = 80,
         overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT,
-        downgraded_model: Optional[str] = None,
-        temporary_extra_tokens: Optional[int] = None,
-        temporary_extra_cost_cents: Optional[int] = None,
-        temporary_expires_at: Optional[datetime] = None,
-    ) -> Dict[str, Any]:
+        downgraded_model: str | None = None,
+        temporary_extra_tokens: int | None = None,
+        temporary_extra_cost_cents: int | None = None,
+        temporary_expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """Set or update user quota limits."""
         pool = self._get_pool()
         if not pool:
@@ -840,7 +845,7 @@ class QuotaService:
         tenant_id: str,
         limit: int = 50,
         unacknowledged_only: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get quota alerts for a tenant."""
         pool = self._get_pool()
         if not pool:
@@ -918,7 +923,7 @@ class QuotaService:
         self,
         tenant_id: str,
         user_id: str,
-    ) -> Optional[UserQuota]:
+    ) -> UserQuota | None:
         """Get or create a user quota record."""
         pool = self._get_pool()
         if not pool:
@@ -970,6 +975,7 @@ class QuotaService:
                     )
 
                 if row:
+
                     def _value(key: str, default: Any = None) -> Any:
                         if isinstance(row, dict):
                             return row.get(key, default)
@@ -994,7 +1000,9 @@ class QuotaService:
                         requests_per_day=_value("requests_per_day"),
                         current_daily_tokens=int(_value("current_daily_tokens", 0) or 0),
                         current_monthly_tokens=int(_value("current_monthly_tokens", 0) or 0),
-                        current_monthly_cost_cents=int(_value("current_monthly_cost_cents", 0) or 0),
+                        current_monthly_cost_cents=int(
+                            _value("current_monthly_cost_cents", 0) or 0
+                        ),
                         current_daily_requests=int(_value("current_daily_requests", 0) or 0),
                         daily_reset_at=_value("daily_reset_at"),
                         monthly_reset_at=_value("monthly_reset_at"),
@@ -1025,7 +1033,7 @@ def get_quota_service() -> QuotaService:
     return _quota_service
 
 
-def init_quota_service(database: "DatabaseStorage") -> QuotaService:
+def init_quota_service(database: DatabaseStorage) -> QuotaService:
     """Initialize the global QuotaService with database storage."""
     global _quota_service
     if _quota_service is None:

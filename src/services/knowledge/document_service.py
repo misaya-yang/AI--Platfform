@@ -10,7 +10,7 @@ import json
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -19,7 +19,6 @@ from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import NotFoundError, PermissionDeniedError, ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
-from .chunking import ChunkingConfig
 
 logger = get_logger(__name__)
 
@@ -47,7 +46,7 @@ def _detect_mime_type(filename: str) -> str:
     return DOCUMENT_MIME_TYPES.get(ext, "application/octet-stream")
 
 
-def _ensure_dict(value: Any) -> Dict[str, Any]:
+def _ensure_dict(value: Any) -> dict[str, Any]:
     """Ensure value is a dict."""
     if value is None:
         return {}
@@ -66,7 +65,7 @@ def _sanitize_filename(filename: str) -> str:
     """Sanitize filename for storage."""
     # Remove path components and unsafe characters
     filename = filename.split("/")[-1].split("\\")[-1]
-    filename = re.sub(r'[^\w\s\-\.]', '_', filename)
+    filename = re.sub(r"[^\w\s\-\.]", "_", filename)
     return filename[:255]  # Limit length
 
 
@@ -77,7 +76,7 @@ class DocumentService:
         self,
         settings: Settings,
         database: DatabaseStorage,
-        dataset_service: Optional[Any] = None,
+        dataset_service: Any | None = None,
     ):
         self.settings = settings
         self.db = database
@@ -93,8 +92,8 @@ class DocumentService:
         dataset_id: str,
         title: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Create a document from text content."""
         from .dataset_service import _require_not_guest
 
@@ -108,9 +107,7 @@ class DocumentService:
 
         # Check dataset access
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         document_id = str(uuid.uuid4())
 
@@ -142,8 +139,8 @@ class DocumentService:
         dataset_id: str,
         filename: str,
         content: bytes,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Create a document from uploaded file."""
         from .dataset_service import _require_not_guest
 
@@ -157,9 +154,7 @@ class DocumentService:
 
         # Check dataset access
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         filename = _sanitize_filename(filename)
         mime_type = _detect_mime_type(filename)
@@ -168,7 +163,7 @@ class DocumentService:
         extracted_text = ""
         try:
             extracted_text = await self._extract_text_from_bytes(content, mime_type)
-        except (IOError, OSError) as e:
+        except OSError as e:
             logger.warning(f"File I/O error extracting text from {filename}: {e}")
             extracted_text = ""
         except ValueError as e:
@@ -182,12 +177,14 @@ class DocumentService:
 
         # Create document record
         doc_metadata = _ensure_dict(metadata)
-        doc_metadata.update({
-            "filename": filename,
-            "mime_type": mime_type,
-            "size_bytes": len(content),
-            "extracted_text_length": len(extracted_text),
-        })
+        doc_metadata.update(
+            {
+                "filename": filename,
+                "mime_type": mime_type,
+                "size_bytes": len(content),
+                "extracted_text_length": len(extracted_text),
+            }
+        )
 
         await self.db.insert_document(
             document_id=document_id,
@@ -215,9 +212,9 @@ class DocumentService:
         user: UserContext,
         dataset_id: str,
         url: str,
-        title: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Create a document from URL."""
         from .dataset_service import _require_not_guest
 
@@ -228,9 +225,7 @@ class DocumentService:
 
         # Check dataset access
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         # Fetch content
         try:
@@ -245,10 +240,12 @@ class DocumentService:
 
         # Create document record
         doc_metadata = _ensure_dict(metadata)
-        doc_metadata.update({
-            "source_url": url,
-            "fetched_at": datetime.utcnow().isoformat(),
-        })
+        doc_metadata.update(
+            {
+                "source_url": url,
+                "fetched_at": datetime.utcnow().isoformat(),
+            }
+        )
 
         await self.db.insert_document(
             document_id=document_id,
@@ -275,8 +272,8 @@ class DocumentService:
         self,
         user: UserContext,
         dataset_id: str,
-        documents: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        documents: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """Batch create documents."""
         from .dataset_service import _require_not_guest
 
@@ -287,9 +284,7 @@ class DocumentService:
 
         # Check dataset access
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         created_ids = []
         errors = []
@@ -323,7 +318,7 @@ class DocumentService:
                 errors.append({"index": idx, "error": f"Permission denied: {e}"})
             except NotFoundError as e:
                 errors.append({"index": idx, "error": f"Not found: {e}"})
-            except (IOError, OSError) as e:
+            except OSError as e:
                 errors.append({"index": idx, "error": f"File error: {e}"})
 
         return {
@@ -332,33 +327,27 @@ class DocumentService:
             "errors": errors,
         }
 
-    async def list_documents(
-        self, user: UserContext, dataset_id: str
-    ) -> List[Dict[str, Any]]:
+    async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
         """List all documents in a dataset."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "viewer"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "viewer")
 
         return await self.db.get_documents(dataset_id)
 
     async def get_document(
         self, user: UserContext, dataset_id: str, document_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get document details."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "viewer"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "viewer")
 
         doc = await self.db.get_document(document_id)
         if not doc or doc.get("dataset_id") != dataset_id:
@@ -370,20 +359,18 @@ class DocumentService:
         user: UserContext,
         dataset_id: str,
         document_id: str,
-        updates: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
         """Update document metadata."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         # Verify document exists
-        doc = await self.get_document(user, dataset_id, document_id)
+        await self.get_document(user, dataset_id, document_id)
 
         # Build update fields
         fields = {}
@@ -398,18 +385,14 @@ class DocumentService:
 
         return {"id": document_id, "updated": True}
 
-    async def delete_document(
-        self, user: UserContext, dataset_id: str, document_id: str
-    ) -> bool:
+    async def delete_document(self, user: UserContext, dataset_id: str, document_id: str) -> bool:
         """Delete a document."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         # Verify document exists
         await self.get_document(user, dataset_id, document_id)
@@ -422,8 +405,8 @@ class DocumentService:
         self,
         user: UserContext,
         dataset_id: str,
-        document_ids: List[str],
-    ) -> Dict[str, Any]:
+        document_ids: list[str],
+    ) -> dict[str, Any]:
         """Batch delete documents."""
         from .dataset_service import _require_not_guest
 
@@ -434,9 +417,7 @@ class DocumentService:
 
         # Check dataset access
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         deleted = 0
         errors = []
@@ -456,16 +437,14 @@ class DocumentService:
         dataset_id: str,
         document_id: str,
         enabled: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Enable or disable a document."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         await self.get_document(user, dataset_id, document_id)
         await self.db.update_document(document_id, {"enabled": enabled})
@@ -478,23 +457,21 @@ class DocumentService:
         dataset_id: str,
         document_id: str,
         archived: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Archive or unarchive a document."""
         from .dataset_service import _require_not_guest
 
         _require_not_guest(user)
 
         if self.dataset_service:
-            await self.dataset_service._require_dataset_permission(
-                user, dataset_id, "editor"
-            )
+            await self.dataset_service._require_dataset_permission(user, dataset_id, "editor")
 
         await self.get_document(user, dataset_id, document_id)
         await self.db.update_document(document_id, {"archived": archived})
 
         return {"id": document_id, "archived": archived}
 
-    async def get_document_statistics(self, document_id: str) -> Dict[str, Any]:
+    async def get_document_statistics(self, document_id: str) -> dict[str, Any]:
         """Get statistics for a document."""
         return await self.db.get_document_statistics(document_id)
 
@@ -514,13 +491,9 @@ class DocumentService:
     # Text Extraction
     # ========================================================================
 
-    async def _extract_text_from_bytes(
-        self, content: bytes, mime_type: str
-    ) -> str:
+    async def _extract_text_from_bytes(self, content: bytes, mime_type: str) -> str:
         """Extract text from file bytes based on MIME type."""
-        if mime_type == "text/plain":
-            return self._decode_text_bytes(content)
-        elif mime_type == "text/markdown":
+        if mime_type == "text/plain" or mime_type == "text/markdown":
             return self._decode_text_bytes(content)
         elif mime_type == "text/html":
             return self._extract_text_from_html(self._decode_text_bytes(content))
@@ -540,14 +513,13 @@ class DocumentService:
         try:
             import pdfplumber
 
-            with io.BytesIO(content) as pdf_file:
-                with pdfplumber.open(pdf_file) as pdf:
-                    text_parts = []
-                    for page in pdf.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text_parts.append(page_text)
-                    return "\n\n".join(text_parts)
+            with io.BytesIO(content) as pdf_file, pdfplumber.open(pdf_file) as pdf:
+                text_parts = []
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+                return "\n\n".join(text_parts)
         except Exception as e:
             logger.warning(f"pdfplumber extraction failed: {e}")
             # Fallback to PyPDF2

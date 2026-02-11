@@ -14,23 +14,25 @@ import asyncio
 import base64
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class VLMError(RuntimeError):
     """VLM service error."""
+
     pass
 
 
 @dataclass
 class ImageDescription:
     """Result of image description generation."""
+
     description: str
     model: str
     tokens_used: int = 0
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
 class DashScopeVLMService:
@@ -47,7 +49,7 @@ class DashScopeVLMService:
     """
 
     # Model configurations
-    MODEL_INFO: Dict[str, Dict[str, Any]] = {
+    MODEL_INFO: dict[str, dict[str, Any]] = {
         "qwen-vl-max": {"max_tokens": 2000, "supports_url": True},
         "qwen-vl-plus": {"max_tokens": 2000, "supports_url": True},
         "qwen2-vl-72b-instruct": {"max_tokens": 4096, "supports_url": True},
@@ -77,7 +79,7 @@ class DashScopeVLMService:
         self,
         api_key: str,
         model: str = "qwen-vl-max",
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 3,
     ):
@@ -108,20 +110,18 @@ class DashScopeVLMService:
         try:
             import dashscope
             from dashscope import MultiModalConversation
+
             self._MultiModalConversation = MultiModalConversation
             if base_url:
                 dashscope.base_http_api_url = base_url
         except ImportError as exc:
             raise VLMError(
-                "dashscope package is required for VLM service "
-                "(pip install dashscope>=1.24.6)"
+                "dashscope package is required for VLM service (pip install dashscope>=1.24.6)"
             ) from exc
 
         logger.info(f"VLM service initialized with model: {model}")
 
-    def _image_to_base64_data_uri(
-        self, image_bytes: bytes, media_type: str = "image/png"
-    ) -> str:
+    def _image_to_base64_data_uri(self, image_bytes: bytes, media_type: str = "image/png") -> str:
         """Convert image bytes to base64 data URI."""
         b64_data = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{media_type};base64,{b64_data}"
@@ -131,15 +131,15 @@ class DashScopeVLMService:
         if len(image_bytes) < 8:
             return "image/png"
 
-        if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
             return "image/png"
-        elif image_bytes[:2] == b'\xff\xd8':
+        elif image_bytes[:2] == b"\xff\xd8":
             return "image/jpeg"
-        elif image_bytes[:6] in (b'GIF87a', b'GIF89a'):
+        elif image_bytes[:6] in (b"GIF87a", b"GIF89a"):
             return "image/gif"
-        elif image_bytes[:2] == b'BM':
+        elif image_bytes[:2] == b"BM":
             return "image/bmp"
-        elif image_bytes[:4] == b'RIFF' and len(image_bytes) > 12 and image_bytes[8:12] == b'WEBP':
+        elif image_bytes[:4] == b"RIFF" and len(image_bytes) > 12 and image_bytes[8:12] == b"WEBP":
             return "image/webp"
         else:
             return "image/png"
@@ -147,9 +147,9 @@ class DashScopeVLMService:
     async def describe_image(
         self,
         image_bytes: bytes,
-        prompt: Optional[str] = None,
+        prompt: str | None = None,
         image_type: str = "general",
-        context: Optional[str] = None,
+        context: str | None = None,
         max_tokens: int = 1500,
     ) -> ImageDescription:
         """
@@ -265,12 +265,12 @@ class DashScopeVLMService:
 
     async def describe_images_batch(
         self,
-        images: List[bytes],
-        prompts: Optional[List[str]] = None,
-        image_types: Optional[List[str]] = None,
-        contexts: Optional[List[str]] = None,
+        images: list[bytes],
+        prompts: list[str] | None = None,
+        image_types: list[str] | None = None,
+        contexts: list[str] | None = None,
         max_concurrent: int = 8,  # Increased from 3 for better throughput
-    ) -> List[ImageDescription]:
+    ) -> list[ImageDescription]:
         """
         Generate descriptions for multiple images.
 
@@ -298,9 +298,9 @@ class DashScopeVLMService:
         async def describe_with_semaphore(
             idx: int,
             image: bytes,
-            prompt: Optional[str],
+            prompt: str | None,
             image_type: str,
-            context: Optional[str],
+            context: str | None,
         ) -> tuple[int, ImageDescription | Exception]:
             async with semaphore:
                 try:
@@ -327,14 +327,16 @@ class DashScopeVLMService:
         # Sort by index and extract results
         results_sorted = sorted(results_raw, key=lambda x: x[0])
         results = []
-        for idx, result in results_sorted:
+        for _idx, result in results_sorted:
             if isinstance(result, Exception):
                 # Return a placeholder description for failed images
-                results.append(ImageDescription(
-                    description=f"[图片描述生成失败: {result}]",
-                    model=self.model,
-                    metadata={"error": str(result)},
-                ))
+                results.append(
+                    ImageDescription(
+                        description=f"[图片描述生成失败: {result}]",
+                        model=self.model,
+                        metadata={"error": str(result)},
+                    )
+                )
             else:
                 results.append(result)
 
@@ -343,7 +345,7 @@ class DashScopeVLMService:
     async def describe_table_image(
         self,
         image_bytes: bytes,
-        table_context: Optional[str] = None,
+        table_context: str | None = None,
     ) -> ImageDescription:
         """
         Specialized method for describing table/chart images.
@@ -368,7 +370,7 @@ class DashScopeVLMService:
 def create_vlm_service(
     api_key: str,
     model: str = "qwen-vl-max",
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
 ) -> DashScopeVLMService:
     """
     Factory function to create VLM service.

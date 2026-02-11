@@ -14,10 +14,9 @@ Industry standard approach used by Claude, GPT-4V, and Gemini.
 from __future__ import annotations
 
 import base64
-import io
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Callable, Awaitable
 
 from ...core.observability.logging import get_logger
 
@@ -31,7 +30,7 @@ class PDFConversionError(Exception):
         self,
         message: str,
         file_path: str,
-        original_error: Optional[Exception] = None,
+        original_error: Exception | None = None,
     ):
         self.file_path = file_path
         self.original_error = original_error
@@ -76,7 +75,7 @@ class PDFConversionResult:
 
     file_path: str
     total_pages: int
-    page_images: List[PDFPageImage] = field(default_factory=list)
+    page_images: list[PDFPageImage] = field(default_factory=list)
     total_size_bytes: int = 0
     conversion_time_ms: float = 0
 
@@ -165,9 +164,9 @@ class PDFConverter:
     async def convert(
         self,
         file_path: str,
-        max_pages: Optional[int] = None,
-        page_range: Optional[tuple[int, int]] = None,
-        on_progress: Optional[ProgressCallback] = None,
+        max_pages: int | None = None,
+        page_range: tuple[int, int] | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> PDFConversionResult:
         """
         Convert PDF to images.
@@ -185,6 +184,7 @@ class PDFConverter:
             PDFConversionError: If conversion fails
         """
         import time
+
         start_time = time.time()
 
         path = Path(file_path)
@@ -202,9 +202,7 @@ class PDFConverter:
             doc = fitz.open(str(path))
             total_pages = len(doc)
 
-            logger.info(
-                f"[PDFConverter] Opening PDF: {file_path}, pages={total_pages}"
-            )
+            logger.info(f"[PDFConverter] Opening PDF: {file_path}, pages={total_pages}")
 
             # Determine pages to convert
             if page_range:
@@ -257,9 +255,7 @@ class PDFConverter:
                 # Progress callback
                 if on_progress:
                     await on_progress(
-                        i + 1,
-                        pages_to_convert,
-                        f"Converting page {page_num + 1}/{total_pages}"
+                        i + 1, pages_to_convert, f"Converting page {page_num + 1}/{total_pages}"
                     )
 
                 logger.debug(
@@ -302,9 +298,9 @@ class PDFConverter:
         self,
         file_path: str,
         provider: str = "openai",
-        max_pages: Optional[int] = None,
-        on_progress: Optional[ProgressCallback] = None,
-    ) -> List[dict]:
+        max_pages: int | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> list[dict]:
         """
         Convert PDF to provider-specific content blocks ready for API.
 

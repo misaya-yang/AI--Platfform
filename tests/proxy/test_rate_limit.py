@@ -15,22 +15,20 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
-from typing import Dict, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from src.core.gateway.rate_limiter import (
-    RateLimiter,
-    RateLimitConfig,
-    RateLimit,
-)
 from src.core.exceptions import RateLimitExceededError
-
+from src.core.gateway.rate_limiter import (
+    RateLimit,
+    RateLimitConfig,
+    RateLimiter,
+)
 
 # ============ RateLimit Config Tests ============
+
 
 class TestRateLimitConfig:
     """RateLimit 配置测试"""
@@ -92,9 +90,11 @@ class TestRateLimitConfig:
 
 # ============ Mock Request and Service ============
 
+
 @dataclass
 class MockRequest:
     """Mock 请求"""
+
     user_id: str = ""
     tenant_id: str = ""
 
@@ -102,6 +102,7 @@ class MockRequest:
 @dataclass
 class MockServiceConfig:
     """Mock 服务配置"""
+
     rate_limit: MagicMock = None
 
     def __post_init__(self):
@@ -113,8 +114,9 @@ class MockServiceConfig:
 @dataclass
 class MockService:
     """Mock 服务定义"""
+
     service_id: str = "test_service"
-    rate_limit: Optional[Dict] = None
+    rate_limit: dict | None = None
     _config: MockServiceConfig = None
 
     def __post_init__(self):
@@ -126,6 +128,7 @@ class MockService:
 
 
 # ============ RateLimiter Core Tests ============
+
 
 class TestRateLimiter:
     """RateLimiter 核心测试"""
@@ -200,6 +203,7 @@ class TestRateLimiter:
 
 # ============ Tenant Rate Limiting Tests ============
 
+
 class TestTenantRateLimiting:
     """租户限流测试"""
 
@@ -271,6 +275,7 @@ class TestTenantRateLimiting:
 
 # ============ User Rate Limiting Tests ============
 
+
 class TestUserRateLimiting:
     """用户限流测试"""
 
@@ -327,6 +332,7 @@ class TestUserRateLimiting:
 
 # ============ Service Rate Limiting Tests ============
 
+
 class TestServiceRateLimiting:
     """服务限流测试"""
 
@@ -379,6 +385,7 @@ class TestServiceRateLimiting:
 
 # ============ IP Rate Limiting Tests ============
 
+
 class TestIPRateLimiting:
     """IP 限流测试"""
 
@@ -427,6 +434,7 @@ class TestIPRateLimiting:
 
 # ============ Burst Tests ============
 
+
 class TestBurstHandling:
     """Burst 处理测试"""
 
@@ -468,6 +476,7 @@ class TestBurstHandling:
 
 
 # ============ Multi-Dimension Rate Limiting Tests ============
+
 
 class TestMultiDimensionRateLimiting:
     """多维度限流测试"""
@@ -527,6 +536,7 @@ class TestMultiDimensionRateLimiting:
 
 # ============ Sliding Window Tests ============
 
+
 class TestSlidingWindow:
     """滑动窗口测试"""
 
@@ -559,6 +569,7 @@ class TestSlidingWindow:
 
 # ============ Concurrent Access Tests ============
 
+
 class TestConcurrentAccess:
     """并发访问测试"""
 
@@ -574,10 +585,7 @@ class TestConcurrentAccess:
         service = MockService()
 
         # 并发发送 10 个请求
-        tasks = [
-            limiter.enforce(request, service)
-            for _ in range(10)
-        ]
+        tasks = [limiter.enforce(request, service) for _ in range(10)]
 
         # 所有请求都应该成功
         await asyncio.gather(*tasks)
@@ -594,10 +602,7 @@ class TestConcurrentAccess:
         service = MockService()
 
         # 并发发送 10 个请求
-        tasks = [
-            limiter.enforce(request, service)
-            for _ in range(10)
-        ]
+        tasks = [limiter.enforce(request, service) for _ in range(10)]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -610,6 +615,7 @@ class TestConcurrentAccess:
 
 
 # ============ Error Message Tests ============
+
 
 class TestRateLimitErrorMessages:
     """限流错误消息测试"""
@@ -635,6 +641,7 @@ class TestRateLimitErrorMessages:
 
 
 # ============ Service Config Rate Limit Tests ============
+
 
 class TestServiceConfigRateLimit:
     """服务配置限流测试"""

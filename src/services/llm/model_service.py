@@ -6,7 +6,7 @@ Manages LLM model configurations.
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
@@ -24,10 +24,10 @@ class ModelService:
     async def list_models(
         self,
         tenant_id: str,
-        provider_id: Optional[str] = None,
+        provider_id: str | None = None,
         include_disabled: bool = False,
-        access_level: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        access_level: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         List models for a tenant.
 
@@ -38,7 +38,7 @@ class ModelService:
             access_level: Filter by max access level (public, premium, admin)
         """
         conditions = ["tenant_id = $1"]
-        params: List[Any] = [tenant_id]
+        params: list[Any] = [tenant_id]
         param_idx = 2
 
         if provider_id:
@@ -75,7 +75,7 @@ class ModelService:
         self,
         tenant_id: str,
         model_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get a specific model."""
         query = """
             SELECT model_id, tenant_id, provider_id, display_name,
@@ -103,7 +103,7 @@ class ModelService:
         access_level: str = "public",
         is_enabled: bool = True,
         sort_order: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a new model."""
         query = """
             INSERT INTO llm_models (
@@ -119,13 +119,22 @@ class ModelService:
         """
         row = await self.db.fetchrow(
             query,
-            model_id, tenant_id, provider_id, display_name,
-            context_window, max_output_tokens, supports_vision, supports_tools,
-            input_price_per_1k, output_price_per_1k, access_level,
-            is_enabled, sort_order,
+            model_id,
+            tenant_id,
+            provider_id,
+            display_name,
+            context_window,
+            max_output_tokens,
+            supports_vision,
+            supports_tools,
+            input_price_per_1k,
+            output_price_per_1k,
+            access_level,
+            is_enabled,
+            sort_order,
         )
         row_dict = self._row_to_dict(row)
-        
+
         # Sync with model_pricing table for usage recording
         try:
             pricing_svc = get_pricing_service()
@@ -150,17 +159,17 @@ class ModelService:
         self,
         tenant_id: str,
         model_id: str,
-        display_name: Optional[str] = None,
-        context_window: Optional[int] = None,
-        max_output_tokens: Optional[int] = None,
-        supports_vision: Optional[bool] = None,
-        supports_tools: Optional[bool] = None,
-        input_price_per_1k: Optional[Decimal] = None,
-        output_price_per_1k: Optional[Decimal] = None,
-        access_level: Optional[str] = None,
-        is_enabled: Optional[bool] = None,
-        sort_order: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
+        display_name: str | None = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
+        supports_vision: bool | None = None,
+        supports_tools: bool | None = None,
+        input_price_per_1k: Decimal | None = None,
+        output_price_per_1k: Decimal | None = None,
+        access_level: str | None = None,
+        is_enabled: bool | None = None,
+        sort_order: int | None = None,
+    ) -> dict[str, Any] | None:
         """Update a model."""
         updates = []
         params = []
@@ -227,7 +236,7 @@ class ModelService:
 
         query = f"""
             UPDATE llm_models
-            SET {', '.join(updates)}
+            SET {", ".join(updates)}
             WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}
             RETURNING model_id, tenant_id, provider_id, display_name,
                       context_window, max_output_tokens, supports_vision, supports_tools,
@@ -235,7 +244,7 @@ class ModelService:
                       is_enabled, sort_order, created_at, updated_at
         """
         row = await self.db.fetchrow(query, *params)
-        
+
         if row:
             row_dict = self._row_to_dict(row)
             # Sync with model_pricing table for usage recording
@@ -244,20 +253,20 @@ class ModelService:
                 # Use values from the updated row to ensure we have the latest state
                 await pricing_svc.update_pricing(
                     model=model_id,
-                    input_price_per_1k=float(row['input_price_per_1k'] or 0),
-                    output_price_per_1k=float(row['output_price_per_1k'] or 0),
-                    provider=row['provider_id'],
-                    display_name=row['display_name'],
-                    context_window=row['context_window'],
-                    max_output_tokens=row['max_output_tokens'],
-                    supports_vision=row['supports_vision'],
-                    supports_tools=row['supports_tools'],
+                    input_price_per_1k=float(row["input_price_per_1k"] or 0),
+                    output_price_per_1k=float(row["output_price_per_1k"] or 0),
+                    provider=row["provider_id"],
+                    display_name=row["display_name"],
+                    context_window=row["context_window"],
+                    max_output_tokens=row["max_output_tokens"],
+                    supports_vision=row["supports_vision"],
+                    supports_tools=row["supports_tools"],
                 )
                 logger.info(f"Synced pricing for model {model_id}")
             except Exception as e:
                 logger.error(f"Failed to sync pricing for model {model_id}: {e}")
             return row_dict
-            
+
         return None
 
     async def delete_model(
@@ -268,7 +277,8 @@ class ModelService:
         """Delete a model."""
         result = await self.db.execute(
             "DELETE FROM llm_models WHERE tenant_id = $1 AND model_id = $2",
-            tenant_id, model_id,
+            tenant_id,
+            model_id,
         )
         return "DELETE 1" in str(result)
 
@@ -277,7 +287,7 @@ class ModelService:
         tenant_id: str,
         model_id: str,
         is_enabled: bool,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Toggle model enabled state."""
         return await self.update_model(tenant_id, model_id, is_enabled=is_enabled)
 
@@ -285,7 +295,7 @@ class ModelService:
         self,
         tenant_id: str,
         user_access_level: str = "public",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get models available for the AI assistant.
 
@@ -315,7 +325,7 @@ class ModelService:
         rows = await self.db.fetch(query, tenant_id)
         return [self._row_to_dict(row) for row in rows]
 
-    def _row_to_dict(self, row) -> Dict[str, Any]:
+    def _row_to_dict(self, row) -> dict[str, Any]:
         """Convert database row to dictionary."""
         if not row:
             return {}

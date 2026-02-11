@@ -13,7 +13,7 @@ import time
 import uuid
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 try:
     import asyncpg
@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 def build_service_query(
-    status: Optional[str] = None,
-    service_type: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-) -> Tuple[str, List[Any]]:
+    status: str | None = None,
+    service_type: str | None = None,
+    tags: list[str] | None = None,
+) -> tuple[str, list[Any]]:
     """Build service query with safe parameterization.
 
     Uses len(params) for parameter indexing to avoid off-by-one errors.
@@ -45,7 +45,7 @@ def build_service_query(
         Tuple of (query_string, params_list)
     """
     query_parts = ["SELECT * FROM services WHERE 1=1"]
-    params: List[Any] = []
+    params: list[Any] = []
 
     if status:
         params.append(status)
@@ -69,10 +69,10 @@ class DatabaseStorage:
 
     def __init__(
         self,
-        dsn: Optional[str] = None,
+        dsn: str | None = None,
         enabled: bool = False,
         auto_init: bool = True,
-        schema_path: Optional[str] = None,
+        schema_path: str | None = None,
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = 2,
         pool_max_size: int = 10,
@@ -83,15 +83,15 @@ class DatabaseStorage:
         self.schema_path = schema_path or str(
             Path(__file__).resolve().parent.parent.parent / "database" / "schema.sql"
         )
-        self._pool: Optional[Any] = None
+        self._pool: Any | None = None
         self._pool_min_size = max(int(pool_min_size), 1)
         self._pool_max_size = max(int(pool_max_size), self._pool_min_size)
-        self._permission_cache: Dict[str, tuple[List[str], float]] = {}
+        self._permission_cache: dict[str, tuple[list[str], float]] = {}
         self._permission_cache_max_size = 10000  # Prevent unbounded memory growth
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
         self._permission_cache_lock = asyncio.Lock()
 
-    async def _get_cached_permissions(self, user_id: str) -> Optional[List[str]]:
+    async def _get_cached_permissions(self, user_id: str) -> list[str] | None:
         if self._permission_cache_ttl_seconds <= 0:
             return None
         async with self._permission_cache_lock:
@@ -104,7 +104,7 @@ class DatabaseStorage:
                 return None
             return list(permissions)
 
-    async def _set_cached_permissions(self, user_id: str, permissions: List[str]) -> None:
+    async def _set_cached_permissions(self, user_id: str, permissions: list[str]) -> None:
         """Set cached permissions with size limit enforcement.
 
         Uses FIFO eviction when cache exceeds max_size.
@@ -126,7 +126,7 @@ class DatabaseStorage:
                 time.time() + self._permission_cache_ttl_seconds,
             )
 
-    async def _invalidate_permission_cache(self, user_id: Optional[str] = None) -> None:
+    async def _invalidate_permission_cache(self, user_id: str | None = None) -> None:
         async with self._permission_cache_lock:
             if user_id:
                 self._permission_cache.pop(user_id, None)
@@ -164,14 +164,14 @@ class DatabaseStorage:
             await self._pool.close()
             self._pool = None
 
-    async def fetchrow(self, query: str, *args) -> Optional[Any]:
+    async def fetchrow(self, query: str, *args) -> Any | None:
         """执行查询并返回单行结果"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             return await conn.fetchrow(query, *args)
 
-    async def fetch(self, query: str, *args) -> List[Any]:
+    async def fetch(self, query: str, *args) -> list[Any]:
         """执行查询并返回多行结果"""
         if not self._pool:
             return []
@@ -189,7 +189,7 @@ class DatabaseStorage:
         """执行 SQL 建表脚本"""
         if not self._pool:
             return
-        with open(schema_path, "r", encoding="utf-8") as f:
+        with open(schema_path, encoding="utf-8") as f:
             sql = f.read()
         async with self._pool.acquire() as conn:
             await conn.execute(sql)
@@ -593,7 +593,7 @@ class DatabaseStorage:
     # 服务定义表 (services)
     # =========================================================================
 
-    async def save_service(self, service: Dict[str, Any]) -> None:
+    async def save_service(self, service: dict[str, Any]) -> None:
         """保存或更新服务"""
         if not self._pool:
             return
@@ -601,8 +601,8 @@ class DatabaseStorage:
             await conn.execute(
                 """
                 INSERT INTO services (
-                    service_id, name, description, version, service_type, 
-                    connector_type, connector_config, supported_modes, 
+                    service_id, name, description, version, service_type,
+                    connector_type, connector_config, supported_modes,
                     accepted_content_types, output_content_types,
                     input_schema, output_schema, session_enabled, session_adapter,
                     timeout, max_retries, retry_delay, circuit_breaker_enabled,
@@ -671,7 +671,7 @@ class DatabaseStorage:
                 json.dumps(service.get("metadata", {})),
             )
 
-    async def get_service(self, service_id: str) -> Optional[Dict[str, Any]]:
+    async def get_service(self, service_id: str) -> dict[str, Any] | None:
         """获取服务定义"""
         if not self._pool:
             return None
@@ -681,10 +681,10 @@ class DatabaseStorage:
 
     async def list_services(
         self,
-        status: Optional[str] = None,
-        service_type: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
+        status: str | None = None,
+        service_type: str | None = None,
+        tags: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """获取服务列表
 
         Uses build_service_query() for safe parameterization.
@@ -721,7 +721,7 @@ class DatabaseStorage:
     # 会话表 (sessions)
     # =========================================================================
 
-    async def save_session(self, session: Dict[str, Any]) -> None:
+    async def save_session(self, session: dict[str, Any]) -> None:
         """保存或更新会话"""
         if not self._pool:
             return
@@ -754,7 +754,7 @@ class DatabaseStorage:
                 session.get("expires_at"),
             )
 
-    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """获取会话"""
         if not self._pool:
             return None
@@ -765,8 +765,8 @@ class DatabaseStorage:
     async def append_session_message(
         self,
         session_id: str,
-        message: Dict[str, Any],
-        metadata_update: Optional[Dict[str, Any]] = None,
+        message: dict[str, Any],
+        metadata_update: dict[str, Any] | None = None,
     ) -> bool:
         """
         原子追加消息到会话历史（避免竞态条件）
@@ -813,12 +813,12 @@ class DatabaseStorage:
 
     async def list_sessions(
         self,
-        user_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        service_id: Optional[str] = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_id: str | None = None,
         status: str = "active",
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """获取会话列表"""
         if not self._pool:
             return []
@@ -858,7 +858,7 @@ class DatabaseStorage:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
-    async def update_session_history(self, session_id: str, history: List[Dict[str, Any]]) -> None:
+    async def update_session_history(self, session_id: str, history: list[dict[str, Any]]) -> None:
         """更新会话历史"""
         if not self._pool:
             return
@@ -869,7 +869,7 @@ class DatabaseStorage:
                 session_id,
             )
 
-    async def update_session_state(self, session_id: str, state: Dict[str, Any]) -> None:
+    async def update_session_state(self, session_id: str, state: dict[str, Any]) -> None:
         """更新会话状态"""
         if not self._pool:
             return
@@ -905,7 +905,7 @@ class DatabaseStorage:
     # 异步任务表 (tasks)
     # =========================================================================
 
-    async def save_task(self, task: Dict[str, Any]) -> None:
+    async def save_task(self, task: dict[str, Any]) -> None:
         """保存或更新任务"""
         if not self._pool:
             return
@@ -953,7 +953,7 @@ class DatabaseStorage:
                 task.get("completed_at"),
             )
 
-    async def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_task(self, task_id: str) -> dict[str, Any] | None:
         """获取任务"""
         if not self._pool:
             return None
@@ -963,13 +963,13 @@ class DatabaseStorage:
 
     async def list_tasks(
         self,
-        user_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        service_id: Optional[str] = None,
-        status: Optional[str] = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """获取任务列表"""
         if not self._pool:
             return []
@@ -1061,16 +1061,16 @@ class DatabaseStorage:
                 task_id,
             )
 
-    async def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_pending_tasks(self, limit: int = 10) -> list[dict[str, Any]]:
         """获取待处理任务"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT * FROM tasks 
-                WHERE status = 'pending' 
-                ORDER BY priority DESC, created_at ASC 
+                SELECT * FROM tasks
+                WHERE status = 'pending'
+                ORDER BY priority DESC, created_at ASC
                 LIMIT $1
             """,
                 limit,
@@ -1081,7 +1081,7 @@ class DatabaseStorage:
     # Knowledge Base (KBMS)
     # =========================================================================
 
-    async def save_dataset(self, dataset: Dict[str, Any]) -> None:
+    async def save_dataset(self, dataset: dict[str, Any]) -> None:
         """保存或更新知识库 Dataset"""
         if not self._pool:
             return
@@ -1144,7 +1144,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
-                UPDATE datasets 
+                UPDATE datasets
                 SET needs_reindex = false, updated_at = NOW()
                 WHERE dataset_id = $1
                 """,
@@ -1152,7 +1152,7 @@ class DatabaseStorage:
             )
             logger.info(f"Cleared needs_reindex flag for dataset {dataset_id}")
 
-    async def get_dataset(self, dataset_id: str) -> Optional[Dict[str, Any]]:
+    async def get_dataset(self, dataset_id: str) -> dict[str, Any] | None:
         """获取 Dataset"""
         if not self._pool:
             return None
@@ -1164,17 +1164,17 @@ class DatabaseStorage:
 
     async def list_datasets(
         self,
-        tenant_id: Optional[str] = None,
+        tenant_id: str | None = None,
         include_public: bool = True,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Dataset"""
         if not self._pool:
             return []
 
         query = "SELECT * FROM datasets WHERE is_deleted = FALSE"
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         if tenant_id:
@@ -1200,8 +1200,8 @@ class DatabaseStorage:
     async def delete_dataset(
         self,
         dataset_id: str,
-        deleted_by: Optional[str] = None,
-        delete_reason: Optional[str] = None,
+        deleted_by: str | None = None,
+        delete_reason: str | None = None,
     ) -> bool:
         """软删除 Dataset，并清理关联数据。"""
         if not self._pool:
@@ -1259,8 +1259,8 @@ class DatabaseStorage:
             return True
 
     async def get_datasets_statistics_batch(
-        self, dataset_ids: List[str]
-    ) -> Dict[str, Dict[str, int]]:
+        self, dataset_ids: list[str]
+    ) -> dict[str, dict[str, int]]:
         """获取多个 Dataset 的统计数据（批量查询优化）"""
         if not self._pool or not dataset_ids:
             return {}
@@ -1281,7 +1281,7 @@ class DatabaseStorage:
             """
             rows = await conn.fetch(query, dataset_ids)
 
-            result: Dict[str, Dict[str, int]] = {}
+            result: dict[str, dict[str, int]] = {}
             for row in rows:
                 result[row["dataset_id"]] = {
                     "document_count": row["document_count"] or 0,
@@ -1341,7 +1341,7 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
-    async def list_dataset_permissions(self, dataset_id: str) -> List[Dict[str, Any]]:
+    async def list_dataset_permissions(self, dataset_id: str) -> list[dict[str, Any]]:
         """列出 Dataset 权限"""
         if not self._pool:
             return []
@@ -1358,7 +1358,7 @@ class DatabaseStorage:
 
     async def get_dataset_permission(
         self, dataset_id: str, subject_type: str, subject_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """获取指定 subject 对 Dataset 的权限记录"""
         if not self._pool:
             return None
@@ -1374,7 +1374,7 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
-    async def save_document(self, document: Dict[str, Any]) -> None:
+    async def save_document(self, document: dict[str, Any]) -> None:
         """保存或更新文档 Document"""
         if not self._pool:
             return
@@ -1422,7 +1422,7 @@ class DatabaseStorage:
                 document.get("completed_at"),
             )
 
-    async def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+    async def get_document(self, document_id: str) -> dict[str, Any] | None:
         """获取 Document"""
         if not self._pool:
             return None
@@ -1433,21 +1433,21 @@ class DatabaseStorage:
     async def list_documents(
         self,
         dataset_id: str,
-        status: Optional[str] = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出文档"""
         if not self._pool:
             return []
 
         query = """
-            SELECT document_id, dataset_id, title, source_type, source_uri, 
-                   mime_type, size_bytes, status, progress, error, metadata, 
-                   started_at, completed_at, created_at, updated_at 
+            SELECT document_id, dataset_id, title, source_type, source_uri,
+                   mime_type, size_bytes, status, progress, error, metadata,
+                   started_at, completed_at, created_at, updated_at
             FROM documents WHERE dataset_id = $1
         """
-        params: List[Any] = [dataset_id]
+        params: list[Any] = [dataset_id]
         param_idx = 2
 
         if status:
@@ -1465,7 +1465,7 @@ class DatabaseStorage:
     async def find_stuck_documents(
         self,
         stuck_threshold_minutes: int = 15,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """查找长时间未完成处理的文档"""
         if not self._pool:
             return []
@@ -1487,15 +1487,15 @@ class DatabaseStorage:
         self,
         document_id: str,
         status: str,
-        progress: Optional[float] = None,
-        error: Optional[str] = None,
+        progress: float | None = None,
+        error: str | None = None,
     ) -> None:
         """更新 Document 状态"""
         if not self._pool:
             return
 
         updates = ["status = $1", "updated_at = NOW()"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         param_idx = 2
 
         if progress is not None:
@@ -1534,7 +1534,7 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
-    async def update_document_fields(self, document_id: str, fields: Dict[str, Any]) -> None:
+    async def update_document_fields(self, document_id: str, fields: dict[str, Any]) -> None:
         """Update arbitrary document fields (Dify-style enable/disable/archive support)"""
         if not self._pool or not fields:
             return
@@ -1564,7 +1564,7 @@ class DatabaseStorage:
             return
 
         updates = ["updated_at = NOW()"]
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         for key, value in filtered.items():
@@ -1593,7 +1593,7 @@ class DatabaseStorage:
                 document_id,
             )
 
-    async def insert_segments(self, segments: List[Dict[str, Any]]) -> None:
+    async def insert_segments(self, segments: list[dict[str, Any]]) -> None:
         """批量插入/更新 Segment (enhanced with Dify-style fields + content_hash)"""
         if not self._pool or not segments:
             return
@@ -1694,7 +1694,7 @@ class DatabaseStorage:
 
     async def get_segment_hashes_by_document(
         self, document_id: str, content_type: str = "text"
-    ) -> Dict[int, Dict[str, Any]]:
+    ) -> dict[int, dict[str, Any]]:
         """
         获取文档现有 segments 的 hash 映射，用于增量更新比对
 
@@ -1730,8 +1730,8 @@ class DatabaseStorage:
     async def delete_segments_by_document(
         self,
         document_id: str,
-        exclude_ids: Optional[List[str]] = None,
-        content_type: Optional[str] = None,
+        exclude_ids: list[str] | None = None,
+        content_type: str | None = None,
     ) -> int:
         """
         删除指定文档下的 Segment
@@ -1777,17 +1777,17 @@ class DatabaseStorage:
     async def list_segments(
         self,
         dataset_id: str,
-        document_id: Optional[str] = None,
-        query_text: Optional[str] = None,
+        document_id: str | None = None,
+        query_text: str | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Segment"""
         if not self._pool:
             return []
 
         query = "SELECT * FROM segments WHERE dataset_id = $1"
-        params: List[Any] = [dataset_id]
+        params: list[Any] = [dataset_id]
         param_idx = 2
 
         if document_id:
@@ -1812,12 +1812,12 @@ class DatabaseStorage:
     async def search_segments_like_any(
         self,
         dataset_id: str,
-        terms: List[str],
-        document_id: Optional[str] = None,
-        source_type: Optional[str] = None,
-        language: Optional[str] = None,
+        terms: list[str],
+        document_id: str | None = None,
+        source_type: str | None = None,
+        language: str | None = None,
         limit: int = 200,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Keyword candidate retrieval using PostgreSQL full-text search (GIN index).
 
         Uses tsvector/tsquery for O(log N) index lookup when the text_search column
@@ -1854,7 +1854,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             count = await conn.fetchval(
                 """
-                SELECT COUNT(*) FROM segments 
+                SELECT COUNT(*) FROM segments
                 WHERE dataset_id = $1 AND vector_id IS NOT NULL
                 LIMIT 1
                 """,
@@ -1865,9 +1865,9 @@ class DatabaseStorage:
     async def search_segments_vector(
         self,
         dataset_id: str,
-        query_embedding: List[float],
+        query_embedding: list[float],
         top_k: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Vector search placeholder - delegates to vector_store.
 
         Note: Actual vector search should use VectorStore.search() directly.
@@ -1879,12 +1879,12 @@ class DatabaseStorage:
     async def _search_segments_fts(
         self,
         dataset_id: str,
-        terms: List[str],
-        document_id: Optional[str],
-        source_type: Optional[str],
-        language: Optional[str],
+        terms: list[str],
+        document_id: str | None,
+        source_type: str | None,
+        language: str | None,
         limit: int,
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> list[dict[str, Any]] | None:
         """Full-text search using tsvector + GIN index (O(log N)).
 
         Returns None if text_search column doesn't exist (pre-migration).
@@ -1893,8 +1893,8 @@ class DatabaseStorage:
         if not self._pool:
             return None
 
-        query = f"SELECT * FROM segments WHERE dataset_id = $1"
-        params: List[Any] = [dataset_id]
+        query = "SELECT * FROM segments WHERE dataset_id = $1"
+        params: list[Any] = [dataset_id]
         param_idx = 2
 
         if document_id:
@@ -1943,15 +1943,15 @@ class DatabaseStorage:
     async def _search_segments_ilike(
         self,
         dataset_id: str,
-        terms: List[str],
-        document_id: Optional[str],
-        source_type: Optional[str],
-        language: Optional[str],
+        terms: list[str],
+        document_id: str | None,
+        source_type: str | None,
+        language: str | None,
         limit: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Legacy ILIKE fallback for pre-migration databases (O(N) sequential scan)."""
         query = "SELECT * FROM segments WHERE dataset_id = $1"
-        params: List[Any] = [dataset_id]
+        params: list[Any] = [dataset_id]
         param_idx = 2
 
         if document_id:
@@ -1989,7 +1989,7 @@ class DatabaseStorage:
             logger.error(f"ILIKE search error: {e}, params: {params[:2]}...")
             return []
 
-    async def get_segment(self, segment_id: str) -> Optional[Dict[str, Any]]:
+    async def get_segment(self, segment_id: str) -> dict[str, Any] | None:
         """获取 Segment"""
         if not self._pool:
             return None
@@ -1997,7 +1997,7 @@ class DatabaseStorage:
             row = await conn.fetchrow("SELECT * FROM segments WHERE segment_id = $1", segment_id)
             return self._row_to_dict(row) if row else None
 
-    async def get_segments_by_ids(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
+    async def get_segments_by_ids(self, segment_ids: list[str]) -> list[dict[str, Any]]:
         """批量获取 Segment，避免 N+1 查询。"""
         if not self._pool:
             return []
@@ -2015,16 +2015,16 @@ class DatabaseStorage:
         self,
         segment_id: str,
         text: str,
-        token_count: Optional[int] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        vector_id: Optional[str] = None,
+        token_count: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        vector_id: str | None = None,
     ) -> None:
         """更新 Segment"""
         if not self._pool:
             return
 
         updates = ["text = $1", "updated_at = NOW()"]
-        params: List[Any] = [text]
+        params: list[Any] = [text]
         param_idx = 2
 
         if token_count is not None:
@@ -2048,7 +2048,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def update_segment_fields(self, segment_id: str, fields: Dict[str, Any]) -> None:
+    async def update_segment_fields(self, segment_id: str, fields: dict[str, Any]) -> None:
         """Update arbitrary segment fields (Dify-style enable/disable support)"""
         if not self._pool or not fields:
             return
@@ -2073,7 +2073,7 @@ class DatabaseStorage:
             return
 
         updates = ["updated_at = NOW()"]
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         for key, value in filtered.items():
@@ -2101,7 +2101,7 @@ class DatabaseStorage:
                 return int(result.split()[-1]) > 0
             return False
 
-    async def save_image_segment(self, segment_data: Dict[str, Any]) -> None:
+    async def save_image_segment(self, segment_data: dict[str, Any]) -> None:
         """保存图片段到数据库
 
         Args:
@@ -2174,7 +2174,7 @@ class DatabaseStorage:
                 "completed",  # status
             )
 
-    async def get_image_segments_by_document(self, document_id: str) -> List[Dict[str, Any]]:
+    async def get_image_segments_by_document(self, document_id: str) -> list[dict[str, Any]]:
         """获取文档的所有图片段
 
         Args:
@@ -2283,7 +2283,7 @@ class DatabaseStorage:
         position: int = 0,
         proximity_score: float = 1.0,
         char_offset: int = 0,
-        page_number: Optional[int] = None,
+        page_number: int | None = None,
     ) -> bool:
         """Associate an image segment with a text segment.
 
@@ -2328,7 +2328,7 @@ class DatabaseStorage:
 
     async def add_segment_image_associations_batch(
         self,
-        associations: List[Dict[str, Any]],
+        associations: list[dict[str, Any]],
     ) -> int:
         """Add multiple image associations in batch.
 
@@ -2377,7 +2377,7 @@ class DatabaseStorage:
                         continue
             return count
 
-    async def get_segment_associated_images(self, segment_id: str) -> List[Dict[str, Any]]:
+    async def get_segment_associated_images(self, segment_id: str) -> list[dict[str, Any]]:
         """Get all images associated with a text segment.
 
         Args:
@@ -2412,8 +2412,8 @@ class DatabaseStorage:
             return [dict(row) for row in rows]
 
     async def get_segment_associations_batch(
-        self, segment_ids: List[str]
-    ) -> Dict[str, List[Dict[str, Any]]]:
+        self, segment_ids: list[str]
+    ) -> dict[str, list[dict[str, Any]]]:
         """Get associated images for multiple segments efficiently.
 
         Args:
@@ -2447,7 +2447,7 @@ class DatabaseStorage:
                 segment_ids,
             )
 
-            result: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in segment_ids}
+            result: dict[str, list[dict[str, Any]]] = {sid: [] for sid in segment_ids}
             for row in rows:
                 seg_id = row["segment_id"]
                 if seg_id in result:
@@ -2535,12 +2535,12 @@ class DatabaseStorage:
         description: str = None,
         tenant_id: str = None,
         user_id: str = None,
-        roles: List[str] = None,
-        permissions: List[str] = None,
+        roles: list[str] = None,
+        permissions: list[str] = None,
         tier: str = "normal",
-        rate_limit: Dict = None,
-        allowed_services: List[str] = None,
-        allowed_models: List[str] = None,
+        rate_limit: dict = None,
+        allowed_services: list[str] = None,
+        allowed_models: list[str] = None,
         expires_at: datetime = None,
     ) -> int:
         """保存 API Key"""
@@ -2583,14 +2583,14 @@ class DatabaseStorage:
             )
             return row["id"] if row else 0
 
-    async def get_api_key(self, key_hash: str) -> Optional[Dict[str, Any]]:
+    async def get_api_key(self, key_hash: str) -> dict[str, Any] | None:
         """通过哈希获取 API Key"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT * FROM api_keys 
+                SELECT * FROM api_keys
                 WHERE key_hash = $1 AND enabled = TRUE
                 AND (expires_at IS NULL OR expires_at > NOW())
             """,
@@ -2600,9 +2600,9 @@ class DatabaseStorage:
                 # 更新使用统计
                 await conn.execute(
                     """
-                    UPDATE api_keys SET 
-                        last_used_at = NOW(), 
-                        use_count = use_count + 1 
+                    UPDATE api_keys SET
+                        last_used_at = NOW(),
+                        use_count = use_count + 1
                     WHERE key_hash = $1
                 """,
                     key_hash,
@@ -2610,14 +2610,14 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def list_api_keys(
-        self, tenant_id: Optional[str] = None, user_id: Optional[str] = None, enabled: bool = None
-    ) -> List[Dict[str, Any]]:
+        self, tenant_id: str | None = None, user_id: str | None = None, enabled: bool = None
+    ) -> list[dict[str, Any]]:
         """获取 API Key 列表（不返回哈希）"""
         if not self._pool:
             return []
 
         query = """
-            SELECT id, name, description, tenant_id, user_id, roles, 
+            SELECT id, name, description, tenant_id, user_id, roles,
                    permissions, tier, rate_limit, allowed_services, allowed_models,
                    expires_at, enabled, last_used_at, use_count, created_at, updated_at
             FROM api_keys WHERE 1=1
@@ -2668,7 +2668,7 @@ class DatabaseStorage:
     # 用户表 (users)
     # =========================================================================
 
-    async def save_user(self, user: Dict[str, Any]) -> None:
+    async def save_user(self, user: dict[str, Any]) -> None:
         """保存或更新用户"""
         if not self._pool:
             return
@@ -2704,7 +2704,7 @@ class DatabaseStorage:
                 json.dumps(user.get("metadata", {})),
             )
 
-    async def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
         """获取用户"""
         if not self._pool:
             return None
@@ -2713,8 +2713,8 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def list_users(
-        self, tenant_id: Optional[str] = None, status: str = "active", limit: int = 100
-    ) -> List[Dict[str, Any]]:
+        self, tenant_id: str | None = None, status: str = "active", limit: int = 100
+    ) -> list[dict[str, Any]]:
         """获取用户列表"""
         if not self._pool:
             return []
@@ -2753,7 +2753,7 @@ class DatabaseStorage:
     # 租户表 (tenants)
     # =========================================================================
 
-    async def save_tenant(self, tenant: Dict[str, Any]) -> None:
+    async def save_tenant(self, tenant: dict[str, Any]) -> None:
         """保存或更新租户"""
         if not self._pool:
             return
@@ -2786,7 +2786,7 @@ class DatabaseStorage:
                 json.dumps(tenant.get("metadata", {})),
             )
 
-    async def get_tenant(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+    async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         """获取租户"""
         if not self._pool:
             return None
@@ -2794,7 +2794,7 @@ class DatabaseStorage:
             row = await conn.fetchrow("SELECT * FROM tenants WHERE tenant_id = $1", tenant_id)
             return self._row_to_dict(row) if row else None
 
-    async def list_tenants(self, status: str = "active") -> List[Dict[str, Any]]:
+    async def list_tenants(self, status: str = "active") -> list[dict[str, Any]]:
         """获取租户列表"""
         if not self._pool:
             return []
@@ -2845,14 +2845,14 @@ class DatabaseStorage:
             )
 
     async def get_rate_limits(
-        self, scope: Optional[str] = None, enabled: bool = True
-    ) -> List[Dict[str, Any]]:
+        self, scope: str | None = None, enabled: bool = True
+    ) -> list[dict[str, Any]]:
         """获取限流配置"""
         if not self._pool:
             return []
 
         query = """
-            SELECT id, scope, scope_id, requests, window_seconds, 
+            SELECT id, scope, scope_id, requests, window_seconds,
                    burst, strategy, enabled, priority, created_at, updated_at
             FROM rate_limit_config WHERE 1=1
         """
@@ -2891,7 +2891,7 @@ class DatabaseStorage:
     # RBAC 角色表 (rbac_roles)
     # =========================================================================
 
-    async def get_rbac_roles(self) -> List[Dict[str, Any]]:
+    async def get_rbac_roles(self) -> list[dict[str, Any]]:
         """获取所有角色"""
         if not self._pool:
             return []
@@ -2899,7 +2899,7 @@ class DatabaseStorage:
             rows = await conn.fetch("SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name")
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_role_permissions(self, role_name: str) -> List[str]:
+    async def get_role_permissions(self, role_name: str) -> list[str]:
         """获取角色权限"""
         if not self._pool:
             return []
@@ -2912,7 +2912,7 @@ class DatabaseStorage:
     async def save_role(
         self,
         role_name: str,
-        permissions: List[str],
+        permissions: list[str],
         description: str = None,
         is_system: bool = False,
     ) -> None:
@@ -2950,8 +2950,8 @@ class DatabaseStorage:
         user_agent: str = None,
         resource_type: str = None,
         resource_id: str = None,
-        request_summary: Dict = None,
-        response_summary: Dict = None,
+        request_summary: dict = None,
+        response_summary: dict = None,
         error_message: str = None,
         duration_ms: int = None,
     ) -> None:
@@ -2984,14 +2984,14 @@ class DatabaseStorage:
 
     async def query_audit_logs(
         self,
-        event_type: Optional[str] = None,
-        user_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        event_type: str | None = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """查询审计日志"""
         if not self._pool:
             return []
@@ -3041,7 +3041,7 @@ class DatabaseStorage:
         service_id: str,
         status: str,
         response_time_ms: int = None,
-        details: Dict = None,
+        details: dict = None,
         error_message: str = None,
     ) -> None:
         """记录健康检查结果"""
@@ -3061,16 +3061,16 @@ class DatabaseStorage:
                 error_message,
             )
 
-    async def get_health_history(self, service_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_health_history(self, service_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """获取服务健康历史"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT * FROM service_health_records 
-                WHERE service_id = $1 
-                ORDER BY checked_at DESC 
+                SELECT * FROM service_health_records
+                WHERE service_id = $1
+                ORDER BY checked_at DESC
                 LIMIT $2
             """,
                 service_id,
@@ -3113,9 +3113,9 @@ class DatabaseStorage:
                     error_count = usage_statistics.error_count + EXCLUDED.error_count,
                     input_tokens = usage_statistics.input_tokens + EXCLUDED.input_tokens,
                     output_tokens = usage_statistics.output_tokens + EXCLUDED.output_tokens,
-                    avg_response_time_ms = CASE 
-                        WHEN $10 IS NOT NULL THEN 
-                            (COALESCE(usage_statistics.avg_response_time_ms, 0) * usage_statistics.request_count + $10) 
+                    avg_response_time_ms = CASE
+                        WHEN $10 IS NOT NULL THEN
+                            (COALESCE(usage_statistics.avg_response_time_ms, 0) * usage_statistics.request_count + $10)
                             / (usage_statistics.request_count + 1)
                         ELSE usage_statistics.avg_response_time_ms
                     END,
@@ -3142,14 +3142,14 @@ class DatabaseStorage:
         period_type: str,
         start_time: datetime,
         end_time: datetime,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """获取使用统计"""
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT * FROM usage_statistics 
+                SELECT * FROM usage_statistics
                 WHERE dimension = $1 AND dimension_id = $2 AND period_type = $3
                 AND period_start >= $4 AND period_start <= $5
                 ORDER BY period_start
@@ -3169,11 +3169,11 @@ class DatabaseStorage:
     async def record_security_event(
         self,
         tenant_id: str,
-        user_id: Optional[str],
-        service_id: Optional[str],
+        user_id: str | None,
+        service_id: str | None,
         event_type: str,
-        event_date: Optional[date] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        event_date: date | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Record a security event into daily aggregates."""
         if not self._pool:
@@ -3213,7 +3213,7 @@ class DatabaseStorage:
         start_date: date,
         end_date: date,
         limit: int = 20,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get security event breakdown by dimension."""
         if not self._pool:
             return []
@@ -3257,9 +3257,9 @@ class DatabaseStorage:
         event_type: str,
         start_date: date,
         end_date: date,
-        user_id: Optional[str] = None,
-        service_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        user_id: str | None = None,
+        service_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Get daily time series for security events."""
         if not self._pool:
             return []
@@ -3275,7 +3275,7 @@ class DatabaseStorage:
                   AND date <= $3
                   AND event_type = $4
             """
-            params: List[Any] = [tenant_id, start_date, end_date, event_type]
+            params: list[Any] = [tenant_id, start_date, end_date, event_type]
 
             if user_id:
                 query += " AND user_id = $" + str(len(params) + 1)
@@ -3295,7 +3295,7 @@ class DatabaseStorage:
         event_type: str,
         start_date: date,
         end_date: date,
-    ) -> Optional[datetime]:
+    ) -> datetime | None:
         """Get last ingestion time for security event aggregates."""
         if not self._pool:
             return None
@@ -3319,10 +3319,10 @@ class DatabaseStorage:
     async def get_usage_last_ingested_at(
         self,
         tenant_id: str,
-        start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         granularity: str = "day",
-    ) -> Optional[datetime]:
+    ) -> datetime | None:
         """Get last ingestion time for usage aggregates."""
         if not self._pool:
             return None
@@ -3333,7 +3333,7 @@ class DatabaseStorage:
             FROM {table}
             WHERE tenant_id = $1
         """
-        params: List[Any] = [tenant_id]
+        params: list[Any] = [tenant_id]
 
         if start_date:
             query += f" AND date >= ${len(params) + 1}"
@@ -3356,7 +3356,7 @@ class DatabaseStorage:
         user_id: str,
         tenant_id: str = "",
         assistant_id: str = None,
-        metadata: Dict = None,
+        metadata: dict = None,
         is_anonymous: bool = False,
         expires_at: datetime = None,
     ) -> None:
@@ -3367,7 +3367,7 @@ class DatabaseStorage:
             await conn.execute(
                 """
                 INSERT INTO langgraph_threads (
-                    thread_id, user_id, tenant_id, assistant_id, 
+                    thread_id, user_id, tenant_id, assistant_id,
                     metadata, is_anonymous, expires_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (thread_id) DO UPDATE SET
@@ -3386,7 +3386,7 @@ class DatabaseStorage:
                 expires_at,
             )
 
-    async def get_langgraph_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
+    async def get_langgraph_thread(self, thread_id: str) -> dict[str, Any] | None:
         """获取 LangGraph Thread"""
         if not self._pool:
             return None
@@ -3403,8 +3403,8 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def list_user_threads(
-        self, user_id: str, tenant_id: Optional[str] = None, limit: int = 100
-    ) -> List[Dict[str, Any]]:
+        self, user_id: str, tenant_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         """获取用户的 LangGraph Threads"""
         if not self._pool:
             return []
@@ -3435,8 +3435,8 @@ class DatabaseStorage:
         input_hash: str,
         output_text: str,
         input_text: str = None,
-        output_data: Dict = None,
-        metadata: Dict = None,
+        output_data: dict = None,
+        metadata: dict = None,
         expires_at: datetime = None,
     ) -> None:
         """保存语义缓存"""
@@ -3446,7 +3446,7 @@ class DatabaseStorage:
             await conn.execute(
                 """
                 INSERT INTO semantic_cache (
-                    service_id, input_hash, input_text, output_text, 
+                    service_id, input_hash, input_text, output_text,
                     output_data, metadata, expires_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (service_id, input_hash) DO UPDATE SET
@@ -3466,14 +3466,14 @@ class DatabaseStorage:
                 expires_at,
             )
 
-    async def get_cache(self, service_id: str, input_hash: str) -> Optional[Dict[str, Any]]:
+    async def get_cache(self, service_id: str, input_hash: str) -> dict[str, Any] | None:
         """获取语义缓存"""
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT * FROM semantic_cache 
+                SELECT * FROM semantic_cache
                 WHERE service_id = $1 AND input_hash = $2
                 AND (expires_at IS NULL OR expires_at > NOW())
             """,
@@ -3484,9 +3484,9 @@ class DatabaseStorage:
                 # 更新命中统计
                 await conn.execute(
                     """
-                    UPDATE semantic_cache SET 
-                        hit_count = hit_count + 1, 
-                        last_hit_at = NOW() 
+                    UPDATE semantic_cache SET
+                        hit_count = hit_count + 1,
+                        last_hit_at = NOW()
                     WHERE service_id = $1 AND input_hash = $2
                 """,
                     service_id,
@@ -3510,7 +3510,7 @@ class DatabaseStorage:
     # 鉴权配置表 (auth_config)
     # =========================================================================
 
-    async def get_auth_config(self, config_type: str) -> Optional[Dict[str, Any]]:
+    async def get_auth_config(self, config_type: str) -> dict[str, Any] | None:
         """获取鉴权配置"""
         if not self._pool:
             return None
@@ -3521,7 +3521,7 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def save_auth_config(
-        self, config_type: str, config: Dict[str, Any], enabled: bool = True
+        self, config_type: str, config: dict[str, Any], enabled: bool = True
     ) -> None:
         """保存鉴权配置"""
         if not self._pool:
@@ -3545,7 +3545,7 @@ class DatabaseStorage:
     # Confluence 集成表
     # =========================================================================
 
-    async def save_confluence_connection(self, connection: Dict[str, Any]) -> None:
+    async def save_confluence_connection(self, connection: dict[str, Any]) -> None:
         """保存或更新 Confluence 连接配置"""
         if not self._pool:
             return
@@ -3585,7 +3585,7 @@ class DatabaseStorage:
                 connection.get("owner_id") or connection.get("created_by"),
             )
 
-    async def get_confluence_connection(self, connection_id: str) -> Optional[Dict[str, Any]]:
+    async def get_confluence_connection(self, connection_id: str) -> dict[str, Any] | None:
         """获取 Confluence 连接配置"""
         if not self._pool:
             return None
@@ -3597,16 +3597,16 @@ class DatabaseStorage:
 
     async def list_confluence_connections(
         self,
-        tenant_id: Optional[str] = None,
-        status: Optional[str] = None,
+        tenant_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Confluence 连接"""
         if not self._pool:
             return []
 
         query = "SELECT * FROM confluence_connections WHERE 1=1"
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         if tenant_id:
@@ -3626,7 +3626,7 @@ class DatabaseStorage:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_confluence_connections_with_polling(self) -> List[Dict[str, Any]]:
+    async def get_confluence_connections_with_polling(self) -> list[dict[str, Any]]:
         """获取启用轮询的 Confluence 连接"""
         if not self._pool:
             return []
@@ -3642,15 +3642,15 @@ class DatabaseStorage:
         self,
         connection_id: str,
         status: str,
-        last_sync_at: Optional[datetime] = None,
-        last_error: Optional[str] = None,
+        last_sync_at: datetime | None = None,
+        last_error: str | None = None,
     ) -> None:
         """更新 Confluence 连接状态"""
         if not self._pool:
             return
 
         updates = ["status = $1", "updated_at = NOW()"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         param_idx = 2
 
         if last_sync_at:
@@ -3684,14 +3684,14 @@ class DatabaseStorage:
     async def update_confluence_connection(
         self,
         connection_id: str,
-        updates: Dict[str, Any],
+        updates: dict[str, Any],
     ) -> None:
         """更新 Confluence 连接配置"""
         if not self._pool or not updates:
             return
 
         set_clauses = []
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         allowed_fields = {
@@ -3726,14 +3726,14 @@ class DatabaseStorage:
     async def find_confluence_connection_by_domain(
         self,
         domain: str,
-        tenant_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        tenant_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """根据域名查找连接"""
         if not self._pool:
             return None
 
         query = "SELECT * FROM confluence_connections WHERE domain = $1"
-        params: List[Any] = [domain]
+        params: list[Any] = [domain]
 
         if tenant_id:
             query += " AND tenant_id = $2"
@@ -3749,7 +3749,7 @@ class DatabaseStorage:
     # Confluence Space Binding 表
     # =========================================================================
 
-    async def save_confluence_binding(self, binding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def save_confluence_binding(self, binding: dict[str, Any]) -> dict[str, Any] | None:
         """
         保存或更新 Confluence 空间绑定
 
@@ -3814,7 +3814,7 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
-    async def get_confluence_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
+    async def get_confluence_binding(self, binding_id: str) -> dict[str, Any] | None:
         """获取 Confluence 空间绑定"""
         if not self._pool:
             return None
@@ -3826,7 +3826,7 @@ class DatabaseStorage:
 
     async def get_confluence_bindings_by_connection(
         self, connection_id: str
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """获取连接下的所有空间绑定"""
         if not self._pool:
             return []
@@ -3841,7 +3841,7 @@ class DatabaseStorage:
             )
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_confluence_bindings_by_dataset(self, dataset_id: str) -> List[Dict[str, Any]]:
+    async def get_confluence_bindings_by_dataset(self, dataset_id: str) -> list[dict[str, Any]]:
         """获取数据集关联的所有空间绑定"""
         if not self._pool:
             return []
@@ -3860,17 +3860,17 @@ class DatabaseStorage:
         self,
         binding_id: str,
         status: str,
-        synced_page_count: Optional[int] = None,
-        total_page_count: Optional[int] = None,
-        last_sync_at: Optional[datetime] = None,
-        last_error: Optional[str] = None,
+        synced_page_count: int | None = None,
+        total_page_count: int | None = None,
+        last_sync_at: datetime | None = None,
+        last_error: str | None = None,
     ) -> None:
         """更新 Confluence 空间绑定状态"""
         if not self._pool:
             return
 
         updates = ["status = $1", "updated_at = NOW()"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         param_idx = 2
 
         if synced_page_count is not None:
@@ -3914,14 +3914,14 @@ class DatabaseStorage:
     async def update_confluence_binding(
         self,
         binding_id: str,
-        updates: Dict[str, Any],
+        updates: dict[str, Any],
     ) -> None:
         """更新 Confluence 空间绑定"""
         if not self._pool or not updates:
             return
 
         set_clauses = []
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         allowed_fields = {
@@ -3972,18 +3972,18 @@ class DatabaseStorage:
 
     async def list_confluence_bindings(
         self,
-        connection_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        dataset_id: Optional[str] = None,
-        status: Optional[str] = None,
+        connection_id: str | None = None,
+        tenant_id: str | None = None,
+        dataset_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Confluence 空间绑定"""
         if not self._pool:
             return []
 
         query = "SELECT * FROM confluence_space_bindings WHERE 1=1"
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         if connection_id:
@@ -4017,7 +4017,7 @@ class DatabaseStorage:
     # Confluence Page 表
     # =========================================================================
 
-    async def save_confluence_page(self, page: Dict[str, Any]) -> None:
+    async def save_confluence_page(self, page: dict[str, Any]) -> None:
         """保存或更新 Confluence 页面记录"""
         if not self._pool:
             return
@@ -4061,7 +4061,7 @@ class DatabaseStorage:
                 page.get("author"),
             )
 
-    async def get_confluence_page(self, page_record_id: str) -> Optional[Dict[str, Any]]:
+    async def get_confluence_page(self, page_record_id: str) -> dict[str, Any] | None:
         """通过记录 ID 获取 Confluence 页面记录"""
         if not self._pool:
             return None
@@ -4073,7 +4073,7 @@ class DatabaseStorage:
 
     async def get_confluence_page_by_binding_and_page(
         self, binding_id: str, page_id: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """通过绑定 ID 和页面 ID 获取 Confluence 页面记录"""
         if not self._pool:
             return None
@@ -4088,7 +4088,7 @@ class DatabaseStorage:
             )
             return self._row_to_dict(row) if row else None
 
-    async def get_confluence_page_by_document(self, document_id: str) -> Optional[Dict[str, Any]]:
+    async def get_confluence_page_by_document(self, document_id: str) -> dict[str, Any] | None:
         """根据文档 ID 获取 Confluence 页面记录"""
         if not self._pool:
             return None
@@ -4101,11 +4101,11 @@ class DatabaseStorage:
     async def list_confluence_pages(
         self,
         binding_id: str,
-        status: Optional[str] = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         synced_only: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         列出 Confluence 页面记录
 
@@ -4144,7 +4144,7 @@ class DatabaseStorage:
             LEFT JOIN documents d ON cp.document_id = d.document_id
             WHERE cp.binding_id = $1
         """
-        params: List[Any] = [binding_id]
+        params: list[Any] = [binding_id]
         param_idx = 2
 
         # 只返回已入库的页面（有 document_id）
@@ -4199,18 +4199,18 @@ class DatabaseStorage:
         self,
         id: str,
         status: str,
-        document_id: Optional[str] = None,
-        content_hash: Optional[str] = None,
-        version: Optional[int] = None,
-        last_synced_at: Optional[datetime] = None,
-        error: Optional[str] = None,
+        document_id: str | None = None,
+        content_hash: str | None = None,
+        version: int | None = None,
+        last_synced_at: datetime | None = None,
+        error: str | None = None,
     ) -> None:
         """更新 Confluence 页面状态"""
         if not self._pool:
             return
 
         updates = ["status = $1", "updated_at = NOW()"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         param_idx = 2
 
         if document_id is not None:
@@ -4300,7 +4300,7 @@ class DatabaseStorage:
         self,
         binding_id: str,
         page_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """根据 Confluence page_id 获取页面记录"""
         if not self._pool:
             return None
@@ -4318,8 +4318,8 @@ class DatabaseStorage:
     async def update_confluence_page_sync_config(
         self,
         page_id: str,
-        updates: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
         """更新页面级同步配置"""
         if not self._pool:
             return None
@@ -4333,7 +4333,7 @@ class DatabaseStorage:
         }
 
         set_clauses = ["updated_at = NOW()"]
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         for key, value in updates.items():
@@ -4357,7 +4357,7 @@ class DatabaseStorage:
             row = await conn.fetchrow(query, *params)
             return self._row_to_dict(row) if row else None
 
-    async def get_bindings_due_for_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_bindings_due_for_sync(self, limit: int = 100) -> list[dict[str, Any]]:
         """获取需要同步的绑定列表（next_sync_at <= now）"""
         if not self._pool:
             return []
@@ -4376,7 +4376,7 @@ class DatabaseStorage:
             )
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_pages_due_for_sync(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_pages_due_for_sync(self, limit: int = 100) -> list[dict[str, Any]]:
         """获取需要同步的页面列表（有独立配置且 next_sync_at <= now）"""
         if not self._pool:
             return []
@@ -4395,7 +4395,7 @@ class DatabaseStorage:
             )
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_all_polling_pages(self, limit: int = 500) -> List[Dict[str, Any]]:
+    async def get_all_polling_pages(self, limit: int = 500) -> list[dict[str, Any]]:
         """
         获取所有启用轮询的页面（用于调度器初始化）
 
@@ -4472,18 +4472,18 @@ class DatabaseStorage:
         self,
         binding_id: str,
         page_id: str,
-        document_id: Optional[str] = None,
+        document_id: str | None = None,
         space_key: str = "",
         title: str = "",
         version: int = 1,
-        content_hash: Optional[str] = None,
-        parent_page_id: Optional[str] = None,
+        content_hash: str | None = None,
+        parent_page_id: str | None = None,
         depth: int = 0,
         status: str = "synced",
-        labels: Optional[List[str]] = None,
-        web_url: Optional[str] = None,
-        author: Optional[str] = None,
-        confluence_updated_at: Optional[str] = None,
+        labels: list[str] | None = None,
+        web_url: str | None = None,
+        author: str | None = None,
+        confluence_updated_at: str | None = None,
     ) -> None:
         """插入或更新 Confluence 页面记录"""
         if not self._pool:
@@ -4562,7 +4562,7 @@ class DatabaseStorage:
     # Confluence Sync Task 表
     # =========================================================================
 
-    async def save_confluence_sync_task(self, task: Dict[str, Any]) -> None:
+    async def save_confluence_sync_task(self, task: dict[str, Any]) -> None:
         """保存或更新 Confluence 同步任务"""
         if not self._pool:
             return
@@ -4605,7 +4605,7 @@ class DatabaseStorage:
                 task.get("owner_id"),  # ACL: owner_id for access control
             )
 
-    async def get_confluence_sync_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+    async def get_confluence_sync_task(self, task_id: str) -> dict[str, Any] | None:
         """获取 Confluence 同步任务"""
         if not self._pool:
             return None
@@ -4617,16 +4617,16 @@ class DatabaseStorage:
 
     async def list_confluence_sync_tasks(
         self,
-        binding_id: Optional[str] = None,
-        status: Optional[str] = None,
+        binding_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Confluence 同步任务"""
         if not self._pool:
             return []
 
         query = "SELECT * FROM confluence_sync_tasks WHERE 1=1"
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         if binding_id:
@@ -4650,17 +4650,17 @@ class DatabaseStorage:
         self,
         task_id: str,
         status: str,
-        progress: Optional[float] = None,
-        processed_items: Optional[int] = None,
-        error: Optional[str] = None,
-        result: Optional[Dict] = None,
+        progress: float | None = None,
+        processed_items: int | None = None,
+        error: str | None = None,
+        result: dict | None = None,
     ) -> None:
         """更新 Confluence 同步任务状态"""
         if not self._pool:
             return
 
         updates = ["status = $1", "updated_at = NOW()"]
-        params: List[Any] = [status]
+        params: list[Any] = [status]
         param_idx = 2
 
         if progress is not None:
@@ -4700,7 +4700,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
 
-    async def get_pending_confluence_sync_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_pending_confluence_sync_tasks(self, limit: int = 10) -> list[dict[str, Any]]:
         """获取待处理的 Confluence 同步任务"""
         if not self._pool:
             return []
@@ -4719,11 +4719,11 @@ class DatabaseStorage:
     async def create_confluence_sync_task(
         self,
         task_id: str,
-        binding_id: Optional[str] = None,
-        page_id: Optional[str] = None,
+        binding_id: str | None = None,
+        page_id: str | None = None,
         task_type: str = "full_sync",
         priority: int = 0,
-        owner_id: Optional[str] = None,
+        owner_id: str | None = None,
     ) -> None:
         """创建 Confluence 同步任务"""
         if not self._pool:
@@ -4749,14 +4749,14 @@ class DatabaseStorage:
     async def update_confluence_sync_task(
         self,
         task_id: str,
-        updates: Dict[str, Any],
+        updates: dict[str, Any],
     ) -> None:
         """更新 Confluence 同步任务"""
         if not self._pool or not updates:
             return
 
         set_clauses = []
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         allowed_fields = {
@@ -4799,17 +4799,17 @@ class DatabaseStorage:
     async def update_document_confluence_fields(
         self,
         document_id: str,
-        confluence_page_id: Optional[str] = None,
-        confluence_binding_id: Optional[str] = None,
-        confluence_version: Optional[int] = None,
-        confluence_web_url: Optional[str] = None,
+        confluence_page_id: str | None = None,
+        confluence_binding_id: str | None = None,
+        confluence_version: int | None = None,
+        confluence_web_url: str | None = None,
     ) -> None:
         """更新文档的 Confluence 关联字段"""
         if not self._pool:
             return
 
         updates = ["updated_at = NOW()"]
-        params: List[Any] = []
+        params: list[Any] = []
         param_idx = 1
 
         if confluence_page_id is not None:
@@ -4846,7 +4846,7 @@ class DatabaseStorage:
         binding_id: str,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """获取 Confluence 绑定关联的文档"""
         if not self._pool:
             return []
@@ -4868,7 +4868,7 @@ class DatabaseStorage:
     # 用户认证增强方法 (Account Management)
     # =========================================================================
 
-    async def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         """通过邮箱获取用户"""
         if not self._pool:
             return None
@@ -4876,7 +4876,7 @@ class DatabaseStorage:
             row = await conn.fetchrow("SELECT * FROM users WHERE LOWER(email) = LOWER($1)", email)
             return self._row_to_dict(row) if row else None
 
-    async def save_user_with_password(self, user: Dict[str, Any]) -> None:
+    async def save_user_with_password(self, user: dict[str, Any]) -> None:
         """保存或更新用户（包含密码字段）"""
         if not self._pool:
             return
@@ -4983,13 +4983,12 @@ class DatabaseStorage:
             return
         async with self._pool.acquire() as conn:
             await conn.execute(
-                """
+                f"""
                 UPDATE users SET
-                    locked_until = NOW() + INTERVAL '%s minutes',
+                    locked_until = NOW() + INTERVAL '{minutes} minutes',
                     updated_at = NOW()
                 WHERE user_id = $1
-            """
-                % minutes,
+            """,
                 user_id,
             )
 
@@ -5012,12 +5011,12 @@ class DatabaseStorage:
 
     async def log_login_audit(
         self,
-        user_id: Optional[str],
-        email: Optional[str],
+        user_id: str | None,
+        email: str | None,
         action: str,
         ip_address: str,
         user_agent: str,
-        details: Dict[str, Any],
+        details: dict[str, Any],
     ) -> None:
         """记录登录审计日志"""
         if not self._pool:
@@ -5036,7 +5035,7 @@ class DatabaseStorage:
                 json.dumps(details),
             )
 
-    async def get_user_permissions(self, user_id: str) -> List[str]:
+    async def get_user_permissions(self, user_id: str) -> list[str]:
         """获取用户的所有权限（角色权限 + 额外权限）"""
         if not self._pool:
             return []
@@ -5124,9 +5123,9 @@ class DatabaseStorage:
 
     async def list_users_paginated(
         self,
-        status: Optional[str] = None,
-        search: Optional[str] = None,
-        tenant_id: Optional[str] = None,
+        status: str | None = None,
+        search: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple:
@@ -5168,7 +5167,7 @@ class DatabaseStorage:
 
             return users, total or 0
 
-    async def update_user(self, user_id: str, updates: Dict[str, Any]) -> None:
+    async def update_user(self, user_id: str, updates: dict[str, Any]) -> None:
         """更新用户字段"""
         if not self._pool or not updates:
             return
@@ -5249,7 +5248,7 @@ class DatabaseStorage:
         await self._invalidate_permission_cache(user_id)
         return result == "DELETE 1"
 
-    async def update_user_roles(self, user_id: str, roles: List[str], granted_by: str) -> None:
+    async def update_user_roles(self, user_id: str, roles: list[str], granted_by: str) -> None:
         """更新用户的所有角色"""
         if not self._pool:
             return
@@ -5273,7 +5272,7 @@ class DatabaseStorage:
             )
         await self._invalidate_permission_cache(user_id)
 
-    async def get_user_roles(self, user_id: str) -> List[str]:
+    async def get_user_roles(self, user_id: str) -> list[str]:
         """获取用户的所有角色"""
         if not self._pool:
             return []
@@ -5293,7 +5292,7 @@ class DatabaseStorage:
     # 角色和权限管理方法
     # =========================================================================
 
-    async def list_roles(self) -> List[Dict[str, Any]]:
+    async def list_roles(self) -> list[dict[str, Any]]:
         """获取所有角色"""
         if not self._pool:
             return []
@@ -5301,7 +5300,7 @@ class DatabaseStorage:
             rows = await conn.fetch("SELECT * FROM rbac_roles ORDER BY is_system DESC, role_name")
             return [self._row_to_dict(row) for row in rows]
 
-    async def get_role(self, role_name: str) -> Optional[Dict[str, Any]]:
+    async def get_role(self, role_name: str) -> dict[str, Any] | None:
         """获取角色详情"""
         if not self._pool:
             return None
@@ -5310,7 +5309,7 @@ class DatabaseStorage:
             return self._row_to_dict(row) if row else None
 
     async def create_role(
-        self, role_name: str, description: Optional[str], permissions: List[str]
+        self, role_name: str, description: str | None, permissions: list[str]
     ) -> None:
         """创建新角色"""
         if not self._pool:
@@ -5340,7 +5339,7 @@ class DatabaseStorage:
         await self._invalidate_permission_cache()
 
     async def update_role(
-        self, role_name: str, description: Optional[str], permissions: Optional[List[str]]
+        self, role_name: str, description: str | None, permissions: list[str] | None
     ) -> None:
         """更新角色"""
         if not self._pool:
@@ -5413,7 +5412,7 @@ class DatabaseStorage:
             await self._invalidate_permission_cache()
             return result == "DELETE 1"
 
-    async def list_permissions(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_permissions(self, category: str | None = None) -> list[dict[str, Any]]:
         """获取所有权限定义"""
         if not self._pool:
             return []
@@ -5439,7 +5438,7 @@ class DatabaseStorage:
             )
             return count or 0
 
-    async def get_users_by_role(self, role_name: str) -> List[Dict[str, Any]]:
+    async def get_users_by_role(self, role_name: str) -> list[dict[str, Any]]:
         """获取拥有指定角色的所有用户"""
         if not self._pool:
             return []
@@ -5460,7 +5459,7 @@ class DatabaseStorage:
     # 用户额外权限管理 (User Extra Permissions)
     # =========================================================================
 
-    async def get_user_extra_permissions(self, user_id: str) -> List[Dict[str, Any]]:
+    async def get_user_extra_permissions(self, user_id: str) -> list[dict[str, Any]]:
         """获取用户的额外权限（直接分配，非角色）"""
         if not self._pool:
             return []
@@ -5486,8 +5485,8 @@ class DatabaseStorage:
         user_id: str,
         permission_code: str,
         granted_by: str,
-        note: Optional[str] = None,
-        expires_at: Optional[datetime] = None,
+        note: str | None = None,
+        expires_at: datetime | None = None,
     ) -> bool:
         """给用户添加额外权限"""
         if not self._pool:
@@ -5535,33 +5534,32 @@ class DatabaseStorage:
                 return False
 
     async def update_user_extra_permissions(
-        self, user_id: str, permissions: List[str], granted_by: str
+        self, user_id: str, permissions: list[str], granted_by: str
     ) -> None:
         """更新用户的额外权限（替换所有）"""
         if not self._pool:
             return
         await self._invalidate_permission_cache(user_id)
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                # 删除现有的额外权限
-                await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
-                # 添加新的额外权限
-                for perm in permissions:
-                    await conn.execute(
-                        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            # 删除现有的额外权限
+            await conn.execute("DELETE FROM user_permissions WHERE user_id = $1", user_id)
+            # 添加新的额外权限
+            for perm in permissions:
+                await conn.execute(
+                    """
                         INSERT INTO user_permissions (user_id, permission_code, granted_by)
                         VALUES ($1, $2, $3)
                     """,
-                        user_id,
-                        perm,
-                        granted_by,
-                    )
+                    user_id,
+                    perm,
+                    granted_by,
+                )
 
     # =========================================================================
     # 辅助方法
     # =========================================================================
 
-    def _row_to_dict(self, row) -> Dict[str, Any]:
+    def _row_to_dict(self, row) -> dict[str, Any]:
         """将数据库行转换为字典，正确处理 JSON 和 datetime 字段"""
         if not row:
             return {}
@@ -5615,7 +5613,7 @@ class DatabaseStorage:
         session_id: str,
         key: str,
         value: Any,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         """
         Store or update a session memory entry.
@@ -5649,7 +5647,7 @@ class DatabaseStorage:
         tenant_id: str,
         session_id: str,
         key: str,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """
         Retrieve a session memory entry.
 
@@ -5684,7 +5682,7 @@ class DatabaseStorage:
         session_id: str,
         query: str,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Search session memory by key or value content.
 
@@ -5777,7 +5775,7 @@ class DatabaseStorage:
         user_id: str,
         key: str,
         value: Any,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         """
         Store or update a user memory entry.
@@ -5811,7 +5809,7 @@ class DatabaseStorage:
         tenant_id: str,
         user_id: str,
         key: str,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """
         Retrieve a user memory entry and increment access count.
 
@@ -5853,7 +5851,7 @@ class DatabaseStorage:
         user_id: str,
         query: str,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Search user memory by key or value content.
 
@@ -5921,7 +5919,7 @@ class DatabaseStorage:
         tenant_id: str,
         user_id: str,
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get the most frequently accessed user memory entries.
 
@@ -5950,7 +5948,7 @@ class DatabaseStorage:
             )
             return [self._memory_row_to_dict(row) for row in rows]
 
-    def _memory_row_to_dict(self, row) -> Dict[str, Any]:
+    def _memory_row_to_dict(self, row) -> dict[str, Any]:
         """
         Convert a memory table row to a dictionary with proper JSON parsing.
 
@@ -5990,13 +5988,13 @@ class DatabaseStorage:
         content: str,
         content_hash: str,
         change_type: str,
-        title: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        change_reason: Optional[str] = None,
-        changed_by: Optional[str] = None,
-        confluence_version: Optional[int] = None,
-        confluence_updated_at: Optional[datetime] = None,
-    ) -> Optional[Dict[str, Any]]:
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        change_reason: str | None = None,
+        changed_by: str | None = None,
+        confluence_version: int | None = None,
+        confluence_updated_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
         """
         Create a new document version snapshot.
 
@@ -6078,7 +6076,7 @@ class DatabaseStorage:
         document_id: str,
         limit: int = 20,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         List version history for a document.
 
@@ -6115,7 +6113,7 @@ class DatabaseStorage:
         self,
         document_id: str,
         version_number: int,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Get a specific document version with full content.
 
@@ -6155,7 +6153,7 @@ class DatabaseStorage:
     async def get_latest_document_version(
         self,
         document_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get the latest version of a document."""
         if not self._pool:
             return None
@@ -6247,7 +6245,7 @@ class DatabaseStorage:
     # Document Summaries (Hierarchical Indexing)
     # ============================================
 
-    async def save_document_summary(self, data: Dict[str, Any]) -> bool:
+    async def save_document_summary(self, data: dict[str, Any]) -> bool:
         """
         Save or update a document summary for L1 hierarchical indexing.
 
@@ -6290,7 +6288,7 @@ class DatabaseStorage:
             )
             return True
 
-    async def get_document_summary(self, document_id: str) -> Optional[Dict[str, Any]]:
+    async def get_document_summary(self, document_id: str) -> dict[str, Any] | None:
         """
         Get document summary for L1 retrieval context.
 
@@ -6338,7 +6336,7 @@ class DatabaseStorage:
         self,
         dataset_id: str,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get all document summaries in a dataset.
 
@@ -6355,7 +6353,7 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT ds.document_id, ds.summary, ds.keywords, ds.topics, 
+                SELECT ds.document_id, ds.summary, ds.keywords, ds.topics,
                        ds.vector_id, ds.created_at, d.title as document_title
                 FROM document_summaries ds
                 JOIN documents d ON ds.document_id = d.document_id

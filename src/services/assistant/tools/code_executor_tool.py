@@ -12,20 +12,20 @@ Features:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ....core.observability.logging import get_logger
 from .tool_registry import (
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
     ToolCallRequest,
     ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRiskLevel,
     register_tool,
 )
-from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from ..code_executor import CodeExecutorService
@@ -99,7 +99,7 @@ print("Chart saved to /workspace/output/revenue_trend.png")
             name="code",
             type="string",
             description="Python code to execute. Has access to data analysis libraries (numpy, pandas, matplotlib, etc.), "
-                       "user uploads in /workspace/input/, and should save outputs to /workspace/output/.",
+            "user uploads in /workspace/input/, and should save outputs to /workspace/output/.",
             required=True,
         ),
     ],
@@ -107,10 +107,10 @@ print("Chart saved to /workspace/output/revenue_trend.png")
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
     when_to_use="ALWAYS use when user uploads Excel/CSV files and asks to analyze data, trends, growth rates, "
-                "statistics, or visualization. Use for any data computation that requires precision beyond LLM estimation. "
-                "Use for creating charts, graphs, or any data visualization.",
+    "statistics, or visualization. Use for any data computation that requires precision beyond LLM estimation. "
+    "Use for creating charts, graphs, or any data visualization.",
     when_not_to_use="Do not use for generating AI images/artwork (use generate_image instead). "
-                    "Do not use for simple factual questions that don't require computation.",
+    "Do not use for simple factual questions that don't require computation.",
     examples=[
         ToolExample(
             description="Analyze uploaded Excel and calculate growth rate",
@@ -192,7 +192,7 @@ plt.savefig('/workspace/output/histogram.png', dpi=150)
 class CodeExecutorToolExecutor(ToolExecutor):
     """Executor for the code execution tool."""
 
-    def __init__(self, code_executor: "CodeExecutorService"):
+    def __init__(self, code_executor: CodeExecutorService):
         """
         Initialize the code executor tool.
 
@@ -239,10 +239,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
             )
 
         try:
-            logger.info(
-                f"Executing code (call_id={request.call_id}, "
-                f"code_length={len(code)})"
-            )
+            logger.info(f"Executing code (call_id={request.call_id}, code_length={len(code)})")
 
             # Execute the code
             result = await self.code_executor.execute(code=code)
@@ -250,12 +247,14 @@ class CodeExecutorToolExecutor(ToolExecutor):
             # Format output files for the result
             output_files_info = []
             for f in result.output_files:
-                output_files_info.append({
-                    "filename": f.filename,
-                    "mime_type": f.mime_type,
-                    "size_bytes": f.size_bytes,
-                    "content_base64": f.to_base64(),
-                })
+                output_files_info.append(
+                    {
+                        "filename": f.filename,
+                        "mime_type": f.mime_type,
+                        "size_bytes": f.size_bytes,
+                        "content_base64": f.to_base64(),
+                    }
+                )
 
             # Build the result content
             result_content = {
@@ -298,7 +297,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 error=str(e),
             )
 
-    def _format_result(self, result: Dict[str, Any]) -> str:
+    def _format_result(self, result: dict[str, Any]) -> str:
         """
         Format execution result for LLM consumption.
 
@@ -347,7 +346,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
 
 
 def register_code_executor_tool(
-    code_executor: Optional["CodeExecutorService"] = None,
+    code_executor: CodeExecutorService | None = None,
 ) -> None:
     """
     Register the code executor tool with the global registry.

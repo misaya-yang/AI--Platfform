@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -134,7 +134,11 @@ class TestAppendSessionMessage:
         mock_pool = AsyncMock()
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(return_value="UPDATE 1")
-        mock_pool.acquire = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()))
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
         db._pool = mock_pool
 
         message = {
@@ -157,7 +161,11 @@ class TestAppendSessionMessage:
         mock_pool = AsyncMock()
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(return_value="UPDATE 1")
-        mock_pool.acquire = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()))
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
         db._pool = mock_pool
 
         message = {"role": "user", "content": "First message"}

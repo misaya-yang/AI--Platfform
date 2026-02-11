@@ -23,10 +23,9 @@ import asyncio
 import hashlib
 import logging
 import re
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-import threading
 
 import httpx
 
@@ -36,14 +35,14 @@ import httpx
 # =============================================================================
 class SensitiveDataFilter(logging.Filter):
     """Filter that redacts sensitive information like API keys from log records."""
-    
+
     # Patterns to redact
     _PATTERNS = [
-        (re.compile(r'Bearer\s+[a-zA-Z0-9_-]+'), 'Bearer ***'),
-        (re.compile(r'api_key[=:]\s*[a-zA-Z0-9_-]+'), 'api_key=***'),
-        (re.compile(r'key[=:]\s*[a-zA-Z0-9_-]+'), 'key=***'),
+        (re.compile(r"Bearer\s+[a-zA-Z0-9_-]+"), "Bearer ***"),
+        (re.compile(r"api_key[=:]\s*[a-zA-Z0-9_-]+"), "api_key=***"),
+        (re.compile(r"key[=:]\s*[a-zA-Z0-9_-]+"), "key=***"),
     ]
-    
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Redact sensitive data from log message."""
         if isinstance(record.msg, str):
@@ -51,7 +50,7 @@ class SensitiveDataFilter(logging.Filter):
         if record.args:
             record.args = tuple(self._redact(str(arg)) for arg in record.args)
         return True
-    
+
     def _redact(self, text: str) -> str:
         """Apply all redaction patterns."""
         for pattern, replacement in self._PATTERNS:
@@ -65,19 +64,19 @@ logger.addFilter(SensitiveDataFilter())
 # =============================================================================
 # Rerank Result Cache
 # =============================================================================
-_rerank_cache: OrderedDict[str, List[Tuple[int, float]]] = OrderedDict()
+_rerank_cache: OrderedDict[str, list[tuple[int, float]]] = OrderedDict()
 _rerank_cache_lock = threading.Lock()
 _RERANK_CACHE_MAX_SIZE = 200
 
 
-def _make_rerank_cache_key(model: str, query: str, docs: List[str]) -> str:
+def _make_rerank_cache_key(model: str, query: str, docs: list[str]) -> str:
     """Generate cache key for rerank result."""
     docs_hash = hashlib.md5("|||".join(docs).encode()).hexdigest()
     query_hash = hashlib.md5(query.encode()).hexdigest()
     return f"{model}:{query_hash}:{docs_hash}"
 
 
-def _get_cached_rerank(model: str, query: str, docs: List[str]) -> Optional[List[Tuple[int, float]]]:
+def _get_cached_rerank(model: str, query: str, docs: list[str]) -> list[tuple[int, float]] | None:
     """Get cached rerank result."""
     key = _make_rerank_cache_key(model, query, docs)
     with _rerank_cache_lock:
@@ -87,7 +86,9 @@ def _get_cached_rerank(model: str, query: str, docs: List[str]) -> Optional[List
     return None
 
 
-def _set_cached_rerank(model: str, query: str, docs: List[str], result: List[Tuple[int, float]]) -> None:
+def _set_cached_rerank(
+    model: str, query: str, docs: list[str], result: list[tuple[int, float]]
+) -> None:
     """Cache rerank result."""
     key = _make_rerank_cache_key(model, query, docs)
     with _rerank_cache_lock:
@@ -102,7 +103,7 @@ def _set_cached_rerank(model: str, query: str, docs: List[str], result: List[Tup
 # =============================================================================
 # HTTP Client Pool
 # =============================================================================
-_http_client: Optional[httpx.AsyncClient] = None
+_http_client: httpx.AsyncClient | None = None
 _http_client_lock = asyncio.Lock()
 
 
@@ -122,6 +123,7 @@ async def _get_http_client() -> httpx.AsyncClient:
 @dataclass
 class RerankResult:
     """Result from reranking."""
+
     index: int
     relevance_score: float
 
@@ -137,13 +139,15 @@ class AsyncTextReranker:
     """
 
     # DashScope Rerank API endpoint
-    DASHSCOPE_RERANK_URL = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+    DASHSCOPE_RERANK_URL = (
+        "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+    )
 
     def __init__(
         self,
         api_key: str,
         model: str = "gte-rerank",
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         self.api_key = api_key
         self.model = model
@@ -152,10 +156,10 @@ class AsyncTextReranker:
     async def rerank(
         self,
         query: str,
-        documents: List[str],
-        top_n: Optional[int] = None,
+        documents: list[str],
+        top_n: int | None = None,
         return_documents: bool = False,
-    ) -> List[RerankResult]:
+    ) -> list[RerankResult]:
         """
         Rerank documents by relevance to query.
 
@@ -213,8 +217,8 @@ class AsyncTextReranker:
             output = data.get("output", {})
             results_data = output.get("results", [])
 
-            results: List[RerankResult] = []
-            cache_data: List[Tuple[int, float]] = []
+            results: list[RerankResult] = []
+            cache_data: list[tuple[int, float]] = []
 
             for item in results_data:
                 idx = item.get("index", -1)
@@ -244,7 +248,7 @@ class AsyncTextReranker:
 # =============================================================================
 # Singleton Reranker
 # =============================================================================
-_reranker_cache: Dict[str, AsyncTextReranker] = {}
+_reranker_cache: dict[str, AsyncTextReranker] = {}
 _reranker_cache_lock = threading.Lock()
 
 
@@ -261,27 +265,28 @@ def get_text_reranker(api_key: str, model: str = "gte-rerank") -> AsyncTextReran
 # BGE Reranker (Multilingual)
 # =============================================================================
 
+
 class BGEReranker:
     """
     BGE Reranker for multilingual cross-encoder reranking.
-    
+
     Models:
     - BAAI/bge-reranker-v2-m3: Multilingual (100+ langs, 1024 max tokens)
     - BAAI/bge-reranker-v2-gemma: Longer context (8k tokens)
-    
+
     For Arabic-English RAG, bge-reranker-v2-m3 is recommended.
     """
-    
+
     MODEL_MAX_LENGTH = {
         "BAAI/bge-reranker-v2-m3": 1024,
         "BAAI/bge-reranker-v2-gemma": 8192,
         "BAAI/bge-reranker-large": 512,
     }
-    
+
     def __init__(
         self,
         model: str = "BAAI/bge-reranker-v2-m3",
-        device: Optional[str] = None,
+        device: str | None = None,
         use_fp16: bool = True,
     ):
         self.model_name = model
@@ -289,15 +294,15 @@ class BGEReranker:
         self.use_fp16 = use_fp16
         self._model = None
         self._initialized = False
-    
+
     def _ensure_initialized(self):
         """Lazy load the model."""
         if self._initialized:
             return
-        
+
         try:
             from FlagEmbedding import FlagReranker
-            
+
             logger.info(f"Loading BGE Reranker: {self.model_name}")
             self._model = FlagReranker(
                 self.model_name,
@@ -306,50 +311,47 @@ class BGEReranker:
             )
             self._initialized = True
             logger.info("BGE Reranker loaded")
-            
+
         except ImportError:
-            raise RuntimeError(
-                "FlagEmbedding package required: pip install FlagEmbedding"
-            )
-    
+            raise RuntimeError("FlagEmbedding package required: pip install FlagEmbedding")
+
     async def rerank(
         self,
         query: str,
-        documents: List[str],
-        top_n: Optional[int] = None,
+        documents: list[str],
+        top_n: int | None = None,
         return_documents: bool = False,
-    ) -> List[RerankResult]:
+    ) -> list[RerankResult]:
         """Rerank documents using BGE cross-encoder."""
         if not documents:
             return []
-        
+
         self._ensure_initialized()
-        
+
         # Prepare pairs
         pairs = [[query, doc] for doc in documents]
-        
+
         # Run inference in thread
         def _compute_scores():
             return self._model.compute_score(pairs, normalize=True)
-        
+
         scores = await asyncio.to_thread(_compute_scores)
-        
+
         # Handle single document case
         if isinstance(scores, float):
             scores = [scores]
-        
+
         # Create results
         results = [
-            RerankResult(index=i, relevance_score=float(score))
-            for i, score in enumerate(scores)
+            RerankResult(index=i, relevance_score=float(score)) for i, score in enumerate(scores)
         ]
-        
+
         # Sort by score
         results.sort(key=lambda x: x.relevance_score, reverse=True)
-        
+
         if top_n:
             results = results[:top_n]
-        
+
         return results
 
 
@@ -357,19 +359,20 @@ class BGEReranker:
 # Cohere Reranker (Cloud)
 # =============================================================================
 
+
 class CohereReranker:
     """
     Cohere Reranker for multilingual reranking.
-    
+
     Models:
     - rerank-multilingual-v3.0: Latest multilingual (100+ langs)
     - rerank-english-v3.0: English-optimized
-    
+
     Note: Requires Cohere API key.
     """
-    
+
     COHERE_RERANK_URL = "https://api.cohere.ai/v1/rerank"
-    
+
     def __init__(
         self,
         api_key: str,
@@ -377,18 +380,18 @@ class CohereReranker:
     ):
         self.api_key = api_key
         self.model = model
-    
+
     async def rerank(
         self,
         query: str,
-        documents: List[str],
-        top_n: Optional[int] = None,
+        documents: list[str],
+        top_n: int | None = None,
         return_documents: bool = False,
-    ) -> List[RerankResult]:
+    ) -> list[RerankResult]:
         """Rerank documents using Cohere API."""
         if not documents:
             return []
-        
+
         # Check cache
         cached = _get_cached_rerank(self.model, query, documents)
         if cached is not None:
@@ -396,7 +399,7 @@ class CohereReranker:
             if top_n:
                 results = results[:top_n]
             return results
-        
+
         payload = {
             "model": self.model,
             "query": query,
@@ -405,12 +408,12 @@ class CohereReranker:
         }
         if top_n:
             payload["top_n"] = top_n
-        
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        
+
         client = await _get_http_client()
         response = await client.post(
             self.COHERE_RERANK_URL,
@@ -419,22 +422,22 @@ class CohereReranker:
         )
         response.raise_for_status()
         data = response.json()
-        
+
         results = []
         cache_data = []
-        
+
         for item in data.get("results", []):
             idx = item.get("index", -1)
             score = item.get("relevance_score", 0.0)
             if idx >= 0:
                 results.append(RerankResult(index=idx, relevance_score=score))
                 cache_data.append((idx, score))
-        
+
         results.sort(key=lambda x: x.relevance_score, reverse=True)
         cache_data.sort(key=lambda x: x[1], reverse=True)
-        
+
         _set_cached_rerank(self.model, query, documents, cache_data)
-        
+
         return results
 
 
@@ -442,36 +445,37 @@ class CohereReranker:
 # Local Cross-Encoder Reranker
 # =============================================================================
 
+
 class LocalCrossEncoderReranker:
     """
     Local cross-encoder reranker using sentence-transformers.
-    
+
     Recommended multilingual models:
     - cross-encoder/ms-marco-MiniLM-L-12-v2: Fast, English-optimized
     - jeffwan/mmarco-mMiniLMv2-L12-H384-v1: Multilingual mMARCO
     - amberoad/bert-multilingual-passage-reranking-msmarco: Arabic support
-    
+
     For Arabic-English, use multilingual models.
     """
-    
+
     def __init__(
         self,
         model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
-        device: Optional[str] = None,
+        device: str | None = None,
         max_length: int = 512,
     ):
         self.model_name = model
         self.device = device
         self.max_length = max_length
         self._model = None
-    
+
     def _ensure_initialized(self):
         if self._model is not None:
             return
-        
+
         try:
             from sentence_transformers import CrossEncoder
-            
+
             logger.info(f"Loading CrossEncoder: {self.model_name}")
             self._model = CrossEncoder(
                 self.model_name,
@@ -479,42 +483,39 @@ class LocalCrossEncoderReranker:
                 max_length=self.max_length,
             )
             logger.info("CrossEncoder loaded")
-            
+
         except ImportError:
-            raise RuntimeError(
-                "sentence-transformers required: pip install sentence-transformers"
-            )
-    
+            raise RuntimeError("sentence-transformers required: pip install sentence-transformers")
+
     async def rerank(
         self,
         query: str,
-        documents: List[str],
-        top_n: Optional[int] = None,
+        documents: list[str],
+        top_n: int | None = None,
         return_documents: bool = False,
-    ) -> List[RerankResult]:
+    ) -> list[RerankResult]:
         """Rerank documents using local cross-encoder."""
         if not documents:
             return []
-        
+
         self._ensure_initialized()
-        
+
         pairs = [(query, doc) for doc in documents]
-        
+
         def _predict():
             return self._model.predict(pairs)
-        
+
         scores = await asyncio.to_thread(_predict)
-        
+
         results = [
-            RerankResult(index=i, relevance_score=float(score))
-            for i, score in enumerate(scores)
+            RerankResult(index=i, relevance_score=float(score)) for i, score in enumerate(scores)
         ]
-        
+
         results.sort(key=lambda x: x.relevance_score, reverse=True)
-        
+
         if top_n:
             results = results[:top_n]
-        
+
         return results
 
 
@@ -522,36 +523,37 @@ class LocalCrossEncoderReranker:
 # Factory Function for Rerankers
 # =============================================================================
 
+
 def create_reranker(
     provider: str = "dashscope",
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
+    api_key: str | None = None,
+    model: str | None = None,
     **kwargs,
 ):
     """
     Factory function to create reranker instances.
-    
+
     Args:
         provider: Reranker provider ("dashscope", "bge", "cohere", "local")
         api_key: API key (required for cloud providers)
         model: Model name override
         **kwargs: Additional arguments for specific providers
-        
+
     Returns:
         Reranker instance
-        
+
     Example:
         # DashScope (default)
         reranker = create_reranker(provider="dashscope", api_key="...")
-        
+
         # BGE (local)
         reranker = create_reranker(provider="bge")
-        
+
         # Cohere
         reranker = create_reranker(provider="cohere", api_key="...")
     """
     provider = provider.lower()
-    
+
     if provider in ("dashscope", "gte", "aliyun"):
         if not api_key:
             raise ValueError("API key required for DashScope reranker")
@@ -560,13 +562,13 @@ def create_reranker(
             model=model or "gte-rerank",
             **kwargs,
         )
-    
+
     elif provider in ("bge", "flagembedding", "baai"):
         return BGEReranker(
             model=model or "BAAI/bge-reranker-v2-m3",
             **kwargs,
         )
-    
+
     elif provider in ("cohere",):
         if not api_key:
             raise ValueError("API key required for Cohere reranker")
@@ -574,13 +576,13 @@ def create_reranker(
             api_key=api_key,
             model=model or "rerank-multilingual-v3.0",
         )
-    
+
     elif provider in ("local", "cross-encoder", "sentence-transformers"):
         return LocalCrossEncoderReranker(
             model=model or "cross-encoder/ms-marco-MiniLM-L-12-v2",
             **kwargs,
         )
-    
+
     else:
         logger.warning(f"Unknown provider '{provider}', defaulting to DashScope")
         if not api_key:
@@ -592,19 +594,20 @@ def create_reranker(
 # Multilingual Rerank Helper
 # =============================================================================
 
+
 async def rerank_multilingual(
     query: str,
-    documents: List[str],
+    documents: list[str],
     top_n: int = 10,
     provider: str = "bge",
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
-) -> List[Tuple[int, float]]:
+    api_key: str | None = None,
+    model: str | None = None,
+) -> list[tuple[int, float]]:
     """
     Convenience function for multilingual reranking.
-    
+
     For Arabic-English RAG, uses BGE-Reranker-v2-m3 by default.
-    
+
     Args:
         query: Query text
         documents: List of document texts
@@ -612,7 +615,7 @@ async def rerank_multilingual(
         provider: Reranker provider
         api_key: API key (for cloud providers)
         model: Model override
-        
+
     Returns:
         List of (index, score) tuples sorted by score descending
     """

@@ -6,19 +6,19 @@ Allows the agent to read and update user long-term memory.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Any, Optional
+from typing import TYPE_CHECKING
 
+from ....core.observability.logging import get_logger
 from .tool_registry import (
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
     ToolCallRequest,
     ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRiskLevel,
 )
-from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from ..memory_service import MemoryService
@@ -28,15 +28,15 @@ logger = get_logger(__name__)
 UPDATE_MEMORY_DEFINITION = ToolDefinition(
     name="update_user_memory",
     description="Update the user's long-term memory with new facts or preferences. "
-                "Use this when the user explicitly asks you to remember something, "
-                "or when you learn important preferences (e.g. language, coding style, name). "
-                "Do NOT use for temporary conversation context.",
+    "Use this when the user explicitly asks you to remember something, "
+    "or when you learn important preferences (e.g. language, coding style, name). "
+    "Do NOT use for temporary conversation context.",
     parameters=[
         ToolParameter(
             name="key",
             type="string",
             description="The key for the memory item (e.g., 'user_name', 'favorite_language', 'project_context'). "
-                        "Use snake_case.",
+            "Use snake_case.",
             required=True,
         ),
         ToolParameter(
@@ -57,7 +57,7 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="When the user says 'remember that my name is X', 'I prefer Python', "
-                "or implies a long-term preference.",
+    "or implies a long-term preference.",
     when_not_to_use="For temporary information relevant only to the current turn.",
     examples=[
         ToolExample(
@@ -77,7 +77,7 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
 class UpdateMemoryExecutor(ToolExecutor):
     """Executor for update memory tool."""
 
-    def __init__(self, memory_service: "MemoryService"):
+    def __init__(self, memory_service: MemoryService):
         self.memory_service = memory_service
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
@@ -118,7 +118,7 @@ class UpdateMemoryExecutor(ToolExecutor):
                         success=False,
                         error="Value is required for set action",
                     )
-                
+
                 await self.memory_service.set_user_memory(
                     tenant_id=request.user.tenant_id,
                     user_id=request.user.user_id,

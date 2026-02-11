@@ -14,26 +14,25 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any
 
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .rate_limit_http import SlidingWindowRateLimiter, RateLimitInfo
-
-from ..observability.logging import get_logger
 from ...services.metrics import get_metrics_recorder
+from ..observability.logging import get_logger
+from .rate_limit_http import RateLimitInfo, SlidingWindowRateLimiter
 
 logger = get_logger(__name__)
 
 
 # ============ 流式路径检测 ============
 
-STREAMING_PATHS: Set[str] = {
+STREAMING_PATHS: set[str] = {
     "/api/v1/stream",
 }
 
-STREAMING_PATH_PREFIXES: List[str] = [
+STREAMING_PATH_PREFIXES: list[str] = [
     "/api/v1/conversations/",  # /api/v1/conversations/{id}/stream
     "/api/v1/langgraph/",  # LangGraph SSE endpoints
     "/api/v1/proxy/",  # 透明代理 SSE endpoints
@@ -41,16 +40,16 @@ STREAMING_PATH_PREFIXES: List[str] = [
 ]
 
 # Streaming suffixes to detect (LangGraph 兼容)
-STREAMING_SUFFIXES: List[str] = [
-    "/stream",           # 通用流式后缀
-    "/runs/stream",      # LangGraph runs stream
-    "/sse",              # SSE endpoint
+STREAMING_SUFFIXES: list[str] = [
+    "/stream",  # 通用流式后缀
+    "/runs/stream",  # LangGraph runs stream
+    "/sse",  # SSE endpoint
 ]
 
 # 额外的流式路径关键词检测
-STREAMING_KEYWORDS: List[str] = [
-    "/stream",           # 包含 stream 的路径
-    "/events",           # SSE events
+STREAMING_KEYWORDS: list[str] = [
+    "/stream",  # 包含 stream 的路径
+    "/events",  # SSE events
 ]
 
 
@@ -83,13 +82,11 @@ def is_streaming_path(path: str) -> bool:
 
     # Check keywords anywhere in path (but exclude false positives like "upstream")
     path_lower = path.lower()
-    if "/stream" in path_lower and "upstream" not in path_lower:
-        return True
-
-    return False
+    return bool("/stream" in path_lower and "upstream" not in path_lower)
 
 
 # ============ 纯 ASGI 中间件基类 ============
+
 
 class PureASGIMiddleware:
     """
@@ -135,10 +132,12 @@ class PureASGIMiddleware:
 
     def _wrap_send(self, scope: Scope, send: Send) -> Send:
         """包装 send 以处理响应"""
+
         async def wrapped_send(message: Message) -> None:
             if message["type"] == "http.response.start":
                 message = await self.process_response_start(scope, message)
             await send(message)
+
         return wrapped_send
 
     async def process_streaming_request(self, scope: Scope, receive: Receive) -> None:
@@ -156,12 +155,14 @@ class PureASGIMiddleware:
 
 # ============ 流式友好的鉴权中间件 ============
 
+
 @dataclass
 class StreamingAuthConfig:
     """流式友好的鉴权配置"""
+
     jwt_enabled: bool = False
     jwt_secret: str = ""
-    jwt_algorithms: List[str] = field(default_factory=lambda: ["HS256"])
+    jwt_algorithms: list[str] = field(default_factory=lambda: ["HS256"])
     api_key_enabled: bool = False
     api_key_header: str = "X-API-Key"
     guest_session_enabled: bool = True
@@ -169,9 +170,16 @@ class StreamingAuthConfig:
     anonymous_enabled: bool = True
     anonymous_cookie: str = "ag_anon_id"
     anonymous_header: str = "X-AG-Anonymous-Id"
-    whitelist_paths: List[str] = field(default_factory=lambda: [
-        "/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"
-    ])
+    whitelist_paths: list[str] = field(
+        default_factory=lambda: [
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
+        ]
+    )
 
 
 class StreamingAuthMiddleware(PureASGIMiddleware):
@@ -224,12 +232,12 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
             message = {**message, "headers": list(headers.items())}
         return message
 
-    def _extract_user_info(self, scope: Scope) -> Dict[str, Any]:
+    def _extract_user_info(self, scope: Scope) -> dict[str, Any]:
         """从请求头提取用户信息
-        
+
         Supports:
         - Authorization: Bearer <jwt> header
-        - X-API-Key header  
+        - X-API-Key header
         - X-Guest-Session header
         - X-AG-Anonymous-Id header or cookie
         """
@@ -239,9 +247,9 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         # Try to extract and VERIFY JWT user if present
         # CRITICAL: Must verify signature before trusting claims
         auth_header = headers.get(b"authorization", b"").decode()
-        if auth_header.lower().startswith("bearer ") and getattr(self.config, 'jwt_enabled', True):
-            jwt_secret = getattr(self.config, 'jwt_secret', '')
-            jwt_algorithms = getattr(self.config, 'jwt_algorithms', ['HS256'])
+        if auth_header.lower().startswith("bearer ") and getattr(self.config, "jwt_enabled", True):
+            jwt_secret = getattr(self.config, "jwt_secret", "")
+            jwt_algorithms = getattr(self.config, "jwt_algorithms", ["HS256"])
 
             # Skip JWT auth if no secret configured
             if not jwt_secret:
@@ -249,6 +257,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
             else:
                 try:
                     import jwt
+
                     token = auth_header.split(" ", 1)[1]
 
                     # CRITICAL FIX: Verify signature using PyJWT
@@ -256,7 +265,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                         token,
                         key=jwt_secret,
                         algorithms=jwt_algorithms,
-                        options={"verify_signature": True, "verify_exp": True}
+                        options={"verify_signature": True, "verify_exp": True},
                     )
 
                     user_id = str(payload.get("sub") or payload.get("user_id") or "")
@@ -284,6 +293,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         api_key = headers.get(self.config.api_key_header.lower().encode(), b"").decode()
         if api_key:
             import hashlib
+
             key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
             return {
                 "user_id": f"apikey:{key_hash}",
@@ -326,7 +336,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
             "roles": ["guest"],
         }
 
-    def _extract_cookie(self, headers: Dict[bytes, bytes], cookie_name: str) -> str:
+    def _extract_cookie(self, headers: dict[bytes, bytes], cookie_name: str) -> str:
         """Extract a specific cookie value from headers"""
         cookie_header = headers.get(b"cookie", b"").decode()
         if cookie_header:
@@ -339,10 +349,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""
-        for wp in self.config.whitelist_paths:
-            if path == wp or path.startswith(wp + "/"):
-                return True
-        return False
+        return any(path == wp or path.startswith(wp + "/") for wp in self.config.whitelist_paths)
 
     def _get_client_ip(self, scope: Scope) -> str:
         """获取客户端 IP"""
@@ -365,9 +372,11 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
 # ============ 流式友好的限流中间件 ============
 
+
 @dataclass
 class StreamingRateLimitConfig:
     """流式友好的限流配置"""
+
     enabled: bool = True
     global_limit: int = 1000
     global_window: int = 60
@@ -377,9 +386,9 @@ class StreamingRateLimitConfig:
     guest_window: int = 60
     ip_limit: int = 60
     ip_window: int = 60
-    whitelist_paths: List[str] = field(default_factory=lambda: [
-        "/health", "/health/live", "/health/ready", "/metrics"
-    ])
+    whitelist_paths: list[str] = field(
+        default_factory=lambda: ["/health", "/health/live", "/health/ready", "/metrics"]
+    )
 
 
 class StreamingRateLimitMiddleware(PureASGIMiddleware):
@@ -429,26 +438,32 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
         if user_info:
             if user_type == "user":
-                checks.append((
-                    "user",
-                    f"ratelimit:user:{user_id}",
-                    self.config.user_limit,
-                    self.config.user_window,
-                ))
+                checks.append(
+                    (
+                        "user",
+                        f"ratelimit:user:{user_id}",
+                        self.config.user_limit,
+                        self.config.user_window,
+                    )
+                )
             elif user_type in ("guest", "anonymous"):
-                checks.append((
-                    "guest",
-                    f"ratelimit:guest:{user_id}",
-                    self.config.guest_limit,
-                    self.config.guest_window,
-                ))
+                checks.append(
+                    (
+                        "guest",
+                        f"ratelimit:guest:{user_id}",
+                        self.config.guest_limit,
+                        self.config.guest_window,
+                    )
+                )
 
-        checks.append((
-            "ip",
-            f"ratelimit:ip:{client_ip}",
-            self.config.ip_limit,
-            self.config.ip_window,
-        ))
+        checks.append(
+            (
+                "ip",
+                f"ratelimit:ip:{client_ip}",
+                self.config.ip_limit,
+                self.config.ip_window,
+            )
+        )
 
         for dimension, key, limit, window in checks:
             result = await self.limiter.check(key, limit, window)
@@ -483,10 +498,7 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""
-        for wp in self.config.whitelist_paths:
-            if path == wp or path.startswith(wp + "/"):
-                return True
-        return False
+        return any(path == wp or path.startswith(wp + "/") for wp in self.config.whitelist_paths)
 
     def _get_user_field(self, user_info: Any, field: str, default: Any = None) -> Any:
         if not user_info:
@@ -559,15 +571,17 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
 # ============ 流式友好的请求日志中间件 ============
 
+
 @dataclass
 class StreamingLogConfig:
     """流式友好的日志配置"""
+
     enabled: bool = True
     log_request_body: bool = False
     log_response_body: bool = False
-    exclude_paths: List[str] = field(default_factory=lambda: [
-        "/health", "/health/live", "/health/ready", "/metrics"
-    ])
+    exclude_paths: list[str] = field(
+        default_factory=lambda: ["/health", "/health/live", "/health/ready", "/metrics"]
+    )
 
 
 class StreamingLoggingMiddleware(PureASGIMiddleware):
@@ -694,23 +708,22 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
 
     def _is_excluded(self, path: str) -> bool:
         """检查路径是否被排除"""
-        for ep in self.config.exclude_paths:
-            if path == ep or path.startswith(ep + "/"):
-                return True
-        return False
+        return any(path == ep or path.startswith(ep + "/") for ep in self.config.exclude_paths)
 
 
 # ============ 流式友好的追踪中间件 ============
 
+
 @dataclass
 class StreamingTracingConfig:
     """流式友好的追踪配置"""
+
     service_name: str = "gateway"
     log_requests: bool = True
     log_responses: bool = True
-    exclude_paths: Set[str] = field(default_factory=lambda: {
-        "/health", "/health/live", "/health/ready", "/metrics"
-    })
+    exclude_paths: set[str] = field(
+        default_factory=lambda: {"/health", "/health/live", "/health/ready", "/metrics"}
+    )
 
 
 class StreamingTracingMiddleware(PureASGIMiddleware):
@@ -773,23 +786,29 @@ class StreamingTracingMiddleware(PureASGIMiddleware):
                 duration = (time.time() - start_time) * 1000
                 logger.info(
                     f"Request completed: {method} {path} -> {status_code} ({duration:.2f}ms)",
-                    extra={"trace_id": trace_id, "status_code": status_code, "duration_ms": duration}
+                    extra={
+                        "trace_id": trace_id,
+                        "status_code": status_code,
+                        "duration_ms": duration,
+                    },
                 )
         except Exception as e:
             duration = (time.time() - start_time) * 1000
             logger.error(
                 f"Request failed: {method} {path} ({duration:.2f}ms)",
                 extra={"trace_id": trace_id, "error": str(e), "duration_ms": duration},
-                exc_info=True
+                exc_info=True,
             )
             raise
 
 
 # ============ 流式友好的匿名身份中间件 ============
 
+
 @dataclass
 class StreamingAnonymousConfig:
     """流式友好的匿名身份配置"""
+
     enabled: bool = True
     header_name: str = "X-AG-Anonymous-Id"
     cookie_name: str = "ag_anon_id"

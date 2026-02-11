@@ -3,17 +3,18 @@
 
 提供各实体的数据访问抽象，支持内存和数据库两种存储后端
 """
-from .service_repository import ServiceRepository, DatabaseServiceRepository
-from .session_repository import SessionRepository, DatabaseSessionRepository
-from .task_repository import TaskRepository, DatabaseTaskRepository
-from .user_repository import UserRepository, DatabaseUserRepository
+
 from .api_key_repository import APIKeyRepository, DatabaseAPIKeyRepository
-from .knowledge_repository import KnowledgeRepository, DatabaseKnowledgeRepository
+from .knowledge_repository import DatabaseKnowledgeRepository, KnowledgeRepository
+from .service_repository import DatabaseServiceRepository, ServiceRepository
+from .session_repository import DatabaseSessionRepository, SessionRepository
+from .task_repository import DatabaseTaskRepository, TaskRepository
+from .user_repository import DatabaseUserRepository, UserRepository
 
 __all__ = [
     "ServiceRepository",
     "DatabaseServiceRepository",
-    "SessionRepository", 
+    "SessionRepository",
     "DatabaseSessionRepository",
     "TaskRepository",
     "DatabaseTaskRepository",

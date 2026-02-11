@@ -3,21 +3,23 @@ Tests for health endpoint authentication requirements.
 
 Ensures sensitive health information is protected from unauthorized access.
 """
-import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+
 from dataclasses import dataclass
-from typing import List, Optional
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 @dataclass
 class MockUserContext:
     """Mock UserContext for testing."""
+
     user_id: str
     tenant_id: str = ""
     tier: str = "normal"
     is_authenticated: bool = False
     ip: str = "127.0.0.1"
-    roles: List[str] = None
+    roles: list[str] = None
 
     def __post_init__(self):
         if self.roles is None:
@@ -29,10 +31,10 @@ class TestHealthEndpointAuth:
 
     def test_basic_health_returns_minimal_info(self):
         """Basic /health endpoint should return minimal info (no service count)."""
-        from src.api.v1.health import gateway_health
-
         # Create async test
         import asyncio
+
+        from src.api.v1.health import gateway_health
 
         async def run_test():
             mock_registry = AsyncMock()
@@ -50,15 +52,12 @@ class TestHealthEndpointAuth:
 
     def test_services_health_requires_auth(self):
         """Detailed /health/services requires authentication."""
-        from src.api.v1.health import require_admin
         from fastapi import HTTPException
 
+        from src.api.v1.health import require_admin
+
         # Unauthenticated user
-        mock_user = MockUserContext(
-            user_id="anon:123",
-            is_authenticated=False,
-            roles=[]
-        )
+        mock_user = MockUserContext(user_id="anon:123", is_authenticated=False, roles=[])
 
         with pytest.raises(HTTPException) as exc_info:
             require_admin(mock_user)
@@ -67,15 +66,12 @@ class TestHealthEndpointAuth:
 
     def test_services_health_requires_admin_role(self):
         """Detailed /health/services requires admin role."""
-        from src.api.v1.health import require_admin
         from fastapi import HTTPException
 
+        from src.api.v1.health import require_admin
+
         # Authenticated but not admin
-        mock_user = MockUserContext(
-            user_id="user123",
-            is_authenticated=True,
-            roles=["user"]
-        )
+        mock_user = MockUserContext(user_id="user123", is_authenticated=True, roles=["user"])
 
         with pytest.raises(HTTPException) as exc_info:
             require_admin(mock_user)
@@ -87,11 +83,7 @@ class TestHealthEndpointAuth:
         from src.api.v1.health import require_admin
 
         # Admin user
-        mock_user = MockUserContext(
-            user_id="admin123",
-            is_authenticated=True,
-            roles=["admin"]
-        )
+        mock_user = MockUserContext(user_id="admin123", is_authenticated=True, roles=["admin"])
 
         # Should not raise
         result = require_admin(mock_user)
@@ -102,11 +94,7 @@ class TestHealthEndpointAuth:
         from src.api.v1.health import require_admin
 
         # Ops user
-        mock_user = MockUserContext(
-            user_id="ops123",
-            is_authenticated=True,
-            roles=["ops"]
-        )
+        mock_user = MockUserContext(user_id="ops123", is_authenticated=True, roles=["ops"])
 
         # Should not raise
         result = require_admin(mock_user)
@@ -114,14 +102,13 @@ class TestHealthEndpointAuth:
 
     def test_providers_health_requires_admin(self):
         """Provider health endpoint requires admin."""
-        from src.api.v1.health import require_admin
         from fastapi import HTTPException
+
+        from src.api.v1.health import require_admin
 
         # Regular authenticated user
         mock_user = MockUserContext(
-            user_id="user123",
-            is_authenticated=True,
-            roles=["user", "premium"]
+            user_id="user123", is_authenticated=True, roles=["user", "premium"]
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -135,8 +122,9 @@ class TestHealthEndpointInfoProtection:
 
     def test_basic_health_does_not_leak_service_count(self):
         """Basic health should not leak infrastructure details."""
-        from src.api.v1.health import gateway_health
         import asyncio
+
+        from src.api.v1.health import gateway_health
 
         async def run_test():
             mock_registry = AsyncMock()

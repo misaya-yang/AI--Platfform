@@ -8,10 +8,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.core.middleware.streaming import (
-    StreamingAuthConfig,
-    StreamingAuthMiddleware,
     StreamingAnonymousConfig,
     StreamingAnonymousMiddleware,
+    StreamingAuthConfig,
+    StreamingAuthMiddleware,
     StreamingRateLimitConfig,
     StreamingRateLimitMiddleware,
 )

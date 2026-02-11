@@ -19,34 +19,35 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 # 上下文变量，用于在请求生命周期内传递日志上下文
-_log_context: ContextVar[Optional["LogContext"]] = ContextVar("log_context", default=None)
+_log_context: ContextVar[LogContext | None] = ContextVar("log_context", default=None)
 
 
 @dataclass
 class LogContext:
     """
     日志上下文
-    
+
     在请求处理过程中携带上下文信息，自动注入到日志中。
     """
-    trace_id: Optional[str] = None
-    span_id: Optional[str] = None
-    user_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    service_id: Optional[str] = None
-    session_id: Optional[str] = None
-    client_ip: Optional[str] = None
-    
+
+    trace_id: str | None = None
+    span_id: str | None = None
+    user_id: str | None = None
+    tenant_id: str | None = None
+    service_id: str | None = None
+    session_id: str | None = None
+    client_ip: str | None = None
+
     # 额外的自定义字段
-    extra: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> Dict[str, Any]:
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         result = {}
-        
+
         if self.trace_id:
             result["trace_id"] = self.trace_id
         if self.span_id:
@@ -61,13 +62,13 @@ class LogContext:
             result["session_id"] = self.session_id
         if self.client_ip:
             result["client_ip"] = self.client_ip
-        
+
         if self.extra:
             result.update(self.extra)
-        
+
         return result
-    
-    def with_span(self, span_id: str) -> "LogContext":
+
+    def with_span(self, span_id: str) -> LogContext:
         """创建带有新 span_id 的上下文副本"""
         return LogContext(
             trace_id=self.trace_id,
@@ -81,7 +82,7 @@ class LogContext:
         )
 
 
-def get_log_context() -> Optional[LogContext]:
+def get_log_context() -> LogContext | None:
     """获取当前日志上下文"""
     return _log_context.get()
 
@@ -97,7 +98,7 @@ def clear_log_context() -> None:
 
 
 # 敏感字段列表（这些字段的值会被脱敏）
-SENSITIVE_FIELDS: Set[str] = {
+SENSITIVE_FIELDS: set[str] = {
     "password",
     "secret",
     "token",
@@ -114,7 +115,7 @@ SENSITIVE_FIELDS: Set[str] = {
 def _mask_sensitive(value: Any, field_name: str = "") -> Any:
     """
     脱敏敏感数据
-    
+
     Args:
         value: 待处理的值
         field_name: 字段名称（用于判断是否需要脱敏）
@@ -123,20 +124,20 @@ def _mask_sensitive(value: Any, field_name: str = "") -> Any:
         if isinstance(value, str) and len(value) > 4:
             return f"{value[:2]}***{value[-2:]}"
         return "***"
-    
+
     if isinstance(value, dict):
         return {k: _mask_sensitive(v, k) for k, v in value.items()}
-    
+
     if isinstance(value, list):
         return [_mask_sensitive(item) for item in value]
-    
+
     return value
 
 
 class StructuredFormatter(logging.Formatter):
     """
     结构化日志格式化器
-    
+
     输出 JSON 格式的日志，包含：
     - 时间戳
     - 日志级别
@@ -145,7 +146,7 @@ class StructuredFormatter(logging.Formatter):
     - 上下文信息（trace_id, user_id 等）
     - 额外字段
     """
-    
+
     def __init__(
         self,
         include_timestamp: bool = True,
@@ -159,87 +160,103 @@ class StructuredFormatter(logging.Formatter):
         self.include_level = include_level
         self.include_logger = include_logger
         self.mask_sensitive = mask_sensitive
-    
+
     def format(self, record: logging.LogRecord) -> str:
         """格式化日志记录"""
         # 基础字段
-        log_data: Dict[str, Any] = {}
-        
+        log_data: dict[str, Any] = {}
+
         if self.include_timestamp:
             log_data["timestamp"] = datetime.utcnow().isoformat() + "Z"
-        
+
         if self.include_level:
             log_data["level"] = record.levelname
-        
+
         if self.include_logger:
             log_data["logger"] = record.name
-        
+
         log_data["message"] = record.getMessage()
-        
+
         # 添加上下文信息
         context = get_log_context()
         if context:
             log_data.update(context.to_dict())
-        
+
         # 添加 record 中的额外字段
         extra_fields = {}
         for key, value in record.__dict__.items():
             if key not in {
-                "name", "msg", "args", "created", "filename", "funcName",
-                "levelname", "levelno", "lineno", "module", "msecs",
-                "pathname", "process", "processName", "relativeCreated",
-                "stack_info", "exc_info", "exc_text", "thread", "threadName",
+                "name",
+                "msg",
+                "args",
+                "created",
+                "filename",
+                "funcName",
+                "levelname",
+                "levelno",
+                "lineno",
+                "module",
+                "msecs",
+                "pathname",
+                "process",
+                "processName",
+                "relativeCreated",
+                "stack_info",
+                "exc_info",
+                "exc_text",
+                "thread",
+                "threadName",
                 "message",
             }:
                 extra_fields[key] = value
-        
+
         if extra_fields:
             if self.mask_sensitive:
                 extra_fields = _mask_sensitive(extra_fields)
             log_data["extra"] = extra_fields
-        
+
         # 添加异常信息
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
-        
+
         return json.dumps(log_data, ensure_ascii=False, default=str)
 
 
 class SimpleFormatter(logging.Formatter):
     """
     简单日志格式化器（用于开发环境）
-    
+
     输出人类可读的格式，同时包含上下文信息。
     """
-    
+
     COLORS = {
-        "DEBUG": "\033[36m",    # 青色
-        "INFO": "\033[32m",     # 绿色
+        "DEBUG": "\033[36m",  # 青色
+        "INFO": "\033[32m",  # 绿色
         "WARNING": "\033[33m",  # 黄色
-        "ERROR": "\033[31m",    # 红色
-        "CRITICAL": "\033[35m", # 紫色
+        "ERROR": "\033[31m",  # 红色
+        "CRITICAL": "\033[35m",  # 紫色
     }
     RESET = "\033[0m"
-    
+
     def __init__(self, use_colors: bool = True, **kwargs):
         super().__init__(**kwargs)
         self.use_colors = use_colors
-    
+
     def format(self, record: logging.LogRecord) -> str:
         """格式化日志记录"""
         # 时间和级别
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         level = record.levelname
-        
+
         if self.use_colors:
             color = self.COLORS.get(level, "")
             level_str = f"{color}{level:8}{self.RESET}"
         else:
             level_str = f"{level:8}"
-        
+
         # 基础消息
         message = record.getMessage()
-        
+
         # 上下文信息
         context_parts = []
         context = get_log_context()
@@ -250,26 +267,26 @@ class SimpleFormatter(logging.Formatter):
                 context_parts.append(f"user={context.user_id}")
             if context.service_id:
                 context_parts.append(f"service={context.service_id}")
-        
+
         context_str = f" [{', '.join(context_parts)}]" if context_parts else ""
-        
+
         # 组合输出
         output = f"{timestamp} {level_str} {record.name}{context_str} - {message}"
-        
+
         # 异常信息
         if record.exc_info:
             output += "\n" + self.formatException(record.exc_info)
-        
+
         return output
 
 
 class ContextLogger(logging.Logger):
     """
     支持上下文的 Logger
-    
+
     自动注入当前请求的上下文信息到日志中。
     """
-    
+
     def _log(
         self,
         level: int,
@@ -283,7 +300,7 @@ class ContextLogger(logging.Logger):
         """覆写 _log 方法，注入上下文"""
         if extra is None:
             extra = {}
-        
+
         # 注入上下文
         context = get_log_context()
         if context:
@@ -291,17 +308,17 @@ class ContextLogger(logging.Logger):
             for key, value in context_dict.items():
                 if key not in extra:
                     extra[key] = value
-        
+
         super()._log(level, msg, args, exc_info, extra, stack_info, stacklevel + 1)
 
 
 def get_logger(name: str) -> logging.Logger:
     """
     获取 Logger 实例
-    
+
     Args:
         name: Logger 名称（通常使用 __name__）
-    
+
     Returns:
         配置好的 Logger 实例
     """
@@ -311,10 +328,10 @@ def get_logger(name: str) -> logging.Logger:
 def configure_structured_logging(
     level: str = "INFO",
     format_type: str = "json",
-    module_levels: Optional[Dict[str, str]] = None,
+    module_levels: dict[str, str] | None = None,
     mask_sensitive: bool = True,
     log_to_file: bool = True,
-    log_dir: Optional[str] = None,
+    log_dir: str | None = None,
     log_file_max_bytes: int = 10 * 1024 * 1024,  # 10MB
     log_file_backup_count: int = 5,
 ) -> None:
@@ -391,12 +408,9 @@ def configure_structured_logging(
     # 配置模块级别
     if module_levels:
         for module_name, module_level in module_levels.items():
-            logging.getLogger(module_name).setLevel(
-                getattr(logging, module_level.upper())
-            )
+            logging.getLogger(module_name).setLevel(getattr(logging, module_level.upper()))
 
     # 降低第三方库的日志级别
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-

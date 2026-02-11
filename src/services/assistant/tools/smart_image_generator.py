@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ....core.observability.logging import get_logger
 from .gemini_image_tool import get_gemini_image_generator
@@ -24,11 +24,11 @@ logger = get_logger(__name__)
 class SmartImageGenerationResult:
     success: bool
     provider: str
-    images: List[Dict[str, Any]] = field(default_factory=list)
-    error: Optional[str] = None
-    error_code: Optional[str] = None
+    images: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+    error_code: str | None = None
     blocked: bool = False
-    block_reason: Optional[str] = None
+    block_reason: str | None = None
     duration_ms: float = 0.0
     used_fallback: bool = False
 
@@ -142,7 +142,7 @@ class SmartImageGenerator:
         )
 
 
-_smart_image_generator: Optional[SmartImageGenerator] = None
+_smart_image_generator: SmartImageGenerator | None = None
 
 
 def get_smart_image_generator(prefer_gemini: bool = True) -> SmartImageGenerator:
@@ -151,4 +151,3 @@ def get_smart_image_generator(prefer_gemini: bool = True) -> SmartImageGenerator
     if _smart_image_generator is None or _smart_image_generator.prefer_gemini != prefer_gemini:
         _smart_image_generator = SmartImageGenerator(prefer_gemini=prefer_gemini)
     return _smart_image_generator
-

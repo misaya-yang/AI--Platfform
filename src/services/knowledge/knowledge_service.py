@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import os
 import re
-import asyncio
-import uuid
 import tempfile
-from dataclasses import dataclass
+import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import httpx
 
@@ -20,57 +19,63 @@ from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
+# Type hint imports
+import contextlib
+from typing import TYPE_CHECKING
+
 from ...persistence.database import DatabaseStorage
 from .chunking import (
+    AssociatedImage,
+    Chunk,
     ChunkingConfig,
     ChunkingMode,
-    process_document,
+    ContentType,
+    enforce_token_limits,
     flatten_chunks,
     merge_small_chunks,
-    enforce_token_limits,
-    ContentType,
-    AssociatedImage,
+    process_document,
 )
-from .embedding import EmbeddingConfig, BaseEmbedding, create_embedding, get_cached_embedder, DashScopeMultimodalEmbedding
-from .pdf_image_processor import PDFImageProcessor, ExtractedImage, PDFExtractionResult
-from .ingestion import DocumentImageExtractor, ExtractedImage as IngestionExtractedImage
+from .embedding import (
+    BaseEmbedding,
+    DashScopeMultimodalEmbedding,
+    EmbeddingConfig,
+    create_embedding,
+    get_cached_embedder,
+)
+from .ingestion import DocumentImageExtractor
+from .ingestion import ExtractedImage as IngestionExtractedImage
+from .pdf_image_processor import ExtractedImage, PDFImageProcessor
 from .retrieval import (
-    bm25_scores, 
-    cosine_similarity, 
-    mmr_select, 
-    reciprocal_rank_fusion, 
-    tokenize, 
-    compute_text_match_score,
     ScoreNormalization,
-    normalize_hybrid_scores,
+    bm25_scores,
     compute_language_weights,
+    compute_text_match_score,
+    cosine_similarity,
     detect_language,
-)
-from .utils import normalize_text, split_into_segments
-from .vector_store import VectorStore
-from .structured_document_parser import (
-    StructuredDocumentParser, 
-    ChunkType, 
-    StructuredChunk,
-    ParseResult
+    mmr_select,
+    reciprocal_rank_fusion,
+    tokenize,
 )
 from .retrieval_service import RetrieveResult
+from .structured_document_parser import (
+    ChunkType,
+    StructuredDocumentParser,
+)
+from .utils import normalize_text
+from .vector_store import VectorStore
 
-# Type hint imports
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..storage.image_storage import ImageStorageService
-    from .worker import KnowledgeWorker
-    from .vlm_service import DashScopeVLMService
     from .embedding import UnifiedMultimodalEmbedding
+    from .worker import KnowledgeWorker
 
 # Global VLM semaphore for rate limiting across all concurrent document processing
 # This prevents overwhelming the VLM API when multiple documents are processed simultaneously
-_global_vlm_semaphore: Optional[asyncio.Semaphore] = None
+_global_vlm_semaphore: asyncio.Semaphore | None = None
 _global_vlm_max_concurrent: int = 10  # Default, updated from settings on first use
 
 
-def _ensure_dict(value: Any) -> Dict[str, Any]:
+def _ensure_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -84,7 +89,7 @@ def _ensure_dict(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _resolve_mime_type(filename: str, mime_type: Optional[str], document_type: Optional[str]) -> str:
+def _resolve_mime_type(filename: str, mime_type: str | None, document_type: str | None) -> str:
     """Resolve a safe MIME type without overwriting with non-MIME document type labels."""
     if mime_type:
         return mime_type
@@ -102,7 +107,7 @@ def _resolve_mime_type(filename: str, mime_type: Optional[str], document_type: O
     return guessed or "application/octet-stream"
 
 
-def _permission_rank(p: Optional[str]) -> int:
+def _permission_rank(p: str | None) -> int:
     if not p:
         return 0
     p = str(p).lower()
@@ -116,28 +121,28 @@ def _require_not_guest(user: UserContext) -> None:
 
 class KnowledgeService:
     """Main knowledge base service - coordinates specialized sub-services.
-    
+
     This service acts as a facade for:
     - DatasetService: Dataset management
     - DocumentService: Document CRUD operations
     - IngestionService: Document processing and embedding
     - RetrievalService: Search and retrieval
-    
+
     Note: This class is being refactored. New code should use the sub-services directly.
     """
-    
+
     def __init__(
         self,
         settings: Settings,
         database: DatabaseStorage,
-        multimodal_embedding: Optional[DashScopeMultimodalEmbedding] = None,
-        image_storage_service: Optional["ImageStorageService"] = None,
-        vlm_service: Optional[Any] = None,
+        multimodal_embedding: DashScopeMultimodalEmbedding | None = None,
+        image_storage_service: ImageStorageService | None = None,
+        vlm_service: Any | None = None,
         # New: allow injecting sub-services (for testing and gradual migration)
-        dataset_service: Optional[Any] = None,
-        document_service: Optional[Any] = None,
-        ingestion_service: Optional[Any] = None,
-        retrieval_service: Optional[Any] = None,
+        dataset_service: Any | None = None,
+        document_service: Any | None = None,
+        ingestion_service: Any | None = None,
+        retrieval_service: Any | None = None,
     ):
         self.settings = settings
         self.db = database
@@ -153,11 +158,13 @@ class KnowledgeService:
         from .document_service import DocumentService as DocService
         from .ingestion_service import IngestionService
         from .retrieval_service import RetrievalService
-        
+
         self.dataset_service = dataset_service or DatasetService(settings, database)
-        self.document_service = document_service or DocService(settings, database, self.dataset_service)
+        self.document_service = document_service or DocService(
+            settings, database, self.dataset_service
+        )
         self.retrieval_service = retrieval_service or RetrievalService(settings, database)
-        
+
         # Initialize structured document parser for enhanced multimodal parsing
         self.structured_parser = None
         try:
@@ -184,10 +191,10 @@ class KnowledgeService:
             max_retries=getattr(settings.knowledge.qdrant, "max_retries", 3),
             retry_base_delay=getattr(settings.knowledge.qdrant, "retry_base_delay", 0.5),
         )
-        
+
         # Update retrieval service with vector store
         self.retrieval_service.vector_store = self.vector_store
-        
+
         # Initialize ingestion service with vector store
         self.ingestion_service = ingestion_service or IngestionService(
             settings, database, self.vector_store
@@ -199,113 +206,146 @@ class KnowledgeService:
     # ========================================================================
     # Delegated Methods (will be removed after full migration to sub-services)
     # ========================================================================
-    
+
     # Dataset operations - delegated to DatasetService
-    async def list_datasets(self, user: UserContext) -> List[Dict[str, Any]]:
+    async def list_datasets(self, user: UserContext) -> list[dict[str, Any]]:
         """List datasets (delegated to DatasetService)."""
         return await self.dataset_service.list_datasets(user)
-    
-    async def create_dataset(self, user: UserContext, data: Dict[str, Any]) -> Dict[str, Any]:
+
+    async def create_dataset(self, user: UserContext, data: dict[str, Any]) -> dict[str, Any]:
         """Create dataset (delegated to DatasetService)."""
         return await self.dataset_service.create_dataset(user, data)
-    
-    async def update_dataset(self, user: UserContext, dataset_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+
+    async def update_dataset(
+        self, user: UserContext, dataset_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
         """Update dataset (delegated to DatasetService)."""
         return await self.dataset_service.update_dataset(user, dataset_id, patch)
-    
+
     async def delete_dataset(self, user: UserContext, dataset_id: str) -> bool:
         """Delete dataset (delegated to DatasetService)."""
         return await self.dataset_service.delete_dataset(user, dataset_id)
-    
-    async def list_dataset_permissions(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+
+    async def list_dataset_permissions(
+        self, user: UserContext, dataset_id: str
+    ) -> list[dict[str, Any]]:
         """List dataset permissions (delegated to DatasetService)."""
         return await self.dataset_service.list_dataset_permissions(user, dataset_id)
-    
+
     async def grant_dataset_permission(
         self, user: UserContext, dataset_id: str, target_user_id: str, permission: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Grant dataset permission (delegated to DatasetService)."""
-        return await self.dataset_service.grant_dataset_permission(user, dataset_id, target_user_id, permission)
-    
+        return await self.dataset_service.grant_dataset_permission(
+            user, dataset_id, target_user_id, permission
+        )
+
     async def revoke_dataset_permission(
         self, user: UserContext, dataset_id: str, target_user_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Revoke dataset permission (delegated to DatasetService)."""
-        return await self.dataset_service.revoke_dataset_permission(user, dataset_id, target_user_id)
-    
+        return await self.dataset_service.revoke_dataset_permission(
+            user, dataset_id, target_user_id
+        )
+
     # Document operations - delegated to DocumentService
     async def create_document_from_text(
-        self, user: UserContext, dataset_id: str, title: str, content: str, metadata: Optional[Dict] = None
-    ) -> Dict[str, Any]:
+        self,
+        user: UserContext,
+        dataset_id: str,
+        title: str,
+        content: str,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
         """Create document from text (delegated to DocumentService)."""
-        return await self.document_service.create_document_from_text(user, dataset_id, title, content, metadata)
-    
+        return await self.document_service.create_document_from_text(
+            user, dataset_id, title, content, metadata
+        )
+
     async def create_document_from_upload(
-        self, user: UserContext, dataset_id: str, filename: str, content: bytes, metadata: Optional[Dict] = None,
+        self,
+        user: UserContext,
+        dataset_id: str,
+        filename: str,
+        content: bytes,
+        metadata: dict | None = None,
         processing_mode: str = "text_only",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create document from upload (delegated to DocumentService)."""
         return await self.document_service.create_document_from_upload(
             user, dataset_id, filename, content, metadata, processing_mode=processing_mode
         )
-    
+
     async def create_document_from_url(
-        self, user: UserContext, dataset_id: str, url: str, title: Optional[str] = None, metadata: Optional[Dict] = None
-    ) -> Dict[str, Any]:
+        self,
+        user: UserContext,
+        dataset_id: str,
+        url: str,
+        title: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
         """Create document from URL (delegated to DocumentService)."""
-        return await self.document_service.create_document_from_url(user, dataset_id, url, title, metadata)
-    
-    async def list_documents(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+        return await self.document_service.create_document_from_url(
+            user, dataset_id, url, title, metadata
+        )
+
+    async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
         """List documents (delegated to DocumentService)."""
         return await self.document_service.list_documents(user, dataset_id)
-    
-    async def get_document(self, user: UserContext, dataset_id: str, document_id: str) -> Dict[str, Any]:
+
+    async def get_document(
+        self, user: UserContext, dataset_id: str, document_id: str
+    ) -> dict[str, Any]:
         """Get document (delegated to DocumentService)."""
         return await self.document_service.get_document(user, dataset_id, document_id)
-    
+
     async def delete_document(self, user: UserContext, dataset_id: str, document_id: str) -> bool:
         """Delete document (delegated to DocumentService)."""
         return await self.document_service.delete_document(user, dataset_id, document_id)
-    
+
     async def batch_create_documents(
-        self, user: UserContext, dataset_id: str, documents: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+        self, user: UserContext, dataset_id: str, documents: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         """Batch create documents (delegated to DocumentService)."""
         return await self.document_service.batch_create_documents(user, dataset_id, documents)
-    
+
     async def batch_delete_documents(
-        self, user: UserContext, dataset_id: str, document_ids: List[str]
-    ) -> Dict[str, Any]:
+        self, user: UserContext, dataset_id: str, document_ids: list[str]
+    ) -> dict[str, Any]:
         """Batch delete documents (delegated to DocumentService)."""
         return await self.document_service.batch_delete_documents(user, dataset_id, document_ids)
-    
+
     async def set_document_enabled(
         self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Set document enabled (delegated to DocumentService)."""
-        return await self.document_service.set_document_enabled(user, dataset_id, document_id, enabled)
-    
+        return await self.document_service.set_document_enabled(
+            user, dataset_id, document_id, enabled
+        )
+
     async def set_document_archived(
         self, user: UserContext, dataset_id: str, document_id: str, archived: bool
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Set document archived (delegated to DocumentService)."""
-        return await self.document_service.set_document_archived(user, dataset_id, document_id, archived)
-    
+        return await self.document_service.set_document_archived(
+            user, dataset_id, document_id, archived
+        )
+
     async def update_document(
-        self, user: UserContext, dataset_id: str, document_id: str, updates: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, user: UserContext, dataset_id: str, document_id: str, updates: dict[str, Any]
+    ) -> dict[str, Any]:
         """Update document (delegated to DocumentService)."""
         return await self.document_service.update_document(user, dataset_id, document_id, updates)
 
     def _create_vlm_callback(self):
         """Create a VLM callback for document processing.
-        
+
         Uses a global semaphore to limit concurrent VLM API calls across all
         document processing tasks. This prevents overwhelming the API when
         multiple documents are processed simultaneously.
         """
         global _global_vlm_semaphore, _global_vlm_max_concurrent
-        
+
         vlm = self.vlm_service
         if vlm is None:
             return None
@@ -315,7 +355,9 @@ class KnowledgeService:
         if _global_vlm_semaphore is None or _global_vlm_max_concurrent != vlm_max_concurrent:
             _global_vlm_max_concurrent = vlm_max_concurrent
             _global_vlm_semaphore = asyncio.Semaphore(vlm_max_concurrent)
-            logger.info(f"Initialized global VLM semaphore with max_concurrent={vlm_max_concurrent}")
+            logger.info(
+                f"Initialized global VLM semaphore with max_concurrent={vlm_max_concurrent}"
+            )
 
         semaphore = _global_vlm_semaphore
 
@@ -347,7 +389,7 @@ class KnowledgeService:
 
         return _vlm_extract_text
 
-    def _is_multimodal_dataset(self, dataset: Dict[str, Any]) -> bool:
+    def _is_multimodal_dataset(self, dataset: dict[str, Any]) -> bool:
         """Check if dataset is configured for multimodal (unified embedding space).
 
         A dataset is considered multimodal if:
@@ -362,32 +404,36 @@ class KnowledgeService:
         model = str(dataset.get("embedding_model") or "")
 
         # Check provider
-        multimodal_providers = {"unified_multimodal", "unified", "cross_modal", "dashscope_multimodal", "multimodal"}
+        multimodal_providers = {
+            "unified_multimodal",
+            "unified",
+            "cross_modal",
+            "dashscope_multimodal",
+            "multimodal",
+        }
         if provider in multimodal_providers:
             return True
 
         # Check model
         from .embedding import MULTIMODAL_EMBEDDING_MODELS
+
         if model in MULTIMODAL_EMBEDDING_MODELS:
             return True
 
         # Check index_config
         index_config = _ensure_dict(dataset.get("index_config"))
-        if index_config.get("multimodal_enabled") or index_config.get("enable_multimodal"):
-            return True
-
-        return False
+        return bool(index_config.get("multimodal_enabled") or index_config.get("enable_multimodal"))
 
     def _get_unified_multimodal_embedder(
         self,
-        dataset: Dict[str, Any],
-        embedding_config: Optional[Dict[str, Any]] = None,
-    ) -> "UnifiedMultimodalEmbedding":
+        dataset: dict[str, Any],
+        embedding_config: dict[str, Any] | None = None,
+    ) -> UnifiedMultimodalEmbedding:
         """Create UnifiedMultimodalEmbedding for multimodal datasets.
 
         This ensures text and images are embedded in the same vector space,
         enabling true cross-modal retrieval.
-        
+
         Uses settings.knowledge.multimodal_embedding_* configuration.
         """
         from .embedding import UnifiedMultimodalEmbedding
@@ -396,11 +442,15 @@ class KnowledgeService:
         ec = embedding_config or _ensure_dict(dataset.get("embedding_config"))
         api_key = str(ec.get("api_key") or "").strip()
         if not api_key:
-            raise ValidationFailedError("Multimodal embedding api_key is required in dataset embedding_config")
+            raise ValidationFailedError(
+                "Multimodal embedding api_key is required in dataset embedding_config"
+            )
 
         # Use model from dataset or fall back to settings
         model = dataset.get("embedding_model") or self.settings.knowledge.multimodal_embedding_model
-        max_concurrent = ec.get("max_concurrent") or self.settings.knowledge.multimodal_embedding_max_concurrent
+        max_concurrent = (
+            ec.get("max_concurrent") or self.settings.knowledge.multimodal_embedding_max_concurrent
+        )
 
         return UnifiedMultimodalEmbedding(
             api_key=api_key,
@@ -411,13 +461,17 @@ class KnowledgeService:
 
     def _get_text_embedder(
         self,
-        dataset: Dict[str, Any],
-        embedding_config: Optional[Dict[str, Any]] = None,
-    ) -> "BaseEmbedding":
+        dataset: dict[str, Any],
+        embedding_config: dict[str, Any] | None = None,
+    ) -> BaseEmbedding:
         """Create embedder for text-only datasets using dataset-level config."""
         from .embedding import create_embedding
 
-        ec = _ensure_dict(embedding_config) if embedding_config is not None else _ensure_dict(dataset.get("embedding_config"))
+        ec = (
+            _ensure_dict(embedding_config)
+            if embedding_config is not None
+            else _ensure_dict(dataset.get("embedding_config"))
+        )
         provider = str(dataset.get("embedding_provider") or "").lower() or "local"
         model = str(dataset.get("embedding_model") or "")
         dimension = int(dataset.get("embedding_dimension") or 0) or None
@@ -442,7 +496,7 @@ class KnowledgeService:
             resolved_dimension = self.settings.knowledge.text_embedding_dimension
         return create_embedding(econf, dimension=resolved_dimension)
 
-    def _build_islamic_dataset_defaults(self) -> Dict[str, Any]:
+    def _build_islamic_dataset_defaults(self) -> dict[str, Any]:
         profile = self.settings.knowledge.islamic_profile
         if not profile.enabled:
             return {}
@@ -471,9 +525,9 @@ class KnowledgeService:
     @staticmethod
     def _apply_islamic_dataset_defaults(
         dataset_name: str,
-        index_config: Dict[str, Any],
-        defaults: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        index_config: dict[str, Any],
+        defaults: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         _ = dataset_name  # keep signature for compatibility
         chunking = _ensure_dict(index_config.get("chunking"))
         retrieval = _ensure_dict(index_config.get("retrieval"))
@@ -513,7 +567,9 @@ class KnowledgeService:
             and chunking.get("strict_section_traceability") is None
             and default_chunking.get("strict_section_traceability") is not None
         ):
-            chunking["strict_section_traceability"] = bool(default_chunking.get("strict_section_traceability"))
+            chunking["strict_section_traceability"] = bool(
+                default_chunking.get("strict_section_traceability")
+            )
 
         if (
             chunk_mode == "islamic"
@@ -522,7 +578,9 @@ class KnowledgeService:
         ):
             chunking["strict_section_traceability"] = True
 
-        if chunking.get("strict_section_traceability") and not islamic_cfg.get("strict_section_traceability"):
+        if chunking.get("strict_section_traceability") and not islamic_cfg.get(
+            "strict_section_traceability"
+        ):
             islamic_cfg["strict_section_traceability"] = True
             retrieval["islamic"] = islamic_cfg
 
@@ -534,31 +592,31 @@ class KnowledgeService:
 
     def _convert_structured_chunks(
         self,
-        structured_chunks: List[Dict[str, Any]],
+        structured_chunks: list[dict[str, Any]],
         document_id: str,
         doc_name: str,
         dataset_id: str,
-    ) -> List[Any]:
+    ) -> list[Any]:
         """
         Convert structured parsing chunks to Chunk objects for embedding.
-        
+
         This preserves the document structure (headings, images, tables)
         for better multimodal retrieval.
         """
         from .chunking import Chunk, ContentType
-        
+
         flat_chunks = []
-        
+
         for i, sc in enumerate(structured_chunks):
             chunk_type = sc.get("type", "text")
             content = sc.get("content", "")
             text = sc.get("text", content)  # Use text if available, else content
-            
+
             # Determine content type based on chunk type
             content_type = ContentType.TEXT
             if chunk_type in ("image", "mixed"):
                 content_type = ContentType.MIXED
-            
+
             # Create Chunk object
             chunk = Chunk(
                 text=text,
@@ -577,44 +635,44 @@ class KnowledgeService:
                 },
                 content_type=content_type,
             )
-            
+
             # Mark if this chunk has associated images
             if sc.get("has_images") or sc.get("images"):
                 chunk.metadata["has_images"] = True
                 chunk.metadata["image_count"] = len(sc.get("images", []))
                 # Store image metadata for later retrieval
                 chunk.metadata["associated_images"] = sc.get("images", [])
-            
+
             flat_chunks.append(chunk)
-        
+
         return flat_chunks
 
     def _normalize_structured_chunks(
         self,
-        chunks: List["Chunk"],
+        chunks: list[Chunk],
         config: ChunkingConfig,
-    ) -> List["Chunk"]:
+    ) -> list[Chunk]:
         """Normalize structured chunks to enforce token limits and merge tiny fragments."""
         if not chunks:
             return chunks
 
-        from .chunking import FixedSizeChunker, ChunkingMode, Chunk, count_tokens
+        from .chunking import Chunk, ChunkingMode, FixedSizeChunker, count_tokens
 
         splitter = FixedSizeChunker(config)
-        normalized: List[Chunk] = []
+        normalized: list[Chunk] = []
         separator = "\n\n"
         substantive_pattern = re.compile(r"[\w\u0600-\u06ff]", re.UNICODE)
 
         pending_text = ""
-        pending_meta: Dict[str, Any] = {}
+        pending_meta: dict[str, Any] = {}
         pending_images = []
-        pending_base: Optional[Chunk] = None
+        pending_base: Chunk | None = None
 
         def emit_chunk(
             text: str,
             base_chunk: Chunk,
-            metadata: Dict[str, Any],
-            images: List[Any],
+            metadata: dict[str, Any],
+            images: list[Any],
         ) -> None:
             if not text.strip():
                 return
@@ -754,16 +812,18 @@ class KnowledgeService:
     def _resolve_fusion_config(
         self,
         *,
-        retrieval_defaults: Dict[str, Any],
-        fusion_method: Optional[str],
-        fusion: Optional[str],
-        alpha: Optional[float],
-        dense_weight: Optional[float],
-        bm25_weight: Optional[float],
-        rrf_k: Optional[int],
-        rrf_weights: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
-        fusion_cfg = retrieval_defaults.get("fusion") if isinstance(retrieval_defaults, dict) else None
+        retrieval_defaults: dict[str, Any],
+        fusion_method: str | None,
+        fusion: str | None,
+        alpha: float | None,
+        dense_weight: float | None,
+        bm25_weight: float | None,
+        rrf_k: int | None,
+        rrf_weights: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        fusion_cfg = (
+            retrieval_defaults.get("fusion") if isinstance(retrieval_defaults, dict) else None
+        )
         fusion_strategy = None
         fusion_alpha = None
         fusion_rrf_k = None
@@ -773,9 +833,15 @@ class KnowledgeService:
             fusion_rrf_k = fusion_cfg.get("rrf_k")
 
         effective_fusion_method = str(
-            (fusion_method if fusion_method is not None else
-             fusion if fusion is not None else
-             fusion_strategy or retrieval_defaults.get("fusion_method") or retrieval_defaults.get("fusion"))
+            (
+                fusion_method
+                if fusion_method is not None
+                else fusion
+                if fusion is not None
+                else fusion_strategy
+                or retrieval_defaults.get("fusion_method")
+                or retrieval_defaults.get("fusion")
+            )
             or "rrf"
         ).lower()
         if effective_fusion_method == "alpha":
@@ -791,10 +857,14 @@ class KnowledgeService:
             effective_bm25_weight = 1.0 - float(fusion_alpha)
         else:
             effective_dense_weight = float(
-                dense_weight if dense_weight is not None else retrieval_defaults.get("dense_weight", 0.5)
+                dense_weight
+                if dense_weight is not None
+                else retrieval_defaults.get("dense_weight", 0.5)
             )
             effective_bm25_weight = float(
-                bm25_weight if bm25_weight is not None else retrieval_defaults.get("bm25_weight", 0.5)
+                bm25_weight
+                if bm25_weight is not None
+                else retrieval_defaults.get("bm25_weight", 0.5)
             )
 
         # Legacy rrf_weights support
@@ -802,7 +872,9 @@ class KnowledgeService:
             effective_dense_weight = float(rrf_weights.get("vector", effective_dense_weight))
             effective_bm25_weight = float(rrf_weights.get("keyword", effective_bm25_weight))
 
-        rrf_k_value = int(rrf_k if rrf_k is not None else fusion_rrf_k or retrieval_defaults.get("rrf_k") or 60)
+        rrf_k_value = int(
+            rrf_k if rrf_k is not None else fusion_rrf_k or retrieval_defaults.get("rrf_k") or 60
+        )
 
         return {
             "method": effective_fusion_method,
@@ -813,13 +885,13 @@ class KnowledgeService:
 
     def _filter_candidates_by_metadata(
         self,
-        candidates: List[Dict[str, Any]],
-        source_type: Optional[str],
-        language: Optional[str],
-    ) -> List[Dict[str, Any]]:
+        candidates: list[dict[str, Any]],
+        source_type: str | None,
+        language: str | None,
+    ) -> list[dict[str, Any]]:
         if not source_type and not language:
             return candidates
-        filtered: List[Dict[str, Any]] = []
+        filtered: list[dict[str, Any]] = []
         for c in candidates:
             meta = _ensure_dict(c.get("metadata"))
             if source_type and str(meta.get("source_type")) != str(source_type):
@@ -829,18 +901,18 @@ class KnowledgeService:
             filtered.append(c)
         return filtered
 
-    def _should_apply_score_threshold(self, mode: Optional[str]) -> bool:
+    def _should_apply_score_threshold(self, mode: str | None) -> bool:
         return str(mode or "").lower() == "dense"
 
-    async def _get_dataset_or_404(self, dataset_id: str) -> Dict[str, Any]:
+    async def _get_dataset_or_404(self, dataset_id: str) -> dict[str, Any]:
         dataset = await self.db.get_dataset(dataset_id)
         if not dataset:
             raise ValidationFailedError("dataset not found")
         return dataset
 
     async def _effective_dataset_permission(
-        self, dataset: Dict[str, Any], user: UserContext
-    ) -> Optional[str]:
+        self, dataset: dict[str, Any], user: UserContext
+    ) -> str | None:
         # Admin shortcut
         if user.tier == "admin" or "admin" in (user.roles or []):
             return "owner"
@@ -868,14 +940,18 @@ class KnowledgeService:
         visibility = str(dataset.get("visibility") or "private").lower()
         if visibility == "public":
             return "viewer"
-        if visibility == "tenant" and dataset.get("tenant_id") and dataset.get("tenant_id") == user.tenant_id:
+        if (
+            visibility == "tenant"
+            and dataset.get("tenant_id")
+            and dataset.get("tenant_id") == user.tenant_id
+        ):
             return "viewer"
 
         return None
 
     async def require_dataset_access(
         self, user: UserContext, dataset_id: str, required: str = "viewer"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         dataset = await self._get_dataset_or_404(dataset_id)
         perm = await self._effective_dataset_permission(dataset, user)
         if _permission_rank(perm) < _permission_rank(required):
@@ -884,7 +960,7 @@ class KnowledgeService:
             )
         return dataset
 
-    def _redact_dataset_secrets(self, dataset: Dict[str, Any]) -> Dict[str, Any]:
+    def _redact_dataset_secrets(self, dataset: dict[str, Any]) -> dict[str, Any]:
         """Remove sensitive fields before returning dataset configs to clients."""
         ds = dict(dataset or {})
         embedding_config = _ensure_dict(ds.get("embedding_config"))
@@ -903,15 +979,17 @@ class KnowledgeService:
         ds["index_config"] = index_config
         return ds
 
-    def sanitize_dataset_for_response(self, dataset: Dict[str, Any]) -> Dict[str, Any]:
+    def sanitize_dataset_for_response(self, dataset: dict[str, Any]) -> dict[str, Any]:
         """Public wrapper to redact sensitive config fields for API responses."""
         return self._redact_dataset_secrets(dataset)
 
     # ========================= Dataset =========================
 
-    async def list_datasets(self, user: UserContext) -> List[Dict[str, Any]]:
-        datasets = await self.db.list_datasets(tenant_id=user.tenant_id, include_public=True, limit=200, offset=0)
-        visible: List[Dict[str, Any]] = []
+    async def list_datasets(self, user: UserContext) -> list[dict[str, Any]]:
+        datasets = await self.db.list_datasets(
+            tenant_id=user.tenant_id, include_public=True, limit=200, offset=0
+        )
+        visible: list[dict[str, Any]] = []
         for ds in datasets:
             perm = await self._effective_dataset_permission(ds, user)
             if _permission_rank(perm) >= 1:
@@ -950,14 +1028,9 @@ class KnowledgeService:
 
         return [self._redact_dataset_secrets(ds) for ds in visible]
 
-
     async def preview_chunking(
-        self,
-        user: UserContext,
-        dataset_id: str,
-        text: str,
-        config: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
+        self, user: UserContext, dataset_id: str, text: str, config: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
         # Verify dataset access (viewer is enough for preview, though ideally check if member)
         if dataset_id != "temp_preview":
             await self.require_dataset_access(user, dataset_id, required="viewer")
@@ -968,7 +1041,7 @@ class KnowledgeService:
             chunking_config = ChunkingConfig.from_dict(config)
         else:
             if dataset_id == "temp_preview":
-                 chunking_config = ChunkingConfig() # Default config
+                chunking_config = ChunkingConfig()  # Default config
             else:
                 # Fallback to dataset default if no config provided
                 dataset = await self._get_dataset_or_404(dataset_id)
@@ -978,29 +1051,24 @@ class KnowledgeService:
         # Process text
         # Use a dummy document_id for preview
         doc_id = f"preview_{uuid.uuid4().hex[:8]}"
-        
+
         # We need to run this in a thread pool as it might be CPU intensive
-        chunks = await asyncio.to_thread(
-            process_document, 
-            text, 
-            chunking_config, 
-            doc_id
-        )
-        
+        chunks = await asyncio.to_thread(process_document, text, chunking_config, doc_id)
+
         # Flatten and format
         flat_chunks = flatten_chunks(chunks)
-        
+
         return [
             {
                 "content": c.text,
                 "token_count": c.token_count,
                 "char_count": c.char_count,
-                "metadata": c.metadata
+                "metadata": c.metadata,
             }
             for c in flat_chunks
         ]
 
-    async def create_dataset(self, user: UserContext, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_dataset(self, user: UserContext, data: dict[str, Any]) -> dict[str, Any]:
         _require_not_guest(user)
 
         dataset_id = str(data.get("dataset_id") or "").strip()
@@ -1023,7 +1091,7 @@ class KnowledgeService:
             islamic_defaults,
         )
 
-        embedder: Optional[BaseEmbedding] = None
+        embedder: BaseEmbedding | None = None
         dim: int = 0
         collection: str = ""
         try:
@@ -1074,7 +1142,9 @@ class KnowledgeService:
         await self.db.grant_dataset_permission(dataset_id, "user", user.user_id, "owner")
         return self._redact_dataset_secrets(await self._get_dataset_or_404(dataset_id))
 
-    async def update_dataset(self, user: UserContext, dataset_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+    async def update_dataset(
+        self, user: UserContext, dataset_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
 
         mutable = {
@@ -1097,7 +1167,9 @@ class KnowledgeService:
         if new_dim != old_dim:
             docs = await self.db.list_documents(dataset_id=dataset_id, limit=1, offset=0)
             if docs:
-                raise ValidationFailedError("Cannot change embedding_dimension when documents exist; reindex required")
+                raise ValidationFailedError(
+                    "Cannot change embedding_dimension when documents exist; reindex required"
+                )
 
         updated = dict(dataset)
         updated.update(filtered)
@@ -1110,9 +1182,14 @@ class KnowledgeService:
             )
 
         # If embedding settings changed, ensure a matching collection.
-        embedding_keys = {"embedding_provider", "embedding_model", "embedding_dimension", "embedding_config"}
+        embedding_keys = {
+            "embedding_provider",
+            "embedding_model",
+            "embedding_dimension",
+            "embedding_config",
+        }
         if embedding_keys.intersection(filtered.keys()):
-            embedder: Optional[BaseEmbedding] = None
+            embedder: BaseEmbedding | None = None
             dim: int = 0
             try:
                 econf = self._resolve_embedding_config(
@@ -1140,7 +1217,9 @@ class KnowledgeService:
                 updated["embedding_dimension"] = dim
                 updated["collection_name"] = collection
             except Exception as exc:
-                raise ValidationFailedError(f"Failed to update dataset embedding/index: {exc}") from exc
+                raise ValidationFailedError(
+                    f"Failed to update dataset embedding/index: {exc}"
+                ) from exc
             finally:
                 if embedder:
                     await embedder.close()
@@ -1154,7 +1233,7 @@ class KnowledgeService:
         dataset_id: str,
         *,
         password: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
     ) -> bool:
         dataset = await self.require_dataset_access(user, dataset_id, required="owner")
 
@@ -1207,7 +1286,9 @@ class KnowledgeService:
                 )
         return deleted
 
-    async def list_dataset_permissions(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+    async def list_dataset_permissions(
+        self, user: UserContext, dataset_id: str
+    ) -> list[dict[str, Any]]:
         await self.require_dataset_access(user, dataset_id, required="owner")
         return await self.db.list_dataset_permissions(dataset_id)
 
@@ -1240,8 +1321,8 @@ class KnowledgeService:
         dataset_id: str,
         title: str,
         content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc_id = str(uuid.uuid4())
         # Sanitize content for PostgreSQL
@@ -1267,13 +1348,13 @@ class KnowledgeService:
         dataset_id: str,
         filename: str,
         content_bytes: bytes,
-        mime_type: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        mime_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
         processing_mode: str = "text_only",  # auto | text_only | scanned | multimodal
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Create a document from file upload.
-        
+
         Args:
             user: User context
             dataset_id: Target dataset ID
@@ -1290,7 +1371,7 @@ class KnowledgeService:
 
         name = (filename or "").strip().lower()
         mime = (mime_type or "").strip().lower()
-        
+
         # Parse and validate processing mode
         mode = parse_processing_mode(processing_mode)
         logger.info(f"Creating document with processing_mode={mode.value}")
@@ -1322,12 +1403,12 @@ class KnowledgeService:
             logger.info(
                 f"[Upload] {mode.value} mode: saving file directly, processing deferred to worker"
             )
-            
+
             # Save original file to storage
             if self.image_storage_service:
                 dataset = await self._get_dataset_or_404(dataset_id)
                 tenant_id = str(dataset.get("tenant_id") or user.tenant_id or "default")
-                
+
                 try:
                     original_key = await self.image_storage_service.upload_original_file(
                         tenant_id=tenant_id,
@@ -1341,7 +1422,7 @@ class KnowledgeService:
                     doc_metadata["original_mime_type"] = mime_type or "application/octet-stream"
                 except Exception as e:
                     logger.warning(f"Failed to save original file to storage: {e}")
-            
+
             # Update document with metadata
             doc = {
                 "document_id": doc_id,
@@ -1356,19 +1437,23 @@ class KnowledgeService:
                 "metadata": doc_metadata,
             }
             await self.db.save_document(doc)
-            
+
             logger.info(f"[Upload] Scanned document {doc_id} saved, ready for worker processing")
             return await self.db.get_document(doc_id) or doc
 
         # ============================================================
         # STANDARD PATH: text_only and multimodal modes
         # ============================================================
-        extracted_images: List[IngestionExtractedImage] = []
+        extracted_images: list[IngestionExtractedImage] = []
         text: str = ""
         detected_mime: str = ""
 
         # Use unified DocumentImageExtractor for all file types when multimodal is available
-        if mode == ProcessingMode.MULTIMODAL and self.multimodal_embedding and self.image_storage_service:
+        if (
+            mode == ProcessingMode.MULTIMODAL
+            and self.multimodal_embedding
+            and self.image_storage_service
+        ):
             try:
                 logger.info(f"Processing document with unified image extraction: {filename}")
                 extraction_result = await self.document_image_extractor.extract(
@@ -1415,7 +1500,6 @@ class KnowledgeService:
         # Prepare document metadata
         doc_metadata = metadata or {}
         stored_image_metadata = []
-        images_embedded = False  # Track if images were embedded in-memory
 
         # Resolve tenant for storage operations
         dataset = None
@@ -1433,30 +1517,34 @@ class KnowledgeService:
                 # Get collection name for vector storage
                 dataset_config = dataset or await self._get_dataset_or_404(dataset_id)
                 index_config = _ensure_dict(dataset_config.get("index_config"))
-                embedding_model = index_config.get("embedding_model") or self.settings.knowledge.default_embedding_model
-                
+                index_config.get(
+                    "embedding_model"
+                ) or self.settings.knowledge.default_embedding_model
+
                 # Determine vector dimension
                 # Default 1024 for unified dimension
                 vector_dim = 1024
-                if hasattr(self.multimodal_embedding, 'dimension'):
+                if hasattr(self.multimodal_embedding, "dimension"):
                     vector_dim = self.multimodal_embedding.dimension
 
                 image_position_offset = int(
                     getattr(self.settings.knowledge, "image_position_offset", 1_000_000)
                 )
-                
+
                 collection = f"kb_{dataset_id}_{vector_dim}"
-                
+
                 # Ensure collection exists
                 await self.vector_store.ensure_collection(
                     dataset_id=dataset_id,
                     dimension=vector_dim,
                     collection_name=collection,
                 )
-                
-                logger.info(f"[Upload] Starting in-memory embedding for {len(extracted_images)} images...")
+
+                logger.info(
+                    f"[Upload] Starting in-memory embedding for {len(extracted_images)} images..."
+                )
                 await self.db.update_document_status(doc_id, status="embedding_images", progress=10)
-                
+
                 # Embed images directly from memory
                 embed_count, embedded_meta = await self._embed_images_in_memory(
                     embedder=self.multimodal_embedding,
@@ -1466,15 +1554,18 @@ class KnowledgeService:
                     collection=collection,
                     base_position=image_position_offset,
                 )
-                
+
                 if embed_count > 0:
-                    images_embedded = True
                     doc_metadata["images_embedded"] = True
                     doc_metadata["embedded_image_count"] = embed_count
-                    logger.info(f"[Upload] In-memory embedding complete: {embed_count} images embedded")
-                
+                    logger.info(
+                        f"[Upload] In-memory embedding complete: {embed_count} images embedded"
+                    )
+
             except Exception as embed_err:
-                logger.warning(f"[Upload] In-memory embedding failed, will retry during ingestion: {embed_err}")
+                logger.warning(
+                    f"[Upload] In-memory embedding failed, will retry during ingestion: {embed_err}"
+                )
                 # Continue with upload, images will be embedded during ingestion
 
         # ============================================================
@@ -1483,17 +1574,18 @@ class KnowledgeService:
         if extracted_images and self.image_storage_service:
             logger.info(f"[Upload] Uploading {len(extracted_images)} images to S3...")
             await self.db.update_document_status(doc_id, status="uploading_images", progress=65)
-            
-            async def upload_single_image(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+
+            async def upload_single_image(idx: int, img: IngestionExtractedImage) -> dict[str, Any]:
                 """Upload a single image and return metadata."""
                 try:
                     page_number = (
-                        getattr(img, "page_number", None) or
-                        img.metadata.get("page_number") if hasattr(img, "metadata") else None
+                        getattr(img, "page_number", None) or img.metadata.get("page_number")
+                        if hasattr(img, "metadata")
+                        else None
                     )
                     attachment_id = f"upload_{img.image_id}"
                     storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
-                    
+
                     storage_url = await self.image_storage_service.upload_image(
                         tenant_id=tenant_id,
                         document_id=doc_id,
@@ -1508,7 +1600,7 @@ class KnowledgeService:
                             "page_number": str(page_number) if page_number else str(idx),
                         },
                     )
-                    
+
                     actual_storage_key = self.image_storage_service._generate_key(
                         tenant_id, doc_id, attachment_id, storage_filename
                     )
@@ -1537,29 +1629,35 @@ class KnowledgeService:
                         "context_text": img.context_text[:200] if img.context_text else "",
                         "error": str(store_err),
                     }
-            
+
             # Parallel upload with concurrency limit (reduced for stability)
             upload_semaphore = asyncio.Semaphore(10)
-            
-            async def upload_with_semaphore(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+
+            async def upload_with_semaphore(
+                idx: int, img: IngestionExtractedImage
+            ) -> dict[str, Any]:
                 async with upload_semaphore:
                     return await upload_single_image(idx, img)
-            
+
             upload_tasks = [upload_with_semaphore(i, img) for i, img in enumerate(extracted_images)]
             upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-            
+
             for result in upload_results:
                 if isinstance(result, Exception):
                     logger.warning(f"Image upload failed: {result}")
                     continue
                 stored_image_metadata.append(result)
-            
-            logger.info(f"[Upload] S3 upload complete: {len(stored_image_metadata)}/{len(extracted_images)} images")
+
+            logger.info(
+                f"[Upload] S3 upload complete: {len(stored_image_metadata)}/{len(extracted_images)} images"
+            )
 
         if stored_image_metadata:
             doc_metadata["extracted_images"] = stored_image_metadata
             doc_metadata["image_count"] = len(stored_image_metadata)
-            logger.info(f"Document {doc_id} has {len(stored_image_metadata)} images persisted to storage")
+            logger.info(
+                f"Document {doc_id} has {len(stored_image_metadata)} images persisted to storage"
+            )
 
         # Persist original file to storage for future re-extraction (reindex)
         if self.image_storage_service and tenant_id:
@@ -1577,25 +1675,26 @@ class KnowledgeService:
                 logger.info(f"Original file persisted to storage: {original_key}")
             except Exception as e:
                 logger.warning(f"Failed to persist original file to storage: {e}")
-        
+
         # Structured document parsing for PDFs (enhanced multimodal support)
         # Check if enabled via dataset config or global settings
         dataset_config = await self.db.get_dataset(dataset_id) if self.db else None
-        dataset_index_config = _ensure_dict(dataset_config.get("index_config")) if dataset_config else {}
+        dataset_index_config = (
+            _ensure_dict(dataset_config.get("index_config")) if dataset_config else {}
+        )
         parsing_config = dataset_index_config.get("parsing", {})
-        
+
         # Enable structured parsing by default for PDFs, can be disabled per-dataset
         use_structured_parsing = parsing_config.get("structured", True)
-        
+
         structured_chunks = None
         if name.endswith(".pdf") and self.structured_parser and use_structured_parsing:
             try:
                 logger.info(f"Running structured document parsing for {filename}")
                 parse_result = await self.structured_parser.parse_pdf(
-                    content_bytes, 
-                    filename=filename
+                    content_bytes, filename=filename
                 )
-                
+
                 # Convert structured chunks to serializable format
                 structured_chunks = []
                 for chunk in parse_result.chunks:
@@ -1621,14 +1720,22 @@ class KnowledgeService:
                             for img in chunk.images
                         ]
                     structured_chunks.append(chunk_data)
-                
+
                 doc_metadata["structured_parsing"] = {
                     "enabled": True,
                     "total_chunks": len(parse_result.chunks),
-                    "text_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.TEXT]),
-                    "heading_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.HEADING]),
-                    "image_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.IMAGE]),
-                    "table_chunks": len([c for c in parse_result.chunks if c.type == ChunkType.TABLE]),
+                    "text_chunks": len(
+                        [c for c in parse_result.chunks if c.type == ChunkType.TEXT]
+                    ),
+                    "heading_chunks": len(
+                        [c for c in parse_result.chunks if c.type == ChunkType.HEADING]
+                    ),
+                    "image_chunks": len(
+                        [c for c in parse_result.chunks if c.type == ChunkType.IMAGE]
+                    ),
+                    "table_chunks": len(
+                        [c for c in parse_result.chunks if c.type == ChunkType.TABLE]
+                    ),
                     "chunks": structured_chunks,
                 }
                 logger.info(
@@ -1637,7 +1744,9 @@ class KnowledgeService:
                     f"{len([c for c in parse_result.chunks if c.type == ChunkType.TABLE])} tables)"
                 )
             except Exception as e:
-                logger.warning(f"Structured parsing failed, falling back to standard extraction: {e}")
+                logger.warning(
+                    f"Structured parsing failed, falling back to standard extraction: {e}"
+                )
                 doc_metadata["structured_parsing"] = {"enabled": False, "error": str(e)}
 
         # Mark that full extraction ran at upload — ingest_document will skip re-extraction
@@ -1665,9 +1774,9 @@ class KnowledgeService:
         user: UserContext,
         dataset_id: str,
         url: str,
-        title: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         await self.require_dataset_access(user, dataset_id, required="editor")
 
         raw_url = (url or "").strip()
@@ -1686,29 +1795,31 @@ class KnowledgeService:
             "Accept-Encoding": "gzip, deflate",
         }
 
-        content_type: Optional[str] = None
+        content_type: str | None = None
         content_bytes: bytes = b""
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0, read=20.0),
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
-            async with client.stream("GET", str(parsed)) as resp:
-                if resp.status_code >= 400:
-                    raise ValidationFailedError(
-                        f"Failed to fetch url: {resp.status_code} {resp.reason_phrase or ''}".strip()
-                    )
-                content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip() or None
-                chunks: List[bytes] = []
-                size = 0
-                async for part in resp.aiter_bytes():
-                    if not part:
-                        continue
-                    size += len(part)
-                    if size > max_bytes:
-                        raise ValidationFailedError("URL content is too large (limit 10MB)")
-                    chunks.append(part)
-                content_bytes = b"".join(chunks)
+        async with (
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0, read=20.0),
+                follow_redirects=True,
+                headers=headers,
+            ) as client,
+            client.stream("GET", str(parsed)) as resp,
+        ):
+            if resp.status_code >= 400:
+                raise ValidationFailedError(
+                    f"Failed to fetch url: {resp.status_code} {resp.reason_phrase or ''}".strip()
+                )
+            content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip() or None
+            chunks: list[bytes] = []
+            size = 0
+            async for part in resp.aiter_bytes():
+                if not part:
+                    continue
+                size += len(part)
+                if size > max_bytes:
+                    raise ValidationFailedError("URL content is too large (limit 10MB)")
+                chunks.append(part)
+            content_bytes = b"".join(chunks)
 
         text, detected_mime = await asyncio.to_thread(
             self._extract_text_from_bytes, content_bytes, str(parsed), content_type
@@ -1731,11 +1842,13 @@ class KnowledgeService:
         await self.db.save_document(doc)
         return await self.db.get_document(doc_id) or doc
 
-    async def list_documents(self, user: UserContext, dataset_id: str) -> List[Dict[str, Any]]:
+    async def list_documents(self, user: UserContext, dataset_id: str) -> list[dict[str, Any]]:
         await self.require_dataset_access(user, dataset_id, required="viewer")
         return await self.db.list_documents(dataset_id=dataset_id, limit=200, offset=0)
 
-    async def get_document(self, user: UserContext, dataset_id: str, document_id: str) -> Dict[str, Any]:
+    async def get_document(
+        self, user: UserContext, dataset_id: str, document_id: str
+    ) -> dict[str, Any]:
         await self.require_dataset_access(user, dataset_id, required="viewer")
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
@@ -1755,12 +1868,12 @@ class KnowledgeService:
         dataset = await self._get_dataset_or_404(dataset_id)
         collection = str(dataset.get("collection_name") or "")
         if collection:
-            segs = await self.db.list_segments(dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0)
+            segs = await self.db.list_segments(
+                dataset_id=dataset_id, document_id=document_id, limit=5000, offset=0
+            )
             ids = [str(s.get("vector_id") or s.get("segment_id") or "") for s in segs]
-            try:
+            with contextlib.suppress(Exception):
                 await self.vector_store.delete_points(collection, ids)
-            except Exception:
-                pass
         return await self.db.delete_document(document_id)
 
     # ========================= Segment =========================
@@ -1769,9 +1882,9 @@ class KnowledgeService:
         self,
         user: UserContext,
         dataset_id: str,
-        document_id: Optional[str] = None,
-        q: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        document_id: str | None = None,
+        q: str | None = None,
+    ) -> list[dict[str, Any]]:
         await self.require_dataset_access(user, dataset_id, required="viewer")
         return await self.db.list_segments(
             dataset_id=dataset_id, document_id=document_id, query_text=q, limit=500, offset=0
@@ -1783,7 +1896,7 @@ class KnowledgeService:
         dataset_id: str,
         segment_id: str,
         new_text: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         dataset = await self.require_dataset_access(user, dataset_id, required="editor")
         seg = await self.db.get_segment(segment_id)
         if not seg or str(seg.get("dataset_id")) != dataset_id:
@@ -1806,15 +1919,17 @@ class KnowledgeService:
         # Always persist the new text first.
         await self.db.update_segment(segment_id, text=clean_text)
 
-        vector_error: Optional[str] = None
+        vector_error: str | None = None
         try:
-            embedder: Optional[BaseEmbedding] = None
+            embedder: BaseEmbedding | None = None
             try:
                 embedder = create_embedding(econf, dimension=dim)
-                vec = (await asyncio.wait_for(
-                    embedder.embed_documents([clean_text]),
-                    timeout=float(econf.timeout_seconds) + 10.0,
-                ))[0]
+                vec = (
+                    await asyncio.wait_for(
+                        embedder.embed_documents([clean_text]),
+                        timeout=float(econf.timeout_seconds) + 10.0,
+                    )
+                )[0]
                 collection = await self.vector_store.ensure_collection(
                     dataset_id=dataset_id,
                     dimension=embedder.dimension,
@@ -1857,10 +1972,8 @@ class KnowledgeService:
         collection = str(dataset.get("collection_name") or "")
         if collection:
             pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-            try:
+            with contextlib.suppress(Exception):
                 await self.vector_store.delete_points(collection, [pid])
-            except Exception:
-                pass
         document_id = str(seg.get("document_id") or "")
         result = await self.db.delete_segment(segment_id)
         # Update document segment_count after deletion
@@ -1917,7 +2030,9 @@ class KnowledgeService:
                             min_images = getattr(
                                 self.settings.knowledge, "scanned_min_images_for_image_only", 5
                             )
-                            embeddable_count = len(re_extracted_images) if re_extracted_images else 0
+                            embeddable_count = (
+                                len(re_extracted_images) if re_extracted_images else 0
+                            )
                             if embeddable_count >= min_images:
                                 logger.info(
                                     f"Re-extraction: Scanned PDF with {embeddable_count} images, "
@@ -1927,16 +2042,23 @@ class KnowledgeService:
                         if re_extracted_images and not doc_meta.get("extracted_images"):
                             try:
                                 tenant_id = str(dataset.get("tenant_id") or "default")
-                                stored_image_metadata: List[Dict[str, Any]] = []
+                                stored_image_metadata: list[dict[str, Any]] = []
 
-                                async def upload_single_image(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                                async def upload_single_image(
+                                    idx: int, img: IngestionExtractedImage
+                                ) -> dict[str, Any]:
                                     try:
                                         page_number = (
-                                            getattr(img, "page_number", None) or
-                                            img.metadata.get("page_number") if hasattr(img, "metadata") else None
+                                            getattr(img, "page_number", None)
+                                            or img.metadata.get("page_number")
+                                            if hasattr(img, "metadata")
+                                            else None
                                         )
                                         attachment_id = f"reindex_{img.image_id}"
-                                        storage_filename = img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}"
+                                        storage_filename = (
+                                            img.filename
+                                            or f"image_{idx}.{img.mime_type.split('/')[-1]}"
+                                        )
                                         storage_url = await self.image_storage_service.upload_image(
                                             tenant_id=tenant_id,
                                             document_id=document_id,
@@ -1948,11 +2070,18 @@ class KnowledgeService:
                                                 "width": str(img.width),
                                                 "height": str(img.height),
                                                 "source_location": img.source_location,
-                                                "page_number": str(page_number) if page_number else str(idx),
+                                                "page_number": str(page_number)
+                                                if page_number
+                                                else str(idx),
                                             },
                                         )
-                                        actual_storage_key = self.image_storage_service._generate_key(
-                                            tenant_id, document_id, attachment_id, storage_filename
+                                        actual_storage_key = (
+                                            self.image_storage_service._generate_key(
+                                                tenant_id,
+                                                document_id,
+                                                attachment_id,
+                                                storage_filename,
+                                            )
                                         )
                                         return {
                                             "image_id": img.image_id,
@@ -1963,11 +2092,15 @@ class KnowledgeService:
                                             "height": img.height,
                                             "page_number": page_number,
                                             "size_bytes": img.size_bytes,
-                                            "context_text": img.context_text[:200] if img.context_text else "",
+                                            "context_text": img.context_text[:200]
+                                            if img.context_text
+                                            else "",
                                             "source_location": img.source_location,
                                         }
                                     except Exception as store_err:
-                                        logger.warning(f"Failed to persist image {img.image_id}: {store_err}")
+                                        logger.warning(
+                                            f"Failed to persist image {img.image_id}: {store_err}"
+                                        )
                                         return {
                                             "image_id": img.image_id,
                                             "storage_url": None,
@@ -1976,18 +2109,27 @@ class KnowledgeService:
                                             "height": img.height,
                                             "page_number": None,
                                             "size_bytes": img.size_bytes,
-                                            "context_text": img.context_text[:200] if img.context_text else "",
+                                            "context_text": img.context_text[:200]
+                                            if img.context_text
+                                            else "",
                                             "error": str(store_err),
                                         }
 
                                 upload_semaphore = asyncio.Semaphore(5)
 
-                                async def upload_with_semaphore(idx: int, img: IngestionExtractedImage) -> Dict[str, Any]:
+                                async def upload_with_semaphore(
+                                    idx: int, img: IngestionExtractedImage
+                                ) -> dict[str, Any]:
                                     async with upload_semaphore:
                                         return await upload_single_image(idx, img)
 
-                                upload_tasks = [upload_with_semaphore(i, img) for i, img in enumerate(re_extracted_images)]
-                                upload_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+                                upload_tasks = [
+                                    upload_with_semaphore(i, img)
+                                    for i, img in enumerate(re_extracted_images)
+                                ]
+                                upload_results = await asyncio.gather(
+                                    *upload_tasks, return_exceptions=True
+                                )
                                 for result in upload_results:
                                     if isinstance(result, Exception):
                                         logger.warning(f"Image upload failed: {result}")
@@ -2019,7 +2161,10 @@ class KnowledgeService:
                     if (
                         used_multimodal
                         and len((re_text or "").strip()) < min_chars
-                        and (original_filename.lower().endswith(".pdf") or "pdf" in (original_mime or "").lower())
+                        and (
+                            original_filename.lower().endswith(".pdf")
+                            or "pdf" in (original_mime or "").lower()
+                        )
                         and getattr(self.settings.knowledge, "ocr_enabled", True)
                     ):
                         ocr_text = await asyncio.to_thread(self._ocr_pdf_bytes, original_bytes)
@@ -2046,15 +2191,15 @@ class KnowledgeService:
                 return
 
             await self.db.update_document_status(document_id, status="segmenting", progress=25)
-            
+
             # Check if structured parsing results are available (for enhanced multimodal docs)
             structured_parsing = doc_meta.get("structured_parsing", {})
             use_structured_chunks = (
-                structured_parsing.get("enabled") and 
-                structured_parsing.get("chunks") and
-                len(structured_parsing.get("chunks", [])) > 0
+                structured_parsing.get("enabled")
+                and structured_parsing.get("chunks")
+                and len(structured_parsing.get("chunks", [])) > 0
             )
-            
+
             doc_name = str(doc.get("name") or doc.get("title") or document_id)
 
             index_config = _ensure_dict(dataset.get("index_config"))
@@ -2065,21 +2210,22 @@ class KnowledgeService:
                 f"Parsed chunking config: mode={chunking_config.mode.value}, "
                 f"chunk_size={chunking_config.chunk_size}, overlap={chunking_config.chunk_overlap}"
             )
-            
+
             # Fixed-size mode always uses strict fixed chunking (ignore structured parsing)
             if use_structured_chunks and chunking_config.mode != ChunkingMode.FIXED_SIZE:
                 # Use structured parsing results for intelligent chunking
                 logger.info(f"Using structured parsing results for document {document_id}")
                 flat_chunks = self._convert_structured_chunks(
-                    structured_parsing["chunks"], 
-                    document_id, 
-                    doc_name,
-                    dataset_id
+                    structured_parsing["chunks"], document_id, doc_name, dataset_id
                 )
                 # Enforce token limits and merge tiny fragments for structured chunks
                 flat_chunks = self._normalize_structured_chunks(flat_chunks, chunking_config)
                 # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
-                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                if chunking_config.mode not in (
+                    ChunkingMode.ISLAMIC,
+                    ChunkingMode.FIXED_SIZE,
+                    ChunkingMode.HIERARCHICAL,
+                ):
                     flat_chunks = merge_small_chunks(
                         flat_chunks,
                         min_size=chunking_config.min_chunk_size,
@@ -2087,7 +2233,9 @@ class KnowledgeService:
                         min_tokens=None,
                         max_tokens=None,
                     )
-                logger.info(f"Created {len(flat_chunks)} chunks from structured parsing (normalized)")
+                logger.info(
+                    f"Created {len(flat_chunks)} chunks from structured parsing (normalized)"
+                )
             else:
                 # Standard chunking flow
                 # Use the new configurable chunking module
@@ -2099,7 +2247,11 @@ class KnowledgeService:
 
                 # Merge undersized chunks AFTER flattening (must operate on leaf chunks)
                 # For Quran/Islamic mode, preserve verse-level chunks (traceability > size).
-                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                if chunking_config.mode not in (
+                    ChunkingMode.ISLAMIC,
+                    ChunkingMode.FIXED_SIZE,
+                    ChunkingMode.HIERARCHICAL,
+                ):
                     flat_chunks = merge_small_chunks(
                         flat_chunks,
                         min_size=chunking_config.min_chunk_size,
@@ -2109,7 +2261,10 @@ class KnowledgeService:
                     )
 
                 # Enforce strict token limits only for fixed-size mode (exact token_limit)
-                if chunking_config.mode == ChunkingMode.FIXED_SIZE and chunking_config.use_token_count:
+                if (
+                    chunking_config.mode == ChunkingMode.FIXED_SIZE
+                    and chunking_config.use_token_count
+                ):
                     token_limit = int(chunking_config.token_limit or 0)
                     if token_limit > 0:
                         flat_chunks = enforce_token_limits(
@@ -2118,7 +2273,11 @@ class KnowledgeService:
                             min_tokens=None,
                         )
                 # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
-                if chunking_config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE, ChunkingMode.HIERARCHICAL):
+                if chunking_config.mode not in (
+                    ChunkingMode.ISLAMIC,
+                    ChunkingMode.FIXED_SIZE,
+                    ChunkingMode.HIERARCHICAL,
+                ):
                     flat_chunks = merge_small_chunks(
                         flat_chunks,
                         min_size=chunking_config.min_chunk_size,
@@ -2139,20 +2298,29 @@ class KnowledgeService:
             # === Islamic metadata extraction (opt-in via dataset config) ===
             islamic_cfg = (
                 dataset.get("index_config", {}).get("retrieval", {}).get("islamic", {})
-                if isinstance(dataset.get("index_config"), dict) else {}
+                if isinstance(dataset.get("index_config"), dict)
+                else {}
             )
-            islamic_enabled = any(islamic_cfg.get(k) for k in (
-                "multi_query", "citation_format", "authority_sort", "contextual_prefix",
-            ))
+            islamic_enabled = any(
+                islamic_cfg.get(k)
+                for k in (
+                    "multi_query",
+                    "citation_format",
+                    "authority_sort",
+                    "contextual_prefix",
+                )
+            )
             if islamic_enabled:
                 try:
                     from .islamic_metadata import IslamicMetadataExtractor
+
                     metadata_extractor = IslamicMetadataExtractor()
                     doc_meta_for_islamic = {
                         "title": doc_name,
                         "name": doc_name,
                         **(doc.get("metadata") or {}),
                     }
+
                     def _should_override_citation(existing_val: Any, new_val: Any) -> bool:
                         if not new_val:
                             return False
@@ -2161,11 +2329,17 @@ class KnowledgeService:
                         existing = str(existing_val).lower()
                         if "paragraph" in existing or "section:" in existing:
                             return True
-                        if existing.startswith("quran") and " - " not in existing and " - " in str(new_val):
+                        if (
+                            existing.startswith("quran")
+                            and " - " not in existing
+                            and " - " in str(new_val)
+                        ):
                             return True
-                        if existing.startswith("bulugh") and "hadith" not in existing and "hadith" in str(new_val).lower():
-                            return True
-                        return False
+                        return bool(
+                            existing.startswith("bulugh")
+                            and "hadith" not in existing
+                            and "hadith" in str(new_val).lower()
+                        )
 
                     for c in flat_chunks:
                         per_chunk_meta = {
@@ -2179,7 +2353,11 @@ class KnowledgeService:
                         # Preserve existing Islamic metadata from specialized chunkers
                         for key, value in islamic_meta.items():
                             existing = c.metadata.get(key)
-                            if key == "source_reference" and isinstance(existing, dict) and isinstance(value, dict):
+                            if (
+                                key == "source_reference"
+                                and isinstance(existing, dict)
+                                and isinstance(value, dict)
+                            ):
                                 merged = dict(existing)
                                 for k, v in value.items():
                                     if k not in merged or not merged.get(k):
@@ -2187,9 +2365,11 @@ class KnowledgeService:
                                 c.metadata[key] = merged
                                 continue
                             if key == "citation_text":
-                                if _should_override_citation(existing, value):
-                                    c.metadata[key] = value
-                                elif not existing and value:
+                                if (
+                                    _should_override_citation(existing, value)
+                                    or not existing
+                                    and value
+                                ):
                                     c.metadata[key] = value
                                 continue
                             if existing:
@@ -2203,6 +2383,7 @@ class KnowledgeService:
             if islamic_cfg.get("contextual_prefix"):
                 try:
                     from .contextual_retrieval import ContextualRetrieval
+
                     ctx_retrieval = ContextualRetrieval()
                     doc_meta_ctx = {"title": doc_name, "name": doc_name}
                     for c in flat_chunks:
@@ -2218,13 +2399,16 @@ class KnowledgeService:
                             c.text = f"{prefix}{c.text}"
                     logger.info(f"Contextual prefixes generated for {len(flat_chunks)} chunks")
                 except Exception as ctx_err:
-                    logger.warning(f"Contextual retrieval prefix generation failed (non-fatal): {ctx_err}")
+                    logger.warning(
+                        f"Contextual retrieval prefix generation failed (non-fatal): {ctx_err}"
+                    )
 
             # Convert to the format expected by the rest of the pipeline
             # Include content_hash for incremental update detection
             # Hash the ORIGINAL text (before contextual prefix) so prefix format
             # changes don't invalidate hashes and force unnecessary re-embedding.
             import hashlib
+
             chunks = [
                 (
                     c.text,
@@ -2244,7 +2428,9 @@ class KnowledgeService:
                 return
 
             # Get existing segment hashes for incremental update comparison
-            existing_hashes = await self.db.get_segment_hashes_by_document(document_id, content_type="text")
+            existing_hashes = await self.db.get_segment_hashes_by_document(
+                document_id, content_type="text"
+            )
 
             # Classify chunks: unchanged (skip), changed (update), new (insert)
             # Also track which old segments to delete
@@ -2286,13 +2472,15 @@ class KnowledgeService:
             # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
             is_multimodal = self._is_multimodal_dataset(dataset)
 
-            embedder: Optional[BaseEmbedding] = None
+            embedder: BaseEmbedding | None = None
             embed_timeout = 60.0  # Default timeout for embedding operations
             embedding_provider_used = ""
             try:
                 if is_multimodal:
                     # Use UnifiedMultimodalEmbedding for consistent text-image vector space
-                    logger.info(f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}")
+                    logger.info(
+                        f"Using UnifiedMultimodalEmbedding for multimodal dataset {dataset_id}"
+                    )
                     embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
                     embed_timeout = 90.0  # Longer timeout for multimodal
                     embedding_provider_used = "dashscope_multimodal"
@@ -2300,7 +2488,9 @@ class KnowledgeService:
                     # Use dataset-configured text embedder
                     embedder = self._get_text_embedder(dataset, embedding_config)
                     embed_timeout = 60.0
-                    embedding_provider_used = str(dataset.get("embedding_provider") or getattr(embedder, "provider", "local"))
+                    embedding_provider_used = str(
+                        dataset.get("embedding_provider") or getattr(embedder, "provider", "local")
+                    )
                     logger.info(
                         f"Using {embedding_provider_used} text embedding for dataset {dataset_id} "
                         f"(batch_size={self.settings.knowledge.text_embedding_batch_size})"
@@ -2334,7 +2524,7 @@ class KnowledgeService:
             # 2. Keep unchanged segments and vectors intact
             # 3. Delete excess old segments and their vectors
 
-            segment_rows: List[Dict[str, Any]] = []
+            segment_rows: list[dict[str, Any]] = []
             points = []
             try:
                 from qdrant_client.http import models as qmodels  # type: ignore
@@ -2349,7 +2539,7 @@ class KnowledgeService:
                     else:
                         batch_size = self.settings.knowledge.text_embedding_batch_size
                         max_concurrent = self.settings.knowledge.text_embedding_max_concurrent
-                    
+
                     total = len(chunks_to_embed)
                     embedded = 0
 
@@ -2359,21 +2549,23 @@ class KnowledgeService:
                     for i in range(0, total, batch_size):
                         batch = chunks_to_embed[i : i + batch_size]
                         batches.append((i // batch_size, batch))
-                    
+
                     # Process batches concurrently with configurable parallelism
                     effective_concurrent = min(max_concurrent, len(batches))
                     semaphore = asyncio.Semaphore(effective_concurrent)
-                    
+
                     logger.info(
                         f"Embedding {total} chunks in {len(batches)} batches "
                         f"(batch_size={batch_size}, max_concurrent={effective_concurrent})"
                     )
-                    
-                    async def embed_single_batch(batch_idx: int, batch: list) -> tuple[int, list, list]:
+
+                    async def embed_single_batch(
+                        batch_idx: int, batch: list
+                    ) -> tuple[int, list, list]:
                         """Embed one batch with retry, return (index, vectors, batch_data)"""
                         texts = [text for _, text, _, _, _ in batch]
                         MAX_EMBED_RETRIES = 3
-                        
+
                         async with semaphore:
                             for retry in range(MAX_EMBED_RETRIES):
                                 try:
@@ -2384,7 +2576,7 @@ class KnowledgeService:
                                     return (batch_idx, vectors, batch)
                                 except asyncio.TimeoutError:
                                     if retry < MAX_EMBED_RETRIES - 1:
-                                        wait_time = 2 ** retry  # 1s, 2s
+                                        wait_time = 2**retry  # 1s, 2s
                                         logger.warning(
                                             f"Embedding batch {batch_idx + 1} timeout (attempt {retry + 1}), "
                                             f"retrying in {wait_time}s..."
@@ -2408,26 +2600,32 @@ class KnowledgeService:
                                     return (batch_idx, [None] * len(batch), batch)
                             # Should not reach here, but just in case
                             return (batch_idx, [None] * len(batch), batch)
-                    
+
                     # Launch all embedding tasks concurrently
                     tasks = [embed_single_batch(idx, batch) for idx, batch in batches]
-                    
+
                     # Process results as they complete (for progressive updates)
                     failed_batches = 0
                     for coro in asyncio.as_completed(tasks):
                         batch_idx, vectors, batch = await coro
-                        
+
                         # Build segments for this batch (skip if vectors are None)
-                        for j, (pos, chunk_text, token_count, content_hash, chunk_meta) in enumerate(batch):
+                        for j, (
+                            pos,
+                            chunk_text,
+                            token_count,
+                            content_hash,
+                            chunk_meta,
+                        ) in enumerate(batch):
                             # Skip if embedding failed for this chunk
                             if vectors[j] is None:
                                 failed_batches += 1
                                 continue
-                            
+
                             seg_id = str(uuid.uuid4())
                             seg_metadata = dict(chunk_meta) if chunk_meta else {}
                             seg_metadata["position"] = pos
-                            
+
                             display_text = seg_metadata.pop("original_text", chunk_text)
 
                             payload_meta = {
@@ -2482,7 +2680,7 @@ class KnowledgeService:
                                     "metadata": seg_metadata,
                                 }
                             )
-                    
+
                     if failed_batches > 0:
                         logger.warning(f"Skipped {failed_batches} chunks due to embedding failures")
 
@@ -2491,57 +2689,73 @@ class KnowledgeService:
                         await self.db.update_document_status(
                             document_id, status="embedding", progress=min(progress, 95)
                         )
-                        logger.debug(f"Batch {batch_idx+1}/{len(batches)} embedded ({embedded}/{total} chunks)")
+                        logger.debug(
+                            f"Batch {batch_idx + 1}/{len(batches)} embedded ({embedded}/{total} chunks)"
+                        )
 
                     # Upsert new/changed vectors and segments with adaptive batching
                     # Use smaller batches for large documents to avoid Qdrant timeout
                     from .vector_store import VectorStoreConfig
+
                     qdrant_batch_size = VectorStoreConfig.get_batch_size(len(points))
-                    
+
                     total_points = len(points)
                     upserted_count = 0
-                    
+
                     for q_start in range(0, total_points, qdrant_batch_size):
-                        q_batch = points[q_start:q_start + qdrant_batch_size]
-                        batch_segment_rows = segment_rows[q_start:q_start + qdrant_batch_size]
-                        
+                        q_batch = points[q_start : q_start + qdrant_batch_size]
+                        batch_segment_rows = segment_rows[q_start : q_start + qdrant_batch_size]
+
                         try:
-                            await self.vector_store.upsert(collection_name=collection, points=q_batch)
+                            await self.vector_store.upsert(
+                                collection_name=collection, points=q_batch
+                            )
                             await self.db.insert_segments(batch_segment_rows)
                             upserted_count += len(q_batch)
                             logger.debug(
-                                f"Upserted sub-batch {q_start//qdrant_batch_size + 1}/"
-                                f"{(total_points + qdrant_batch_size - 1)//qdrant_batch_size} "
+                                f"Upserted sub-batch {q_start // qdrant_batch_size + 1}/"
+                                f"{(total_points + qdrant_batch_size - 1) // qdrant_batch_size} "
                                 f"({upserted_count}/{total_points} points)"
                             )
                         except Exception as upsert_err:
                             logger.error(
-                                f"Failed to upsert sub-batch {q_start//qdrant_batch_size + 1}: {upsert_err}"
+                                f"Failed to upsert sub-batch {q_start // qdrant_batch_size + 1}: {upsert_err}"
                             )
                             # Don't fail entire document, continue with other batches
                             # Failed segments will be missing but document will be partially usable
-                    
+
                     if upserted_count > 0:
-                        logger.info(f"Upserted {upserted_count}/{len(segment_rows)} segments for document {document_id}")
+                        logger.info(
+                            f"Upserted {upserted_count}/{len(segment_rows)} segments for document {document_id}"
+                        )
                     else:
-                        raise RuntimeError(f"Failed to upsert any segments for document {document_id}")
+                        raise RuntimeError(
+                            f"Failed to upsert any segments for document {document_id}"
+                        )
                 else:
-                    logger.info(f"All segments unchanged for document {document_id}, no embedding needed")
+                    logger.info(
+                        f"All segments unchanged for document {document_id}, no embedding needed"
+                    )
 
                 # Delete excess old segments (positions beyond new chunk count)
                 if excess_segments:
                     deleted_count = await self.db.delete_segments_by_document(
-                        document_id, exclude_ids=unchanged_segments + [s["segment_id"] for s in segment_rows],
-                        content_type="text"
+                        document_id,
+                        exclude_ids=unchanged_segments + [s["segment_id"] for s in segment_rows],
+                        content_type="text",
                     )
                     if deleted_count > 0:
-                        logger.info(f"Deleted {deleted_count} excess segments for document {document_id}")
+                        logger.info(
+                            f"Deleted {deleted_count} excess segments for document {document_id}"
+                        )
 
                 # Cleanup old vectors that were replaced or from deleted segments
                 if vectors_to_delete and collection:
                     try:
                         await self.vector_store.delete_points(collection, vectors_to_delete)
-                        logger.info(f"Cleaned up {len(vectors_to_delete)} old vectors for document {document_id}")
+                        logger.info(
+                            f"Cleaned up {len(vectors_to_delete)} old vectors for document {document_id}"
+                        )
                     except Exception as cleanup_err:
                         # Non-fatal: old vectors may cause slight duplication but won't break search
                         logger.warning(
@@ -2563,7 +2777,7 @@ class KnowledgeService:
                 image_count = 0
                 doc_metadata = doc.get("metadata", {})
                 image_metadata_list = doc_metadata.get("extracted_images", [])
-                
+
                 # Check if images were already embedded during upload (in-memory direct embedding)
                 images_already_embedded = doc_metadata.get("images_embedded", False)
                 if images_already_embedded:
@@ -2575,10 +2789,16 @@ class KnowledgeService:
                 else:
                     # Determine which multimodal embedder to use
                     multimodal_embedder = None
-                    if is_multimodal and embedder and getattr(embedder, 'supports_multimodal', False):
+                    if (
+                        is_multimodal
+                        and embedder
+                        and getattr(embedder, "supports_multimodal", False)
+                    ):
                         # Dataset is configured for multimodal - use the unified embedder
                         multimodal_embedder = embedder
-                        logger.info(f"Using dataset's multimodal embedder for {len(image_metadata_list)} images")
+                        logger.info(
+                            f"Using dataset's multimodal embedder for {len(image_metadata_list)} images"
+                        )
                     elif (
                         self.multimodal_embedding
                         and self.image_storage_service
@@ -2591,7 +2811,7 @@ class KnowledgeService:
                             f"Multimodal processing enabled for {len(image_metadata_list)} images "
                             f"(processing_mode={doc_metadata.get('processing_mode')})"
                         )
-                    
+
                     if multimodal_embedder and self.image_storage_service and image_metadata_list:
                         await self.db.update_document_status(
                             document_id, status="embedding_images", progress=85
@@ -2607,7 +2827,9 @@ class KnowledgeService:
 
                             # Clean up existing image segments/vectors before re-embedding
                             try:
-                                existing_image_segments = await self.db.get_image_segments_by_document(document_id)
+                                existing_image_segments = (
+                                    await self.db.get_image_segments_by_document(document_id)
+                                )
                                 if existing_image_segments:
                                     vector_ids = [
                                         seg.get("vector_id")
@@ -2615,7 +2837,9 @@ class KnowledgeService:
                                         if seg.get("vector_id")
                                     ]
                                     if vector_ids:
-                                        await self.vector_store.delete_points(image_collection, vector_ids)
+                                        await self.vector_store.delete_points(
+                                            image_collection, vector_ids
+                                        )
                                     await self.db.delete_image_segments_by_document(document_id)
                             except Exception as cleanup_err:
                                 logger.warning(
@@ -2652,7 +2876,9 @@ class KnowledgeService:
                 )
                 try:
                     # Check if there are any image segments for this document
-                    existing_image_segments = await self.db.get_image_segments_by_document(document_id)
+                    existing_image_segments = await self.db.get_image_segments_by_document(
+                        document_id
+                    )
                     if existing_image_segments:
                         association_result = await self.associate_images_to_chunks(
                             document_id=document_id,
@@ -2677,7 +2903,9 @@ class KnowledgeService:
                 try:
                     await self.db.clear_dataset_needs_reindex(dataset_id)
                 except Exception as clear_err:
-                    logger.warning(f"Failed to clear needs_reindex flag for {dataset_id}: {clear_err}")
+                    logger.warning(
+                        f"Failed to clear needs_reindex flag for {dataset_id}: {clear_err}"
+                    )
 
                 await self.db.update_document_status(document_id, status="completed", progress=100)
             except Exception as exc:
@@ -2697,12 +2925,10 @@ class KnowledgeService:
                 f"Ingest failed for document {document_id}: {exc}",
                 exc_info=True,
             )
-            try:
+            with contextlib.suppress(Exception):
                 await self.db.update_document_status(
                     document_id, status="failed", progress=100, error=str(exc)
                 )
-            except Exception:
-                pass
             return
 
     async def _process_document_images_with_embedder(
@@ -2710,14 +2936,14 @@ class KnowledgeService:
         embedder: Any,  # Multimodal embedder
         dataset_id: str,
         document_id: str,
-        image_metadata_list: List[Dict[str, Any]],
+        image_metadata_list: list[dict[str, Any]],
         collection: str,
         base_position: int = 0,
         tenant_id: str = "default",
     ) -> int:
         """
         Process and embed images loaded from persistent storage.
-        
+
         Optimized for parallel processing:
         1. Parallel image loading (concurrent downloads)
         2. Batch embedding (single API call for multiple images)
@@ -2738,26 +2964,31 @@ class KnowledgeService:
             return 0
 
         from qdrant_client.http import models as qmodels
-        
+
         total_images = len(image_metadata_list)
         logger.info(f"Processing {total_images} images in parallel batches...")
 
         # Step 1: Load images from storage (parallel download with retry)
         MAX_DOWNLOAD_RETRIES = 3
-        
-        async def load_image(idx: int, img_meta: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[bytes]]:
+
+        async def load_image(
+            idx: int, img_meta: dict[str, Any]
+        ) -> tuple[int, dict[str, Any], bytes | None]:
             """Load a single image from storage with retry, return (idx, metadata, bytes or None)."""
             storage_url = img_meta.get("storage_url")
             if not storage_url:
                 return (idx, img_meta, None)
-            
+
             storage_key = img_meta.get("storage_key")
             for retry in range(MAX_DOWNLOAD_RETRIES):
                 try:
                     if storage_key:
-                        image_bytes = await self.image_storage_service._backend.download(storage_key)
+                        image_bytes = await self.image_storage_service._backend.download(
+                            storage_key
+                        )
                     else:
                         import httpx
+
                         async with httpx.AsyncClient(timeout=60.0) as client:
                             response = await client.get(storage_url)
                             response.raise_for_status()
@@ -2765,34 +2996,38 @@ class KnowledgeService:
                     return (idx, img_meta, image_bytes)
                 except Exception as e:
                     if retry < MAX_DOWNLOAD_RETRIES - 1:
-                        wait_time = 2 ** retry  # 1s, 2s
-                        logger.debug(f"Download retry {retry + 1} for image {idx} in {wait_time}s: {e}")
+                        wait_time = 2**retry  # 1s, 2s
+                        logger.debug(
+                            f"Download retry {retry + 1} for image {idx} in {wait_time}s: {e}"
+                        )
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.warning(f"Failed to load image {img_meta.get('image_id')} after {MAX_DOWNLOAD_RETRIES} retries: {e}")
+                        logger.warning(
+                            f"Failed to load image {img_meta.get('image_id')} after {MAX_DOWNLOAD_RETRIES} retries: {e}"
+                        )
             return (idx, img_meta, None)
 
         # Load all images in parallel (limit concurrency to avoid S3 socket timeouts)
         load_semaphore = asyncio.Semaphore(5)  # Reduced from 20 to 5
-        
-        async def load_with_semaphore(idx: int, meta: Dict) -> Tuple[int, Dict, Optional[bytes]]:
+
+        async def load_with_semaphore(idx: int, meta: dict) -> tuple[int, dict, bytes | None]:
             async with load_semaphore:
                 return await load_image(idx, meta)
 
         load_tasks = [load_with_semaphore(i, m) for i, m in enumerate(image_metadata_list)]
         load_results = await asyncio.gather(*load_tasks, return_exceptions=True)
-        
+
         # Filter successful loads
-        loaded_images: List[Tuple[int, Dict[str, Any], bytes]] = []
+        loaded_images: list[tuple[int, dict[str, Any], bytes]] = []
         for result in load_results:
             if isinstance(result, Exception):
                 continue
             idx, meta, img_bytes = result
             if img_bytes:
                 loaded_images.append((idx, meta, img_bytes))
-        
+
         logger.info(f"Loaded {len(loaded_images)}/{total_images} images from storage")
-        
+
         if not loaded_images:
             return 0
 
@@ -2800,53 +3035,62 @@ class KnowledgeService:
         # Process in batches to avoid API limits
         EMBED_BATCH_SIZE = 8  # Reduced batch size for stability
         MAX_RETRIES = 3
-        
+
         image_points = []
         image_segments = []
         processed = 0
-        
+
         for batch_start in range(0, len(loaded_images), EMBED_BATCH_SIZE):
-            batch = loaded_images[batch_start:batch_start + EMBED_BATCH_SIZE]
+            batch = loaded_images[batch_start : batch_start + EMBED_BATCH_SIZE]
             batch_bytes = [img_bytes for _, _, img_bytes in batch]
-            
+
             # Retry with exponential backoff
             vectors = None
             for retry in range(MAX_RETRIES):
                 try:
                     # Single API call for batch embedding
                     batch_num = batch_start // EMBED_BATCH_SIZE + 1
-                    logger.info(f"Embedding batch {batch_num}: {len(batch)} images... (attempt {retry + 1}/{MAX_RETRIES})")
+                    logger.info(
+                        f"Embedding batch {batch_num}: {len(batch)} images... (attempt {retry + 1}/{MAX_RETRIES})"
+                    )
                     vectors = await embedder.embed_images(batch_bytes)
-                    
+
                     if vectors and len(vectors) == len(batch):
                         break  # Success
                     else:
-                        logger.warning(f"Embedding returned {len(vectors) if vectors else 0} vectors for {len(batch)} images")
+                        logger.warning(
+                            f"Embedding returned {len(vectors) if vectors else 0} vectors for {len(batch)} images"
+                        )
                         vectors = None
                 except Exception as e:
                     logger.warning(f"Batch {batch_num} embedding attempt {retry + 1} failed: {e}")
                     if retry < MAX_RETRIES - 1:
-                        wait_time = 2 ** retry  # 1s, 2s, 4s
+                        wait_time = 2**retry  # 1s, 2s, 4s
                         logger.info(f"Retrying in {wait_time}s...")
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"Batch {batch_num} failed after {MAX_RETRIES} attempts, skipping")
-            
+                        logger.error(
+                            f"Batch {batch_num} failed after {MAX_RETRIES} attempts, skipping"
+                        )
+
             if not vectors:
                 continue  # Skip this batch if all retries failed
-            
+
             # Create points and segments for this batch
             for i, (idx, img_meta, img_bytes) in enumerate(batch):
                 vector = vectors[i]
                 if not vector:
                     continue
-                
+
                 seg_id = str(uuid.uuid4())
                 position = base_position + idx
                 storage_url = img_meta.get("storage_url", "")
-                
+
                 # Use context text as image description (skip slow VLM calls)
-                image_text = img_meta.get("context_text", "") or f"[Image: page {img_meta.get('page_number', 'unknown')}]"
+                image_text = (
+                    img_meta.get("context_text", "")
+                    or f"[Image: page {img_meta.get('page_number', 'unknown')}]"
+                )
 
                 payload = {
                     "dataset_id": dataset_id,
@@ -2862,38 +3106,44 @@ class KnowledgeService:
                     "image_page": img_meta.get("page_number"),
                 }
 
-                image_points.append(
-                    qmodels.PointStruct(id=seg_id, vector=vector, payload=payload)
-                )
+                image_points.append(qmodels.PointStruct(id=seg_id, vector=vector, payload=payload))
 
-                image_segments.append({
-                    "segment_id": seg_id,
-                    "dataset_id": dataset_id,
-                    "document_id": document_id,
-                    "position": position,
-                    "text": image_text,
-                    "token_count": 0,
-                    "vector_id": seg_id,
-                    "content_type": "image",
-                    "image_url": storage_url,
-                    "image_attachment_id": img_meta.get("image_id"),
-                    "image_filename": img_meta.get("storage_key", "").split("/")[-1] if img_meta.get("storage_key") else f"image_{idx}",
-                    "image_media_type": img_meta.get("mime_type"),
-                    "image_file_size": img_meta.get("size_bytes", 0),
-                    "metadata": {
-                        "width": img_meta.get("width"),
-                        "height": img_meta.get("height"),
-                        "page_number": img_meta.get("page_number"),
-                        "source_location": img_meta.get("source_location"),
-                        "source_position": idx,
-                    },
-                })
+                image_segments.append(
+                    {
+                        "segment_id": seg_id,
+                        "dataset_id": dataset_id,
+                        "document_id": document_id,
+                        "position": position,
+                        "text": image_text,
+                        "token_count": 0,
+                        "vector_id": seg_id,
+                        "content_type": "image",
+                        "image_url": storage_url,
+                        "image_attachment_id": img_meta.get("image_id"),
+                        "image_filename": img_meta.get("storage_key", "").split("/")[-1]
+                        if img_meta.get("storage_key")
+                        else f"image_{idx}",
+                        "image_media_type": img_meta.get("mime_type"),
+                        "image_file_size": img_meta.get("size_bytes", 0),
+                        "metadata": {
+                            "width": img_meta.get("width"),
+                            "height": img_meta.get("height"),
+                            "page_number": img_meta.get("page_number"),
+                            "source_location": img_meta.get("source_location"),
+                            "source_position": idx,
+                        },
+                    }
+                )
                 processed += 1
-            
+
             # Update progress after each batch
             progress = 85 + (batch_start + len(batch)) / len(loaded_images) * 10  # 85% -> 95%
-            await self.db.update_document_status(document_id, status="embedding_images", progress=progress)
-            logger.info(f"Batch complete: {processed}/{len(loaded_images)} images embedded, progress={progress:.1f}%")
+            await self.db.update_document_status(
+                document_id, status="embedding_images", progress=progress
+            )
+            logger.info(
+                f"Batch complete: {processed}/{len(loaded_images)} images embedded, progress={progress:.1f}%"
+            )
 
         # Step 3: Batch upsert to Qdrant
         if image_points:
@@ -2901,9 +3151,10 @@ class KnowledgeService:
                 # Debug: validate vectors before upserting
                 sample_point = image_points[0]
                 sample_vector = sample_point.vector if sample_point else []
-                
+
                 # Check for NaN/Infinity in vectors
                 import math
+
                 has_invalid = False
                 for i, pt in enumerate(image_points):
                     vec = pt.vector
@@ -2911,24 +3162,28 @@ class KnowledgeService:
                         logger.error(f"Point {i} has invalid vector values (NaN/Inf)")
                         has_invalid = True
                         break
-                
+
                 logger.info(
                     f"Upserting {len(image_points)} image vectors to collection={collection}, "
                     f"vector_dim={len(sample_vector)}, sample_id={sample_point.id}, "
                     f"has_invalid={has_invalid}"
                 )
-                
+
                 if has_invalid:
                     raise ValueError("Vectors contain NaN or Infinity values")
-                
+
                 await self.vector_store.upsert(collection_name=collection, points=image_points)
-                logger.info(f"Successfully upserted {len(image_points)} image vectors to collection {collection}")
+                logger.info(
+                    f"Successfully upserted {len(image_points)} image vectors to collection {collection}"
+                )
             except Exception as e:
                 logger.error(f"Failed to upsert image vectors to collection={collection}: {e}")
                 # Log more details for debugging
                 if image_points:
                     pt = image_points[0]
-                    logger.error(f"Sample point: id={pt.id}, vector_len={len(pt.vector) if pt.vector else 0}, payload_keys={list(pt.payload.keys()) if pt.payload else []}")
+                    logger.error(
+                        f"Sample point: id={pt.id}, vector_len={len(pt.vector) if pt.vector else 0}, payload_keys={list(pt.payload.keys()) if pt.payload else []}"
+                    )
                 raise
 
         # Step 4: Batch save to database
@@ -2946,13 +3201,13 @@ class KnowledgeService:
         embedder: Any,  # Multimodal embedder
         dataset_id: str,
         document_id: str,
-        images: List["IngestionExtractedImage"],
+        images: list[IngestionExtractedImage],
         collection: str,
         base_position: int = 0,
-    ) -> Tuple[int, List[Dict[str, Any]]]:
+    ) -> tuple[int, list[dict[str, Any]]]:
         """
         Embed images directly from memory (no S3 download needed).
-        
+
         This is the "in-memory direct embedding" mode for maximum efficiency.
         Images are embedded while still in memory after extraction, before S3 upload.
 
@@ -2970,77 +3225,92 @@ class KnowledgeService:
         if not embedder or not images:
             return 0, []
 
-        from qdrant_client.http import models as qmodels
         import math
-        
+
+        from qdrant_client.http import models as qmodels
+
         total_images = len(images)
         logger.info(f"[MemoryEmbed] Embedding {total_images} images directly from memory...")
 
         # Prepare image data
-        image_data: List[Tuple[int, "IngestionExtractedImage", bytes]] = []
+        image_data: list[tuple[int, IngestionExtractedImage, bytes]] = []
         for idx, img in enumerate(images):
             if img.content and len(img.content) > 0:
                 image_data.append((idx, img, img.content))
             else:
                 logger.debug(f"Skipping image {idx} with no content")
-        
+
         if not image_data:
             logger.warning("[MemoryEmbed] No valid images with content to embed")
             return 0, []
-        
+
         logger.info(f"[MemoryEmbed] {len(image_data)}/{total_images} images have valid content")
 
         # Batch embed images
         EMBED_BATCH_SIZE = 8
         MAX_RETRIES = 3
-        
+
         image_points = []
         image_segments = []
         embedded_metadata = []  # Track which images were embedded
         processed = 0
-        
+
         for batch_start in range(0, len(image_data), EMBED_BATCH_SIZE):
-            batch = image_data[batch_start:batch_start + EMBED_BATCH_SIZE]
+            batch = image_data[batch_start : batch_start + EMBED_BATCH_SIZE]
             batch_bytes = [img_bytes for _, _, img_bytes in batch]
-            
+
             # Retry with exponential backoff
             vectors = None
             for retry in range(MAX_RETRIES):
                 try:
                     batch_num = batch_start // EMBED_BATCH_SIZE + 1
                     total_batches = (len(image_data) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
-                    logger.info(f"[MemoryEmbed] Batch {batch_num}/{total_batches}: {len(batch)} images (attempt {retry + 1})")
-                    
+                    logger.info(
+                        f"[MemoryEmbed] Batch {batch_num}/{total_batches}: {len(batch)} images (attempt {retry + 1})"
+                    )
+
                     vectors = await embedder.embed_images(batch_bytes)
-                    
+
                     if vectors and len(vectors) == len(batch):
                         break
                     else:
-                        logger.warning(f"[MemoryEmbed] Got {len(vectors) if vectors else 0} vectors for {len(batch)} images")
+                        logger.warning(
+                            f"[MemoryEmbed] Got {len(vectors) if vectors else 0} vectors for {len(batch)} images"
+                        )
                         vectors = None
                 except Exception as e:
-                    logger.warning(f"[MemoryEmbed] Batch {batch_num} attempt {retry + 1} failed: {e}")
+                    logger.warning(
+                        f"[MemoryEmbed] Batch {batch_num} attempt {retry + 1} failed: {e}"
+                    )
                     if retry < MAX_RETRIES - 1:
-                        wait_time = 2 ** retry
+                        wait_time = 2**retry
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"[MemoryEmbed] Batch {batch_num} failed after {MAX_RETRIES} attempts")
-            
+                        logger.error(
+                            f"[MemoryEmbed] Batch {batch_num} failed after {MAX_RETRIES} attempts"
+                        )
+
             if not vectors:
                 continue
-            
+
             # Create points and segments for this batch
-            for i, (idx, img, img_bytes) in enumerate(batch):
+            for i, (idx, img, _img_bytes) in enumerate(batch):
                 vector = vectors[i]
                 if not vector:
                     continue
-                
+
                 seg_id = str(uuid.uuid4())
                 position = base_position + idx
-                
+
                 # Use context text as image description
-                image_text = img.context_text[:200] if img.context_text else f"[Image: page {getattr(img, 'page_number', idx)}]"
-                page_number = getattr(img, 'page_number', None) or (img.metadata.get('page_number') if hasattr(img, 'metadata') else None)
+                image_text = (
+                    img.context_text[:200]
+                    if img.context_text
+                    else f"[Image: page {getattr(img, 'page_number', idx)}]"
+                )
+                page_number = getattr(img, "page_number", None) or (
+                    img.metadata.get("page_number") if hasattr(img, "metadata") else None
+                )
 
                 payload = {
                     "dataset_id": dataset_id,
@@ -3056,45 +3326,52 @@ class KnowledgeService:
                     "image_page": page_number,
                 }
 
-                image_points.append(
-                    qmodels.PointStruct(id=seg_id, vector=vector, payload=payload)
+                image_points.append(qmodels.PointStruct(id=seg_id, vector=vector, payload=payload))
+
+                image_segments.append(
+                    {
+                        "segment_id": seg_id,
+                        "dataset_id": dataset_id,
+                        "document_id": document_id,
+                        "position": position,
+                        "text": image_text,
+                        "token_count": 0,
+                        "vector_id": seg_id,
+                        "content_type": "image",
+                        "image_attachment_id": img.image_id,
+                        "image_filename": img.filename
+                        or f"image_{idx}.{img.mime_type.split('/')[-1]}",
+                        "image_media_type": img.mime_type,
+                        "image_file_size": img.size_bytes,
+                        "metadata": {
+                            "width": img.width,
+                            "height": img.height,
+                            "page_number": page_number,
+                            "source_location": img.source_location,
+                            "source_position": idx,
+                        },
+                    }
                 )
 
-                image_segments.append({
-                    "segment_id": seg_id,
-                    "dataset_id": dataset_id,
-                    "document_id": document_id,
-                    "position": position,
-                    "text": image_text,
-                    "token_count": 0,
-                    "vector_id": seg_id,
-                    "content_type": "image",
-                    "image_attachment_id": img.image_id,
-                    "image_filename": img.filename or f"image_{idx}.{img.mime_type.split('/')[-1]}",
-                    "image_media_type": img.mime_type,
-                    "image_file_size": img.size_bytes,
-                    "metadata": {
-                        "width": img.width,
-                        "height": img.height,
-                        "page_number": page_number,
-                        "source_location": img.source_location,
-                        "source_position": idx,
-                    },
-                })
-                
                 # Track this image as embedded
-                embedded_metadata.append({
-                    "idx": idx,
-                    "image_id": img.image_id,
-                    "segment_id": seg_id,
-                    "vector_id": seg_id,
-                })
+                embedded_metadata.append(
+                    {
+                        "idx": idx,
+                        "image_id": img.image_id,
+                        "segment_id": seg_id,
+                        "vector_id": seg_id,
+                    }
+                )
                 processed += 1
-            
+
             # Update progress
             progress = 10 + (batch_start + len(batch)) / len(image_data) * 50  # 10% -> 60%
-            await self.db.update_document_status(document_id, status="embedding_images", progress=progress)
-            logger.info(f"[MemoryEmbed] Progress: {processed}/{len(image_data)} images, {progress:.1f}%")
+            await self.db.update_document_status(
+                document_id, status="embedding_images", progress=progress
+            )
+            logger.info(
+                f"[MemoryEmbed] Progress: {processed}/{len(image_data)} images, {progress:.1f}%"
+            )
 
         # Batch upsert to Qdrant
         if image_points:
@@ -3106,13 +3383,17 @@ class KnowledgeService:
                         logger.error(f"Point {i} has invalid vector values")
                         has_invalid = True
                         break
-                
+
                 if has_invalid:
                     raise ValueError("Vectors contain NaN or Infinity values")
-                
-                logger.info(f"[MemoryEmbed] Upserting {len(image_points)} vectors to collection={collection}")
+
+                logger.info(
+                    f"[MemoryEmbed] Upserting {len(image_points)} vectors to collection={collection}"
+                )
                 await self.vector_store.upsert(collection_name=collection, points=image_points)
-                logger.info(f"[MemoryEmbed] Successfully upserted {len(image_points)} image vectors")
+                logger.info(
+                    f"[MemoryEmbed] Successfully upserted {len(image_points)} image vectors"
+                )
             except Exception as e:
                 logger.error(f"[MemoryEmbed] Failed to upsert vectors: {e}")
                 raise
@@ -3131,7 +3412,7 @@ class KnowledgeService:
         self,
         dataset_id: str,
         document_id: str,
-        images: List[ExtractedImage],
+        images: list[ExtractedImage],
         collection: str,
         base_position: int = 0,
         tenant_id: str = "default",
@@ -3150,7 +3431,6 @@ class KnowledgeService:
         Returns:
             Number of successfully processed images
         """
-
 
         if not self.multimodal_embedding or not images:
             return 0
@@ -3203,34 +3483,38 @@ class KnowledgeService:
                 )
 
                 # Prepare segment for database
-                image_segments.append({
-                    "segment_id": seg_id,
-                    "dataset_id": dataset_id,
-                    "document_id": document_id,
-                    "position": position,
-                    "text": img.context_text or "",
-                    "token_count": 0,
-                    "vector_id": seg_id,
-                    "content_type": "image",
-                    "image_url": "",  # Will be set if stored to S3/OSS
-                    "image_attachment_id": img.image_id,
-                    "image_filename": f"page{img.page_number}_{img.image_id}.{img.mime_type.split('/')[-1]}",
-                    "image_media_type": img.mime_type,
-                    "image_file_size": img.size_bytes,
-                    "metadata": {
-                        "width": img.width,
-                        "height": img.height,
-                        "page_number": img.page_number,
-                        "source_position": idx,
-                    },
-                })
+                image_segments.append(
+                    {
+                        "segment_id": seg_id,
+                        "dataset_id": dataset_id,
+                        "document_id": document_id,
+                        "position": position,
+                        "text": img.context_text or "",
+                        "token_count": 0,
+                        "vector_id": seg_id,
+                        "content_type": "image",
+                        "image_url": "",  # Will be set if stored to S3/OSS
+                        "image_attachment_id": img.image_id,
+                        "image_filename": f"page{img.page_number}_{img.image_id}.{img.mime_type.split('/')[-1]}",
+                        "image_media_type": img.mime_type,
+                        "image_file_size": img.size_bytes,
+                        "metadata": {
+                            "width": img.width,
+                            "height": img.height,
+                            "page_number": img.page_number,
+                            "source_position": idx,
+                        },
+                    }
+                )
 
                 processed += 1
 
                 # Optionally upload to S3/OSS storage
                 if self.image_storage_service:
                     try:
-                        filename = image_segments[-1].get("image_filename", f"{img.image_id}.{img.mime_type.split('/')[-1]}")
+                        filename = image_segments[-1].get(
+                            "image_filename", f"{img.image_id}.{img.mime_type.split('/')[-1]}"
+                        )
                         storage_url = await self.image_storage_service.upload_image(
                             tenant_id=tenant_id,
                             document_id=document_id,
@@ -3252,7 +3536,9 @@ class KnowledgeService:
         if image_points:
             try:
                 await self.vector_store.upsert(collection_name=collection, points=image_points)
-                logger.info(f"Upserted {len(image_points)} image vectors to collection {collection}")
+                logger.info(
+                    f"Upserted {len(image_points)} image vectors to collection {collection}"
+                )
             except Exception as e:
                 logger.error(f"Failed to upsert image vectors: {e}")
                 raise
@@ -3275,34 +3561,34 @@ class KnowledgeService:
         query: str,
         top_k: int = 5,
         mode: str = "hybrid",  # "dense" | "bm25" | "hybrid"
-        document_id: Optional[str] = None,
+        document_id: str | None = None,
         # Fusion parameters
-        dense_weight: Optional[float] = None,  # [0, 1] weight for dense scores
-        bm25_weight: Optional[float] = None,   # [0, 1] weight for BM25 scores
-        fusion_method: Optional[str] = None,   # "weighted" | "rrf"
-        rrf_k: Optional[int] = None,           # RRF constant
+        dense_weight: float | None = None,  # [0, 1] weight for dense scores
+        bm25_weight: float | None = None,  # [0, 1] weight for BM25 scores
+        fusion_method: str | None = None,  # "weighted" | "rrf"
+        rrf_k: int | None = None,  # RRF constant
         # Legacy alpha parameter (converted to weights)
-        alpha: Optional[float] = None,
-        score_threshold: Optional[float] = None,  # Filter results below this score
-        vector_top_k: Optional[int] = None,
-        keyword_top_k: Optional[int] = None,
-        candidate_top_k: Optional[int] = None,
-        keyword_candidate_k: Optional[int] = None,
-        fusion: Optional[str] = None,  # Legacy: rrf | alpha
-        rrf_weights: Optional[Dict[str, float]] = None,  # Legacy
-        rerank: Optional[bool] = None,
-        rerank_model: Optional[str] = None,
-        rerank_top_n: Optional[int] = None,
-        mmr: Optional[bool] = None,
-        mmr_lambda: Optional[float] = None,
-        mmr_threshold: Optional[float] = None,
+        alpha: float | None = None,
+        score_threshold: float | None = None,  # Filter results below this score
+        vector_top_k: int | None = None,
+        keyword_top_k: int | None = None,
+        candidate_top_k: int | None = None,
+        keyword_candidate_k: int | None = None,
+        fusion: str | None = None,  # Legacy: rrf | alpha
+        rrf_weights: dict[str, float] | None = None,  # Legacy
+        rerank: bool | None = None,
+        rerank_model: str | None = None,
+        rerank_top_n: int | None = None,
+        mmr: bool | None = None,
+        mmr_lambda: float | None = None,
+        mmr_threshold: float | None = None,
         # Islamic enhancement parameters
-        multi_query: Optional[bool] = None,
-        authority_sort: Optional[bool] = None,
+        multi_query: bool | None = None,
+        authority_sort: bool | None = None,
         # Additional filters (not implemented in core retrieve, for API compatibility)
-        source_type_filter: Optional[str] = None,
-        language_filter: Optional[str] = None,
-    ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
+        source_type_filter: str | None = None,
+        language_filter: str | None = None,
+    ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
 
         q = (query or "").strip()
@@ -3322,7 +3608,9 @@ class KnowledgeService:
         )
         if retrieval_enforce:
             mode = dense_weight = bm25_weight = fusion_method = rrf_k = rrf_weights = alpha = None
-            score_threshold = vector_top_k = keyword_top_k = candidate_top_k = keyword_candidate_k = fusion = None
+            score_threshold = vector_top_k = keyword_top_k = candidate_top_k = (
+                keyword_candidate_k
+            ) = fusion = None
             rerank = rerank_model = rerank_top_n = None
             mmr = mmr_lambda = mmr_threshold = None
             multi_query = authority_sort = None
@@ -3395,7 +3683,9 @@ class KnowledgeService:
         rerank_cfg = retrieval_defaults.get("rerank")
         rerank_api_key = None
         if isinstance(rerank_cfg, dict):
-            rerank_enabled = bool(rerank_cfg.get("enabled", False)) if rerank is None else bool(rerank)
+            rerank_enabled = (
+                bool(rerank_cfg.get("enabled", False)) if rerank is None else bool(rerank)
+            )
             effective_rerank_model = str(rerank_model or rerank_cfg.get("model") or "gte-rerank")
             effective_rerank_top_n = (
                 int(rerank_top_n)
@@ -3428,7 +3718,8 @@ class KnowledgeService:
 
         # Score threshold - filter out low-relevance results (applied after fusion)
         effective_score_threshold = float(
-            score_threshold if score_threshold is not None 
+            score_threshold
+            if score_threshold is not None
             else retrieval_defaults.get("score_threshold") or 0.0
         )
         # Ensure threshold is within valid range (0 = no filtering)
@@ -3450,22 +3741,26 @@ class KnowledgeService:
         islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
         islamic_multi_query = bool(islamic_cfg.get("multi_query", False)) or bool(multi_query)
         islamic_citation = bool(islamic_cfg.get("citation_format", False))
-        islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(authority_sort)
+        islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(
+            authority_sort
+        )
         islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
         if not islamic_multi_query and multi_query is None:
             try:
                 from .multi_query import ISLAMIC_SYNONYMS
+
                 q_lower = q.lower()
-                if any(term in q_lower for term in ISLAMIC_SYNONYMS.keys()):
+                if any(term in q_lower for term in ISLAMIC_SYNONYMS):
                     islamic_multi_query = True
             except Exception:
                 pass
 
-        queries_to_run: List[str] = [q]
-        meta_islamic_queries: Optional[List[str]] = None
+        queries_to_run: list[str] = [q]
+        meta_islamic_queries: list[str] | None = None
         if islamic_multi_query:
             try:
                 from .multi_query import expand_query_islamic
+
                 queries_to_run = expand_query_islamic(q, max_queries=islamic_max_queries)
                 if len(queries_to_run) > 1:
                     meta_islamic_queries = queries_to_run[:]
@@ -3475,18 +3770,23 @@ class KnowledgeService:
 
         # --- Parallel Dense + BM25 retrieval for better latency ---
         import asyncio
+
         query_lang = detect_language(q)
 
-        dense_queries: List[str] = []
-        bm25_queries: List[str] = []
+        dense_queries: list[str] = []
+        bm25_queries: list[str] = []
         if effective_mode in {"dense", "hybrid"}:
-            dense_queries = queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+            dense_queries = (
+                queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+            )
         if effective_mode in {"bm25", "hybrid"}:
-            bm25_queries = queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+            bm25_queries = (
+                queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
+            )
 
         # Precompute query vectors for dense queries (BM25 runs in parallel)
-        query_vectors: Dict[str, List[float]] = {}
-        dense_disabled_reason: Optional[str] = None
+        query_vectors: dict[str, list[float]] = {}
+        dense_disabled_reason: str | None = None
 
         async def _dense_search(query_text: str) -> tuple[list, int]:
             """Dense (vector) retrieval task for a single query."""
@@ -3515,11 +3815,13 @@ class KnowledgeService:
                     if not text:
                         continue
                     score = float(getattr(h, "score", 0.0))
-                    filtered.append({
-                        "payload": payload,
-                        "score": score,
-                        "point_id": getattr(h, "point_id", None),
-                    })
+                    filtered.append(
+                        {
+                            "payload": payload,
+                            "score": score,
+                            "point_id": getattr(h, "point_id", None),
+                        }
+                    )
                 return filtered, raw_count
             except Exception as vec_err:
                 logger.warning(f"Dense search failed: {vec_err}")
@@ -3554,7 +3856,7 @@ class KnowledgeService:
             scores = bm25_scores(query_tokens, doc_tokens)
 
             hits = []
-            for row, score in zip(valid_rows, scores):
+            for row, score in zip(valid_rows, scores, strict=False):
                 seg_id = str(row.get("segment_id") or "")
                 if not seg_id:
                     continue
@@ -3574,20 +3876,24 @@ class KnowledgeService:
                     seg_metadata["vlm_description"] = row.get("vlm_description")
                 if row.get("image_filename"):
                     seg_metadata["image_filename"] = row.get("image_filename")
-                hits.append({
-                    "segment_id": seg_id,
-                    "document_id": str(row.get("document_id") or ""),
-                    "text": text,
-                    "metadata": seg_metadata,
-                    "bm25_score": float(score),
-                })
+                hits.append(
+                    {
+                        "segment_id": seg_id,
+                        "document_id": str(row.get("document_id") or ""),
+                        "text": text,
+                        "metadata": seg_metadata,
+                        "bm25_score": float(score),
+                    }
+                )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
             return hits[:keyword_k], raw_count
 
-        def _merge_dense_results(results: List[tuple[list, int]]) -> tuple[list, int, Dict[str, int]]:
+        def _merge_dense_results(
+            results: list[tuple[list, int]],
+        ) -> tuple[list, int, dict[str, int]]:
             total_raw = 0
-            merged: Dict[str, Dict[str, Any]] = {}
-            hit_counts: Dict[str, int] = {}
+            merged: dict[str, dict[str, Any]] = {}
+            hit_counts: dict[str, int] = {}
             for hits, raw_count in results:
                 total_raw += raw_count
                 for h in hits:
@@ -3615,10 +3921,12 @@ class KnowledgeService:
             dense_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
             return dense_hits[:dense_merge_k], total_raw, hit_counts
 
-        def _merge_bm25_results(results: List[tuple[list, int]]) -> tuple[list, int, Dict[str, int]]:
+        def _merge_bm25_results(
+            results: list[tuple[list, int]],
+        ) -> tuple[list, int, dict[str, int]]:
             total_raw = 0
-            merged: Dict[str, Dict[str, Any]] = {}
-            hit_counts: Dict[str, int] = {}
+            merged: dict[str, dict[str, Any]] = {}
+            hit_counts: dict[str, int] = {}
             for hits, raw_count in results:
                 total_raw += raw_count
                 for h in hits:
@@ -3627,7 +3935,9 @@ class KnowledgeService:
                         continue
                     score = float(h.get("bm25_score") or 0.0)
                     hit_counts[seg_id] = hit_counts.get(seg_id, 0) + 1
-                    if seg_id not in merged or score > float(merged[seg_id].get("bm25_score") or 0.0):
+                    if seg_id not in merged or score > float(
+                        merged[seg_id].get("bm25_score") or 0.0
+                    ):
                         merged[seg_id] = h
 
             for seg_id, count in hit_counts.items():
@@ -3641,13 +3951,13 @@ class KnowledgeService:
             bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
             return bm25_hits[:bm25_merge_k], total_raw, hit_counts
 
-        async def _run_dense_multi() -> tuple[list, int, Dict[str, int]]:
+        async def _run_dense_multi() -> tuple[list, int, dict[str, int]]:
             if not dense_queries:
                 return [], 0, {}
             results = await asyncio.gather(*[_dense_search(dq) for dq in dense_queries])
             return _merge_dense_results(results)
 
-        async def _run_bm25_multi() -> tuple[list, int, Dict[str, int]]:
+        async def _run_bm25_multi() -> tuple[list, int, dict[str, int]]:
             if not bm25_queries:
                 return [], 0, {}
             results = await asyncio.gather(*[_bm25_search(bq) for bq in bm25_queries])
@@ -3657,10 +3967,12 @@ class KnowledgeService:
         bm25_task = asyncio.create_task(_run_bm25_multi()) if bm25_queries else None
 
         # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
-        need_query_vector = effective_mode in {"dense", "hybrid"} or (mmr_enabled and not rerank_enabled)
+        need_query_vector = effective_mode in {"dense", "hybrid"} or (
+            mmr_enabled and not rerank_enabled
+        )
 
-        qvec: Optional[List[float]] = None
-        embedder: Optional[BaseEmbedding] = None
+        qvec: list[float] | None = None
+        embedder: BaseEmbedding | None = None
         if need_query_vector and dense_queries:
             # Fail-fast health check to avoid long retries when Qdrant is down.
             # In hybrid mode we can degrade to BM25-only; in dense mode we return an explicit error.
@@ -3669,7 +3981,9 @@ class KnowledgeService:
             except Exception:
                 vector_store_ok = False
             if not vector_store_ok:
-                dense_disabled_reason = f"Vector store unavailable (url={getattr(self.vector_store, 'url', '')})"
+                dense_disabled_reason = (
+                    f"Vector store unavailable (url={getattr(self.vector_store, 'url', '')})"
+                )
                 logger.warning(dense_disabled_reason)
                 if effective_mode == "dense":
                     raise ValidationFailedError(dense_disabled_reason)
@@ -3690,7 +4004,9 @@ class KnowledgeService:
                     embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
                 else:
                     econf = self._resolve_embedding_config(
-                        provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
+                        provider=embedding_provider,
+                        model=embedding_model,
+                        embedding_config=embedding_config,
                     )
                     # Use cached embedder for better performance (connection reuse)
                     embedder = await get_cached_embedder(econf, dimension=dim)
@@ -3713,12 +4029,14 @@ class KnowledgeService:
                 missing = [dq for dq in dense_queries if dq not in query_vectors]
                 if missing:
                     vecs = await asyncio.gather(*[embedder.embed_query(dq) for dq in missing])
-                    query_vectors.update(dict(zip(missing, vecs)))
+                    query_vectors.update(dict(zip(missing, vecs, strict=False)))
             except Exception as vec_prep_err:
                 dense_disabled_reason = str(vec_prep_err)
                 logger.warning(f"Vector retrieval preparation failed: {vec_prep_err}")
                 if effective_mode == "dense":
-                    raise ValidationFailedError(f"Dense retrieval preparation failed: {vec_prep_err}")
+                    raise ValidationFailedError(
+                        f"Dense retrieval preparation failed: {vec_prep_err}"
+                    )
 
                 # HYBRID mode: degrade to BM25-only (skip vector retrieval path).
                 dense_queries = []
@@ -3735,19 +4053,19 @@ class KnowledgeService:
             bm25_hits, bm25_hits_raw_count, bm25_query_hits = [], 0, {}
 
         # --- Merge candidates with clear score tracking ---
-        candidates: Dict[str, Dict[str, Any]] = {}
-        dense_ranked_ids: List[str] = []
-        bm25_ranked_ids: List[str] = []
+        candidates: dict[str, dict[str, Any]] = {}
+        dense_ranked_ids: list[str] = []
+        bm25_ranked_ids: list[str] = []
 
         def upsert_candidate(
             segment_id: str,
             document_id: str,
             text: str,
-            metadata: Dict[str, Any],
+            metadata: dict[str, Any],
             *,
             source: str,
-            dense_score: Optional[float] = None,
-            bm25_score: Optional[float] = None,
+            dense_score: float | None = None,
+            bm25_score: float | None = None,
         ) -> None:
             seg_id = str(segment_id or "").strip()
             if not seg_id:
@@ -3827,7 +4145,7 @@ class KnowledgeService:
 
         # Attach multi-query hit counts for cross-language traceability
         if islamic_multi_query and (dense_query_hits or bm25_query_hits):
-            merged_hits: Dict[str, int] = {}
+            merged_hits: dict[str, int] = {}
             for sid, count in (dense_query_hits or {}).items():
                 merged_hits[sid] = max(merged_hits.get(sid, 0), count)
             for sid, count in (bm25_query_hits or {}).items():
@@ -3853,17 +4171,19 @@ class KnowledgeService:
             for cid, c in candidates.items()
             if c.get("_bm25_score") is not None
         }
-        
+
         # Use robust normalization (clips outliers at 5th/95th percentile)
         # This is more stable than min-max for hybrid search
         dense_norm_dict = ScoreNormalization.robust_normalize(dense_scores_dict)
         bm25_norm_dict = ScoreNormalization.robust_normalize(bm25_scores_dict)
-        
+
         # Detect query language for weight adjustment
         lang_dense_weight, lang_bm25_weight = compute_language_weights(
-            q, default_dense_weight=effective_dense_weight, default_bm25_weight=effective_bm25_weight
+            q,
+            default_dense_weight=effective_dense_weight,
+            default_bm25_weight=effective_bm25_weight,
         )
-        
+
         # Apply normalized scores to candidates
         # Apply adaptive weights for multilingual queries (if enabled)
         adaptive_weights = bool(retrieval_defaults.get("adaptive_weights", True))
@@ -3885,7 +4205,7 @@ class KnowledgeService:
             cand["_exact_match"] = match_info["exact_match"]
             cand["_term_matches"] = match_info["term_matches"]
             cand["_term_ratio"] = match_info.get("term_ratio", 0.0)
-        
+
         # --- Stage 3: Fusion (combine dense and BM25 scores) ---
         rrf_scores = None
         rrf_max = 1.0
@@ -3907,15 +4227,15 @@ class KnowledgeService:
         for cid, cand in candidates.items():
             dense_norm = cand.get("_dense_score_norm")
             bm25_norm = cand.get("_bm25_score_norm")
-            
+
             if effective_mode == "dense":
                 # Dense only: use dense score
                 cand["_fusion_score"] = dense_norm if dense_norm is not None else 0.0
-                
+
             elif effective_mode == "bm25":
                 # BM25 only: use BM25 score
                 cand["_fusion_score"] = bm25_norm if bm25_norm is not None else 0.0
-                
+
             else:
                 # Hybrid mode: fuse scores
                 if effective_fusion_method == "rrf":
@@ -3929,7 +4249,7 @@ class KnowledgeService:
                     b_val = bm25_norm if bm25_norm is not None else 0.0
                     d_weight = weighted_dense_weight if weighted_dense_weight is not None else 0.5
                     b_weight = weighted_bm25_weight if weighted_bm25_weight is not None else 0.5
-                    
+
                     # If only one source, penalize the missing score
                     sources = cand.get("_sources", set())
                     if "dense" in sources and "bm25" not in sources:
@@ -3938,15 +4258,17 @@ class KnowledgeService:
                         cand["_fusion_score"] = b_val * b_weight
                     else:
                         cand["_fusion_score"] = d_val * d_weight + b_val * b_weight
-            
+
             # Set initial final score to fusion score
             cand["_final_score"] = cand.get("_fusion_score") or 0.0
 
         # Sort by fusion score
-        ranked = sorted(candidates.values(), key=lambda c: float(c.get("_final_score") or 0.0), reverse=True)
+        ranked = sorted(
+            candidates.values(), key=lambda c: float(c.get("_final_score") or 0.0), reverse=True
+        )
         ranked = ranked[:candidate_k]
 
-        meta: Dict[str, Any] = {
+        meta: dict[str, Any] = {
             "dataset_id": dataset_id,
             "mode": effective_mode,
             "top_k": int(top_k),
@@ -3956,9 +4278,13 @@ class KnowledgeService:
             "vector_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
             "keyword_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
             "dense_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
-            "dense_hits_raw_count": dense_hits_raw_count if effective_mode in {"dense", "hybrid"} else None,
+            "dense_hits_raw_count": dense_hits_raw_count
+            if effective_mode in {"dense", "hybrid"}
+            else None,
             "bm25_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
-            "bm25_hits_raw_count": bm25_hits_raw_count if effective_mode in {"bm25", "hybrid"} else None,
+            "bm25_hits_raw_count": bm25_hits_raw_count
+            if effective_mode in {"bm25", "hybrid"}
+            else None,
             # Top K settings
             "dense_top_k": int(vector_k) if effective_mode in {"dense", "hybrid"} else None,
             "bm25_top_k": int(keyword_k) if effective_mode in {"bm25", "hybrid"} else None,
@@ -3973,8 +4299,12 @@ class KnowledgeService:
             "rerank_model": effective_rerank_model if rerank_enabled else None,
             "mmr": bool(mmr_enabled),
             "mmr_lambda": float(effective_mmr_lambda) if mmr_enabled else None,
-            "mmr_threshold": float(effective_mmr_threshold) if (mmr_enabled and effective_mmr_threshold is not None) else None,
-            "score_threshold": float(effective_score_threshold) if effective_score_threshold > 0 else None,
+            "mmr_threshold": float(effective_mmr_threshold)
+            if (mmr_enabled and effective_mmr_threshold is not None)
+            else None,
+            "score_threshold": float(effective_score_threshold)
+            if effective_score_threshold > 0
+            else None,
             # Embedding info
             "collection_name": collection or None,
             "embedding_provider": embedding_provider,
@@ -3986,27 +4316,37 @@ class KnowledgeService:
         }
         if dense_disabled_reason:
             meta["dense_disabled_reason"] = dense_disabled_reason[:500]
-        
+
         # Log pipeline stages with details
         if effective_mode in {"dense", "hybrid"}:
-            meta["pipeline_stages"].append(f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results")
+            meta["pipeline_stages"].append(
+                f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results"
+            )
             if dense_disabled_reason:
                 meta["pipeline_stages"].append(
                     f"Dense retrieval disabled (fallback to BM25): {dense_disabled_reason[:120]}"
                 )
         if effective_mode in {"bm25", "hybrid"}:
-            meta["pipeline_stages"].append(f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results")
+            meta["pipeline_stages"].append(
+                f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results"
+            )
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
         if effective_mode == "hybrid":
-            meta["pipeline_stages"].append(f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}")
+            meta["pipeline_stages"].append(
+                f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}"
+            )
 
         # Prefetch vectors for MMR in parallel with rerank to reduce latency
         mmr_vectors_task = None
         if mmr_enabled and ranked and collection:
-            ids_for_mmr = [str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")]
+            ids_for_mmr = [
+                str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")
+            ]
             if ids_for_mmr:
                 mmr_vectors_task = asyncio.create_task(
-                    self.vector_store.retrieve_vectors(collection_name=collection, point_ids=ids_for_mmr)
+                    self.vector_store.retrieve_vectors(
+                        collection_name=collection, point_ids=ids_for_mmr
+                    )
                 )
 
         # --- Stage 4: Optional rerank (Async DashScope cross-encoder) ---
@@ -4036,7 +4376,7 @@ class KnowledgeService:
                     top_n=effective_rerank_top_n,
                 )
 
-                reranked: List[Dict[str, Any]] = []
+                reranked: list[dict[str, Any]] = []
                 for r in rerank_results:
                     idx = r.index
                     score = r.relevance_score
@@ -4048,14 +4388,18 @@ class KnowledgeService:
 
                 # Sort by rerank score
                 if reranked:
-                    ranked = sorted(reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True)
-                    meta["pipeline_stages"].append(f"Rerank ({effective_rerank_model}): {len(reranked)} results")
+                    ranked = sorted(
+                        reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True
+                    )
+                    meta["pipeline_stages"].append(
+                        f"Rerank ({effective_rerank_model}): {len(reranked)} results"
+                    )
                 meta["rerank_top_n"] = effective_rerank_top_n
             except Exception as exc:
                 meta["rerank_error"] = str(exc)
 
         # --- Stage 5: Optional MMR diversification ---
-        final: List[Dict[str, Any]] = ranked
+        final: list[dict[str, Any]] = ranked
         if mmr_enabled and ranked and len(ranked) <= top_k:
             meta["mmr_skipped"] = "candidate_count<=top_k"
             mmr_enabled = False
@@ -4064,7 +4408,11 @@ class KnowledgeService:
                 meta["mmr_error"] = "dataset collection_name is missing"
             else:
                 try:
-                    ids = [str(c.get("segment_id") or "") for c in ranked if str(c.get("segment_id") or "")]
+                    ids = [
+                        str(c.get("segment_id") or "")
+                        for c in ranked
+                        if str(c.get("segment_id") or "")
+                    ]
                     if mmr_vectors_task is not None:
                         vectors = await mmr_vectors_task
                     else:
@@ -4073,7 +4421,7 @@ class KnowledgeService:
                             point_ids=ids,
                         )
 
-                    relevance: Dict[str, float] = {}
+                    relevance: dict[str, float] = {}
                     for c in ranked:
                         cid = str(c.get("segment_id") or "")
                         if not cid:
@@ -4088,7 +4436,9 @@ class KnowledgeService:
                         else:
                             relevance[cid] = float(c.get("_final_score") or 0.0)
 
-                    ordered_ids = sorted(ids, key=lambda x: float(relevance.get(x, 0.0)), reverse=True)
+                    ordered_ids = sorted(
+                        ids, key=lambda x: float(relevance.get(x, 0.0)), reverse=True
+                    )
                     selected_ids, picks = mmr_select(
                         ordered_ids,
                         relevance,
@@ -4110,7 +4460,7 @@ class KnowledgeService:
                                 break
 
                     cand_by_id = {str(c.get("segment_id") or ""): c for c in ranked}
-                    out: List[Dict[str, Any]] = []
+                    out: list[dict[str, Any]] = []
                     for cid in selected_ids[:top_k]:
                         c = cand_by_id.get(cid)
                         if not c:
@@ -4127,21 +4477,33 @@ class KnowledgeService:
                             c["_final_score"] = float(relevance.get(cid, 0.0))
                         out.append(c)
                     final = out
-                    meta["pipeline_stages"].append(f"MMR diversification: {len(out)} results (lambda={effective_mmr_lambda})")
+                    meta["pipeline_stages"].append(
+                        f"MMR diversification: {len(out)} results (lambda={effective_mmr_lambda})"
+                    )
                 except Exception as exc:
                     meta["mmr_error"] = str(exc)
 
         # --- Build response ---
         # Final sort by _final_score to ensure correct ordering
-        final_sorted = sorted(final[:top_k] if final else [], key=lambda c: float(c.get("_final_score") or 0.0), reverse=True)
-        
+        final_sorted = sorted(
+            final[:top_k] if final else [],
+            key=lambda c: float(c.get("_final_score") or 0.0),
+            reverse=True,
+        )
+
         # Apply score threshold to final results
         if effective_score_threshold > 0.0:
             original_count = len(final_sorted)
-            final_sorted = [c for c in final_sorted if float(c.get("_final_score") or 0.0) >= effective_score_threshold]
+            final_sorted = [
+                c
+                for c in final_sorted
+                if float(c.get("_final_score") or 0.0) >= effective_score_threshold
+            ]
             if len(final_sorted) < original_count:
-                meta["pipeline_stages"].append(f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results")
-        
+                meta["pipeline_stages"].append(
+                    f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results"
+                )
+
         if source_type_filter or language_filter:
             original_count = len(final_sorted)
             final_sorted = self._filter_candidates_by_metadata(
@@ -4183,8 +4545,12 @@ class KnowledgeService:
                         merged = {**meta_from_db, **_ensure_dict(item.get("metadata"))}
                         item["metadata"] = merged
                         source_type = seg.get("source_type") or meta_from_db.get("source_type")
-                        citation_text = seg.get("citation_text") or meta_from_db.get("citation_text")
-                        source_reference = seg.get("source_reference") or meta_from_db.get("source_reference")
+                        citation_text = seg.get("citation_text") or meta_from_db.get(
+                            "citation_text"
+                        )
+                        source_reference = seg.get("source_reference") or meta_from_db.get(
+                            "source_reference"
+                        )
                         if source_type and not item.get("source_type"):
                             item["source_type"] = source_type
                         if citation_text and not item.get("citation_text"):
@@ -4193,11 +4559,12 @@ class KnowledgeService:
                             item["source_reference"] = source_reference
             except Exception as hydrate_err:
                 logger.warning(f"Failed to hydrate segment metadata for citations: {hydrate_err}")
-        
+
         # --- POST_RANKING Hook: Islamic citation formatting & authority sort ---
         if (islamic_citation or islamic_authority_sort) and final_sorted:
             try:
                 from .citation_formatter import CitationFormatter
+
                 formatter = CitationFormatter()
 
                 if islamic_citation:
@@ -4206,7 +4573,9 @@ class KnowledgeService:
                         formatted = formatter.format_citation(c)
                         if formatted:
                             c["citation_text"] = formatted
-                    meta["pipeline_stages"].append(f"Islamic citation formatting: {len(final_sorted)} results enriched")
+                    meta["pipeline_stages"].append(
+                        f"Islamic citation formatting: {len(final_sorted)} results enriched"
+                    )
 
                 if islamic_authority_sort:
                     # Re-sort by Islamic authority (Quran > Hadith > Tafseer > Fiqh > Others)
@@ -4235,7 +4604,10 @@ class KnowledgeService:
         if meta_islamic_queries:
             meta["islamic_multi_query"] = True
             meta["islamic_expanded_queries"] = meta_islamic_queries
-            meta["pipeline_stages"].insert(0, f"Islamic multi-query: {len(meta_islamic_queries)} queries ({', '.join(meta_islamic_queries[:3])}{'...' if len(meta_islamic_queries) > 3 else ''})")
+            meta["pipeline_stages"].insert(
+                0,
+                f"Islamic multi-query: {len(meta_islamic_queries)} queries ({', '.join(meta_islamic_queries[:3])}{'...' if len(meta_islamic_queries) > 3 else ''})",
+            )
         if islamic_citation or islamic_authority_sort:
             meta["islamic_enhancements"] = {
                 "multi_query": islamic_multi_query,
@@ -4244,7 +4616,7 @@ class KnowledgeService:
             }
 
         # Build result candidates first (to collect image URLs for presigned generation)
-        result_candidates: List[Dict[str, Any]] = []
+        result_candidates: list[dict[str, Any]] = []
         for rank, c in enumerate(final_sorted, 1):
             seg_id = str(c.get("segment_id") or "")
             payload = dict(c.get("metadata") or {})
@@ -4328,19 +4700,21 @@ class KnowledgeService:
             raw_image_url = payload.get("image_url")
             vlm_description = payload.get("vlm_description")
 
-            result_candidates.append({
-                "seg_id": seg_id,
-                "document_id": str(c.get("document_id") or ""),
-                "score": score,
-                "text": str(c.get("text") or ""),
-                "payload": payload,
-                "content_type": content_type,
-                "raw_image_url": raw_image_url,
-                "vlm_description": vlm_description,
-            })
+            result_candidates.append(
+                {
+                    "seg_id": seg_id,
+                    "document_id": str(c.get("document_id") or ""),
+                    "score": score,
+                    "text": str(c.get("text") or ""),
+                    "payload": payload,
+                    "content_type": content_type,
+                    "raw_image_url": raw_image_url,
+                    "vlm_description": vlm_description,
+                }
+            )
 
         # Generate presigned URLs for image results (Text-First RAG)
-        async def get_presigned_url_for_result(cand: Dict[str, Any]) -> Optional[str]:
+        async def get_presigned_url_for_result(cand: dict[str, Any]) -> str | None:
             """Generate presigned URL for an image result."""
             content_type = cand.get("content_type")
             raw_url = cand.get("raw_image_url")
@@ -4359,8 +4733,8 @@ class KnowledgeService:
         presigned_urls = await asyncio.gather(*presigned_tasks)
 
         # Build final results with presigned URLs
-        results: List[RetrieveResult] = []
-        for cand, presigned_url in zip(result_candidates, presigned_urls):
+        results: list[RetrieveResult] = []
+        for cand, presigned_url in zip(result_candidates, presigned_urls, strict=False):
             payload = cand["payload"]
             image_url = presigned_url or cand.get("raw_image_url")
 
@@ -4393,16 +4767,16 @@ class KnowledgeService:
         query: str,
         top_k: int = 5,
         include_images: bool = True,
-        content_type_filter: Optional[str] = None,
+        content_type_filter: str | None = None,
         multimodal_rerank: bool = False,
         # Advanced multimodal parameters
         image_search_enabled: bool = True,
-        vlm_rerank_weight: Optional[float] = None,
-        image_boost: Optional[float] = None,
-        image_score_threshold: Optional[float] = None,
+        vlm_rerank_weight: float | None = None,
+        image_boost: float | None = None,
+        image_score_threshold: float | None = None,
         use_separate_thresholds: bool = False,
         **kwargs: Any,
-    ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
+    ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         """
         Retrieve with associated images attached to results.
 
@@ -4433,16 +4807,21 @@ class KnowledgeService:
         """
         # Fetch more results if filtering to ensure we get enough after filter
         # Also fetch more if we're applying separate thresholds or boosting
-        effective_top_k = top_k * 3 if (content_type_filter or use_separate_thresholds) else top_k * 2
+        effective_top_k = (
+            top_k * 3 if (content_type_filter or use_separate_thresholds) else top_k * 2
+        )
 
         # Filter out kwargs that retrieve() doesn't support
         # These are multimodal-specific or UI-specific parameters
         unsupported_kwargs = {
-            'image_search_enabled', 'vlm_rerank_weight', 'image_boost', 
-            'image_score_threshold', 'use_separate_thresholds',
+            "image_search_enabled",
+            "vlm_rerank_weight",
+            "image_boost",
+            "image_score_threshold",
+            "use_separate_thresholds",
         }
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in unsupported_kwargs}
-        
+
         # Perform standard retrieval (now with unified multimodal embedding)
         results, meta = await self.retrieve(
             user=user,
@@ -4457,7 +4836,9 @@ class KnowledgeService:
         for r in results:
             ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
             content_types_before[ct] = content_types_before.get(ct, 0) + 1
-        logger.info(f"[retrieve_with_images] Base retrieve returned {len(results)} results: {content_types_before}")
+        logger.info(
+            f"[retrieve_with_images] Base retrieve returned {len(results)} results: {content_types_before}"
+        )
 
         # Apply separate thresholds for text vs image content if requested
         if use_separate_thresholds and results:
@@ -4483,7 +4864,7 @@ class KnowledgeService:
                 content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
                 if content_type == "image":
                     # Create new result with boosted score
-                    boosted_score = min(r.score * image_boost, 1.0)
+                    min(r.score * image_boost, 1.0)
                     # Update the result's score (RetrieveResult is mutable via metadata)
                     r.metadata["_original_score"] = r.score
                     r.metadata["_boosted"] = True
@@ -4495,7 +4876,7 @@ class KnowledgeService:
                     if r.metadata.get("content_type", getattr(r, "content_type", "text")) == "image"
                     else r.score
                 ),
-                reverse=True
+                reverse=True,
             )
             meta["image_boost"] = image_boost
 
@@ -4503,7 +4884,9 @@ class KnowledgeService:
         if content_type_filter and content_type_filter in ("text", "image"):
             filtered_results = []
             for r in results:
-                segment_content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                segment_content_type = r.metadata.get(
+                    "content_type", getattr(r, "content_type", "text")
+                )
                 if segment_content_type == content_type_filter:
                     filtered_results.append(r)
             results = filtered_results[:top_k]
@@ -4520,13 +4903,13 @@ class KnowledgeService:
         associations = await self.db.get_segment_associations_batch(segment_ids)
 
         # Enhance results with associated images
-        enhanced_results: List[RetrieveResult] = []
+        enhanced_results: list[RetrieveResult] = []
         for r in results:
             # Create enhanced metadata with images
             enhanced_meta = dict(r.metadata)
 
             # Build associated images list
-            associated_imgs: List[Dict[str, Any]] = []
+            associated_imgs: list[dict[str, Any]] = []
             if r.segment_id in associations and associations[r.segment_id]:
                 associated_imgs = [
                     {
@@ -4577,8 +4960,7 @@ class KnowledgeService:
 
         # Count segments with images
         segments_with_images = sum(
-            1 for r in enhanced_results
-            if r.metadata.get("has_images", False)
+            1 for r in enhanced_results if r.metadata.get("has_images", False)
         )
         meta["segments_with_images"] = segments_with_images
 
@@ -4598,13 +4980,13 @@ class KnowledgeService:
                     image_weight=effective_vlm_weight,
                 )
                 meta["vlm_rerank_weight"] = effective_vlm_weight
-                
+
                 # Convert results to rerank candidates
-                rerank_candidates: List[RerankCandidate] = []
+                rerank_candidates: list[RerankCandidate] = []
                 for r in enhanced_results:
                     # Determine media type
                     media_type = "image" if r.content_type == "image" else "text"
-                    
+
                     # For image segments, we need to load image bytes
                     image_bytes = None
                     if media_type == "image" and r.image_url:
@@ -4614,13 +4996,14 @@ class KnowledgeService:
                                 # Extract storage key from URL or use image_url directly
                                 # For now, try downloading from URL
                                 import httpx
+
                                 async with httpx.AsyncClient(timeout=10.0) as client:
                                     response = await client.get(r.image_url)
                                     response.raise_for_status()
                                     image_bytes = response.content
                         except Exception as load_err:
                             logger.debug(f"Could not load image for reranking: {load_err}")
-                    
+
                     candidate = RerankCandidate(
                         segment_id=r.segment_id,
                         text=r.text if media_type == "text" else None,
@@ -4631,7 +5014,7 @@ class KnowledgeService:
                         metadata=r.metadata,
                     )
                     rerank_candidates.append(candidate)
-                
+
                 # Perform reranking
                 logger.info(f"Applying multimodal reranking to {len(rerank_candidates)} candidates")
                 reranked = await reranker.rerank(
@@ -4641,17 +5024,19 @@ class KnowledgeService:
                     rerank_images_only=False,
                     score_threshold=0.0,
                 )
-                
+
                 # Map reranked results back to RetrieveResult format
-                reranked_map = {c.segment_id: c for c in reranked}
-                reranked_results: List[RetrieveResult] = []
-                
+                {c.segment_id: c for c in reranked}
+                reranked_results: list[RetrieveResult] = []
+
                 for candidate in reranked:
                     # Find original result
-                    original = next((r for r in enhanced_results if r.segment_id == candidate.segment_id), None)
+                    original = next(
+                        (r for r in enhanced_results if r.segment_id == candidate.segment_id), None
+                    )
                     if not original:
                         continue
-                    
+
                     # Update score with rerank score
                     reranked_results.append(
                         RetrieveResult(
@@ -4666,12 +5051,12 @@ class KnowledgeService:
                             associated_images=original.associated_images,
                         )
                     )
-                
+
                 enhanced_results = reranked_results
                 meta["multimodal_rerank"] = True
                 meta["multimodal_rerank_count"] = len(reranked_results)
                 logger.info(f"Multimodal reranking completed: {len(reranked_results)} results")
-                
+
             except Exception as rerank_err:
                 logger.warning(f"Multimodal reranking failed: {rerank_err}")
                 meta["multimodal_rerank"] = False
@@ -4693,7 +5078,7 @@ class KnowledgeService:
         vlm_rerank: bool = True,  # Whether to enable VLM reranking
         include_images: bool = True,  # Whether to attach associated images
         **kwargs: Any,
-    ) -> Tuple[List[RetrieveResult], Dict[str, Any]]:
+    ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         """
         Hierarchical multimodal retrieval v2 with intent-aware VLM reranking.
 
@@ -4768,13 +5153,11 @@ class KnowledgeService:
         meta["original_top_k"] = top_k
 
         # Log retrieval statistics
-        content_type_counts: Dict[str, int] = {}
+        content_type_counts: dict[str, int] = {}
         for r in results:
             ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
             content_type_counts[ct] = content_type_counts.get(ct, 0) + 1
-        logger.info(
-            f"[retrieve_v2] Stage 1 returned {len(results)} results: {content_type_counts}"
-        )
+        logger.info(f"[retrieve_v2] Stage 1 returned {len(results)} results: {content_type_counts}")
         meta["stage1_content_types"] = content_type_counts
 
         if not results:
@@ -4786,9 +5169,7 @@ class KnowledgeService:
         # - intent is "find_document" (user wants text content, not images)
         # - VLM service is not available
         should_vlm_rerank = (
-            vlm_rerank
-            and intent != "find_document"
-            and self.vlm_service is not None
+            vlm_rerank and intent != "find_document" and self.vlm_service is not None
         )
 
         if should_vlm_rerank:
@@ -4799,7 +5180,9 @@ class KnowledgeService:
                 # find_image: Higher image weight (0.5) for aggressive image prioritization
                 # general: Balanced weight (0.4)
                 image_weight = 0.5 if intent == "find_image" else 0.4
-                assert 0.0 <= image_weight <= 1.0, f"image_weight must be in [0.0, 1.0], got {image_weight}"
+                assert 0.0 <= image_weight <= 1.0, (
+                    f"image_weight must be in [0.0, 1.0], got {image_weight}"
+                )
 
                 reranker = MultimodalReranker(
                     vlm_service=self.vlm_service,
@@ -4810,11 +5193,13 @@ class KnowledgeService:
                 )
 
                 # Separate results by content type
-                image_results: List[RetrieveResult] = []
-                text_results: List[RetrieveResult] = []
+                image_results: list[RetrieveResult] = []
+                text_results: list[RetrieveResult] = []
 
                 for r in results:
-                    content_type = r.metadata.get("content_type", getattr(r, "content_type", "text"))
+                    content_type = r.metadata.get(
+                        "content_type", getattr(r, "content_type", "text")
+                    )
                     if content_type == "image":
                         image_results.append(r)
                     else:
@@ -4826,10 +5211,10 @@ class KnowledgeService:
                 )
 
                 # Only rerank image results if there are any
-                reranked_image_results: List[RetrieveResult] = []
+                reranked_image_results: list[RetrieveResult] = []
                 if image_results:
                     # Convert image results to RerankCandidate format
-                    rerank_candidates: List[RerankCandidate] = []
+                    rerank_candidates: list[RerankCandidate] = []
                     for r in image_results:
                         # Load image bytes if we have a URL
                         image_bytes = None
@@ -4920,12 +5305,12 @@ class KnowledgeService:
             segment_ids = [r.segment_id for r in results]
             associations = await self.db.get_segment_associations_batch(segment_ids)
 
-            enhanced_results: List[RetrieveResult] = []
+            enhanced_results: list[RetrieveResult] = []
             for r in results:
                 enhanced_meta = dict(r.metadata)
 
                 # Build associated images list
-                associated_imgs: List[Dict[str, Any]] = []
+                associated_imgs: list[dict[str, Any]] = []
                 if r.segment_id in associations and associations[r.segment_id]:
                     associated_imgs = [
                         {
@@ -4974,14 +5359,12 @@ class KnowledgeService:
             results = enhanced_results
 
             # Update metadata
-            segments_with_images = sum(
-                1 for r in results if r.metadata.get("has_images", False)
-            )
+            segments_with_images = sum(1 for r in results if r.metadata.get("has_images", False))
             meta["segments_with_images"] = segments_with_images
             meta["include_images"] = True
 
         # Final statistics
-        final_content_types: Dict[str, int] = {}
+        final_content_types: dict[str, int] = {}
         for r in results:
             ct = r.metadata.get("content_type", getattr(r, "content_type", "text"))
             final_content_types[ct] = final_content_types.get(ct, 0) + 1
@@ -4998,37 +5381,37 @@ class KnowledgeService:
         self,
         user: UserContext,
         dataset_id: str,
-        queries: List[str],
+        queries: list[str],
         top_k: int = 5,
         mode: str = "hybrid",
-        document_id: Optional[str] = None,
-        dense_weight: Optional[float] = None,
-        bm25_weight: Optional[float] = None,
-        fusion_method: Optional[str] = None,
-        alpha: Optional[float] = None,
-        score_threshold: Optional[float] = None,
-        source_type_filter: Optional[str] = None,
-        language_filter: Optional[str] = None,
+        document_id: str | None = None,
+        dense_weight: float | None = None,
+        bm25_weight: float | None = None,
+        fusion_method: str | None = None,
+        alpha: float | None = None,
+        score_threshold: float | None = None,
+        source_type_filter: str | None = None,
+        language_filter: str | None = None,
         multi_query: bool = False,
         authority_sort: bool = False,
-        vector_top_k: Optional[int] = None,
-        keyword_top_k: Optional[int] = None,
-        candidate_top_k: Optional[int] = None,
-        keyword_candidate_k: Optional[int] = None,
-        fusion: Optional[str] = None,
-        rrf_k: Optional[int] = None,
-        rrf_weights: Optional[Dict[str, float]] = None,
-        rerank: Optional[bool] = None,
-        rerank_model: Optional[str] = None,
-        rerank_top_n: Optional[int] = None,
-        mmr: Optional[bool] = None,
-        mmr_lambda: Optional[float] = None,
-        mmr_threshold: Optional[float] = None,
+        vector_top_k: int | None = None,
+        keyword_top_k: int | None = None,
+        candidate_top_k: int | None = None,
+        keyword_candidate_k: int | None = None,
+        fusion: str | None = None,
+        rrf_k: int | None = None,
+        rrf_weights: dict[str, float] | None = None,
+        rerank: bool | None = None,
+        rerank_model: str | None = None,
+        rerank_top_n: int | None = None,
+        mmr: bool | None = None,
+        mmr_lambda: float | None = None,
+        mmr_threshold: float | None = None,
         include_images: bool = True,
         include_associated_images: bool = True,
         max_parallel: int = 10,
         dedupe_results: bool = False,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Batch retrieval - parallel retrieval with multiple queries.
 
         Args:
@@ -5057,7 +5440,7 @@ class KnowledgeService:
         # Limit concurrency
         semaphore = asyncio.Semaphore(max_parallel)
 
-        async def _retrieve_single(query: str) -> Dict[str, Any]:
+        async def _retrieve_single(query: str) -> dict[str, Any]:
             async with semaphore:
                 try:
                     results, meta = await self.retrieve(
@@ -5112,9 +5495,7 @@ class KnowledgeService:
                     }
 
         # Execute all queries in parallel
-        batch_results = await asyncio.gather(
-            *[_retrieve_single(q) for q in valid_queries]
-        )
+        batch_results = await asyncio.gather(*[_retrieve_single(q) for q in valid_queries])
 
         # Dedupe results if requested
         if dedupe_results:
@@ -5154,9 +5535,7 @@ class KnowledgeService:
         cleaned = []
         for char in text:
             # Keep printable chars, newlines, tabs, carriage returns
-            if char.isprintable() or char in "\n\r\t":
-                cleaned.append(char)
-            elif ord(char) > 31:  # Keep non-control chars
+            if char.isprintable() or char in "\n\r\t" or ord(char) > 31:
                 cleaned.append(char)
         return "".join(cleaned)
 
@@ -5174,75 +5553,74 @@ class KnowledgeService:
         """Clean PDF extracted content, removing TOC lines and noise."""
         if not text:
             return ""
-        
+
         lines = text.split("\n")
         cleaned_lines = []
-        
+
         # Track if we're in TOC section
         toc_indicators = 0
-        
+
         for line in lines:
-            original_line = line
             line = line.strip()
             if not line:
                 continue
-            
+
             # Skip lines that look like TOC entries - VERY aggressive patterns
             # Pattern: any combination of dots followed by page numbers
-            if re.search(r'\.{2,}\s*\d+\s*$', line):  # ....2
+            if re.search(r"\.{2,}\s*\d+\s*$", line):  # ....2
                 toc_indicators += 1
                 continue
-            if re.search(r'(\.\s+){2,}\d+\s*$', line):  # . . . 2
+            if re.search(r"(\.\s+){2,}\d+\s*$", line):  # . . . 2
                 toc_indicators += 1
                 continue
-            if re.search(r'·{2,}\s*\d+\s*$', line):  # ···2
+            if re.search(r"·{2,}\s*\d+\s*$", line):  # ···2
                 toc_indicators += 1
                 continue
-            if re.search(r'…+\s*\d+\s*$', line):  # …2
+            if re.search(r"…+\s*\d+\s*$", line):  # …2
                 toc_indicators += 1
                 continue
-            
+
             # Skip lines starting with dots (like "......2")
-            if re.match(r'^[\.·…\s]+\d+', line):
+            if re.match(r"^[\.·…\s]+\d+", line):
                 toc_indicators += 1
                 continue
-            
+
             # Skip lines that contain excessive dots anywhere
-            dot_count = len(re.findall(r'[\.·…]', line))
+            dot_count = len(re.findall(r"[\.·…]", line))
             if len(line) > 5 and dot_count > 3:
                 # More than 3 dots in a short line, likely TOC
                 if dot_count / len(line) > 0.15:
                     toc_indicators += 1
                     continue
-            
+
             # Skip very short lines that are just page numbers or section numbers
-            if re.match(r'^[\d\.\s]+$', line) and len(line) < 10:
+            if re.match(r"^[\d\.\s]+$", line) and len(line) < 10:
                 continue
-            
+
             # Skip lines that look like "2.1 2.1标题..."
-            if re.match(r'^\d+(\.\d+)*\s+\d+(\.\d+)*', line):
+            if re.match(r"^\d+(\.\d+)*\s+\d+(\.\d+)*", line):
                 continue
-            
+
             # Clean up remaining dots sequences in the line
-            line = re.sub(r'\.{3,}', ' ', line)
-            line = re.sub(r'(\.\s+){2,}', ' ', line)
-            line = re.sub(r'·{2,}', ' ', line)
-            line = re.sub(r'…{1,}', ' ', line)
-            
+            line = re.sub(r"\.{3,}", " ", line)
+            line = re.sub(r"(\.\s+){2,}", " ", line)
+            line = re.sub(r"·{2,}", " ", line)
+            line = re.sub(r"…{1,}", " ", line)
+
             # Clean up repeated spaces
-            line = re.sub(r'\s{2,}', ' ', line)
-            
+            line = re.sub(r"\s{2,}", " ", line)
+
             line = line.strip()
             if line and len(line) > 2:  # Skip very short remnants
                 cleaned_lines.append(line)
-        
+
         result = "\n".join(cleaned_lines)
-        
+
         # If a large portion of content was TOC-like, we may have a TOC-heavy doc
         # Log this for debugging
         if toc_indicators > 10:
             logger.info(f"Cleaned {toc_indicators} TOC-like lines from PDF")
-        
+
         return result
 
     def _extract_text_from_pdf_bytes(self, content: bytes) -> str:
@@ -5252,8 +5630,8 @@ class KnowledgeService:
         falls back to pypdf for basic text extraction.
         Scanned PDFs are handled via multimodal image embedding (no OCR).
         """
-        from io import BytesIO
         import traceback
+        from io import BytesIO
 
         text = ""
 
@@ -5261,6 +5639,7 @@ class KnowledgeService:
         try:
             # Explicit import check
             import pdfplumber
+
             text = self._extract_pdf_with_pdfplumber(BytesIO(content))
         except ImportError as e:
             logger.warning(f"pdfplumber import failed: {e}")
@@ -5273,8 +5652,9 @@ class KnowledgeService:
         if not text:
             try:
                 from pypdf import PdfReader  # type: ignore
+
                 reader = PdfReader(BytesIO(content))
-                parts: List[str] = []
+                parts: list[str] = []
                 for i, page in enumerate(reader.pages):
                     try:
                         t = page.extract_text() or ""
@@ -5286,7 +5666,9 @@ class KnowledgeService:
                 text = "\n".join(parts)
             except ImportError as exc:
                 logger.error(f"pypdf import failed: {exc}")
-                raise ValidationFailedError("PDF parsing requires pypdf (pip install pypdf) or pdfplumber") from exc
+                raise ValidationFailedError(
+                    "PDF parsing requires pypdf (pip install pypdf) or pdfplumber"
+                ) from exc
             except Exception as exc:
                 logger.error(f"pypdf parsing failed: {exc}")
                 traceback.print_exc()
@@ -5307,80 +5689,79 @@ class KnowledgeService:
 
     def _ocr_pdf_bytes(self, content: bytes) -> str:
         """OCR a PDF using PyMuPDF rendering + Tesseract CLI.
-        
+
         Uses shared OCR utilities from ocr_utils module.
         """
-        from .ocr_utils import OCRCConfig, ocr_pdf_bytes as _ocr_pdf
-        
+        from .ocr_utils import OCRCConfig
+        from .ocr_utils import ocr_pdf_bytes as _ocr_pdf
+
         config = OCRCConfig.from_settings(self.settings.knowledge)
         max_workers = int(getattr(self.settings.knowledge, "ocr_page_concurrency", 2) or 1)
-        
+
         return _ocr_pdf(content, config=config, max_workers=max_workers)
-    
+
     def _extract_pdf_with_pdfplumber(self, pdf_stream) -> str:
         """Extract PDF content using pdfplumber with table detection."""
         import pdfplumber  # type: ignore
-        
-        parts: List[str] = []
-        
+
+        parts: list[str] = []
+
         with pdfplumber.open(pdf_stream) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                page_parts: List[str] = []
-                
+            for _page_num, page in enumerate(pdf.pages):
+                page_parts: list[str] = []
+
                 # Extract tables first
                 tables = page.extract_tables() or []
-                table_bboxes = []
-                
+
                 for table in tables:
                     if table and len(table) > 0:
                         md_table = self._pdf_table_to_markdown(table)
                         if md_table:
                             page_parts.append("\n" + md_table + "\n")
-                
+
                 # Extract text (excluding table areas if possible)
                 text = page.extract_text() or ""
                 if text.strip():
                     # If we have tables, the text might include table content
                     # Still add it but tables are now properly formatted
                     page_parts.insert(0, text)
-                
+
                 if page_parts:
                     parts.append("\n".join(page_parts))
-        
+
         text = "\n\n".join(parts)
         return self._sanitize_text_for_db(normalize_text(text))
-    
-    def _pdf_table_to_markdown(self, table: List[List]) -> str:
+
+    def _pdf_table_to_markdown(self, table: list[list]) -> str:
         """Convert a PDF table (list of rows) to Markdown format."""
         if not table or len(table) == 0:
             return ""
-        
+
         # Filter out empty rows
         table = [row for row in table if row and any(cell for cell in row)]
         if not table:
             return ""
-        
+
         # Get max columns
         total_cols = max(len(row) for row in table)
         if total_cols == 0:
             return ""
-        
-        md_lines: List[str] = []
-        
+
+        md_lines: list[str] = []
+
         for i, row in enumerate(table):
             # Pad row to total_cols
             cells = list(row) + [""] * (total_cols - len(row))
             # Clean cell content
             cells = [
-                str(cell or "").strip().replace("|", "\\|").replace("\n", " ")
-                for cell in cells
+                str(cell or "").strip().replace("|", "\\|").replace("\n", " ") for cell in cells
             ]
             md_lines.append("| " + " | ".join(cells) + " |")
-            
+
             # Add separator after header
             if i == 0:
                 md_lines.append("| " + " | ".join(["---"] * total_cols) + " |")
-        
+
         return "\n".join(md_lines)
 
     def _extract_text_from_docx_bytes(self, content: bytes) -> str:
@@ -5388,28 +5769,30 @@ class KnowledgeService:
         try:
             from docx import Document  # type: ignore
         except Exception as exc:
-            raise ValidationFailedError("DOCX parsing requires python-docx (pip install python-docx)") from exc
+            raise ValidationFailedError(
+                "DOCX parsing requires python-docx (pip install python-docx)"
+            ) from exc
 
         try:
             from io import BytesIO
 
             doc = Document(BytesIO(content))
-            parts: List[str] = []
-            
+            parts: list[str] = []
+
             # Get all paragraphs and tables in document order
             paragraphs = list(getattr(doc, "paragraphs", []) or [])
             tables = list(getattr(doc, "tables", []) or [])
-            
+
             para_idx = 0
             table_idx = 0
-            
+
             # Process document body in order (paragraphs and tables interleaved)
             for element in doc.element.body:
                 tag = getattr(element, "tag", None)
                 if tag is None:
                     continue
                 tag_str = str(tag)
-                
+
                 if tag_str.endswith("}p"):  # Paragraph
                     if para_idx < len(paragraphs):
                         para = paragraphs[para_idx]
@@ -5417,7 +5800,7 @@ class KnowledgeService:
                         if t:
                             parts.append(t)
                         para_idx += 1
-                        
+
                 elif tag_str.endswith("}tbl"):  # Table
                     if table_idx < len(tables):
                         table = tables[table_idx]
@@ -5435,42 +5818,44 @@ class KnowledgeService:
             raise
         except Exception as exc:
             raise ValidationFailedError(f"Failed to parse DOCX: {exc}") from exc
-    
+
     def _table_to_markdown(self, table) -> str:
         """Convert a python-docx table to Markdown format."""
         try:
             rows = list(getattr(table, "rows", []) or [])
             if not rows:
                 return ""
-            
+
             # Calculate total columns (handle merged cells)
-            total_cols = max(len(list(getattr(row, "cells", []) or [])) for row in rows) if rows else 0
+            total_cols = (
+                max(len(list(getattr(row, "cells", []) or [])) for row in rows) if rows else 0
+            )
             if total_cols == 0:
                 return ""
-            
-            md_lines: List[str] = []
-            
+
+            md_lines: list[str] = []
+
             # Header row
             header_row = rows[0]
             headers = self._parse_table_row(header_row, total_cols)
             md_lines.append("| " + " | ".join(headers) + " |")
             md_lines.append("| " + " | ".join(["---"] * total_cols) + " |")
-            
+
             # Data rows
             for row in rows[1:]:
                 cells = self._parse_table_row(row, total_cols)
                 md_lines.append("| " + " | ".join(cells) + " |")
-            
+
             return "\n".join(md_lines)
         except Exception:
             return ""
-    
-    def _parse_table_row(self, row, total_cols: int) -> List[str]:
+
+    def _parse_table_row(self, row, total_cols: int) -> list[str]:
         """Parse a table row into a list of cell texts."""
         cells = list(getattr(row, "cells", []) or [])
         row_cells = [""] * total_cols
         col_idx = 0
-        
+
         for cell in cells:
             if col_idx >= total_cols:
                 break
@@ -5479,19 +5864,19 @@ class KnowledgeService:
                 col_idx += 1
             if col_idx >= total_cols:
                 break
-                
+
             # Get cell text
             cell_text = str(getattr(cell, "text", "") or "").strip()
             # Clean up cell text for markdown (escape pipes, remove newlines)
             cell_text = cell_text.replace("|", "\\|").replace("\n", " ")
-            
+
             # Handle grid span (column merging)
             grid_span = getattr(cell, "grid_span", 1) or 1
             for i in range(grid_span):
                 if col_idx + i < total_cols:
                     row_cells[col_idx + i] = cell_text if i == 0 else ""
             col_idx += grid_span
-        
+
         return row_cells
 
     def _extract_text_from_doc_bytes(self, content: bytes) -> str:
@@ -5521,43 +5906,53 @@ class KnowledgeService:
     def _extract_text_from_html(self, html: str) -> str:
         """Extract text from HTML with improved handling of various content types."""
         try:
-            from bs4 import BeautifulSoup, NavigableString  # type: ignore
+            from bs4 import BeautifulSoup  # type: ignore
         except Exception as exc:
             raise ValidationFailedError(
                 "HTML parsing requires beautifulsoup4 (pip install beautifulsoup4 lxml)"
             ) from exc
 
         soup = BeautifulSoup(html or "", "lxml")
-        
+
         # Remove non-content elements
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "iframe", "form"]):
-            try:
+        for tag in soup(
+            ["script", "style", "noscript", "header", "footer", "nav", "aside", "iframe", "form"]
+        ):
+            with contextlib.suppress(Exception):
                 tag.decompose()
-            except Exception:
-                pass
-        
+
         # Try to find main content area
         main_content = None
-        for selector in ["main", "article", "[role='main']", ".content", "#content", ".post", ".article"]:
+        for selector in [
+            "main",
+            "article",
+            "[role='main']",
+            ".content",
+            "#content",
+            ".post",
+            ".article",
+        ]:
             try:
                 main_content = soup.select_one(selector)
                 if main_content:
                     break
             except Exception:
                 continue
-        
+
         # Use main content if found, otherwise use full body
         content_root = main_content or soup.body or soup
-        
-        parts: List[str] = []
-        
+
+        parts: list[str] = []
+
         # Extract title
         title_tag = soup.find("title")
         if title_tag and title_tag.string:
             parts.append(f"# {title_tag.string.strip()}")
-        
+
         # Extract headings and paragraphs
-        for element in content_root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "blockquote", "pre", "code"]):
+        for element in content_root.find_all(
+            ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "th", "blockquote", "pre", "code"]
+        ):
             text = element.get_text(separator=" ", strip=True)
             if text:
                 tag_name = element.name
@@ -5570,24 +5965,26 @@ class KnowledgeService:
                     continue  # Handle tables separately
                 else:
                     parts.append(text)
-        
+
         # Handle tables
         for table in content_root.find_all("table"):
-            table_rows: List[str] = []
+            table_rows: list[str] = []
             for tr in table.find_all("tr"):
-                cells = [cell.get_text(separator=" ", strip=True) for cell in tr.find_all(["th", "td"])]
+                cells = [
+                    cell.get_text(separator=" ", strip=True) for cell in tr.find_all(["th", "td"])
+                ]
                 if any(cells):
                     table_rows.append(" | ".join(c if c else "-" for c in cells))
             if table_rows:
                 parts.append("\n".join(table_rows))
-        
+
         # Fallback: if no structured content found, use simple text extraction
         if not parts:
             text = content_root.get_text(separator="\n", strip=True)
             lines = [ln.strip() for ln in (text or "").splitlines()]
             lines = [ln for ln in lines if ln]
             return self._sanitize_text_for_db(normalize_text("\n".join(lines)))
-        
+
         result = "\n\n".join(parts)
         result = normalize_text(result)
         return self._sanitize_text_for_db(result)
@@ -5595,15 +5992,15 @@ class KnowledgeService:
     def _extract_text_from_bytes(
         self,
         content: bytes,
-        filename: Optional[str] = None,
-        mime_type: Optional[str] = None,
-    ) -> Tuple[str, str]:
+        filename: str | None = None,
+        mime_type: str | None = None,
+    ) -> tuple[str, str]:
         name = (filename or "").strip().lower()
         mime = (mime_type or "").strip().lower()
 
         # Legacy Office (.doc) is OLE2 Compound Document.
         if (
-            content.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1")
+            content.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
             or name.endswith(".doc")
             or "application/msword" in mime
         ):
@@ -5614,7 +6011,11 @@ class KnowledgeService:
             return self._extract_text_from_pdf_bytes(content), "application/pdf"
 
         # DOCX (OOXML zip)
-        if content.startswith(b"PK\x03\x04") or name.endswith(".docx") or "wordprocessingml.document" in mime:
+        if (
+            content.startswith(b"PK\x03\x04")
+            or name.endswith(".docx")
+            or "wordprocessingml.document" in mime
+        ):
             return (
                 self._extract_text_from_docx_bytes(content),
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -5634,7 +6035,7 @@ class KnowledgeService:
         return decoded, (mime_type or "text/plain")
 
     def _resolve_embedding_config(
-        self, provider: str, model: str, embedding_config: Dict[str, Any]
+        self, provider: str, model: str, embedding_config: dict[str, Any]
     ) -> EmbeddingConfig:
         provider_key = (provider or "").lower()
         api_key = str(embedding_config.get("api_key") or "").strip()
@@ -5653,17 +6054,23 @@ class KnowledgeService:
             if not api_key:
                 api_key = str(self.settings.knowledge.gemini.api_key or "").strip()
             if not api_key:
-                raise ValidationFailedError("Gemini api_key is required in dataset embedding_config")
+                raise ValidationFailedError(
+                    "Gemini api_key is required in dataset embedding_config"
+                )
         elif provider_key in {"dashscope", "aliyun"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
             if not api_key:
-                raise ValidationFailedError("DashScope api_key is required in dataset embedding_config")
+                raise ValidationFailedError(
+                    "DashScope api_key is required in dataset embedding_config"
+                )
         elif provider_key in {"siliconflow", "silicon", "sf"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.siliconflow.api_key or "").strip()
             if not api_key:
-                raise ValidationFailedError("SiliconFlow api_key is required in dataset embedding_config")
+                raise ValidationFailedError(
+                    "SiliconFlow api_key is required in dataset embedding_config"
+                )
             endpoint = base_url or (
                 str(self.settings.knowledge.siliconflow.base_url or "").strip()
                 or "https://api.siliconflow.cn/v1"
@@ -5681,21 +6088,25 @@ class KnowledgeService:
             api_key=api_key or None,
             base_url=base_url,
             timeout_seconds=30.0,
-            extra={k: v for k, v in (embedding_config or {}).items() if k not in {"api_key", "base_url"}},
+            extra={
+                k: v
+                for k, v in (embedding_config or {}).items()
+                if k not in {"api_key", "base_url"}
+            },
         )
 
     # ========================= Document Enable/Disable/Archive (Dify-style) =========================
 
     async def set_document_enabled(
         self, user: UserContext, dataset_id: str, document_id: str, enabled: bool
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Enable or disable a document."""
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
 
-        update_data: Dict[str, Any] = {"enabled": enabled}
+        update_data: dict[str, Any] = {"enabled": enabled}
         if not enabled:
             update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
             update_data["disabled_by"] = user.user_id
@@ -5712,15 +6123,15 @@ class KnowledgeService:
         dataset_id: str,
         document_id: str,
         archived: bool,
-        reason: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        reason: str | None = None,
+    ) -> dict[str, Any]:
         """Archive or unarchive a document."""
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc = await self.db.get_document(document_id)
         if not doc or str(doc.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("document not found")
 
-        update_data: Dict[str, Any] = {"archived": archived}
+        update_data: dict[str, Any] = {"archived": archived}
         if archived:
             update_data["archived_at"] = datetime.utcnow()  # Pass datetime object, not string
             update_data["archived_by"] = user.user_id
@@ -5738,8 +6149,8 @@ class KnowledgeService:
         user: UserContext,
         dataset_id: str,
         document_id: str,
-        update_data: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        update_data: dict[str, Any],
+    ) -> dict[str, Any]:
         """Update document metadata."""
         await self.require_dataset_access(user, dataset_id, required="editor")
         doc = await self.db.get_document(document_id)
@@ -5758,22 +6169,34 @@ class KnowledgeService:
         self,
         user: UserContext,
         dataset_id: str,
-        documents: List[Any],
-        process_rule: Optional[Dict[str, Any]] = None,
-        batch_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        documents: list[Any],
+        process_rule: dict[str, Any] | None = None,
+        batch_name: str | None = None,
+    ) -> dict[str, Any]:
         """Batch create documents from text."""
         await self.require_dataset_access(user, dataset_id, required="editor")
 
         batch_id = batch_name or f"batch_{uuid.uuid4().hex[:8]}"
-        created_docs: List[Dict[str, Any]] = []
-        errors: Dict[str, str] = {}
+        created_docs: list[dict[str, Any]] = []
+        errors: dict[str, str] = {}
 
         for i, doc_data in enumerate(documents):
             try:
-                title = doc_data.title if hasattr(doc_data, "title") else doc_data.get("title", f"doc_{i}")
-                content = doc_data.content if hasattr(doc_data, "content") else doc_data.get("content", "")
-                metadata = doc_data.metadata if hasattr(doc_data, "metadata") else doc_data.get("metadata", {})
+                title = (
+                    doc_data.title
+                    if hasattr(doc_data, "title")
+                    else doc_data.get("title", f"doc_{i}")
+                )
+                content = (
+                    doc_data.content
+                    if hasattr(doc_data, "content")
+                    else doc_data.get("content", "")
+                )
+                metadata = (
+                    doc_data.metadata
+                    if hasattr(doc_data, "metadata")
+                    else doc_data.get("metadata", {})
+                )
 
                 doc = await self.create_document_from_text(
                     user, dataset_id, title=title, content=content, metadata=metadata
@@ -5793,14 +6216,14 @@ class KnowledgeService:
         }
 
     async def batch_delete_documents(
-        self, user: UserContext, dataset_id: str, document_ids: List[str]
-    ) -> Dict[str, Any]:
+        self, user: UserContext, dataset_id: str, document_ids: list[str]
+    ) -> dict[str, Any]:
         """Batch delete documents."""
         await self.require_dataset_access(user, dataset_id, required="editor")
 
         success_count = 0
-        failed_ids: List[str] = []
-        errors: Dict[str, str] = {}
+        failed_ids: list[str] = []
+        errors: dict[str, str] = {}
 
         for doc_id in document_ids:
             try:
@@ -5825,14 +6248,14 @@ class KnowledgeService:
 
     async def set_segment_enabled(
         self, user: UserContext, dataset_id: str, segment_id: str, enabled: bool
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Enable or disable a segment."""
         dataset = await self.require_dataset_access(user, dataset_id, required="editor")
         seg = await self.db.get_segment(segment_id)
         if not seg or str(seg.get("dataset_id")) != dataset_id:
             raise ValidationFailedError("segment not found")
 
-        update_data: Dict[str, Any] = {"enabled": enabled}
+        update_data: dict[str, Any] = {"enabled": enabled}
         if not enabled:
             update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
             update_data["disabled_by"] = user.user_id
@@ -5847,10 +6270,8 @@ class KnowledgeService:
             collection = str(dataset.get("collection_name") or "")
             if collection:
                 pid = str(seg.get("vector_id") or seg.get("segment_id") or "")
-                try:
+                with contextlib.suppress(Exception):
                     await self.vector_store.delete_points(collection, [pid])
-                except Exception:
-                    pass
 
         return await self.db.get_segment(segment_id) or seg
 
@@ -5860,9 +6281,9 @@ class KnowledgeService:
         dataset_id: str,
         document_id: str,
         content: str,
-        answer: Optional[str] = None,
-        keywords: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        answer: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Create a new segment manually."""
         dataset = await self.require_dataset_access(user, dataset_id, required="editor")
         doc = await self.db.get_document(document_id)
@@ -5909,13 +6330,15 @@ class KnowledgeService:
                 embedding_config=embedding_config,
             )
 
-            embedder: Optional[BaseEmbedding] = None
+            embedder: BaseEmbedding | None = None
             try:
                 embedder = create_embedding(econf, dimension=dim)
-                vec = (await asyncio.wait_for(
-                    embedder.embed_documents([clean_content]),
-                    timeout=float(econf.timeout_seconds) + 10.0,
-                ))[0]
+                vec = (
+                    await asyncio.wait_for(
+                        embedder.embed_documents([clean_content]),
+                        timeout=float(econf.timeout_seconds) + 10.0,
+                    )
+                )[0]
 
                 collection = await self.vector_store.ensure_collection(
                     dataset_id=dataset_id,
@@ -5939,7 +6362,9 @@ class KnowledgeService:
                 collection_name=collection,
                 points=[qmodels.PointStruct(id=seg_id, vector=vec, payload=payload)],
             )
-            await self.db.update_segment_fields(seg_id, {"vector_id": seg_id, "status": "completed"})
+            await self.db.update_segment_fields(
+                seg_id, {"vector_id": seg_id, "status": "completed"}
+            )
         except Exception as exc:
             await self.db.update_segment_fields(seg_id, {"status": "error", "error": str(exc)})
 
@@ -5950,9 +6375,7 @@ class KnowledgeService:
 
     # ========================= Statistics =========================
 
-    async def get_dataset_statistics(
-        self, user: UserContext, dataset_id: str
-    ) -> Dict[str, Any]:
+    async def get_dataset_statistics(self, user: UserContext, dataset_id: str) -> dict[str, Any]:
         """Get dataset statistics."""
         await self.require_dataset_access(user, dataset_id, required="viewer")
 
@@ -5960,9 +6383,19 @@ class KnowledgeService:
         segs = await self.db.list_segments(dataset_id=dataset_id, limit=50000, offset=0)
 
         total_docs = len(docs)
-        available_docs = len([d for d in docs if d.get("status") == "completed" and d.get("enabled", True) and not d.get("archived", False)])
+        available_docs = len(
+            [
+                d
+                for d in docs
+                if d.get("status") == "completed"
+                and d.get("enabled", True)
+                and not d.get("archived", False)
+            ]
+        )
         total_segs = len(segs)
-        available_segs = len([s for s in segs if s.get("enabled", True) and s.get("status") == "completed"])
+        available_segs = len(
+            [s for s in segs if s.get("enabled", True) and s.get("status") == "completed"]
+        )
 
         word_count = sum(d.get("word_count", 0) or 0 for d in docs)
         hit_count = sum(s.get("hit_count", 0) or 0 for s in segs)
@@ -5979,7 +6412,7 @@ class KnowledgeService:
 
     async def get_document_statistics(
         self, user: UserContext, dataset_id: str, document_id: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get document statistics."""
         await self.require_dataset_access(user, dataset_id, required="viewer")
         doc = await self.db.get_document(document_id)
@@ -6002,9 +6435,9 @@ class KnowledgeService:
 
     def _normalize_local_image_url(
         self,
-        image_url: Optional[str],
-        segment_id: Optional[str],
-    ) -> Optional[str]:
+        image_url: str | None,
+        segment_id: str | None,
+    ) -> str | None:
         if not image_url or not segment_id:
             return image_url
         if isinstance(image_url, str) and image_url.startswith("file://"):
@@ -6013,10 +6446,10 @@ class KnowledgeService:
 
     async def _get_presigned_image_url(
         self,
-        image_url: Optional[str],
-        segment_id: Optional[str],
+        image_url: str | None,
+        segment_id: str | None,
         expiry_seconds: int = 3600,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Get presigned URL for an image.
 
@@ -6062,7 +6495,7 @@ class KnowledgeService:
         document_id: str,
         max_images_per_chunk: int = 10,
         proximity_threshold: float = 0.3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Associate image segments with text segments based on proximity.
 
@@ -6087,7 +6520,6 @@ class KnowledgeService:
             Statistics about associations created
         """
 
-
         # Get all segments for the document
         doc = await self.db.get_document(document_id)
         if not doc:
@@ -6101,16 +6533,16 @@ class KnowledgeService:
         )
 
         text_segments = [
-            s for s in all_segments
-            if str(s.get("content_type", "text")).lower() == "text"
+            s for s in all_segments if str(s.get("content_type", "text")).lower() == "text"
         ]
         image_segments = [
-            s for s in all_segments
-            if str(s.get("content_type", "text")).lower() == "image"
+            s for s in all_segments if str(s.get("content_type", "text")).lower() == "image"
         ]
 
         if not text_segments or not image_segments:
-            logger.info(f"Document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments - skipping association")
+            logger.info(
+                f"Document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments - skipping association"
+            )
             return {
                 "document_id": document_id,
                 "text_segments": len(text_segments),
@@ -6118,14 +6550,16 @@ class KnowledgeService:
                 "associations_created": 0,
             }
 
-        logger.info(f"Associating images for document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments")
+        logger.info(
+            f"Associating images for document {document_id}: {len(text_segments)} text, {len(image_segments)} image segments"
+        )
 
         def _normalize_for_match(value: str) -> str:
             return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
         placeholder_pattern = re.compile(r"\[Image\]|\[图片\]")
-        placeholder_map: Dict[int, Dict[str, Any]] = {}
-        text_norm_cache: Dict[str, str] = {}
+        placeholder_map: dict[int, dict[str, Any]] = {}
+        text_norm_cache: dict[str, str] = {}
 
         text_segments_sorted = sorted(
             text_segments,
@@ -6143,7 +6577,7 @@ class KnowledgeService:
                         placeholder_map[placeholder_index] = seg
                     placeholder_index += 1
 
-        image_infos: List[Dict[str, Any]] = []
+        image_infos: list[dict[str, Any]] = []
         for img_seg in image_segments:
             img_metadata = _ensure_dict(img_seg.get("metadata"))
             context_index = img_metadata.get("context_index")
@@ -6160,7 +6594,9 @@ class KnowledgeService:
             if context_index is not None:
                 if context_index in placeholder_map:
                     mapped_seg = placeholder_map[context_index]
-                    image_position = int(mapped_seg.get("position", image_position) or image_position)
+                    image_position = int(
+                        mapped_seg.get("position", image_position) or image_position
+                    )
                     if image_page is None:
                         mapped_meta = _ensure_dict(mapped_seg.get("metadata"))
                         image_page = mapped_meta.get("page") or mapped_meta.get("page_number")
@@ -6172,15 +6608,17 @@ class KnowledgeService:
             if len(context_norm) < 12:
                 context_norm = ""
 
-            image_infos.append({
-                "segment": img_seg,
-                "position": image_position,
-                "page": image_page,
-                "context_norm": context_norm,
-            })
+            image_infos.append(
+                {
+                    "segment": img_seg,
+                    "position": image_position,
+                    "page": image_page,
+                    "context_norm": context_norm,
+                }
+            )
 
         # Build associations
-        associations: List[Dict[str, Any]] = []
+        associations: list[dict[str, Any]] = []
         segments_with_images = 0
 
         for text_seg in text_segments_sorted:
@@ -6191,7 +6629,7 @@ class KnowledgeService:
             text_norm = text_norm_cache.get(text_seg_id, "")
 
             # Find candidate images and compute proximity scores
-            candidates: List[Tuple[Dict[str, Any], float]] = []
+            candidates: list[tuple[dict[str, Any], float]] = []
 
             for img_info in image_infos:
                 img_seg = img_info["segment"]
@@ -6221,14 +6659,16 @@ class KnowledgeService:
                 segments_with_images += 1
 
             for position, (img_seg, score) in enumerate(top_candidates):
-                associations.append({
-                    "segment_id": text_seg_id,
-                    "image_segment_id": str(img_seg.get("segment_id")),
-                    "position": position,
-                    "proximity_score": score,
-                    "char_offset": int(img_seg.get("position", 0)),
-                    "page_number": img_seg.get("metadata", {}).get("page"),
-                })
+                associations.append(
+                    {
+                        "segment_id": text_seg_id,
+                        "image_segment_id": str(img_seg.get("segment_id")),
+                        "position": position,
+                        "proximity_score": score,
+                        "char_offset": int(img_seg.get("position", 0)),
+                        "page_number": img_seg.get("metadata", {}).get("page"),
+                    }
+                )
 
         # Batch insert associations
         if associations:
@@ -6236,7 +6676,7 @@ class KnowledgeService:
             logger.info(f"Created {count} image associations for document {document_id}")
 
             # Update segment flags in batch
-            affected_segment_ids = list(set(a["segment_id"] for a in associations))
+            affected_segment_ids = list({a["segment_id"] for a in associations})
             for seg_id in affected_segment_ids:
                 await self.db.update_segment_image_flags(seg_id)
 
@@ -6251,9 +6691,9 @@ class KnowledgeService:
     def _compute_image_proximity_score(
         self,
         text_position: int,
-        text_page: Optional[int],
+        text_page: int | None,
         image_position: int,
-        image_page: Optional[int],
+        image_page: int | None,
         total_segments: int,
     ) -> float:
         """
@@ -6323,9 +6763,9 @@ class KnowledgeService:
         self,
         user: UserContext,
         dataset_id: str,
-        document_id: Optional[str] = None,
+        document_id: str | None = None,
         include_images: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get segments with their associated images attached.
 
@@ -6352,9 +6792,9 @@ class KnowledgeService:
 
         # Get text segments that have images
         text_segment_ids = [
-            s.get("segment_id") for s in segments
-            if str(s.get("content_type", "text")).lower() == "text"
-            and s.get("has_images", False)
+            s.get("segment_id")
+            for s in segments
+            if str(s.get("content_type", "text")).lower() == "text" and s.get("has_images", False)
         ]
 
         if not text_segment_ids:
@@ -6419,8 +6859,8 @@ class KnowledgeService:
     async def recover_stuck_documents(
         self,
         stuck_threshold_minutes: int = 15,
-        worker: Optional["KnowledgeWorker"] = None,
-    ) -> Dict[str, Any]:
+        worker: KnowledgeWorker | None = None,
+    ) -> dict[str, Any]:
         """
         Recover documents stuck in processing state.
 
@@ -6470,11 +6910,13 @@ class KnowledgeService:
                     )
 
                     result["recovered_count"] += 1
-                    result["recovered_documents"].append({
-                        "document_id": doc_id,
-                        "title": title,
-                        "old_status": old_status,
-                    })
+                    result["recovered_documents"].append(
+                        {
+                            "document_id": doc_id,
+                            "title": title,
+                            "old_status": old_status,
+                        }
+                    )
 
                     logger.info(f"Recovered stuck document: {title} ({doc_id}) from {old_status}")
 

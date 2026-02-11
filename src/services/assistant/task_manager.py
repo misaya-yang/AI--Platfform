@@ -47,11 +47,12 @@ References:
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Dict, List, Optional, Set
-import uuid
+from typing import Any
 
 from ...core.observability.logging import get_logger
 from .working_memory import WorkingMemory
@@ -88,16 +89,17 @@ class SessionResources:
         lock: Asyncio lock for thread-safe access
         semaphore: Asyncio semaphore for concurrency control
     """
+
     session_id: str
     tenant_id: str
     user_id: str
 
     # Memory resources (initialized in __post_init__ if not provided)
-    working_memory: Optional[WorkingMemory] = None
+    working_memory: WorkingMemory | None = None
 
     # Execution state
-    active_tasks: Set[str] = field(default_factory=set)
-    pending_tool_calls: Dict[str, Any] = field(default_factory=dict)
+    active_tasks: set[str] = field(default_factory=set)
+    pending_tool_calls: dict[str, Any] = field(default_factory=dict)
 
     # Timing (using UTC for consistent timezone handling)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -106,7 +108,7 @@ class SessionResources:
 
     # Concurrency control (created in __post_init__)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    semaphore: Optional[asyncio.Semaphore] = None  # Initialized in __post_init__
+    semaphore: asyncio.Semaphore | None = None  # Initialized in __post_init__
 
     # Maximum concurrent tasks per session
     max_concurrent_tasks: int = 5
@@ -121,13 +123,15 @@ class SessionResources:
 
     def is_expired(self) -> bool:
         """Check if session has timed out."""
-        return datetime.now(timezone.utc) - self.last_activity > timedelta(seconds=self.timeout_seconds)
+        return datetime.now(timezone.utc) - self.last_activity > timedelta(
+            seconds=self.timeout_seconds
+        )
 
     def touch(self) -> None:
         """Update last activity timestamp."""
         self.last_activity = datetime.now(timezone.utc)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization/logging."""
         return {
             "session_id": self.session_id,
@@ -155,6 +159,7 @@ class TaskContext:
         cancelled: Whether cancellation was requested
         cancel_event: Event to signal cancellation
     """
+
     task_id: str
     session_id: str
     started_at: datetime = field(default_factory=datetime.now)
@@ -168,7 +173,7 @@ class TaskContext:
         self.cancelled = True
         self.cancel_event.set()
 
-    async def wait_for_cancel(self, timeout: Optional[float] = None) -> bool:
+    async def wait_for_cancel(self, timeout: float | None = None) -> bool:
         """Wait for cancellation signal."""
         try:
             await asyncio.wait_for(self.cancel_event.wait(), timeout=timeout)
@@ -233,10 +238,10 @@ class TaskManager:
         self.cleanup_interval = cleanup_interval_seconds
         self.max_concurrent_per_session = max_concurrent_per_session
 
-        self._sessions: Dict[str, SessionResources] = {}
-        self._task_contexts: Dict[str, TaskContext] = {}  # task_id -> TaskContext
+        self._sessions: dict[str, SessionResources] = {}
+        self._task_contexts: dict[str, TaskContext] = {}  # task_id -> TaskContext
         self._lock = asyncio.Lock()
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
         self._started = False
 
     async def start(self) -> None:
@@ -258,10 +263,8 @@ class TaskManager:
 
         if self._cleanup_task:
             self._cleanup_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
 
         # Clean up all sessions
         async with self._lock:
@@ -279,7 +282,7 @@ class TaskManager:
         session_id: str,
         tenant_id: str,
         user_id: str,
-        timeout_seconds: Optional[int] = None,
+        timeout_seconds: int | None = None,
     ) -> AsyncGenerator[SessionResources, None]:
         """
         Get or create a session with automatic resource management.
@@ -317,7 +320,7 @@ class TaskManager:
         session_id: str,
         tenant_id: str,
         user_id: str,
-        timeout_seconds: Optional[int] = None,
+        timeout_seconds: int | None = None,
     ) -> SessionResources:
         """Get existing session or create new one."""
         async with self._lock:
@@ -350,7 +353,7 @@ class TaskManager:
             logger.debug(f"Created new session: {session_id}")
             return session
 
-    async def get_session(self, session_id: str) -> Optional[SessionResources]:
+    async def get_session(self, session_id: str) -> SessionResources | None:
         """Get a session if it exists and is not expired."""
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -367,8 +370,7 @@ class TaskManager:
 
                 # Clean up associated task contexts
                 to_remove = [
-                    tid for tid, ctx in self._task_contexts.items()
-                    if ctx.session_id == session_id
+                    tid for tid, ctx in self._task_contexts.items() if ctx.session_id == session_id
                 ]
                 for tid in to_remove:
                     del self._task_contexts[tid]
@@ -380,8 +382,8 @@ class TaskManager:
     async def register_task(
         self,
         session_id: str,
-        task_id: Optional[str] = None,
-    ) -> Optional[TaskContext]:
+        task_id: str | None = None,
+    ) -> TaskContext | None:
         """
         Register a new task within a session.
 
@@ -445,11 +447,11 @@ class TaskManager:
             return True
         return False
 
-    async def get_task_context(self, task_id: str) -> Optional[TaskContext]:
+    async def get_task_context(self, task_id: str) -> TaskContext | None:
         """Get the context for a task."""
         return self._task_contexts.get(task_id)
 
-    async def get_session_stats(self) -> Dict[str, Any]:
+    async def get_session_stats(self) -> dict[str, Any]:
         """Get statistics about active sessions."""
         async with self._lock:
             total = len(self._sessions)
@@ -457,7 +459,7 @@ class TaskManager:
             total_tasks = sum(len(s.active_tasks) for s in self._sessions.values())
 
             # Group by tenant
-            by_tenant: Dict[str, int] = {}
+            by_tenant: dict[str, int] = {}
             for s in self._sessions.values():
                 by_tenant[s.tenant_id] = by_tenant.get(s.tenant_id, 0) + 1
 
@@ -484,18 +486,14 @@ class TaskManager:
     async def _cleanup_expired(self) -> int:
         """Remove expired sessions."""
         async with self._lock:
-            expired = [
-                sid for sid, session in self._sessions.items()
-                if session.is_expired()
-            ]
+            expired = [sid for sid, session in self._sessions.items() if session.is_expired()]
             for sid in expired:
                 session = self._sessions.pop(sid)
                 session.working_memory.clear()
 
                 # Clean up associated task contexts
                 to_remove = [
-                    tid for tid, ctx in self._task_contexts.items()
-                    if ctx.session_id == sid
+                    tid for tid, ctx in self._task_contexts.items() if ctx.session_id == sid
                 ]
                 for tid in to_remove:
                     del self._task_contexts[tid]
@@ -508,7 +506,7 @@ class TaskManager:
     async def _evict_oldest(self) -> None:
         """Evict the oldest inactive session (LRU eviction)."""
         # Find oldest by last_activity
-        oldest_id: Optional[str] = None
+        oldest_id: str | None = None
         oldest_time = datetime.now(timezone.utc)
 
         for sid, session in self._sessions.items():
@@ -522,8 +520,7 @@ class TaskManager:
 
             # Clean up associated task contexts
             to_remove = [
-                tid for tid, ctx in self._task_contexts.items()
-                if ctx.session_id == oldest_id
+                tid for tid, ctx in self._task_contexts.items() if ctx.session_id == oldest_id
             ]
             for tid in to_remove:
                 del self._task_contexts[tid]
@@ -536,7 +533,7 @@ class TaskManager:
 # =============================================================================
 
 
-_task_manager: Optional[TaskManager] = None
+_task_manager: TaskManager | None = None
 
 
 def get_task_manager() -> TaskManager:

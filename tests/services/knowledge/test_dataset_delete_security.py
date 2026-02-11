@@ -46,7 +46,9 @@ async def test_delete_dataset_rejects_invalid_password(mock_service: KnowledgeSe
 
 @pytest.mark.asyncio
 async def test_delete_dataset_soft_delete_and_audit(mock_service: KnowledgeService) -> None:
-    user = UserContext(user_id="u_test", tenant_id="tenant_a", is_authenticated=True, roles=["user"])
+    user = UserContext(
+        user_id="u_test", tenant_id="tenant_a", is_authenticated=True, roles=["user"]
+    )
     mock_service.db.get_user.return_value = {"password_hash": hash_password("Correct#123")}
     mock_service.db.delete_dataset.return_value = True
 
@@ -58,7 +60,9 @@ async def test_delete_dataset_soft_delete_and_audit(mock_service: KnowledgeServi
     )
 
     assert deleted is True
-    mock_service.vector_store.delete_collection.assert_awaited_once_with(collection_name="col_kb_test")
+    mock_service.vector_store.delete_collection.assert_awaited_once_with(
+        collection_name="col_kb_test"
+    )
     mock_service.db.delete_dataset.assert_awaited_once_with(
         "kb_test",
         deleted_by="u_test",

@@ -67,4 +67,3 @@ class AnonymousIdentityMiddleware(BaseHTTPMiddleware):
             response.headers.setdefault(header_name, anon_id)
 
         return response
-

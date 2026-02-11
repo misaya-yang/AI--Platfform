@@ -16,7 +16,9 @@ class StubVectorStore:
         self.collections = []
         self.upserts = []
 
-    async def ensure_collection(self, dataset_id, dimension, collection_name=None, distance="cosine"):
+    async def ensure_collection(
+        self, dataset_id, dimension, collection_name=None, distance="cosine"
+    ):
         self.collections.append((dataset_id, dimension, collection_name))
         return collection_name or f"kb_{dataset_id}_{dimension}"
 

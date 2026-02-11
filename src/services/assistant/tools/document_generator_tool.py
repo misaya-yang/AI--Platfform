@@ -15,21 +15,19 @@ import base64
 import io
 import re
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 
+from ....core.observability.logging import get_logger
 from .tool_registry import (
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
     ToolCallRequest,
     ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRiskLevel,
     register_tool,
 )
-from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -41,8 +39,8 @@ logger = get_logger(__name__)
 DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     name="generate_document",
     description="Generate a formatted document (Word, PDF, or Markdown) from text content. "
-                "IMPORTANT: The content parameter must contain COMPLETE, DETAILED document content in Markdown format. "
-                "Before calling this tool, you MUST first write out the full document content in your chat response.",
+    "IMPORTANT: The content parameter must contain COMPLETE, DETAILED document content in Markdown format. "
+    "Before calling this tool, you MUST first write out the full document content in your chat response.",
     parameters=[
         ToolParameter(
             name="title",
@@ -54,9 +52,9 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
             name="content",
             type="string",
             description="COMPLETE document content in Markdown format. This MUST be the FULL detailed content, "
-                        "not a skeleton or outline. Include: headers (# ## ###), detailed paragraphs, lists, "
-                        "examples, and analysis. The content should be comprehensive and well-structured. "
-                        "Minimum 500+ words for typical documents.",
+            "not a skeleton or outline. Include: headers (# ## ###), detailed paragraphs, lists, "
+            "examples, and analysis. The content should be comprehensive and well-structured. "
+            "Minimum 500+ words for typical documents.",
             required=True,
         ),
         ToolParameter(
@@ -71,17 +69,17 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="Use ONLY AFTER you have written out the complete document content in your chat response. "
-                "The user should see the full content before you generate the document file. "
-                "Good for creating detailed reports, plans, analyses, or documentation.",
+    "The user should see the full content before you generate the document file. "
+    "Good for creating detailed reports, plans, analyses, or documentation.",
     when_not_to_use="Do NOT use with minimal/skeleton content. Do NOT use for simple responses. "
-                    "Do NOT call immediately - first show the full content in chat, then generate.",
+    "Do NOT call immediately - first show the full content in chat, then generate.",
     examples=[
         ToolExample(
             description="Generate a sales report",
             input={
                 "title": "Q4 Sales Report",
                 "content": "# Q4 Sales Report\n\n## Summary\n- Total revenue: $1.2M\n- Growth: 15%\n\n## Details\n...",
-                "format": "docx"
+                "format": "docx",
             },
             expected_output="Returns a Word document with the formatted report",
         ),
@@ -90,7 +88,7 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
             input={
                 "title": "Team Meeting Notes 2025-01-15",
                 "content": "# Team Meeting Notes\n\n**Date:** January 15, 2025\n\n## Attendees\n- Alice\n- Bob\n\n## Action Items\n1. Review project timeline\n2. Update documentation",
-                "format": "docx"
+                "format": "docx",
             },
             expected_output="Returns a Word document with meeting notes",
         ),
@@ -103,14 +101,16 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
 # Markdown to Document Converter
 # =============================================================================
 
+
 class MarkdownToDocxConverter:
     """Convert Markdown to Word document using python-docx."""
 
     def __init__(self):
         try:
             from docx import Document
-            from docx.shared import Pt, Inches
             from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.shared import Inches, Pt
+
             self._docx_available = True
         except ImportError:
             self._docx_available = False
@@ -126,7 +126,6 @@ class MarkdownToDocxConverter:
             raise RuntimeError("python-docx is not installed")
 
         from docx import Document
-        from docx.shared import Pt, Inches
         from docx.enum.text import WD_ALIGN_PARAGRAPH
 
         doc = Document()
@@ -147,9 +146,8 @@ class MarkdownToDocxConverter:
     def _parse_markdown(self, doc, content: str):
         """Parse markdown and add to document."""
         from docx.shared import Pt
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-        lines = content.split('\n')
+        lines = content.split("\n")
         in_code_block = False
         code_content = []
         in_list = False
@@ -157,14 +155,14 @@ class MarkdownToDocxConverter:
 
         for line in lines:
             # Handle code blocks
-            if line.startswith('```'):
+            if line.startswith("```"):
                 if in_code_block:
                     # End code block
                     if code_content:
                         code_para = doc.add_paragraph()
-                        code_para.style = 'No Spacing'
-                        run = code_para.add_run('\n'.join(code_content))
-                        run.font.name = 'Courier New'
+                        code_para.style = "No Spacing"
+                        run = code_para.add_run("\n".join(code_content))
+                        run.font.name = "Courier New"
                         run.font.size = Pt(9)
                     code_content = []
                 in_code_block = not in_code_block
@@ -183,28 +181,28 @@ class MarkdownToDocxConverter:
                 continue
 
             # Handle headers
-            if line.startswith('#'):
+            if line.startswith("#"):
                 if in_list and list_items:
                     self._add_list(doc, list_items)
                     list_items = []
                     in_list = False
 
-                level = len(re.match(r'^#+', line).group())
-                text = line.lstrip('#').strip()
+                level = len(re.match(r"^#+", line).group())
+                text = line.lstrip("#").strip()
                 doc.add_heading(text, level=min(level, 9))
                 continue
 
             # Handle bullet lists
-            if re.match(r'^[\-\*]\s', line):
+            if re.match(r"^[\-\*]\s", line):
                 in_list = True
-                list_items.append(('bullet', line[2:].strip()))
+                list_items.append(("bullet", line[2:].strip()))
                 continue
 
             # Handle numbered lists
-            if re.match(r'^\d+\.\s', line):
+            if re.match(r"^\d+\.\s", line):
                 in_list = True
-                text = re.sub(r'^\d+\.\s', '', line).strip()
-                list_items.append(('number', text))
+                text = re.sub(r"^\d+\.\s", "", line).strip()
+                list_items.append(("number", text))
                 continue
 
             # Regular paragraph
@@ -220,33 +218,33 @@ class MarkdownToDocxConverter:
         if in_list and list_items:
             self._add_list(doc, list_items)
 
-    def _add_list(self, doc, items: List[tuple]):
+    def _add_list(self, doc, items: list[tuple]):
         """Add a list to the document."""
         for item_type, text in items:
-            if item_type == 'bullet':
-                para = doc.add_paragraph(style='List Bullet')
+            if item_type == "bullet":
+                para = doc.add_paragraph(style="List Bullet")
             else:
-                para = doc.add_paragraph(style='List Number')
+                para = doc.add_paragraph(style="List Number")
             self._add_formatted_text(para, text)
 
     def _add_formatted_text(self, para, text: str):
         """Add text with basic formatting (bold, italic)."""
         # Simple regex-based formatting
         # Handle **bold** and *italic*
-        parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)', text)
+        parts = re.split(r"(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)", text)
 
         for part in parts:
             if not part:
                 continue
-            if part.startswith('**') and part.endswith('**'):
+            if part.startswith("**") and part.endswith("**"):
                 run = para.add_run(part[2:-2])
                 run.bold = True
-            elif part.startswith('*') and part.endswith('*'):
+            elif part.startswith("*") and part.endswith("*"):
                 run = para.add_run(part[1:-1])
                 run.italic = True
-            elif part.startswith('`') and part.endswith('`'):
+            elif part.startswith("`") and part.endswith("`"):
                 run = para.add_run(part[1:-1])
-                run.font.name = 'Courier New'
+                run.font.name = "Courier New"
             else:
                 para.add_run(part)
 
@@ -258,10 +256,12 @@ class MarkdownToPdfConverter:
         self._available = False
         try:
             import markdown
-            self._md = markdown.Markdown(extensions=['tables', 'fenced_code'])
+
+            self._md = markdown.Markdown(extensions=["tables", "fenced_code"])
             # Check for PDF generation capability
             try:
                 from weasyprint import HTML
+
                 self._available = True
             except ImportError:
                 logger.info("weasyprint not installed, PDF generation disabled")
@@ -281,7 +281,7 @@ class MarkdownToPdfConverter:
         from weasyprint import HTML
 
         # Convert markdown to HTML
-        md = markdown.Markdown(extensions=['tables', 'fenced_code'])
+        md = markdown.Markdown(extensions=["tables", "fenced_code"])
         html_content = md.convert(markdown_content)
 
         # Wrap in HTML document with styling
@@ -318,6 +318,7 @@ class MarkdownToPdfConverter:
 # Document Generator Tool Executor
 # =============================================================================
 
+
 class DocumentGeneratorExecutor(ToolExecutor):
     """Executor for document generation tool."""
 
@@ -352,7 +353,9 @@ class DocumentGeneratorExecutor(ToolExecutor):
                     )
 
                 doc_bytes = self.docx_converter.convert(title, content)
-                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                mime_type = (
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
                 filename = f"{self._sanitize_filename(title)}.docx"
 
             elif format == "pdf":
@@ -371,7 +374,7 @@ class DocumentGeneratorExecutor(ToolExecutor):
             elif format == "md":
                 # Plain markdown output
                 full_content = f"# {title}\n\n{content}"
-                doc_bytes = full_content.encode('utf-8')
+                doc_bytes = full_content.encode("utf-8")
                 mime_type = "text/markdown"
                 filename = f"{self._sanitize_filename(title)}.md"
 
@@ -390,12 +393,14 @@ class DocumentGeneratorExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=True,
                 result=f"Document '{filename}' generated successfully. The user can download it directly from the chat interface - do NOT mention any file paths or workspace directories.",
-                output_files=[{
-                    "filename": filename,
-                    "content_base64": base64.b64encode(doc_bytes).decode("utf-8"),
-                    "mime_type": mime_type,
-                    "size_bytes": len(doc_bytes),
-                }],
+                output_files=[
+                    {
+                        "filename": filename,
+                        "content_base64": base64.b64encode(doc_bytes).decode("utf-8"),
+                        "mime_type": mime_type,
+                        "size_bytes": len(doc_bytes),
+                    }
+                ],
                 metadata={
                     "format": format,
                     "title": title,
@@ -419,7 +424,7 @@ class DocumentGeneratorExecutor(ToolExecutor):
     def _sanitize_filename(self, title: str) -> str:
         """Sanitize title for use as filename."""
         # Remove or replace invalid characters
-        safe = re.sub(r'[<>:"/\\|?*]', '_', title)
+        safe = re.sub(r'[<>:"/\\|?*]', "_", title)
         # Limit length
         return safe[:100]
 
@@ -427,6 +432,7 @@ class DocumentGeneratorExecutor(ToolExecutor):
 # =============================================================================
 # Registration Helper
 # =============================================================================
+
 
 def register_document_generation_tool() -> bool:
     """Register document generation tool with the global registry."""

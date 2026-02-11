@@ -4,19 +4,21 @@ Tests for JWT signature verification in streaming middleware.
 CRITICAL SECURITY TEST: Ensures JWT tokens are properly verified before
 trusting authentication claims.
 """
-import pytest
-import jwt
-from datetime import datetime, timedelta
+
 from dataclasses import dataclass, field
-from typing import List
+from datetime import datetime, timedelta
+
+import jwt
+import pytest
 
 
 @dataclass
 class MockStreamingAuthConfig:
     """Mock config for testing."""
+
     jwt_enabled: bool = True
     jwt_secret: str = "test-secret-key-minimum-32-chars!"
-    jwt_algorithms: List[str] = field(default_factory=lambda: ["HS256"])
+    jwt_algorithms: list[str] = field(default_factory=lambda: ["HS256"])
     api_key_enabled: bool = False
     api_key_header: str = "X-API-Key"
     guest_session_enabled: bool = True
@@ -24,7 +26,7 @@ class MockStreamingAuthConfig:
     anonymous_enabled: bool = True
     anonymous_cookie: str = "ag_anon_id"
     anonymous_header: str = "X-AG-Anonymous-Id"
-    whitelist_paths: List[str] = field(default_factory=list)
+    whitelist_paths: list[str] = field(default_factory=list)
 
 
 class TestJWTVerification:
@@ -42,7 +44,7 @@ class TestJWTVerification:
             "tenant_id": "tenant1",
             "tier": "premium",
             "roles": ["user"],
-            "exp": datetime.utcnow() + timedelta(hours=1)
+            "exp": datetime.utcnow() + timedelta(hours=1),
         }
         return jwt.encode(payload, jwt_secret, algorithm="HS256")
 
@@ -54,17 +56,14 @@ class TestJWTVerification:
             "tenant_id": "victim_tenant",
             "tier": "admin",
             "roles": ["admin"],
-            "exp": datetime.utcnow() + timedelta(hours=1)
+            "exp": datetime.utcnow() + timedelta(hours=1),
         }
         return jwt.encode(payload, "wrong-secret-totally-different!", algorithm="HS256")
 
     @pytest.fixture
     def expired_token(self, jwt_secret):
         """Expired JWT - should be rejected."""
-        payload = {
-            "sub": "user123",
-            "exp": datetime.utcnow() - timedelta(hours=1)
-        }
+        payload = {"sub": "user123", "exp": datetime.utcnow() - timedelta(hours=1)}
         return jwt.encode(payload, jwt_secret, algorithm="HS256")
 
     @pytest.fixture
@@ -184,13 +183,12 @@ class TestJWTLogging:
 
     @pytest.fixture
     def config(self):
-        return MockStreamingAuthConfig(
-            jwt_secret="test-secret-key-minimum-32-chars!"
-        )
+        return MockStreamingAuthConfig(jwt_secret="test-secret-key-minimum-32-chars!")
 
     def test_invalid_signature_is_logged(self, config, caplog):
         """Invalid JWT signature should log a warning."""
         import logging
+
         from src.core.middleware.streaming import StreamingAuthMiddleware
 
         middleware = StreamingAuthMiddleware(app=None, config=config)
@@ -199,7 +197,7 @@ class TestJWTLogging:
         forged = jwt.encode(
             {"sub": "attacker", "exp": datetime.utcnow() + timedelta(hours=1)},
             "wrong-secret",
-            algorithm="HS256"
+            algorithm="HS256",
         )
 
         scope = {
@@ -220,6 +218,7 @@ class TestJWTLogging:
     def test_expired_token_is_logged(self, config, caplog):
         """Expired JWT should log appropriately."""
         import logging
+
         from src.core.middleware.streaming import StreamingAuthMiddleware
 
         middleware = StreamingAuthMiddleware(app=None, config=config)
@@ -227,7 +226,7 @@ class TestJWTLogging:
         expired = jwt.encode(
             {"sub": "user", "exp": datetime.utcnow() - timedelta(hours=1)},
             config.jwt_secret,
-            algorithm="HS256"
+            algorithm="HS256",
         )
 
         scope = {
@@ -240,7 +239,4 @@ class TestJWTLogging:
             middleware._extract_user_info(scope)
 
         # Should have logged about expiration
-        assert any(
-            "expir" in record.message.lower()
-            for record in caplog.records
-        )
+        assert any("expir" in record.message.lower() for record in caplog.records)

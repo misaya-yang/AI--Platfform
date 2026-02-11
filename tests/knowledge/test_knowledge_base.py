@@ -8,10 +8,10 @@
 """
 
 import asyncio
-import httpx
 import time
 from pathlib import Path
-from typing import Optional
+
+import httpx
 
 # Configuration
 BASE_URL = "http://localhost:8080"
@@ -30,7 +30,7 @@ class KnowledgeBaseTester:
             },
             timeout=60.0,
         )
-        self.document_id: Optional[str] = None
+        self.document_id: str | None = None
 
     async def check_health(self) -> bool:
         """检查服务健康状态"""
@@ -118,6 +118,7 @@ class KnowledgeBaseTester:
         except Exception as e:
             print(f"❌ 文件上传异常: {e}")
             import traceback
+
             traceback.print_exc()
             return False
 
@@ -156,7 +157,7 @@ class KnowledgeBaseTester:
                 print(f"\n⚠️ 检查状态异常: {e}")
                 await asyncio.sleep(2)
 
-        print(f"\n⚠️ 等待超时，文档可能仍在处理中")
+        print("\n⚠️ 等待超时，文档可能仍在处理中")
         return False
 
     async def test_retrieval(self, query: str) -> bool:

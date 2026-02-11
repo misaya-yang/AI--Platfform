@@ -1,6 +1,7 @@
 """
 核心工具函数
 """
+
 from __future__ import annotations
 
 
@@ -22,7 +23,7 @@ def estimate_tokens(text: str | None) -> int:
         return 0
 
     # CJK 字符范围：\u4e00-\u9fff
-    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     non_cjk_count = max(len(text) - cjk_count, 0)
 
     # CJK: 2 字符/Token，其他: 4 字符/Token
@@ -52,4 +53,4 @@ def truncate_text(text: str, max_tokens: int) -> str:
         else:
             right = mid
 
-    return text[:left - 1] if left > 0 else ""
+    return text[: left - 1] if left > 0 else ""

@@ -3,19 +3,21 @@
 
 基于 PostgreSQL 的 ServiceRegistry 存储后端实现
 """
+
 from __future__ import annotations
 
+import builtins
 import json
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from ...models.service import (
-    ServiceDefinition,
-    ServiceConfig,
-    ServiceRateLimitConfig,
     ServiceAuthConfig,
     ServiceCacheConfig,
+    ServiceConfig,
+    ServiceDefinition,
     ServicePriorityConfig,
+    ServiceRateLimitConfig,
 )
 from .service_registry import RegistryStorage
 
@@ -26,69 +28,58 @@ if TYPE_CHECKING:
 
 class DatabaseRegistryStorage(RegistryStorage):
     """基于数据库的服务注册存储"""
-    
+
     def __init__(
-        self, 
-        database: "DatabaseStorage",
-        redis: Optional["RedisStorage"] = None,
-        cache_ttl: int = 300
+        self, database: DatabaseStorage, redis: RedisStorage | None = None, cache_ttl: int = 300
     ):
         self.database = database
         self.redis = redis
         self.cache_ttl = cache_ttl
-    
+
     async def save(self, service: ServiceDefinition) -> None:
         """保存服务到数据库"""
         service_dict = self._service_to_dict(service)
         await self.database.save_service(service_dict)
-        
+
         # 更新缓存
         if self.redis and self.redis.enabled:
-            await self.redis.save(
-                f"service:{service.service_id}", 
-                service_dict, 
-                self.cache_ttl
-            )
-    
-    async def get(self, service_id: str) -> Optional[ServiceDefinition]:
+            await self.redis.save(f"service:{service.service_id}", service_dict, self.cache_ttl)
+
+    async def get(self, service_id: str) -> ServiceDefinition | None:
         """获取服务，优先从缓存读取"""
         # 尝试从缓存获取
         if self.redis and self.redis.enabled:
             cached = await self.redis.get(f"service:{service_id}")
             if cached:
                 return self._dict_to_service(cached)
-        
+
         # 从数据库获取
         service_dict = await self.database.get_service(service_id)
         if not service_dict:
             return None
-        
+
         # 写入缓存
         if self.redis and self.redis.enabled:
-            await self.redis.save(
-                f"service:{service_id}", 
-                service_dict, 
-                self.cache_ttl
-            )
-        
+            await self.redis.save(f"service:{service_id}", service_dict, self.cache_ttl)
+
         return self._dict_to_service(service_dict)
-    
-    async def list(self) -> List[ServiceDefinition]:
+
+    async def list(self) -> builtins.list[ServiceDefinition]:
         """获取所有服务"""
         services_dict = await self.database.list_services()
         return [self._dict_to_service(s) for s in services_dict]
-    
+
     async def delete(self, service_id: str) -> bool:
         """删除服务"""
         result = await self.database.delete_service(service_id)
-        
+
         # 清除缓存
         if self.redis and self.redis.enabled:
             await self.redis.delete(f"service:{service_id}")
-        
+
         return result
-    
-    def _service_to_dict(self, service: ServiceDefinition) -> Dict[str, Any]:
+
+    def _service_to_dict(self, service: ServiceDefinition) -> dict[str, Any]:
         """将 ServiceDefinition 转换为字典"""
         result = {
             "service_id": service.service_id,
@@ -118,7 +109,7 @@ class DatabaseRegistryStorage(RegistryStorage):
             "metadata": service.metadata or {},
             "async_config": service.async_config,
         }
-        
+
         # 处理 service_config
         if service.service_config:
             sc = service.service_config
@@ -148,11 +139,12 @@ class DatabaseRegistryStorage(RegistryStorage):
                     "max_queue_size": sc.priority.max_queue_size if sc.priority else 100,
                 },
             }
-        
+
         return result
-    
-    def _dict_to_service(self, data: Dict[str, Any]) -> ServiceDefinition:
+
+    def _dict_to_service(self, data: dict[str, Any]) -> ServiceDefinition:
         """将字典转换为 ServiceDefinition"""
+
         def as_enum(enum_cls, value, default):
             if value is None:
                 return default
@@ -162,25 +154,25 @@ class DatabaseRegistryStorage(RegistryStorage):
                 return enum_cls(value)
             except (ValueError, KeyError):
                 return default
-        
+
         service_type = as_enum(ServiceType, data.get("service_type"), ServiceType.CUSTOM)
         connector_type = as_enum(ConnectorType, data.get("connector_type"), ConnectorType.HTTP)
-        
+
         supported_modes = []
         for m in data.get("supported_modes", ["sync"]):
             mode = as_enum(InvocationMode, m, InvocationMode.SYNC)
             supported_modes.append(mode)
-        
+
         accepted = []
         for t in data.get("accepted_content_types", ["text"]):
             content_type = as_enum(ContentType, t, ContentType.TEXT)
             accepted.append(content_type)
-        
+
         outputs = []
         for t in data.get("output_content_types", ["text"]):
             content_type = as_enum(ContentType, t, ContentType.TEXT)
             outputs.append(content_type)
-        
+
         # 解析 connector_config
         connector_config = data.get("connector_config", {})
         if isinstance(connector_config, str):
@@ -188,7 +180,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                 connector_config = json.loads(connector_config)
             except json.JSONDecodeError:
                 connector_config = {}
-        
+
         # 解析 service_config
         service_config = None
         sc_data = data.get("service_config")
@@ -198,7 +190,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                     sc_data = json.loads(sc_data)
                 except json.JSONDecodeError:
                     sc_data = {}
-            
+
             if sc_data:
                 service_config = ServiceConfig(
                     rate_limit=ServiceRateLimitConfig(
@@ -226,7 +218,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                         max_queue_size=sc_data.get("priority", {}).get("max_queue_size", 100),
                     ),
                 )
-        
+
         # 解析 metadata
         metadata = data.get("metadata", {})
         if isinstance(metadata, str):
@@ -234,7 +226,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                 metadata = json.loads(metadata)
             except json.JSONDecodeError:
                 metadata = {}
-        
+
         # 解析 input_schema
         input_schema = data.get("input_schema", {})
         if isinstance(input_schema, str):
@@ -244,7 +236,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                 input_schema = {}
         if not isinstance(input_schema, dict):
             input_schema = {}
-        
+
         # 解析 output_schema
         output_schema = data.get("output_schema", {})
         if isinstance(output_schema, str):
@@ -254,7 +246,7 @@ class DatabaseRegistryStorage(RegistryStorage):
                 output_schema = {}
         if not isinstance(output_schema, dict):
             output_schema = {}
-        
+
         return ServiceDefinition(
             service_id=data["service_id"],
             name=data.get("name", data["service_id"]),
@@ -284,4 +276,3 @@ class DatabaseRegistryStorage(RegistryStorage):
             async_config=data.get("async_config"),
             service_config=service_config,
         )
-

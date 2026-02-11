@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..core.observability.logging import get_logger
 
@@ -39,14 +39,14 @@ class ProxyServiceConfig:
 
     # 上游配置
     upstream_url: str  # e.g., http://langgraph:8123
-    upstream_urls: List[str] = field(default_factory=list)  # 多实例 URL 列表
+    upstream_urls: list[str] = field(default_factory=list)  # 多实例 URL 列表
 
     # 可选配置
-    assistant_id: Optional[str] = None  # LangGraph assistant_id
-    graph_id: Optional[str] = None  # LangGraph graph_id (graph name)
-    default_model: Optional[str] = None
-    default_provider: Optional[str] = None
-    path_rewrite: Optional[str] = None  # 路径重写前缀，如 /api/v1
+    assistant_id: str | None = None  # LangGraph assistant_id
+    graph_id: str | None = None  # LangGraph graph_id (graph name)
+    default_model: str | None = None
+    default_provider: str | None = None
+    path_rewrite: str | None = None  # 路径重写前缀，如 /api/v1
     strip_prefix: bool = True  # 是否去除 /proxy/{service_name} 前缀
 
     # 超时配置
@@ -56,7 +56,7 @@ class ProxyServiceConfig:
     timeout_pool: float = 60.0
 
     # 认证配置
-    auth_token: Optional[str] = None  # 内部认证 token
+    auth_token: str | None = None  # 内部认证 token
     forward_auth: bool = True  # 是否转发原始 Authorization 头
 
     # 限流配置
@@ -72,12 +72,12 @@ class ProxyServiceConfig:
     load_balance_strategy: str = "round_robin"  # round_robin | least_connections | random
 
     # 元数据
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # 状态
     enabled: bool = True
 
-    def get_upstream_urls(self) -> List[str]:
+    def get_upstream_urls(self) -> list[str]:
         """获取所有上游 URL"""
         urls = list(self.upstream_urls) if self.upstream_urls else []
         if self.upstream_url and self.upstream_url not in urls:
@@ -118,10 +118,10 @@ class ProxyConfigLoader:
         self.cache_ttl = cache_ttl
 
         # 本地缓存
-        self._cache: Dict[str, CachedConfig] = {}
+        self._cache: dict[str, CachedConfig] = {}
         self._lock = asyncio.Lock()
 
-    async def get_config(self, service_name: str) -> Optional[ProxyServiceConfig]:
+    async def get_config(self, service_name: str) -> ProxyServiceConfig | None:
         """
         获取服务配置
 
@@ -149,7 +149,7 @@ class ProxyConfigLoader:
 
         return config
 
-    async def _load_from_database(self, service_name: str) -> Optional[ProxyServiceConfig]:
+    async def _load_from_database(self, service_name: str) -> ProxyServiceConfig | None:
         """从数据库加载配置"""
         if not self.database or not getattr(self.database, "enabled", False):
             logger.debug(f"Database not available, cannot load config for {service_name}")
@@ -159,11 +159,11 @@ class ProxyConfigLoader:
             # 查询 services 表
             # service_name 可以匹配 service_id 或 name
             query = """
-                SELECT 
+                SELECT
                     service_id, name, connector_config, service_config,
                     timeout, status, metadata
-                FROM services 
-                WHERE (service_id = $1 OR name = $1) 
+                FROM services
+                WHERE (service_id = $1 OR name = $1)
                   AND status = 'active'
                 LIMIT 1
             """
@@ -228,7 +228,7 @@ class ProxyConfigLoader:
             urls_str = connector_config["instance_urls"]
             if isinstance(urls_str, str):
                 upstream_urls = [u.strip() for u in urls_str.split(",") if u.strip()]
-        normalized_urls: List[str] = []
+        normalized_urls: list[str] = []
         for url in upstream_urls:
             normalized = _normalize_url(url)
             if normalized:
@@ -239,7 +239,7 @@ class ProxyConfigLoader:
         rate_limit = service_config.get("rate_limit") or {}
         cache_config = service_config.get("cache") or {}
 
-        def _pick_identity(*keys: str) -> Optional[str]:
+        def _pick_identity(*keys: str) -> str | None:
             for key in keys:
                 value = connector_config.get(key)
                 if value is None:
@@ -301,7 +301,7 @@ class ProxyConfigLoader:
             ttl=float("inf"),  # 永不过期
         )
 
-    def invalidate(self, service_name: Optional[str] = None) -> None:
+    def invalidate(self, service_name: str | None = None) -> None:
         """
         使缓存失效
 
@@ -313,17 +313,17 @@ class ProxyConfigLoader:
         else:
             self._cache.clear()
 
-    async def list_services(self) -> List[ProxyServiceConfig]:
+    async def list_services(self) -> list[ProxyServiceConfig]:
         """列出所有启用透明代理的服务"""
         if not self.database or not getattr(self.database, "enabled", False):
-            return list(c.config for c in self._cache.values())
+            return [c.config for c in self._cache.values()]
 
         try:
             query = """
-                SELECT 
+                SELECT
                     service_id, name, connector_config, service_config,
                     timeout, status, metadata
-                FROM services 
+                FROM services
                 WHERE status = 'active'
                   AND connector_config->>'proxy_mode' = 'transparent'
             """

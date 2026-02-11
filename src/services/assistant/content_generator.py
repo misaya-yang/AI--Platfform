@@ -20,18 +20,19 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any
 
 from ...core.observability.logging import get_logger
+from .agui_protocol import create_agui_emitter
 from .guardrails import (
     DocumentType,
     QualityGuardrails,
     QualityIssue,
     ValidationResult,
 )
-from .agui_protocol import AGUIEventEmitter, create_agui_emitter
 
 logger = get_logger(__name__)
 
@@ -65,8 +66,8 @@ class ContentOutline:
     """Outline structure for content generation."""
 
     title: str
-    sections: List[str]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    sections: list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,11 +75,11 @@ class GeneratedContent:
     """Result of content generation."""
 
     content: str
-    sections: List[ContentSection]
-    outline: Optional[ContentOutline] = None
-    validation: Optional[ValidationResult] = None
+    sections: list[ContentSection]
+    outline: ContentOutline | None = None
+    validation: ValidationResult | None = None
     repair_attempts: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def word_count(self) -> int:
@@ -127,7 +128,7 @@ class DeepContentGenerator:
     def __init__(
         self,
         llm_client: Any,
-        guardrails: Optional[QualityGuardrails] = None,
+        guardrails: QualityGuardrails | None = None,
         model_name: str = "claude-sonnet-4-20250514",
     ):
         """
@@ -146,7 +147,7 @@ class DeepContentGenerator:
         self,
         request: str,
         doc_type: DocumentType,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """
         Generate content through multi-phase process.
@@ -196,7 +197,7 @@ class DeepContentGenerator:
             phase=GenerationPhase.GENERATING,
         )
 
-        sections: List[ContentSection] = []
+        sections: list[ContentSection] = []
         full_content = ""
 
         for i, section_title in enumerate(outline.sections):
@@ -221,10 +222,12 @@ class DeepContentGenerator:
                     phase=GenerationPhase.GENERATING,
                 )
 
-            sections.append(ContentSection(
-                title=section_title,
-                content=section_content,
-            ))
+            sections.append(
+                ContentSection(
+                    title=section_title,
+                    content=section_content,
+                )
+            )
             full_content += f"\n\n# {section_title}\n\n{section_content}"
 
         # Phase 4: Validation
@@ -306,8 +309,8 @@ class DeepContentGenerator:
         self,
         request: str,
         doc_type: DocumentType,
-        request_id: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None,
+        request_id: str | None = None,
+        context: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         """
         Generate content with AG-UI protocol events.
@@ -372,7 +375,7 @@ class DeepContentGenerator:
         )
         yield emitter.status("generating", "生成详细内容...", phase="generating")
 
-        sections: List[ContentSection] = []
+        sections: list[ContentSection] = []
         full_content = ""
 
         # Start text message
@@ -396,10 +399,12 @@ class DeepContentGenerator:
                 section_content += chunk
                 yield emitter.text_message_content(chunk)
 
-            sections.append(ContentSection(
-                title=section_title,
-                content=section_content,
-            ))
+            sections.append(
+                ContentSection(
+                    title=section_title,
+                    content=section_content,
+                )
+            )
             full_content += section_content
 
             # Emit progress status
@@ -426,13 +431,15 @@ class DeepContentGenerator:
         validation = self.guardrails.validate(full_content, doc_type)
 
         # Emit state snapshot with validation results
-        yield emitter.state_snapshot({
-            "validation": {
-                "passed": validation.passed,
-                "score": validation.score,
-                "issues": [i.to_dict() for i in validation.issues],
-            },
-        })
+        yield emitter.state_snapshot(
+            {
+                "validation": {
+                    "passed": validation.passed,
+                    "score": validation.score,
+                    "issues": [i.to_dict() for i in validation.issues],
+                },
+            }
+        )
 
         # Step 5: Self-repair if needed
         repair_attempts = 0
@@ -472,34 +479,44 @@ class DeepContentGenerator:
             validation = self.guardrails.validate(full_content, doc_type)
 
             # Emit updated state
-            yield emitter.state_delta([
-                {"op": "replace", "path": "/validation/passed", "value": validation.passed},
-                {"op": "replace", "path": "/validation/score", "value": validation.score},
-                {"op": "replace", "path": "/validation/issues", "value": [i.to_dict() for i in validation.issues]},
-            ])
+            yield emitter.state_delta(
+                [
+                    {"op": "replace", "path": "/validation/passed", "value": validation.passed},
+                    {"op": "replace", "path": "/validation/score", "value": validation.score},
+                    {
+                        "op": "replace",
+                        "path": "/validation/issues",
+                        "value": [i.to_dict() for i in validation.issues],
+                    },
+                ]
+            )
 
             yield emitter.step_finished(step_id=step_id_repair)
 
         yield emitter.step_finished(step_id=step_id_validating)
 
         # Emit completion
-        yield emitter.state_snapshot({
-            "content": full_content,
-            "word_count": self._count_words(full_content),
-            "validation_passed": validation.passed,
-            "repair_attempts": repair_attempts,
-            "outline": {
-                "title": outline.title,
-                "sections": outline.sections,
-            },
-        })
+        yield emitter.state_snapshot(
+            {
+                "content": full_content,
+                "word_count": self._count_words(full_content),
+                "validation_passed": validation.passed,
+                "repair_attempts": repair_attempts,
+                "outline": {
+                    "title": outline.title,
+                    "sections": outline.sections,
+                },
+            }
+        )
 
-        yield emitter.run_finished(metadata={
-            "word_count": self._count_words(full_content),
-            "section_count": len(sections),
-            "validation_passed": validation.passed,
-            "repair_attempts": repair_attempts,
-        })
+        yield emitter.run_finished(
+            metadata={
+                "word_count": self._count_words(full_content),
+                "section_count": len(sections),
+                "validation_passed": validation.passed,
+                "repair_attempts": repair_attempts,
+            }
+        )
 
         yield emitter.stream_end()
 
@@ -507,7 +524,7 @@ class DeepContentGenerator:
         self,
         request: str,
         doc_type: DocumentType,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> ContentOutline:
         """
         Generate content outline.
@@ -554,21 +571,19 @@ class DeepContentGenerator:
         try:
             # Extract JSON from response
             import re
-            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response)
-            if json_match:
-                data = json.loads(json_match.group(1))
-            else:
-                data = json.loads(response)
+
+            json_match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
+            data = json.loads(json_match.group(1)) if json_match else json.loads(response)
 
             return ContentOutline(
                 title=data.get("title", request[:50]),
-                sections=data.get("sections", [f"章节 {i+1}" for i in range(min_sections)]),
+                sections=data.get("sections", [f"章节 {i + 1}" for i in range(min_sections)]),
             )
         except (json.JSONDecodeError, KeyError):
             # Fallback to default structure
             return ContentOutline(
                 title=request[:50],
-                sections=[f"章节 {i+1}" for i in range(min_sections)],
+                sections=[f"章节 {i + 1}" for i in range(min_sections)],
             )
 
     async def _generate_section(
@@ -576,8 +591,8 @@ class DeepContentGenerator:
         section_title: str,
         outline: ContentOutline,
         doc_type: DocumentType,
-        context: Dict[str, Any],
-        previous_sections: List[ContentSection],
+        context: dict[str, Any],
+        previous_sections: list[ContentSection],
     ) -> AsyncIterator[str]:
         """
         Generate a single section with depth.
@@ -603,9 +618,7 @@ class DeepContentGenerator:
         # Build context from previous sections
         prev_context = ""
         if previous_sections:
-            prev_context = "已完成章节：\n" + "\n".join(
-                f"- {s.title}" for s in previous_sections
-            )
+            prev_context = "已完成章节：\n" + "\n".join(f"- {s.title}" for s in previous_sections)
 
         prompt = f"""你是一位资深专家，正在撰写专业文档《{outline.title}》。请为 "{section_title}" 章节撰写深度、详尽的内容。
 
@@ -641,7 +654,7 @@ class DeepContentGenerator:
     async def _repair_content(
         self,
         content: str,
-        issues: List[QualityIssue],
+        issues: list[QualityIssue],
         doc_type: DocumentType,
     ) -> AsyncIterator[str]:
         """
@@ -658,8 +671,7 @@ class DeepContentGenerator:
             Repaired content chunks
         """
         issues_text = "\n".join(
-            f"- [{i.severity.value}] {i.message} (建议: {i.action})"
-            for i in issues
+            f"- [{i.severity.value}] {i.message} (建议: {i.action})" for i in issues
         )
 
         prompt = f"""你生成的内容存在以下问题需要修复：
@@ -689,7 +701,7 @@ class DeepContentGenerator:
         Returns:
             LLM response text
         """
-        if hasattr(self.llm_client, 'messages'):
+        if hasattr(self.llm_client, "messages"):
             # Anthropic
             response = await self.llm_client.messages.create(
                 model=self.model_name,
@@ -698,7 +710,7 @@ class DeepContentGenerator:
             )
             return response.content[0].text
 
-        if hasattr(self.llm_client, 'chat'):
+        if hasattr(self.llm_client, "chat"):
             # OpenAI-compatible
             response = await self.llm_client.chat.completions.create(
                 model=self.model_name,
@@ -719,7 +731,7 @@ class DeepContentGenerator:
         Yields:
             Response chunks
         """
-        if hasattr(self.llm_client, 'messages'):
+        if hasattr(self.llm_client, "messages"):
             # Anthropic streaming
             async with self.llm_client.messages.stream(
                 model=self.model_name,
@@ -729,7 +741,7 @@ class DeepContentGenerator:
                 async for text in stream.text_stream:
                     yield text
 
-        elif hasattr(self.llm_client, 'chat'):
+        elif hasattr(self.llm_client, "chat"):
             # OpenAI-compatible streaming
             stream = await self.llm_client.chat.completions.create(
                 model=self.model_name,
@@ -749,16 +761,17 @@ class DeepContentGenerator:
     def _count_words(self, content: str) -> int:
         """Count words in content."""
         import re
-        clean = re.sub(r'[#*`~\[\](){}|]', '', content)
-        clean = re.sub(r'\s+', ' ', clean).strip()
-        chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', clean))
-        english_words = len(re.findall(r'[a-zA-Z]+', clean))
+
+        clean = re.sub(r"[#*`~\[\](){}|]", "", content)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", clean))
+        english_words = len(re.findall(r"[a-zA-Z]+", clean))
         return chinese_chars + english_words
 
 
 def create_content_generator(
     llm_client: Any,
-    guardrails: Optional[QualityGuardrails] = None,
+    guardrails: QualityGuardrails | None = None,
     model_name: str = "claude-sonnet-4-20250514",
 ) -> DeepContentGenerator:
     """

@@ -8,10 +8,10 @@ Code Review 修复验证测试
 4. 嵌入重试机制
 """
 
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 
@@ -22,12 +22,12 @@ class TestImageMagicValidation:
         """设置魔数验证函数"""
         # 复制 knowledge.py 中的验证逻辑
         IMAGE_MAGIC_BYTES = {
-            b'\xff\xd8\xff': "image/jpeg",
-            b'\x89PNG\r\n\x1a\n': "image/png",
-            b'GIF87a': "image/gif",
-            b'GIF89a': "image/gif",
-            b'RIFF': "image/webp",
-            b'BM': "image/bmp",
+            b"\xff\xd8\xff": "image/jpeg",
+            b"\x89PNG\r\n\x1a\n": "image/png",
+            b"GIF87a": "image/gif",
+            b"GIF89a": "image/gif",
+            b"RIFF": "image/webp",
+            b"BM": "image/bmp",
         }
 
         def validate_image_magic(data: bytes) -> bool:
@@ -36,53 +36,51 @@ class TestImageMagicValidation:
                 if data.startswith(magic):
                     return True
             # Special case for WebP: RIFF....WEBP
-            if data[:4] == b'RIFF' and len(data) >= 12 and data[8:12] == b'WEBP':
-                return True
-            return False
+            return bool(data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP")
 
         self.validate_image_magic = validate_image_magic
 
     def test_jpeg_magic_bytes(self):
         """测试 JPEG 魔数验证"""
         # JPEG 文件头
-        jpeg_header = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00'
+        jpeg_header = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"
         assert self.validate_image_magic(jpeg_header) is True
 
     def test_png_magic_bytes(self):
         """测试 PNG 魔数验证"""
         # PNG 文件头
-        png_header = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+        png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
         assert self.validate_image_magic(png_header) is True
 
     def test_gif87a_magic_bytes(self):
         """测试 GIF87a 魔数验证"""
-        gif_header = b'GIF87a\x00\x00\x00\x00'
+        gif_header = b"GIF87a\x00\x00\x00\x00"
         assert self.validate_image_magic(gif_header) is True
 
     def test_gif89a_magic_bytes(self):
         """测试 GIF89a 魔数验证"""
-        gif_header = b'GIF89a\x00\x00\x00\x00'
+        gif_header = b"GIF89a\x00\x00\x00\x00"
         assert self.validate_image_magic(gif_header) is True
 
     def test_webp_magic_bytes(self):
         """测试 WebP 魔数验证"""
         # WebP: RIFF....WEBP
-        webp_header = b'RIFF\x00\x00\x00\x00WEBP'
+        webp_header = b"RIFF\x00\x00\x00\x00WEBP"
         assert self.validate_image_magic(webp_header) is True
 
     def test_bmp_magic_bytes(self):
         """测试 BMP 魔数验证"""
-        bmp_header = b'BM\x00\x00\x00\x00'
+        bmp_header = b"BM\x00\x00\x00\x00"
         assert self.validate_image_magic(bmp_header) is True
 
     def test_invalid_file_rejected(self):
         """测试无效文件被拒绝"""
         # 文本文件
-        text_content = b'Hello, this is a text file'
+        text_content = b"Hello, this is a text file"
         assert self.validate_image_magic(text_content) is False
 
         # PDF 文件
-        pdf_header = b'%PDF-1.4'
+        pdf_header = b"%PDF-1.4"
         assert self.validate_image_magic(pdf_header) is False
 
         # JavaScript 伪造
@@ -91,16 +89,16 @@ class TestImageMagicValidation:
 
     def test_empty_content_rejected(self):
         """测试空内容被拒绝"""
-        assert self.validate_image_magic(b'') is False
+        assert self.validate_image_magic(b"") is False
 
     def test_short_content_rejected(self):
         """测试过短内容被拒绝"""
-        assert self.validate_image_magic(b'\xff') is False
+        assert self.validate_image_magic(b"\xff") is False
 
     def test_spoofed_content_type_rejected(self):
         """测试伪造的 content-type 被拒绝（实际内容不是图片）"""
         # 内容是文本，但可能被伪造为 image/jpeg
-        fake_jpeg = b'Not a real JPEG file content'
+        fake_jpeg = b"Not a real JPEG file content"
         assert self.validate_image_magic(fake_jpeg) is False
 
 
@@ -129,10 +127,10 @@ class TestSQLParameterization:
 
         # 检查 SQL 查询
         query = call_args[0][0]
-        assert '%s' not in query, "SQL query should not use %s formatting"
-        assert '%d' not in query, "SQL query should not use %d formatting"
-        assert 'make_interval' in query, "SQL query should use make_interval function"
-        assert '$1' in query, "SQL query should use $1 parameterized placeholder"
+        assert "%s" not in query, "SQL query should not use %s formatting"
+        assert "%d" not in query, "SQL query should not use %d formatting"
+        assert "make_interval" in query, "SQL query should use make_interval function"
+        assert "$1" in query, "SQL query should use $1 parameterized placeholder"
 
         # 检查参数
         assert call_args[0][1] == 15, "Should pass stuck_threshold_minutes as parameter"
@@ -190,9 +188,9 @@ class TestEmbeddingRetryMechanism:
         """测试重试常量已定义"""
         from src.services.knowledge.embedding import DashScopeEmbedding
 
-        assert hasattr(DashScopeEmbedding, 'MAX_RETRIES')
-        assert hasattr(DashScopeEmbedding, 'RETRY_BASE_DELAY')
-        assert hasattr(DashScopeEmbedding, 'REQUEST_TIMEOUT')
+        assert hasattr(DashScopeEmbedding, "MAX_RETRIES")
+        assert hasattr(DashScopeEmbedding, "RETRY_BASE_DELAY")
+        assert hasattr(DashScopeEmbedding, "REQUEST_TIMEOUT")
 
         assert DashScopeEmbedding.MAX_RETRIES == 3
         assert DashScopeEmbedding.RETRY_BASE_DELAY == 1.0
@@ -206,6 +204,7 @@ class TestTaskQueueHandlerBinding:
     async def test_process_file_handler_uses_app_state_assistant_service(self):
         """处理器应从 app.state 获取 assistant_service"""
         from fastapi import FastAPI
+
         from src import main as main_module
 
         app = FastAPI()
@@ -227,6 +226,7 @@ class TestTaskQueueHandlerBinding:
     async def test_process_file_handler_skips_when_assistant_missing(self):
         """assistant_service 未初始化时不应调用处理函数"""
         from fastapi import FastAPI
+
         from src import main as main_module
 
         app = FastAPI()
@@ -246,10 +246,10 @@ class TestTaskQueueHandlerBinding:
         from src.services.knowledge.embedding import DashScopeEmbedding
 
         # 创建一个 mock 实例来检查方法
-        with patch.object(DashScopeEmbedding, '__init__', lambda x: None):
+        with patch.object(DashScopeEmbedding, "__init__", lambda x: None):
             embedding = DashScopeEmbedding()
-            assert hasattr(embedding, '_call_with_retry')
-            assert callable(getattr(embedding, '_call_with_retry', None))
+            assert hasattr(embedding, "_call_with_retry")
+            assert callable(getattr(embedding, "_call_with_retry", None))
 
 
 class TestDatabaseMigration:
@@ -265,27 +265,28 @@ class TestDatabaseMigration:
         assert os.path.exists(migration_path), f"Migration file should exist: {migration_path}"
 
         # 读取文件内容
-        with open(migration_path, 'r', encoding='utf-8') as f:
+        with open(migration_path, encoding="utf-8") as f:
             content = f.read()
 
         # 检查 sync_images 字段
-        assert 'sync_images' in content, "Migration should add sync_images column"
-        assert 'image_max_size_bytes' in content, "Migration should add image_max_size_bytes column"
-        assert 'BOOLEAN' in content, "sync_images should be BOOLEAN type"
-        assert 'INTEGER' in content or 'int' in content.lower(), "image_max_size_bytes should be INTEGER type"
+        assert "sync_images" in content, "Migration should add sync_images column"
+        assert "image_max_size_bytes" in content, "Migration should add image_max_size_bytes column"
+        assert "BOOLEAN" in content, "sync_images should be BOOLEAN type"
+        assert "INTEGER" in content or "int" in content.lower(), (
+            "image_max_size_bytes should be INTEGER type"
+        )
 
     def test_migration_file_contains_root_page_ids(self):
         """测试迁移文件包含 root_page_ids 字段"""
-        import os
 
         migration_path = "database/migrations/016_confluence_multi_root_pages.sql"
 
-        with open(migration_path, 'r', encoding='utf-8') as f:
+        with open(migration_path, encoding="utf-8") as f:
             content = f.read()
 
-        assert 'root_page_ids' in content, "Migration should add root_page_ids column"
-        assert 'root_page_titles' in content, "Migration should add root_page_titles column"
-        assert 'TEXT[]' in content, "Arrays should be TEXT[] type"
+        assert "root_page_ids" in content, "Migration should add root_page_ids column"
+        assert "root_page_titles" in content, "Migration should add root_page_titles column"
+        assert "TEXT[]" in content, "Arrays should be TEXT[] type"
 
 
 class TestHardcodedValueRemoval:
@@ -293,16 +294,16 @@ class TestHardcodedValueRemoval:
 
     def test_no_hardcoded_domain_in_connection_create(self):
         """测试 ConnectionCreate.tsx 中没有硬编码域名"""
-        import os
 
         file_path = "web/src/pages/confluence/ConnectionCreate.tsx"
 
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, encoding="utf-8") as f:
             content = f.read()
 
         # 检查不包含硬编码的域名
-        assert 'hejazfs.atlassian.net' not in content, \
+        assert "hejazfs.atlassian.net" not in content, (
             "Should not contain hardcoded domain 'hejazfs.atlassian.net'"
+        )
 
         # 检查域名默认值是空字符串
         assert 'domain: ""' in content, "Domain default value should be empty string"
@@ -313,7 +314,7 @@ class TestCryptoUtilities:
 
     def test_encrypt_decrypt_roundtrip(self):
         """测试加密解密往返"""
-        from src.core.crypto import encrypt_value, decrypt_value
+        from src.core.crypto import decrypt_value, encrypt_value
 
         original = "my-secret-api-token-12345"
         encryption_key = "test-encryption-key-32chars!!"
@@ -385,19 +386,19 @@ class TestCQLValidation:
         from src.services.knowledge.confluence.client import _escape_cql_value
 
         invalid_keys = [
-            "space key",      # space
-            "space'key",      # quote
-            'space"key',      # double quote
-            "space;key",      # semicolon
-            "space=key",      # equals
-            "space(key)",     # parentheses
+            "space key",  # space
+            "space'key",  # quote
+            'space"key',  # double quote
+            "space;key",  # semicolon
+            "space=key",  # equals
+            "space(key)",  # parentheses
             "space AND type=page",  # injection attempt
         ]
 
         for key in invalid_keys:
             try:
                 _escape_cql_value(key)
-                assert False, f"Should reject invalid key: {key}"
+                raise AssertionError(f"Should reject invalid key: {key}")
             except ValueError:
                 pass  # Expected
 
@@ -422,8 +423,9 @@ class TestUtcNowFunction:
 
     def test_utc_now_is_utc(self):
         """测试 _utc_now 返回 UTC 时间"""
+        from datetime import timezone
+
         from src.services.knowledge.confluence.sync_service import _utc_now
-        from datetime import datetime, timezone
 
         now = _utc_now()
         utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -449,8 +451,8 @@ class TestAsyncTaskHandling:
         from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
 
         # Check that the method exists
-        assert hasattr(ConfluenceSyncService, '_create_background_task')
-        assert hasattr(ConfluenceSyncService, '_handle_task_exception')
+        assert hasattr(ConfluenceSyncService, "_create_background_task")
+        assert hasattr(ConfluenceSyncService, "_handle_task_exception")
 
 
 class TestClientCaching:
@@ -461,7 +463,7 @@ class TestClientCaching:
         from src.config.settings import ConfluenceSettings
 
         settings = ConfluenceSettings()
-        assert hasattr(settings, 'client_cache_ttl_seconds')
+        assert hasattr(settings, "client_cache_ttl_seconds")
         assert settings.client_cache_ttl_seconds == 300  # Default 5 minutes
 
 

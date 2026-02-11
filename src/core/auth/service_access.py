@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, List, Sequence, Tuple
+from typing import Any
 
 
 class ServiceAccessMode(str, Enum):
@@ -14,7 +15,7 @@ def _normalize_token(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def normalize_service_scope(value: Any) -> List[str]:
+def normalize_service_scope(value: Any) -> list[str]:
     """Normalize allow/deny service scope definitions.
 
     Supports:
@@ -24,7 +25,7 @@ def normalize_service_scope(value: Any) -> List[str]:
     if not value:
         return []
 
-    raw_items: List[Any]
+    raw_items: list[Any]
     if isinstance(value, str):
         raw_items = [part.strip() for part in value.split(",")]
     elif isinstance(value, (list, tuple, set)):
@@ -32,7 +33,7 @@ def normalize_service_scope(value: Any) -> List[str]:
     else:
         return []
 
-    deduped: List[str] = []
+    deduped: list[str] = []
     for item in raw_items:
         token = _normalize_token(item)
         if token and token not in deduped:
@@ -70,8 +71,8 @@ def service_scope_matches(scope: Sequence[str], candidates: Sequence[str]) -> bo
     return False
 
 
-def normalize_service_candidates(values: Iterable[Any]) -> Tuple[str, ...]:
-    deduped: List[str] = []
+def normalize_service_candidates(values: Iterable[Any]) -> tuple[str, ...]:
+    deduped: list[str] = []
     for value in values:
         token = _normalize_token(value)
         if token and token not in deduped:
@@ -82,8 +83,8 @@ def normalize_service_candidates(values: Iterable[Any]) -> Tuple[str, ...]:
 @dataclass(frozen=True)
 class ServiceAccessPolicy:
     mode: ServiceAccessMode = ServiceAccessMode.ALL
-    allowed_services: Tuple[str, ...] = ()
-    denied_services: Tuple[str, ...] = ()
+    allowed_services: tuple[str, ...] = ()
+    denied_services: tuple[str, ...] = ()
 
 
 def service_access_policy_from_metadata(metadata: Any) -> ServiceAccessPolicy:
@@ -113,10 +114,12 @@ def service_access_policy_from_metadata(metadata: Any) -> ServiceAccessPolicy:
 def evaluate_service_access(
     policy: ServiceAccessPolicy,
     candidates: Sequence[str],
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Evaluate whether service candidates are allowed by policy."""
     normalized_candidates = normalize_service_candidates(candidates)
-    if policy.denied_services and service_scope_matches(policy.denied_services, normalized_candidates):
+    if policy.denied_services and service_scope_matches(
+        policy.denied_services, normalized_candidates
+    ):
         return False, "denied_by_user_policy"
 
     if policy.mode == ServiceAccessMode.ALLOWLIST:

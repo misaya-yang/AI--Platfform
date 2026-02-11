@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...persistence.redis import RedisStorage
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
-_metrics_recorder: Optional["MetricsRecorder"] = None
+_metrics_recorder: MetricsRecorder | None = None
 
 # Token pricing for cost estimation (per 1K tokens, USD)
 TOKEN_PRICING = {
@@ -41,10 +41,10 @@ TTL_7D = 604800  # 7 days
 class MetricsRecorder:
     """Central service for recording metrics to Redis"""
 
-    def __init__(self, redis: Optional["RedisStorage"] = None):
+    def __init__(self, redis: RedisStorage | None = None):
         self.redis = redis
 
-    def set_redis(self, redis: "RedisStorage") -> None:
+    def set_redis(self, redis: RedisStorage) -> None:
         """Set or update the Redis storage instance"""
         self.redis = redis
 
@@ -274,7 +274,7 @@ class MetricsRecorder:
         except Exception as e:
             logger.warning(f"Failed to record run metric: {e}")
 
-    async def get_latency_percentiles(self) -> Dict[str, int]:
+    async def get_latency_percentiles(self) -> dict[str, int]:
         """
         Calculate latency percentiles from recent samples
 
@@ -322,7 +322,7 @@ class MetricsRecorder:
             logger.warning(f"Failed to calculate latency percentiles: {e}")
             return {"p50": 0, "p95": 0, "p99": 0}
 
-    async def get_today_summary(self) -> Dict[str, Any]:
+    async def get_today_summary(self) -> dict[str, Any]:
         """
         Get today's metrics summary
 
@@ -383,20 +383,14 @@ class MetricsRecorder:
 
             # Calculate derived metrics
             success_rate = (
-                round(success_count / total_requests * 100, 1)
-                if total_requests > 0
-                else 100.0
+                round(success_count / total_requests * 100, 1) if total_requests > 0 else 100.0
             )
-            avg_latency = (
-                int(latency_sum / latency_count) if latency_count > 0 else 0
-            )
+            avg_latency = int(latency_sum / latency_count) if latency_count > 0 else 0
             run_success_rate = (
                 round(runs_success / total_runs * 100, 1) if total_runs > 0 else 100.0
             )
             avg_run_duration = (
-                int(runs_duration_sum / runs_duration_count)
-                if runs_duration_count > 0
-                else 0
+                int(runs_duration_sum / runs_duration_count) if runs_duration_count > 0 else 0
             )
 
             # Get percentiles
@@ -423,7 +417,7 @@ class MetricsRecorder:
             logger.warning(f"Failed to get today's summary: {e}")
             return self._empty_summary()
 
-    def _empty_summary(self) -> Dict[str, Any]:
+    def _empty_summary(self) -> dict[str, Any]:
         """Return an empty metrics summary"""
         return {
             "total_requests": 0,
@@ -439,9 +433,7 @@ class MetricsRecorder:
             "total_runs": 0,
             "run_success_rate": 100.0,
             "avg_run_duration_ms": 0,
-            "requests_by_hour": [
-                {"hour": f"{i:02d}:00", "count": 0} for i in range(24)
-            ],
+            "requests_by_hour": [{"hour": f"{i:02d}:00", "count": 0} for i in range(24)],
         }
 
 
@@ -453,7 +445,7 @@ def get_metrics_recorder() -> MetricsRecorder:
     return _metrics_recorder
 
 
-def init_metrics_recorder(redis: "RedisStorage") -> MetricsRecorder:
+def init_metrics_recorder(redis: RedisStorage) -> MetricsRecorder:
     """Initialize the global MetricsRecorder with Redis storage"""
     global _metrics_recorder
     if _metrics_recorder is None:

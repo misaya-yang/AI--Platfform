@@ -7,9 +7,7 @@ Ensures that:
 3. sync_mode=polling always writes interval to database
 """
 
-import pytest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services.knowledge.confluence.scheduler import PagePollingTask
 

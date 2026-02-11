@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import List
 
 from ...core.gateway.dispatcher import GatewayDispatcher
 from ...models.task import TaskStatus
@@ -21,7 +20,7 @@ class TaskWorker:
         self.storage = storage
         self.dispatcher = dispatcher
         self.task_manager = task_manager
-        self._workers: List[asyncio.Task] = []
+        self._workers: list[asyncio.Task] = []
         self._running = False
 
     async def start(self, concurrency: int = 1) -> None:
@@ -45,13 +44,9 @@ class TaskWorker:
                 continue
             await self.task_manager.update_status(task_id, TaskStatus.PROCESSING)
             try:
-                response = await self.dispatcher.invoke(
-                    request, roles=roles, client_ip=client_ip
-                )
+                response = await self.dispatcher.invoke(request, roles=roles, client_ip=client_ip)
                 await self.task_manager.update_status(
                     task_id, TaskStatus.COMPLETED, result=response
                 )
             except Exception as exc:
-                await self.task_manager.update_status(
-                    task_id, TaskStatus.FAILED, error=str(exc)
-                )
+                await self.task_manager.update_status(task_id, TaskStatus.FAILED, error=str(exc))

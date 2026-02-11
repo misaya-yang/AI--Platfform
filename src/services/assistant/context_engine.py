@@ -19,7 +19,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -52,18 +52,18 @@ class ContextStructure:
 
     # Layer 1: Static content (highest cache hit potential)
     system_prompt: str
-    tool_definitions: List[Dict[str, Any]] = field(default_factory=list)
+    tool_definitions: list[dict[str, Any]] = field(default_factory=list)
 
     # Layer 2: User-level content (stable within user session)
-    user_preferences: Optional[str] = None
-    long_term_memory: Optional[str] = None
+    user_preferences: str | None = None
+    long_term_memory: str | None = None
 
     # Layer 3: Session-level content (stable within session)
-    task_state: Optional[str] = None
-    conversation_history: List[Dict[str, Any]] = field(default_factory=list)
+    task_state: str | None = None
+    conversation_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Layer 4: Request-level content (changes every request)
-    current_context: Optional[str] = None
+    current_context: str | None = None
     current_query: str = ""
 
 
@@ -106,7 +106,7 @@ class ContextEngine:
 
     # Cache breakpoint markers for different providers
     # These values are assigned to message["cache_control"] directly
-    CACHE_BREAKPOINTS: Dict[str, Optional[Dict[str, Any]]] = {
+    CACHE_BREAKPOINTS: dict[str, dict[str, Any] | None] = {
         "anthropic": {"type": "ephemeral"},
         "openai": None,  # OpenAI doesn't support explicit cache control
     }
@@ -121,7 +121,7 @@ class ContextEngine:
         """
         self.provider = provider.lower()
 
-    def build_messages(self, context: ContextStructure) -> List[Dict[str, Any]]:
+    def build_messages(self, context: ContextStructure) -> list[dict[str, Any]]:
         """
         Build messages with stable prefix for cache optimization.
 
@@ -154,11 +154,11 @@ class ContextEngine:
             ]
             ```
         """
-        messages: List[Dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
 
         # Build system message (stable, high cache hit potential)
         system_content = self._build_system_content(context)
-        system_msg: Dict[str, Any] = {
+        system_msg: dict[str, Any] = {
             "role": "system",
             "content": system_content,
         }
@@ -225,7 +225,7 @@ class ContextEngine:
             Working on implementing a REST API.
             ```
         """
-        parts: List[str] = [context.system_prompt]
+        parts: list[str] = [context.system_prompt]
 
         # Add user preferences (Layer 2 - User-level)
         if context.user_preferences:
@@ -273,9 +273,13 @@ def estimate_tokens(text: str) -> int:
         return 0
 
     # Count CJK characters (Chinese, Japanese, Korean)
-    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or
-                    '\u3040' <= c <= '\u30ff' or  # Japanese hiragana/katakana
-                    '\uac00' <= c <= '\ud7af')     # Korean
+    cjk_count = sum(
+        1
+        for c in text
+        if "\u4e00" <= c <= "\u9fff"
+        or "\u3040" <= c <= "\u30ff"  # Japanese hiragana/katakana
+        or "\uac00" <= c <= "\ud7af"
+    )  # Korean
 
     # Non-CJK characters
     ascii_count = len(text) - cjk_count
@@ -330,6 +334,7 @@ def estimate_history_tokens(history: list) -> int:
 # Module-level convenience functions
 # =============================================================================
 
+
 def create_context_engine(provider: str) -> ContextEngine:
     """
     Factory function to create a ContextEngine for a specific provider.
@@ -343,7 +348,7 @@ def create_context_engine(provider: str) -> ContextEngine:
     return ContextEngine(provider=provider)
 
 
-def serialize_tools_deterministic(tools: List[Dict[str, Any]]) -> str:
+def serialize_tools_deterministic(tools: list[dict[str, Any]]) -> str:
     """
     Serialize tool definitions deterministically for KV-cache optimization.
 
@@ -374,16 +379,13 @@ def serialize_tools_deterministic(tools: List[Dict[str, Any]]) -> str:
     variable_fields = {"created_at", "updated_at", "last_used", "usage_count"}
 
     for tool in sorted_tools:
-        stable_tool = {
-            k: v for k, v in sorted(tool.items())
-            if k not in variable_fields
-        }
+        stable_tool = {k: v for k, v in sorted(tool.items()) if k not in variable_fields}
         stable_tools.append(stable_tool)
 
     return json.dumps(stable_tools, sort_keys=True, ensure_ascii=False, indent=2)
 
 
-def format_long_term_memory(memory_context: Dict[str, Any]) -> str:
+def format_long_term_memory(memory_context: dict[str, Any]) -> str:
     """
     Format long-term memory context for inclusion in system prompt.
 

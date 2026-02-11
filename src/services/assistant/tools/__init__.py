@@ -10,20 +10,6 @@ Provides:
 - Schema generation for OpenAI/Anthropic
 """
 
-from .tavily_search import TavilySearchTool
-from .tool_registry import (
-    ToolRegistry,
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
-    ToolCallRequest,
-    ToolCallResult,
-    get_tool_registry,
-    register_tool,
-)
 from .builtin_tools import (
     KB_SEARCH_DEFINITION,
     WEB_SEARCH_DEFINITION,
@@ -45,6 +31,20 @@ from .pptx_generator_tool import (
     PPTX_GENERATION_DEFINITION,
     PPTXGeneratorExecutor,
     register_pptx_generation_tool,
+)
+from .tavily_search import TavilySearchTool
+from .tool_registry import (
+    ToolCallRequest,
+    ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRegistry,
+    ToolRiskLevel,
+    get_tool_registry,
+    register_tool,
 )
 
 __all__ = [

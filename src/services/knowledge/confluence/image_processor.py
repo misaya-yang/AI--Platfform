@@ -23,15 +23,15 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from .models import ConfluenceAttachment, ImageSegment
-from .parser import ImageReference, extract_embeddable_images
+from .parser import extract_embeddable_images
 
 if TYPE_CHECKING:
-    from .client import ConfluenceClient
     from ...storage.image_storage import ImageStorageService
     from ..vlm_service import DashScopeVLMService
+    from .client import ConfluenceClient
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,8 @@ class ImageProcessingResult:
     processed_images: int
     skipped_images: int
     failed_images: int
-    segments: List[ImageSegment]
-    errors: List[str]
+    segments: list[ImageSegment]
+    errors: list[str]
 
     @property
     def success_rate(self) -> float:
@@ -85,10 +85,10 @@ class ConfluenceImageProcessor:
 
     def __init__(
         self,
-        confluence_client: "ConfluenceClient",
-        storage_service: "ImageStorageService",
-        multimodal_embedding: Optional[Any] = None,
-        vlm_service: Optional["DashScopeVLMService"] = None,
+        confluence_client: ConfluenceClient,
+        storage_service: ImageStorageService,
+        multimodal_embedding: Any | None = None,
+        vlm_service: DashScopeVLMService | None = None,
         max_image_size: int = MAX_IMAGE_SIZE_BYTES,
         max_images_per_page: int = 50,
         generate_vlm_descriptions: bool = True,
@@ -130,8 +130,8 @@ class ConfluenceImageProcessor:
         page_id: str,
         document_id: str,
         tenant_id: str,
-        page_content: Optional[str] = None,
-        page_title: Optional[str] = None,
+        page_content: str | None = None,
+        page_title: str | None = None,
         generate_embeddings: bool = False,
     ) -> ImageProcessingResult:
         """
@@ -153,18 +153,17 @@ class ConfluenceImageProcessor:
             On critical failure, uploaded images are rolled back (deleted)
             to prevent orphan files in storage.
         """
-        errors: List[str] = []
-        segments: List[ImageSegment] = []
+        errors: list[str] = []
+        segments: list[ImageSegment] = []
         skipped = 0
         failed = 0
         # Track uploaded URLs for rollback on critical failure
-        uploaded_storage_urls: List[str] = []
+        uploaded_storage_urls: list[str] = []
 
         try:
             # 1. Get image attachments from Confluence
             attachments = await self.client.get_page_image_attachments(
-                page_id=page_id,
-                embeddable_only=True
+                page_id=page_id, embeddable_only=True
             )
 
             # 2. Limit number of images
@@ -173,7 +172,7 @@ class ConfluenceImageProcessor:
                     f"Page {page_id} has {len(attachments)} images, "
                     f"limiting to {self.max_images_per_page}"
                 )
-                attachments = attachments[:self.max_images_per_page]
+                attachments = attachments[: self.max_images_per_page]
 
             total_images = len(attachments)
 
@@ -190,19 +189,21 @@ class ConfluenceImageProcessor:
                 )
 
             # 3. Extract image references from content for context (keep order)
-            image_contexts: Dict[str, List[Dict[str, Any]]] = {}
+            image_contexts: dict[str, list[dict[str, Any]]] = {}
             if page_content:
                 image_refs = extract_embeddable_images(page_content)
                 for idx, ref in enumerate(image_refs):
                     key = ref.attachment_id or ref.filename
                     if not key:
                         continue
-                    image_contexts.setdefault(key, []).append({
-                        "context_text": ref.context_text or "",
-                        "context_index": idx,
-                        "alt_text": ref.alt_text,
-                        "title": ref.title,
-                    })
+                    image_contexts.setdefault(key, []).append(
+                        {
+                            "context_text": ref.context_text or "",
+                            "context_index": idx,
+                            "alt_text": ref.alt_text,
+                            "title": ref.title,
+                        }
+                    )
 
             # 4. Process images concurrently with semaphore-based rate limiting
             vlm_semaphore = asyncio.Semaphore(self.max_concurrent_vlm)
@@ -210,10 +211,10 @@ class ConfluenceImageProcessor:
 
             async def process_with_error_handling(
                 attachment: ConfluenceAttachment,
-            ) -> Tuple[Optional[ImageSegment], Optional[str]]:
+            ) -> tuple[ImageSegment | None, str | None]:
                 """Process single image with error handling."""
                 try:
-                    context_info: Dict[str, Any] = {}
+                    context_info: dict[str, Any] = {}
                     context_key = attachment.attachment_id or attachment.filename
                     info_list = image_contexts.get(context_key)
                     if not info_list and attachment.filename:
@@ -300,10 +301,10 @@ class ConfluenceImageProcessor:
 
     async def _rollback_uploaded_images(
         self,
-        storage_urls: List[str],
+        storage_urls: list[str],
         document_id: str,
         tenant_id: str,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Rollback uploaded images by deleting them from storage.
 
@@ -315,12 +316,10 @@ class ConfluenceImageProcessor:
         Returns:
             List of error messages (empty if all deletions succeeded)
         """
-        errors: List[str] = []
+        errors: list[str] = []
         deleted_count = 0
 
-        logger.info(
-            f"Rolling back {len(storage_urls)} uploaded images for document {document_id}"
-        )
+        logger.info(f"Rolling back {len(storage_urls)} uploaded images for document {document_id}")
 
         for url in storage_urls:
             try:
@@ -328,11 +327,13 @@ class ConfluenceImageProcessor:
                 # For file:// URLs, extract the path
                 # For S3/OSS URLs, extract the key from the path
                 if url.startswith("file://"):
-                    from urllib.parse import urlparse, unquote
+                    from urllib.parse import unquote, urlparse
+
                     parsed = urlparse(url)
                     # Get the path and try to delete
                     file_path = unquote(parsed.path)
                     import os
+
                     if os.path.exists(file_path):
                         os.remove(file_path)
                         deleted_count += 1
@@ -341,6 +342,7 @@ class ConfluenceImageProcessor:
                     # Try to extract key from URL and delete
                     # This is a best-effort cleanup
                     from urllib.parse import urlparse
+
                     parsed = urlparse(url)
                     key = parsed.path.lstrip("/")
                     if key:
@@ -364,12 +366,12 @@ class ConfluenceImageProcessor:
         document_id: str,
         tenant_id: str,
         context: str = "",
-        context_index: Optional[int] = None,
-        context_alt: Optional[str] = None,
-        context_title: Optional[str] = None,
-        page_title: Optional[str] = None,
+        context_index: int | None = None,
+        context_alt: str | None = None,
+        context_title: str | None = None,
+        page_title: str | None = None,
         generate_embedding: bool = False,
-    ) -> Optional[ImageSegment]:
+    ) -> ImageSegment | None:
         """
         处理单张图片
 
@@ -430,7 +432,7 @@ class ConfluenceImageProcessor:
         )
 
         # Generate VLM description if service is available
-        vlm_description: Optional[str] = None
+        vlm_description: str | None = None
         if self.generate_vlm_descriptions and self.vlm_service:
             try:
                 # Detect image type for better prompts
@@ -479,7 +481,7 @@ class ConfluenceImageProcessor:
         if context_title:
             metadata["context_title"] = context_title
 
-        embedding: Optional[List[float]] = None
+        embedding: list[float] | None = None
         if generate_embedding and self.multimodal_embedding:
             try:
                 if context and hasattr(self.multimodal_embedding, "embed_image_and_text"):
@@ -518,14 +520,14 @@ class ConfluenceImageProcessor:
         document_id: str,
         tenant_id: str,
         context: str = "",
-        context_index: Optional[int] = None,
-        context_alt: Optional[str] = None,
-        context_title: Optional[str] = None,
-        page_title: Optional[str] = None,
+        context_index: int | None = None,
+        context_alt: str | None = None,
+        context_title: str | None = None,
+        page_title: str | None = None,
         generate_embedding: bool = False,
-        vlm_semaphore: Optional[asyncio.Semaphore] = None,
-        upload_semaphore: Optional[asyncio.Semaphore] = None,
-    ) -> Optional[ImageSegment]:
+        vlm_semaphore: asyncio.Semaphore | None = None,
+        upload_semaphore: asyncio.Semaphore | None = None,
+    ) -> ImageSegment | None:
         """
         处理单张图片（并发版本，带信号量控制）
 
@@ -607,8 +609,9 @@ class ConfluenceImageProcessor:
         storage_url = await upload_with_limit()
 
         # Generate VLM description with semaphore and timeout
-        vlm_description: Optional[str] = None
+        vlm_description: str | None = None
         if self.generate_vlm_descriptions and self.vlm_service:
+
             async def vlm_with_limit():
                 image_type = self._detect_image_type(attachment.filename)
                 vlm_context = page_title or ""
@@ -657,7 +660,7 @@ class ConfluenceImageProcessor:
         if context_title:
             metadata["context_title"] = context_title
 
-        embedding: Optional[List[float]] = None
+        embedding: list[float] | None = None
         if generate_embedding and self.multimodal_embedding:
             try:
                 if context and hasattr(self.multimodal_embedding, "embed_image_and_text"):
@@ -747,7 +750,7 @@ class ConfluenceImageProcessor:
         page_id: str,
         document_id: str,
         tenant_id: str,
-        page_content: Optional[str] = None,
+        page_content: str | None = None,
     ) -> ImageProcessingResult:
         """
         重新处理页面图片（先删除旧图片）
@@ -774,9 +777,9 @@ class ConfluenceImageProcessor:
 
 
 async def create_image_processor(
-    confluence_client: "ConfluenceClient",
-    storage_service: "ImageStorageService",
-    dashscope_api_key: Optional[str] = None,
+    confluence_client: ConfluenceClient,
+    storage_service: ImageStorageService,
+    dashscope_api_key: str | None = None,
     vlm_model: str = "qwen-vl-max",
     max_image_size: int = MAX_IMAGE_SIZE_BYTES,
     enable_vlm_descriptions: bool = True,
@@ -804,6 +807,7 @@ async def create_image_processor(
     # Initialize VLM service for image descriptions (if API key provided)
     if dashscope_api_key and enable_vlm_descriptions:
         from ..vlm_service import DashScopeVLMService
+
         vlm_service = DashScopeVLMService(
             api_key=dashscope_api_key,
             model=vlm_model,

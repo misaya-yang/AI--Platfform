@@ -12,13 +12,15 @@ LangGraph Server 代理层
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import random
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, AsyncIterator, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 
 import httpx
 
@@ -30,9 +32,11 @@ logger = logging.getLogger(__name__)
 
 # ============ 数据类定义 ============
 
+
 @dataclass
 class UserContext:
     """用户上下文"""
+
     user_id: str
     tenant_id: str = ""
     tier: str = "anonymous"  # anonymous | normal | premium | enterprise | admin
@@ -43,14 +47,15 @@ class UserContext:
 @dataclass
 class LangGraphInstance:
     """LangGraph Server 实例"""
+
     instance_id: str
-    url: str                      # http://langgraph-1:8000
-    weight: int = 1               # 权重
+    url: str  # http://langgraph-1:8000
+    weight: int = 1  # 权重
     is_healthy: bool = True
     active_connections: int = 0
     avg_latency: float = 0.0
-    last_health_check: Optional[datetime] = None
-    
+    last_health_check: datetime | None = None
+
     def __post_init__(self):
         self.url = self.url.rstrip("/")
 
@@ -58,79 +63,89 @@ class LangGraphInstance:
 @dataclass
 class LoadBalancerConfig:
     """负载均衡配置"""
+
     strategy: str = "round_robin"  # round_robin | least_connections | weighted | latency_based
     health_check_interval: int = 10
-    instances: List[LangGraphInstance] = field(default_factory=list)
+    instances: list[LangGraphInstance] = field(default_factory=list)
 
 
 # ============ 异常定义 ============
 
+
 class LangGraphProxyError(Exception):
     """LangGraph 代理错误基类"""
+
     pass
 
 
 class NoHealthyInstanceError(LangGraphProxyError):
     """没有健康的实例可用"""
+
     def __init__(self):
         super().__init__("No healthy LangGraph instances available")
 
 
 class ForbiddenError(LangGraphProxyError):
     """权限拒绝"""
+
     def __init__(self, message: str = "Access denied"):
         super().__init__(message)
 
 
 class QuotaExceededError(LangGraphProxyError):
     """配额超限"""
+
     def __init__(self, message: str):
         super().__init__(message)
 
 
 class ThreadNotFoundError(LangGraphProxyError):
     """Thread 不存在"""
+
     def __init__(self, thread_id: str):
         super().__init__(f"Thread not found: {thread_id}")
 
 
 class AssistantNotFoundError(LangGraphProxyError):
     """Assistant 不存在"""
+
     def __init__(self, assistant_id: str):
         super().__init__(f"Assistant not found: {assistant_id}")
 
 
 class AssistantAccessDeniedError(LangGraphProxyError):
     """Assistant 访问被拒绝"""
+
     def __init__(self, assistant_id: str):
         super().__init__(f"Access denied to assistant: {assistant_id}")
 
 
 # ============ 负载均衡器 ============
 
+
 class LangGraphLoadBalancer:
     """LangGraph 服务负载均衡器"""
-    
+
     def __init__(self, config: LoadBalancerConfig):
         self.strategy = config.strategy
-        self.instances: List[LangGraphInstance] = config.instances
+        self.instances: list[LangGraphInstance] = config.instances
         self._rr_index = -1
-    
+
     def add_instance(self, instance: LangGraphInstance) -> None:
         """添加实例"""
         self.instances.append(instance)
-    
+
     def remove_instance(self, instance_id: str) -> None:
         """移除实例"""
         self.instances = [i for i in self.instances if i.instance_id != instance_id]
-    
+
     def mark_unhealthy(self, instance_id: str) -> None:
         """标记实例不健康"""
         for inst in self.instances:
             if inst.instance_id == instance_id:
                 inst.is_healthy = False
                 break
-    
+
     def mark_healthy(self, instance_id: str) -> None:
         """标记实例健康"""
         for inst in self.instances:
@@ -138,14 +153,14 @@ class LangGraphLoadBalancer:
                 inst.is_healthy = True
                 inst.last_health_check = datetime.utcnow()
                 break
-    
+
     async def select_instance(self, request_type: str = None) -> LangGraphInstance:
         """选择目标实例"""
         healthy = [i for i in self.instances if i.is_healthy]
-        
+
         if not healthy:
             raise NoHealthyInstanceError()
-        
+
         if self.strategy == "round_robin":
             return self._round_robin(healthy)
         elif self.strategy == "least_connections":
@@ -156,17 +171,17 @@ class LangGraphLoadBalancer:
             return self._latency_based(healthy)
         else:
             return self._round_robin(healthy)
-    
-    def _round_robin(self, instances: List[LangGraphInstance]) -> LangGraphInstance:
+
+    def _round_robin(self, instances: list[LangGraphInstance]) -> LangGraphInstance:
         """轮询"""
         self._rr_index = (self._rr_index + 1) % len(instances)
         return instances[self._rr_index]
-    
-    def _least_connections(self, instances: List[LangGraphInstance]) -> LangGraphInstance:
+
+    def _least_connections(self, instances: list[LangGraphInstance]) -> LangGraphInstance:
         """最少连接"""
         return min(instances, key=lambda i: i.active_connections)
-    
-    def _weighted(self, instances: List[LangGraphInstance]) -> LangGraphInstance:
+
+    def _weighted(self, instances: list[LangGraphInstance]) -> LangGraphInstance:
         """加权（根据实例配置的权重）"""
         total_weight = sum(i.weight for i in instances)
         r = random.uniform(0, total_weight)
@@ -176,29 +191,30 @@ class LangGraphLoadBalancer:
             if r <= cumulative:
                 return instance
         return instances[-1]
-    
-    def _latency_based(self, instances: List[LangGraphInstance]) -> LangGraphInstance:
+
+    def _latency_based(self, instances: list[LangGraphInstance]) -> LangGraphInstance:
         """基于延迟（选择响应最快的）"""
         return min(instances, key=lambda i: i.avg_latency)
 
 
 # ============ LangGraph 代理类 ============
 
+
 class LangGraphProxy:
     """
     LangGraph Server 代理层
     负责：负载均衡、限流检查、请求增强、响应处理
     """
-    
+
     # 用户层级对应的配额
     THREAD_QUOTAS = {
         "anonymous": 1,
         "normal": 10,
         "premium": 100,
-        "enterprise": float('inf'),
-        "admin": float('inf'),
+        "enterprise": float("inf"),
+        "admin": float("inf"),
     }
-    
+
     # 缓存 TTL（秒）
     THREAD_CACHE_TTL = 60
     ASSISTANT_CACHE_TTL = 300
@@ -207,22 +223,22 @@ class LangGraphProxy:
     def __init__(
         self,
         load_balancer: LangGraphLoadBalancer,
-        rate_limiter: Optional[Any] = None,
-        redis_client: Optional[Any] = None,
-        auth_token: Optional[str] = None,
+        rate_limiter: Any | None = None,
+        redis_client: Any | None = None,
+        auth_token: str | None = None,
     ):
         self.lb = load_balancer
         self.rate_limiter = rate_limiter
         self.redis = redis_client  # RedisStorage instance
         self.auth_token = auth_token
-        self._clients: Dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[str, httpx.AsyncClient] = {}
         # L1 缓存: Thread 元数据 {cache_key: (thread_data, timestamp)}
-        self._thread_cache: Dict[str, tuple] = {}
+        self._thread_cache: dict[str, tuple] = {}
         # L1 缓存: Assistant 信息 {assistant_id: (assistant_data, timestamp)}
-        self._assistant_cache: Dict[str, tuple] = {}
+        self._assistant_cache: dict[str, tuple] = {}
         # L1 缓存: Assistants 列表 {user_id: (assistants_list, timestamp)}
-        self._assistants_list_cache: Dict[str, tuple] = {}
-    
+        self._assistants_list_cache: dict[str, tuple] = {}
+
     async def _get_client(self, instance: LangGraphInstance) -> httpx.AsyncClient:
         """获取或创建实例的 HTTP 客户端"""
         if instance.instance_id not in self._clients:
@@ -241,8 +257,8 @@ class LangGraphProxy:
     def _build_langgraph_headers(
         self,
         user: UserContext,
-        original_headers: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, str]:
+        original_headers: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """
         构建发送给 LangGraph 的 headers
 
@@ -265,10 +281,10 @@ class LangGraphProxy:
         # 如果配置了内部认证 token，添加到 Authorization header
         # 优先使用配置的 Token，其次是备选 Key
         token = self.auth_token or "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
-        
+
         # DEBUG: Log authentication flow
         logger.info(f"[LangGraphProxy] Building headers. Using token: {token[:10]}...")
-        
+
         # 修正：LangGraph Server/SDK 标准认证使用 X-Api-Key Header
         # 用户指出的 "langgraph-auth" 鉴权通常依赖此 Header
         if token:
@@ -297,9 +313,9 @@ class LangGraphProxy:
         method: str,
         path: str,
         user: UserContext,
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        original_headers: Optional[Dict[str, str]] = None,
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        original_headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         """
         统一的请求转发方法
@@ -322,7 +338,7 @@ class LangGraphProxy:
         )
 
         return response
-    
+
     # ============ Assistants API ============
 
     async def list_assistants(
@@ -330,8 +346,8 @@ class LangGraphProxy:
         user: UserContext,
         limit: int = 10,
         offset: int = 0,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         列出用户可访问的 Assistants（带二级缓存）
 
@@ -389,12 +405,10 @@ class LangGraphProxy:
             self._assistants_list_cache[cache_key] = (result, time.time())
             # L2 Redis 缓存
             if self.redis and self.redis.enabled:
-                try:
+                with contextlib.suppress(Exception):
                     await self.redis.cache_assistants_list(
                         user.user_id, result, self.ASSISTANTS_LIST_CACHE_TTL
                     )
-                except Exception:
-                    pass
 
         return result
 
@@ -403,7 +417,7 @@ class LangGraphProxy:
         user: UserContext,
         assistant_id: str,
         require_write: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         获取 Assistant 详情（带二级缓存和所有权验证）
 
@@ -464,21 +478,19 @@ class LangGraphProxy:
         self._assistant_cache[cache_key] = (result, time.time())
         # L2 Redis 缓存（共享，权限在读取时验证）
         if self.redis and self.redis.enabled:
-            try:
+            with contextlib.suppress(Exception):
                 await self.redis.cache_assistant(assistant_id, result, self.ASSISTANT_CACHE_TTL)
-            except Exception:
-                pass
 
         return result
-    
+
     async def create_assistant(
         self,
         user: UserContext,
         graph_id: str,
-        config: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
         """创建自定义 Assistant（需要企业版权限）"""
         # 权限检查
         if user.tier not in ["enterprise", "admin"]:
@@ -488,7 +500,7 @@ class LangGraphProxy:
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
 
-        payload: Dict[str, Any] = {"graph_id": graph_id}
+        payload: dict[str, Any] = {"graph_id": graph_id}
         if config:
             payload["config"] = config
         if name:
@@ -508,9 +520,9 @@ class LangGraphProxy:
     async def create_thread(
         self,
         user: UserContext,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         if_exists: str = "do_nothing",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """创建 Thread，注入用户元数据"""
 
         # 检查 Thread 配额
@@ -522,12 +534,14 @@ class LangGraphProxy:
 
         # 注入用户元数据
         thread_metadata = metadata or {}
-        thread_metadata.update({
-            "owner_id": user.user_id,
-            "tenant_id": user.tenant_id,
-            "user_tier": user.tier,
-            "created_at": datetime.utcnow().isoformat(),
-        })
+        thread_metadata.update(
+            {
+                "owner_id": user.user_id,
+                "tenant_id": user.tenant_id,
+                "user_tier": user.tier,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        )
 
         payload = {
             "metadata": thread_metadata,
@@ -546,10 +560,8 @@ class LangGraphProxy:
             self._thread_cache[cache_key] = (thread, time.time())
             # L2 Redis 缓存
             if self.redis and self.redis.enabled:
-                try:
+                with contextlib.suppress(Exception):
                     await self.redis.cache_thread(thread_id, thread, self.THREAD_CACHE_TTL)
-                except Exception:
-                    pass
 
         # 记录用户的 Thread 计数
         await self._increment_thread_count(user)
@@ -558,7 +570,7 @@ class LangGraphProxy:
 
     async def get_thread(
         self, user: UserContext, thread_id: str, use_cache: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """获取 Thread，验证所有权（带二级缓存）
 
         Args:
@@ -607,10 +619,8 @@ class LangGraphProxy:
             self._thread_cache[cache_key] = (thread, time.time())
             # L2 Redis 缓存
             if self.redis and self.redis.enabled:
-                try:
+                with contextlib.suppress(Exception):
                     await self.redis.cache_thread(thread_id, thread, self.THREAD_CACHE_TTL)
-                except Exception:
-                    pass
 
         return thread
 
@@ -618,8 +628,8 @@ class LangGraphProxy:
         self,
         user: UserContext,
         thread_id: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """更新 Thread"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
@@ -641,10 +651,8 @@ class LangGraphProxy:
         self._thread_cache.pop(cache_key, None)
         # L2 Redis 缓存
         if self.redis and self.redis.enabled:
-            try:
+            with contextlib.suppress(Exception):
                 await self.redis.invalidate_thread(thread_id)
-            except Exception:
-                pass
 
         return response.json()
 
@@ -666,10 +674,8 @@ class LangGraphProxy:
         self._thread_cache.pop(cache_key, None)
         # L2 Redis 缓存
         if self.redis and self.redis.enabled:
-            try:
+            with contextlib.suppress(Exception):
                 await self.redis.invalidate_thread(thread_id)
-            except Exception:
-                pass
 
         # 减少 Thread 计数
         await self._decrement_thread_count(user)
@@ -677,10 +683,10 @@ class LangGraphProxy:
     async def search_threads(
         self,
         user: UserContext,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
         limit: int = 10,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """搜索用户的 Threads"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
@@ -700,8 +706,8 @@ class LangGraphProxy:
         response = await client.post("/threads/search", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
-    
-    async def get_thread_state(self, user: UserContext, thread_id: str) -> Dict[str, Any]:
+
+    async def get_thread_state(self, user: UserContext, thread_id: str) -> dict[str, Any]:
         """获取 Thread 状态"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
@@ -718,9 +724,9 @@ class LangGraphProxy:
         self,
         user: UserContext,
         thread_id: str,
-        values: Dict[str, Any],
-        as_node: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        values: dict[str, Any],
+        as_node: str | None = None,
+    ) -> dict[str, Any]:
         """更新 Thread 状态"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
@@ -729,7 +735,7 @@ class LangGraphProxy:
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
 
-        payload: Dict[str, Any] = {"values": values}
+        payload: dict[str, Any] = {"values": values}
         if as_node:
             payload["as_node"] = as_node
 
@@ -742,8 +748,8 @@ class LangGraphProxy:
         user: UserContext,
         thread_id: str,
         limit: int = 10,
-        before: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
         """获取 Thread 历史"""
         # 先验证所有权
         await self.get_thread(user, thread_id)
@@ -767,13 +773,13 @@ class LangGraphProxy:
         user: UserContext,
         thread_id: str,
         assistant_id: str,
-        input_data: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        webhook: Optional[str] = None,
-        interrupt_before: Optional[List[str]] = None,
-        interrupt_after: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        input_data: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        webhook: str | None = None,
+        interrupt_before: list[str] | None = None,
+        interrupt_after: list[str] | None = None,
+    ) -> dict[str, Any]:
         """创建 Run（异步执行，立即返回）"""
         import asyncio
 
@@ -795,7 +801,7 @@ class LangGraphProxy:
             # 构建 Run 配置，注入用户上下文
             run_config = self._build_run_config(user, config)
 
-            payload: Dict[str, Any] = {
+            payload: dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
@@ -810,7 +816,9 @@ class LangGraphProxy:
             if interrupt_after:
                 payload["interrupt_after"] = interrupt_after
 
-            response = await client.post(f"/threads/{thread_id}/runs", json=payload, headers=headers)
+            response = await client.post(
+                f"/threads/{thread_id}/runs", json=payload, headers=headers
+            )
             response.raise_for_status()
             return response.json()
         except Exception:
@@ -854,10 +862,10 @@ class LangGraphProxy:
         user: UserContext,
         thread_id: str,
         assistant_id: str,
-        input_data: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        input_data: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """创建 Run 并等待完成"""
         import asyncio
 
@@ -879,7 +887,7 @@ class LangGraphProxy:
             headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
 
-            payload: Dict[str, Any] = {
+            payload: dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
@@ -887,14 +895,16 @@ class LangGraphProxy:
             if metadata:
                 payload["metadata"] = metadata
 
-            response = await client.post(f"/threads/{thread_id}/runs/wait", json=payload, headers=headers)
+            response = await client.post(
+                f"/threads/{thread_id}/runs/wait", json=payload, headers=headers
+            )
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
                 logger.error(f"LangGraph create_run_wait failed: {e.response.text}")
                 # 抛出包含详细错误信息的异常，以便前端展示
                 raise LangGraphProxyError(f"LangGraph Auth Error: {e.response.text}") from e
-            
+
             result = response.json()
 
             # Extract token usage from response if available
@@ -952,13 +962,13 @@ class LangGraphProxy:
     async def stream_run(
         self,
         user: UserContext,
-        thread_id: Optional[str],
+        thread_id: str | None,
         assistant_id: str,
-        input_data: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-        stream_mode: Optional[List[str]] = None,
+        input_data: dict[str, Any],
+        config: dict[str, Any] | None = None,
+        stream_mode: list[str] | None = None,
         skip_thread_validation: bool = False,
-    ) -> AsyncIterator[Dict[str, Any]]:
+    ) -> AsyncIterator[dict[str, Any]]:
         """流式执行 Run
 
         Args:
@@ -982,10 +992,7 @@ class LangGraphProxy:
         logger.debug(f"[TIMING] stream_run validation: {validation_ms:.2f}ms (concurrent)")
 
         # 确定 endpoint
-        if thread_id:
-            endpoint = f"/threads/{thread_id}/runs/stream"
-        else:
-            endpoint = "/runs/stream"
+        endpoint = f"/threads/{thread_id}/runs/stream" if thread_id else "/runs/stream"
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
@@ -1000,7 +1007,7 @@ class LangGraphProxy:
             headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
 
-            payload: Dict[str, Any] = {
+            payload: dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
@@ -1036,7 +1043,7 @@ class LangGraphProxy:
                             except json.JSONDecodeError:
                                 continue
 
-        except Exception as e:
+        except Exception:
             run_status = "error"
             raise
         finally:
@@ -1088,8 +1095,8 @@ class LangGraphProxy:
     def _extract_token_usage(
         self,
         event: str,
-        data: Dict[str, Any],
-    ) -> Dict[str, int]:
+        data: dict[str, Any],
+    ) -> dict[str, int]:
         """Extract token usage from stream event data
 
         Supports various formats from different LLM providers:
@@ -1113,24 +1120,36 @@ class LangGraphProxy:
         metadata = data.get("metadata", {})
         if metadata and "usage" in metadata:
             meta_usage = metadata["usage"]
-            input_tokens = max(input_tokens, meta_usage.get("prompt_tokens", 0) or meta_usage.get("input_tokens", 0))
-            output_tokens = max(output_tokens, meta_usage.get("completion_tokens", 0) or meta_usage.get("output_tokens", 0))
+            input_tokens = max(
+                input_tokens,
+                meta_usage.get("prompt_tokens", 0) or meta_usage.get("input_tokens", 0),
+            )
+            output_tokens = max(
+                output_tokens,
+                meta_usage.get("completion_tokens", 0) or meta_usage.get("output_tokens", 0),
+            )
 
         # Check for messages event with usage
         if event == "messages" and isinstance(data, dict):
             msg_usage = data.get("usage", {})
             if msg_usage:
-                input_tokens = max(input_tokens, msg_usage.get("prompt_tokens", 0) or msg_usage.get("input_tokens", 0))
-                output_tokens = max(output_tokens, msg_usage.get("completion_tokens", 0) or msg_usage.get("output_tokens", 0))
+                input_tokens = max(
+                    input_tokens,
+                    msg_usage.get("prompt_tokens", 0) or msg_usage.get("input_tokens", 0),
+                )
+                output_tokens = max(
+                    output_tokens,
+                    msg_usage.get("completion_tokens", 0) or msg_usage.get("output_tokens", 0),
+                )
 
         return {"input": input_tokens, "output": output_tokens}
-    
+
     async def get_run(
         self,
         user: UserContext,
         thread_id: str,
         run_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """获取 Run 详情"""
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
@@ -1149,7 +1168,7 @@ class LangGraphProxy:
         thread_id: str,
         limit: int = 10,
         offset: int = 0,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """列出 Thread 的 Runs"""
         # 验证 Thread 所有权
         await self.get_thread(user, thread_id)
@@ -1179,7 +1198,9 @@ class LangGraphProxy:
         headers = self._build_langgraph_headers(user)
 
         params = {"wait": wait}
-        response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel", params=params, headers=headers)
+        response = await client.post(
+            f"/threads/{thread_id}/runs/{run_id}/cancel", params=params, headers=headers
+        )
         response.raise_for_status()
 
     # ============ Threadless Runs ============
@@ -1188,9 +1209,9 @@ class LangGraphProxy:
         self,
         user: UserContext,
         assistant_id: str,
-        input_data: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        input_data: dict[str, Any],
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """创建无状态 Run（一次性对话）"""
         # 验证 Assistant 访问权限（关键！防止未授权访问任意 assistant）
         await self.get_assistant(user, assistant_id)
@@ -1207,7 +1228,7 @@ class LangGraphProxy:
             headers = self._build_langgraph_headers(user)
             run_config = self._build_run_config(user, config)
 
-            payload: Dict[str, Any] = {
+            payload: dict[str, Any] = {
                 "assistant_id": assistant_id,
                 "input": input_data,
                 "config": run_config,
@@ -1274,9 +1295,9 @@ class LangGraphProxy:
     async def store_get(
         self,
         user: UserContext,
-        namespace: List[str],
+        namespace: list[str],
         key: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """获取记忆，验证 namespace 权限"""
 
         if not self._validate_namespace_access(namespace, user):
@@ -1297,9 +1318,9 @@ class LangGraphProxy:
     async def store_put(
         self,
         user: UserContext,
-        namespace: List[str],
+        namespace: list[str],
         key: str,
-        value: Dict[str, Any],
+        value: dict[str, Any],
     ) -> None:
         """写入记忆，验证权限"""
 
@@ -1322,7 +1343,7 @@ class LangGraphProxy:
     async def store_delete(
         self,
         user: UserContext,
-        namespace: List[str],
+        namespace: list[str],
         key: str,
     ) -> None:
         """删除记忆项"""
@@ -1341,8 +1362,8 @@ class LangGraphProxy:
     async def store_list_namespaces(
         self,
         user: UserContext,
-        prefix: Optional[List[str]] = None,
-    ) -> List[List[str]]:
+        prefix: list[str] | None = None,
+    ) -> list[list[str]]:
         """列出命名空间"""
         instance = await self.lb.select_instance()
         client = await self._get_client(instance)
@@ -1359,10 +1380,10 @@ class LangGraphProxy:
         response = await client.get("/store/namespaces", params=params, headers=headers)
         response.raise_for_status()
         return response.json()
-    
+
     # ============ 辅助方法 ============
-    
-    def _verify_ownership(self, thread: Dict[str, Any], user: UserContext) -> None:
+
+    def _verify_ownership(self, thread: dict[str, Any], user: UserContext) -> None:
         """验证 Thread 所有权"""
         metadata = thread.get("metadata", {})
         owner_id = metadata.get("owner_id")
@@ -1383,7 +1404,7 @@ class LangGraphProxy:
 
     def _verify_assistant_ownership(
         self,
-        assistant: Dict[str, Any],
+        assistant: dict[str, Any],
         user: UserContext,
         require_write: bool = False,
     ) -> None:
@@ -1434,7 +1455,7 @@ class LangGraphProxy:
         raise AssistantAccessDeniedError(assistant_id)
 
     @staticmethod
-    def _normalize_shared_with(shared_with: Any) -> List[str]:
+    def _normalize_shared_with(shared_with: Any) -> list[str]:
         if not shared_with:
             return []
         if isinstance(shared_with, str):
@@ -1503,13 +1524,7 @@ class LangGraphProxy:
             can_access = False
 
             # 创建者
-            if created_by == user.user_id:
-                can_access = True
-            # 共享列表
-            elif user.user_id in shared_with:
-                can_access = True
-            # 公开 assistant
-            elif is_public:
+            if created_by == user.user_id or user.user_id in shared_with or is_public:
                 can_access = True
 
             if can_access:
@@ -1529,41 +1544,42 @@ class LangGraphProxy:
         # 失效 Redis 缓存
         if self.redis and self.redis.enabled:
             import asyncio
+
             asyncio.create_task(self._async_invalidate_redis_assistant(assistant_id))
 
     async def _async_invalidate_redis_assistant(self, assistant_id: str) -> None:
         """异步失效 Redis 中的 Assistant 缓存"""
-        try:
+        with contextlib.suppress(Exception):
             await self.redis.delete(f"lg:assistant:{assistant_id}")
-        except Exception:
-            pass
 
-    def _build_run_config(self, user: UserContext, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _build_run_config(
+        self, user: UserContext, config: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """构建 Run 配置，注入用户上下文"""
         run_config = config or {}
         run_config["configurable"] = run_config.get("configurable", {})
-        
+
         # 注入用户信息（供 Agent 使用）
         run_config["configurable"]["user_id"] = user.user_id
         run_config["configurable"]["user_tier"] = user.tier
         run_config["configurable"]["tenant_id"] = user.tenant_id
         # Namespacing for checkpointing/memory where supported by the upstream runtime.
         run_config["configurable"]["checkpoint_ns"] = user.tenant_id or ""
-        
+
         return run_config
-    
+
     async def _check_thread_quota(self, user: UserContext) -> None:
         """检查 Thread 配额"""
         max_threads = self.THREAD_QUOTAS.get(user.tier, 1)
-        
-        if max_threads == float('inf'):
+
+        if max_threads == float("inf"):
             return
-        
+
         current = await self._count_user_threads(user.user_id)
-        
+
         if current >= max_threads:
             raise QuotaExceededError(f"Thread quota exceeded: {current}/{int(max_threads)}")
-    
+
     async def _count_user_threads(self, user_id: str) -> int:
         """统计用户的 Thread 数量"""
         if self.redis and self.redis.enabled:
@@ -1576,114 +1592,96 @@ class LangGraphProxy:
     async def _increment_thread_count(self, user: UserContext) -> None:
         """增加 Thread 计数"""
         if self.redis and self.redis.enabled:
-            try:
+            with contextlib.suppress(Exception):
                 await self.redis.incr_user_thread_count(user.user_id)
-            except Exception:
-                pass
 
     async def _decrement_thread_count(self, user: UserContext) -> None:
         """减少 Thread 计数"""
         if self.redis and self.redis.enabled:
-            try:
+            with contextlib.suppress(Exception):
                 await self.redis.decr_user_thread_count(user.user_id)
-            except Exception:
-                pass
-    
+
     def _validate_namespace_access(
         self,
-        namespace: List[str],
+        namespace: list[str],
         user: UserContext,
         write: bool = False,
     ) -> bool:
         """验证用户是否有权访问该 namespace"""
         if not namespace:
             return False
-        
+
         # 管理员可访问所有
         if user.tier == "admin":
             return True
-        
+
         # 全局 namespace 所有人可读，但只有管理员可写
         if namespace[0] == "global":
             return not write
-        
+
         # 用户 namespace 只能访问自己的
         if namespace[0] == "user":
             return len(namespace) > 1 and namespace[1] == user.user_id
-        
+
         # 租户 namespace（企业版功能）
         if namespace[0] == "tenant":
             if user.tier not in ["premium", "enterprise", "admin"]:
                 return False
             return len(namespace) > 1 and namespace[1] == user.tenant_id
-        
+
         return False
 
 
 # ============ 记忆命名空间注入器 ============
+
 
 class MemoryNamespaceInjector:
     """
     在请求转发到 LangGraph 之前，注入用户相关的 namespace
     确保用户只能访问自己的记忆
     """
-    
+
     @staticmethod
     def inject_user_namespace(
-        namespace: List[str],
+        namespace: list[str],
         user: UserContext,
-    ) -> List[str]:
+    ) -> list[str]:
         """为 namespace 添加用户前缀"""
         if not namespace:
             return ["user", user.user_id]
-        
+
         # 如果已经有 user 前缀，验证是否是本人
         if namespace[0] == "user":
             if len(namespace) > 1 and namespace[1] != user.user_id:
                 raise ForbiddenError("Cannot access other user's namespace")
             return namespace
-        
+
         # 如果是全局 namespace，不修改
         if namespace[0] == "global":
             return namespace
-        
+
         # 其他情况，添加用户前缀
         return ["user", user.user_id] + namespace
-    
+
     @staticmethod
     def validate_namespace_access(
-        namespace: List[str],
+        namespace: list[str],
         user: UserContext,
     ) -> bool:
         """验证用户是否有权访问该 namespace"""
         if not namespace:
             return False
-        
+
         # 全局 namespace 所有人可读
         if namespace[0] == "global":
             return True
-        
+
         # 用户 namespace 只能访问自己的
         if namespace[0] == "user":
             return len(namespace) > 1 and namespace[1] == user.user_id
-        
+
         # 租户 namespace
         if namespace[0] == "tenant":
             return len(namespace) > 1 and namespace[1] == user.tenant_id
-        
+
         return False
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

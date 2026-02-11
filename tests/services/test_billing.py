@@ -7,15 +7,16 @@ Tests for:
 - UsageRecorder - Usage recording and querying
 """
 
-import pytest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.api.v1.proxy import _estimate_tokens_from_payload
 from src.core.utils import estimate_tokens
+from src.services.billing.model_pricing import DEFAULT_PRICING, ModelPrice, ModelPricingService
 from src.services.billing.quota_service import QuotaService, QuotaStatus
-from src.services.billing.model_pricing import ModelPricingService, DEFAULT_PRICING, ModelPrice
 
 
 class TestModelPricingService:
@@ -161,16 +162,18 @@ class TestQuotaService:
         """Test quota check for blocked user"""
         # Mock blocked user
         mock_conn = AsyncMock()
-        mock_conn.fetchrow = AsyncMock(return_value={
-            "daily_token_limit": 100000,
-            "monthly_cost_limit_cents": 10000,
-            "current_daily_tokens": 50000,
-            "current_monthly_cost_cents": 5000,
-            "requests_per_minute": 60,
-            "is_blocked": True,
-            "blocked_reason": "Suspicious activity",
-            "warning_threshold": 0.8,
-        })
+        mock_conn.fetchrow = AsyncMock(
+            return_value={
+                "daily_token_limit": 100000,
+                "monthly_cost_limit_cents": 10000,
+                "current_daily_tokens": 50000,
+                "current_monthly_cost_cents": 5000,
+                "requests_per_minute": 60,
+                "is_blocked": True,
+                "blocked_reason": "Suspicious activity",
+                "warning_threshold": 0.8,
+            }
+        )
         mock_db.pool.acquire = AsyncMock()
         mock_db.pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_db.pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)

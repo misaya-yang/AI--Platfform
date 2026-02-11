@@ -9,20 +9,20 @@ Provides document processing and image extraction for multimodal RAG:
 """
 
 from .document_image_extractor import (
-    DocumentImageExtractor,
-    DocumentExtractionResult,
-    ExtractedImage,
-    PDFExtractor,
-    DOCXExtractor,
-    HTMLExtractor,
-    extract_images_from_document,
-    detect_mime_type,
-    get_image_dimensions,
-    generate_image_id,
     EMBEDDABLE_IMAGE_TYPES,
     MAX_IMAGE_SIZE_BYTES,
-    MIN_IMAGE_WIDTH,
     MIN_IMAGE_HEIGHT,
+    MIN_IMAGE_WIDTH,
+    DocumentExtractionResult,
+    DocumentImageExtractor,
+    DOCXExtractor,
+    ExtractedImage,
+    HTMLExtractor,
+    PDFExtractor,
+    detect_mime_type,
+    extract_images_from_document,
+    generate_image_id,
+    get_image_dimensions,
 )
 
 __all__ = [

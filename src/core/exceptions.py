@@ -34,6 +34,7 @@ class AuthError(GatewayError):
 
 class AuthenticationRequiredError(GatewayError):
     """需要鉴权但未提供有效凭证"""
+
     pass
 
 
@@ -73,5 +74,6 @@ class TaskCancelledError(GatewayError):
 
 class NotFoundError(GatewayError):
     """资源不存在错误"""
+
     def __init__(self, message: str = "Resource not found"):
         super().__init__(message)

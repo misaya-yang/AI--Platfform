@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Comprehensive Image Sync Test
 
@@ -12,10 +11,12 @@ Tests the full image sync pipeline with various scenarios:
 7. Search and verify retrieval
 8. Test specific fee table queries
 """
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
 
@@ -37,15 +38,18 @@ FEE_TABLE_TEST_QUERIES = [
 
 async def test_filename_sanitization():
     """Test 1: Filename sanitization for S3 metadata"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 1: Filename Sanitization")
-    print("="*60)
+    print("=" * 60)
 
     from src.services.storage.image_storage import _sanitize_for_s3_metadata
 
     test_cases = [
         # (input, expected_output_contains)
-        ("Screenshot 2025-01-16 at 11.56.16\u202fam.png", "Screenshot 2025-01-16 at 11.56.16 am.png"),  # narrow no-break space
+        (
+            "Screenshot 2025-01-16 at 11.56.16\u202fam.png",
+            "Screenshot 2025-01-16 at 11.56.16 am.png",
+        ),  # narrow no-break space
         ("normal_file.png", "normal_file.png"),
         ("文件名.png", ".png"),  # Chinese characters removed
         ("file\u00a0name.png", "file name.png"),  # non-breaking space
@@ -69,9 +73,9 @@ async def test_filename_sanitization():
 
 async def test_image_download():
     """Test 2: Image download from Confluence"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 2: Image Download from Confluence")
-    print("="*60)
+    print("=" * 60)
 
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
@@ -86,9 +90,7 @@ async def test_image_download():
         "SELECT domain, email, api_token FROM confluence_connections LIMIT 1"
     )
     credentials = ConfluenceCredentials(
-        domain=conn["domain"],
-        email=conn["email"],
-        api_token=conn["api_token"]
+        domain=conn["domain"], email=conn["email"], api_token=conn["api_token"]
     )
     client = ConfluenceClient(credentials)
 
@@ -115,23 +117,18 @@ async def test_image_download():
 
 async def test_vlm_description(image_bytes):
     """Test 3: VLM description generation"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 3: VLM Description Generation")
-    print("="*60)
+    print("=" * 60)
 
     from src.config.settings import Settings
     from src.services.knowledge.vlm_service import DashScopeVLMService
 
     settings = Settings()
-    vlm = DashScopeVLMService(
-        api_key=settings.knowledge.dashscope.api_key,
-        model="qwen-vl-max"
-    )
+    vlm = DashScopeVLMService(api_key=settings.knowledge.dashscope.api_key, model="qwen-vl-max")
 
     result = await vlm.describe_image(
-        image_bytes=image_bytes,
-        image_type="table",
-        context="Auto Finance FAQs"
+        image_bytes=image_bytes, image_type="table", context="Auto Finance FAQs"
     )
 
     print(f"  Description length: {len(result.description)} characters")
@@ -153,15 +150,17 @@ async def test_vlm_description(image_bytes):
 
 async def test_embedding_and_storage(description):
     """Test 4: Embedding generation and Qdrant storage"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 4: Embedding and Vector Storage")
-    print("="*60)
+    print("=" * 60)
+
+    import uuid
+
+    from qdrant_client import models as qmodels
 
     from src.config.settings import Settings
     from src.services.knowledge.embedding import DashScopeEmbedding
     from src.services.knowledge.vector_store import VectorStore
-    from qdrant_client import models as qmodels
-    import uuid
 
     settings = Settings()
 
@@ -200,9 +199,9 @@ async def test_embedding_and_storage(description):
 
 async def test_search_queries():
     """Test 5: Search queries for fee table values"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 5: Search Query Validation")
-    print("="*60)
+    print("=" * 60)
 
     from src.config.settings import Settings
     from src.services.knowledge.embedding import DashScopeEmbedding
@@ -218,7 +217,7 @@ async def test_search_queries():
 
     results_summary = []
 
-    for query, expected_value, fee_name in FEE_TABLE_TEST_QUERIES[:5]:  # Test first 5
+    for query, expected_value, _fee_name in FEE_TABLE_TEST_QUERIES[:5]:  # Test first 5
         query_vec = await embedder.embed_query(query)
         results = await vector_store.search(
             collection_name="kb_kb_48cbe2b9f033_1024",
@@ -234,7 +233,9 @@ async def test_search_queries():
         passed = has_image_result and has_expected
         status = "PASS" if passed else "FAIL"
         print(f"  [{status}] Query: {query}")
-        print(f"         Top result score: {results[0].score:.4f}, type: {results[0].payload.get('content_type')}")
+        print(
+            f"         Top result score: {results[0].score:.4f}, type: {results[0].payload.get('content_type')}"
+        )
 
         results_summary.append((query, passed, results[0].score if results else 0))
 
@@ -247,9 +248,9 @@ async def test_search_queries():
 
 async def test_database_segment_storage():
     """Test 6: Database segment storage with position"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 6: Database Segment Storage")
-    print("="*60)
+    print("=" * 60)
 
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
@@ -285,16 +286,20 @@ async def test_database_segment_storage():
 
 async def test_sync_service_image_processor():
     """Test 7: Sync service image processor creation"""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST 7: Sync Service Image Processor")
-    print("="*60)
+    print("=" * 60)
 
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
     from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
     from src.services.knowledge.knowledge_service import KnowledgeService
     from src.services.knowledge.vlm_service import DashScopeVLMService
-    from src.services.storage.image_storage import ImageStorageService, StorageConfig, StorageBackend
+    from src.services.storage.image_storage import (
+        ImageStorageService,
+        StorageBackend,
+        StorageConfig,
+    )
 
     settings = Settings()
 
@@ -311,8 +316,7 @@ async def test_sync_service_image_processor():
     storage_service = ImageStorageService(storage_config)
 
     vlm_service = DashScopeVLMService(
-        api_key=settings.knowledge.dashscope.api_key,
-        model="qwen-vl-max"
+        api_key=settings.knowledge.dashscope.api_key, model="qwen-vl-max"
     )
 
     knowledge_service = KnowledgeService(
@@ -340,12 +344,12 @@ async def test_sync_service_image_processor():
     img_processor = await sync_service._get_image_processor(connection_id)
 
     if img_processor:
-        print(f"  [PASS] Image processor created")
+        print("  [PASS] Image processor created")
         print(f"         VLM enabled: {img_processor.vlm_service is not None}")
-        print(f"         Storage: S3/OSS configured")
+        print("         Storage: S3/OSS configured")
         passed = True
     else:
-        print(f"  [FAIL] Image processor is None")
+        print("  [FAIL] Image processor is None")
         passed = False
 
     await db.close()
@@ -353,9 +357,9 @@ async def test_sync_service_image_processor():
 
 
 async def main():
-    print("="*60)
+    print("=" * 60)
     print("COMPREHENSIVE IMAGE SYNC TEST SUITE")
-    print("="*60)
+    print("=" * 60)
 
     test_results = {}
 
@@ -387,9 +391,9 @@ async def main():
     test_results["sync_service"] = await test_sync_service_image_processor()
 
     # Summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST SUMMARY")
-    print("="*60)
+    print("=" * 60)
     all_passed = True
     for name, result in test_results.items():
         status = "PASS" if result else "FAIL"
@@ -397,12 +401,12 @@ async def main():
             all_passed = False
         print(f"  [{status}] {name}")
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     if all_passed:
         print("ALL TESTS PASSED!")
     else:
         print("SOME TESTS FAILED - Review output above")
-    print("="*60)
+    print("=" * 60)
 
     return all_passed
 

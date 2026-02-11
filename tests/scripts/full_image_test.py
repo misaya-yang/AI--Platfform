@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
 """Full end-to-end image sync test"""
+
 import asyncio
-import sys
 import os
-sys.stdout.reconfigure(encoding='utf-8')
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     from src.config.settings import Settings
@@ -47,7 +49,9 @@ async def main():
 
     # Generate VLM description
     vlm = DashScopeVLMService(api_key=settings.knowledge.dashscope.api_key, model="qwen-vl-max")
-    result = await vlm.describe_image(image_bytes=content, image_type="table", context="Auto Finance FAQs")
+    result = await vlm.describe_image(
+        image_bytes=content, image_type="table", context="Auto Finance FAQs"
+    )
 
     # Check if "Legal" is mentioned
     if "legal" in result.description.lower() or "550" in result.description:
@@ -71,6 +75,7 @@ async def main():
 
     # Create embedding using DashScope text embedding
     from src.services.knowledge.embedding import DashScopeEmbedding
+
     embedder = DashScopeEmbedding(
         model=dataset["embedding_model"],
         api_key=settings.knowledge.dashscope.api_key,
@@ -81,10 +86,12 @@ async def main():
     print(f"Generated embedding: dimension={len(vectors[0])}")
 
     # Store in Qdrant
-    from src.services.knowledge.vector_store import VectorStore
+    import uuid
+
     from qdrant_client import models as qmodels
 
-    import uuid
+    from src.services.knowledge.vector_store import VectorStore
+
     vector_store = VectorStore(url=settings.knowledge.qdrant.url)
     segment_id = str(uuid.uuid4())
 
@@ -115,7 +122,7 @@ async def main():
 
     print(f"Search results: {len(search_results)}")
     for i, r in enumerate(search_results):
-        print(f"\n  [{i+1}] Score: {r.score:.4f}")
+        print(f"\n  [{i + 1}] Score: {r.score:.4f}")
         print(f"      content_type: {r.payload.get('content_type')}")
         text = r.payload.get("text", "")[:300]
         print(f"      Text preview: {text}...")
@@ -126,6 +133,7 @@ async def main():
     await client.close()
     await db.close()
     print("\n=== Test Complete! ===")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

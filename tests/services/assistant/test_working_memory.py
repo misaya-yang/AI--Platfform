@@ -8,16 +8,14 @@ Tests for WorkingMemory class and related components:
 - Serialization/deserialization
 """
 
-import pytest
 from datetime import datetime
 
 from src.services.assistant.working_memory import (
-    TaskStatus,
-    TaskItem,
     CollectedInfo,
+    TaskItem,
+    TaskStatus,
     WorkingMemory,
 )
-
 
 # =============================================================================
 # TaskStatus Tests
@@ -184,7 +182,7 @@ class TestWorkingMemoryTasks:
         memory = WorkingMemory(session_id="s1")
 
         task1 = memory.add_task("t1", "First task")
-        task2 = memory.add_task("t2", "Second task")
+        memory.add_task("t2", "Second task")
 
         assert len(memory.tasks) == 2
         assert task1.id == "t1"

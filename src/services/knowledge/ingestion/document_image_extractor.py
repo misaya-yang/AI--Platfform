@@ -27,14 +27,13 @@ import base64
 import hashlib
 import io
 import logging
-import mimetypes
 import os
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import urljoin, urlparse
+from typing import Any
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +42,11 @@ def _get_fitz():
     """Get fitz module with compatibility for old/new PyMuPDF versions."""
     try:
         import pymupdf as fitz
+
         return fitz
     except ImportError:
         import fitz
+
         return fitz
 
 
@@ -107,21 +108,22 @@ EXTENSION_TO_MIME = {
 # Data Classes
 # ============================================================
 
+
 @dataclass
 class ExtractedImage:
     """Represents an image extracted from a document."""
 
-    image_id: str                    # Unique ID (SHA256 hash of content, 16 chars)
-    content: bytes                   # Raw image bytes
-    mime_type: str                   # MIME type (image/png, etc.)
-    width: int                       # Image width in pixels
-    height: int                      # Image height in pixels
-    source_location: str             # Where found (page number, section, etc.)
-    context_text: str = ""           # Surrounding text context
-    alt_text: str = ""               # Alt text if available
-    filename: str = ""               # Original filename if known
-    char_offset: int = -1            # Character offset in document (-1 if unknown)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    image_id: str  # Unique ID (SHA256 hash of content, 16 chars)
+    content: bytes  # Raw image bytes
+    mime_type: str  # MIME type (image/png, etc.)
+    width: int  # Image width in pixels
+    height: int  # Image height in pixels
+    source_location: str  # Where found (page number, section, etc.)
+    context_text: str = ""  # Surrounding text context
+    alt_text: str = ""  # Alt text if available
+    filename: str = ""  # Original filename if known
+    char_offset: int = -1  # Character offset in document (-1 if unknown)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def size_bytes(self) -> int:
@@ -145,12 +147,12 @@ class ExtractedImage:
             return 0.0
         return self.width / self.height
 
-    def to_dict(self, include_context_length: int = 200) -> Dict[str, Any]:
+    def to_dict(self, include_context_length: int = 200) -> dict[str, Any]:
         """Convert to dictionary (without content for serialization).
-        
+
         Args:
             include_context_length: Maximum length of context_text to include (default: 200)
-            
+
         Returns:
             Dictionary representation of the image metadata
         """
@@ -175,13 +177,13 @@ class ExtractedImage:
 class DocumentExtractionResult:
     """Result of document extraction containing text and images."""
 
-    text: str                              # Extracted text content
-    images: List[ExtractedImage]           # Extracted images
-    document_type: str                     # pdf, docx, html, etc.
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    text: str  # Extracted text content
+    images: list[ExtractedImage]  # Extracted images
+    document_type: str  # pdf, docx, html, etc.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def embeddable_images(self) -> List[ExtractedImage]:
+    def embeddable_images(self) -> list[ExtractedImage]:
         """Get only images that can be embedded."""
         return [img for img in self.images if img.is_embeddable]
 
@@ -195,9 +197,9 @@ class DocumentExtractionResult:
 
     def associate_images_with_text(
         self,
-        chunks: List[Dict[str, Any]],
+        chunks: list[dict[str, Any]],
         max_distance: int = MAX_ASSOCIATION_DISTANCE,
-    ) -> Dict[str, List[ExtractedImage]]:
+    ) -> dict[str, list[ExtractedImage]]:
         """Associate images with text chunks based on proximity.
 
         Args:
@@ -207,7 +209,7 @@ class DocumentExtractionResult:
         Returns:
             Dict mapping chunk_id to list of associated images
         """
-        associations: Dict[str, List[ExtractedImage]] = {}
+        associations: dict[str, list[ExtractedImage]] = {}
 
         for img in self.embeddable_images:
             if img.char_offset < 0:
@@ -231,12 +233,13 @@ class DocumentExtractionResult:
 # Image Utility Functions
 # ============================================================
 
+
 def generate_image_id(content: bytes) -> str:
     """Generate unique ID for image based on content hash.
-    
+
     Args:
         content: Raw image bytes
-        
+
     Returns:
         16-character hex string (first 16 chars of SHA256 hash)
     """
@@ -245,13 +248,13 @@ def generate_image_id(content: bytes) -> str:
 
 def _is_valid_image_dimensions(width: int, height: int, min_width: int, min_height: int) -> bool:
     """Check if image dimensions meet minimum requirements.
-    
+
     Args:
         width: Image width in pixels
         height: Image height in pixels
         min_width: Minimum acceptable width
         min_height: Minimum acceptable height
-        
+
     Returns:
         True if dimensions are valid, False otherwise
     """
@@ -260,10 +263,10 @@ def _is_valid_image_dimensions(width: int, height: int, min_width: int, min_heig
 
 def detect_mime_type(content: bytes) -> str:
     """Detect image MIME type from magic bytes.
-    
+
     Args:
         content: Raw file bytes
-        
+
     Returns:
         MIME type string (e.g., 'image/png') or 'application/octet-stream' if unknown
     """
@@ -271,58 +274,59 @@ def detect_mime_type(content: bytes) -> str:
         return "application/octet-stream"
 
     # PNG
-    if len(content) >= 8 and content[:8] == b'\x89PNG\r\n\x1a\n':
+    if len(content) >= 8 and content[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
-    
+
     # JPEG
-    if content[:2] == b'\xff\xd8':
+    if content[:2] == b"\xff\xd8":
         return "image/jpeg"
-    
+
     # GIF
-    if len(content) >= 6 and content[:6] in (b'GIF87a', b'GIF89a'):
+    if len(content) >= 6 and content[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
-    
+
     # BMP
-    if content[:2] == b'BM':
+    if content[:2] == b"BM":
         return "image/bmp"
-    
+
     # WebP
-    if len(content) >= 12 and content[:4] == b'RIFF' and content[8:12] == b'WEBP':
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp"
-    
+
     # TIFF
-    if content[:4] in (b'II*\x00', b'MM\x00*'):
+    if content[:4] in (b"II*\x00", b"MM\x00*"):
         return "image/tiff"
-    
+
     # SVG (XML-based)
-    if b'<svg' in content[:1024].lower() or b'<?xml' in content[:100]:
+    if b"<svg" in content[:1024].lower() or b"<?xml" in content[:100]:
         return "image/svg+xml"
-    
+
     # AVIF
-    if len(content) >= 12 and content[4:8] == b'ftyp':
+    if len(content) >= 12 and content[4:8] == b"ftyp":
         # Check for avif/avis brand
-        if b'avif' in content[8:16] or b'avis' in content[8:16]:
+        if b"avif" in content[8:16] or b"avis" in content[8:16]:
             return "image/avif"
-    
+
     # ICO
-    if len(content) >= 4 and content[:4] == b'\x00\x00\x01\x00':
+    if len(content) >= 4 and content[:4] == b"\x00\x00\x01\x00":
         return "image/x-icon"
-    
+
     return "application/octet-stream"
 
 
-def get_image_dimensions(content: bytes, mime_type: str) -> Tuple[int, int]:
+def get_image_dimensions(content: bytes, mime_type: str) -> tuple[int, int]:
     """Get image dimensions without loading full image.
-    
+
     Args:
         content: Raw image bytes
         mime_type: MIME type of the image
-        
+
     Returns:
         Tuple of (width, height) in pixels. Returns (0, 0) if dimensions cannot be determined.
     """
     try:
         from PIL import Image
+
         with Image.open(io.BytesIO(content)) as img:
             return img.size
     except Exception as e:
@@ -331,13 +335,13 @@ def get_image_dimensions(content: bytes, mime_type: str) -> Tuple[int, int]:
         return _parse_dimensions_from_header(content, mime_type)
 
 
-def _parse_dimensions_from_header(content: bytes, mime_type: str) -> Tuple[int, int]:
+def _parse_dimensions_from_header(content: bytes, mime_type: str) -> tuple[int, int]:
     """Parse image dimensions from header bytes.
-    
+
     Args:
         content: Raw image bytes
         mime_type: MIME type of the image
-        
+
     Returns:
         Tuple of (width, height) in pixels. Returns (0, 0) if parsing fails.
     """
@@ -401,6 +405,7 @@ def _parse_dimensions_from_header(content: bytes, mime_type: str) -> Tuple[int, 
 # Document Type Extractors
 # ============================================================
 
+
 class PDFExtractor:
     """Extract images from PDF documents using PyMuPDF."""
 
@@ -411,12 +416,12 @@ class PDFExtractor:
         context_chars: int = DEFAULT_CONTEXT_CHARS,
     ):
         """Initialize PDF extractor.
-        
+
         Args:
             min_width: Minimum image width to extract (default: 50)
             min_height: Minimum image height to extract (default: 50)
             context_chars: Number of context characters to extract (default: 500)
-            
+
         Raises:
             ValueError: If dimensions are invalid
         """
@@ -424,7 +429,7 @@ class PDFExtractor:
             raise ValueError("Image dimensions must be positive")
         if context_chars < 0:
             raise ValueError("Context chars must be non-negative")
-            
+
         self.min_width = min_width
         self.min_height = min_height
         self.context_chars = context_chars
@@ -432,7 +437,7 @@ class PDFExtractor:
     async def extract(self, content: bytes) -> DocumentExtractionResult:
         """Extract text and images from PDF with parallel processing."""
         try:
-            fitz = _get_fitz()
+            _get_fitz()
         except ImportError:
             logger.warning("PyMuPDF not installed, using fallback")
             return await self._fallback_extract(content)
@@ -447,12 +452,12 @@ class PDFExtractor:
         char_offset: int,
         seen_hashes: set,
         seen_lock: threading.Lock,
-    ) -> List[ExtractedImage]:
+    ) -> list[ExtractedImage]:
         """Extract images from a single page using an isolated document instance.
-        
+
         Note: This method opens a separate document instance per thread to avoid
         threading issues with PyMuPDF. For large PDFs, this increases memory usage.
-        
+
         Args:
             content: Full PDF content bytes
             page_num: Page number to extract (0-indexed)
@@ -460,13 +465,13 @@ class PDFExtractor:
             char_offset: Character offset of this page in full document
             seen_hashes: Set of seen image hashes (shared, thread-safe)
             seen_lock: Lock for seen_hashes access
-            
+
         Returns:
             List of extracted images from this page
         """
         fitz = _get_fitz()
 
-        page_images: List[ExtractedImage] = []
+        page_images: list[ExtractedImage] = []
         doc = None
         try:
             doc = fitz.open(stream=content, filetype="pdf")
@@ -484,7 +489,7 @@ class PDFExtractor:
 
                     # Compute hash first (outside lock to reduce contention)
                     img_hash = hashlib.sha256(img_bytes).hexdigest()
-                    
+
                     # Deduplicate by hash (thread-safe)
                     with seen_lock:
                         if img_hash in seen_hashes:
@@ -499,31 +504,39 @@ class PDFExtractor:
                     height = base_img.get("height", 0)
 
                     # Skip small images
-                    if not _is_valid_image_dimensions(width, height, self.min_width, self.min_height):
-                        logger.debug(f"Skipping small image on page {page_num + 1}: {width}x{height}")
+                    if not _is_valid_image_dimensions(
+                        width, height, self.min_width, self.min_height
+                    ):
+                        logger.debug(
+                            f"Skipping small image on page {page_num + 1}: {width}x{height}"
+                        )
                         continue
 
                     # Get context text
-                    context = page_text[:self.context_chars] if page_text else ""
+                    context = page_text[: self.context_chars] if page_text else ""
 
-                    page_images.append(ExtractedImage(
-                        image_id=generate_image_id(img_bytes),
-                        content=img_bytes,
-                        mime_type=mime_type,
-                        width=width,
-                        height=height,
-                        source_location=f"page_{page_num + 1}",
-                        context_text=context,
-                        char_offset=char_offset,
-                        metadata={
-                            "page_number": page_num + 1,
-                            "image_index": img_index,
-                            "xref": xref,
-                        },
-                    ))
+                    page_images.append(
+                        ExtractedImage(
+                            image_id=generate_image_id(img_bytes),
+                            content=img_bytes,
+                            mime_type=mime_type,
+                            width=width,
+                            height=height,
+                            source_location=f"page_{page_num + 1}",
+                            context_text=context,
+                            char_offset=char_offset,
+                            metadata={
+                                "page_number": page_num + 1,
+                                "image_index": img_index,
+                                "xref": xref,
+                            },
+                        )
+                    )
 
                 except Exception as e:
-                    logger.warning(f"Failed to extract image {img_index} from page {page_num + 1}: {e}")
+                    logger.warning(
+                        f"Failed to extract image {img_index} from page {page_num + 1}: {e}"
+                    )
 
             return page_images
         except Exception as e:
@@ -535,21 +548,21 @@ class PDFExtractor:
 
     def _extract_sync_parallel(self, content: bytes) -> DocumentExtractionResult:
         """Synchronous extraction with parallel image processing.
-        
+
         Args:
             content: PDF file bytes
-            
+
         Returns:
             DocumentExtractionResult containing text and images
         """
         fitz = _get_fitz()
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
         doc = None
         try:
             doc = fitz.open(stream=content, filetype="pdf")
             total_pages = len(doc)
-            text_parts: List[str] = []
+            text_parts: list[str] = []
 
             # Extract all page text sequentially for stable offsets
             for page_num in range(total_pages):
@@ -557,7 +570,7 @@ class PDFExtractor:
                 text_parts.append(page.get_text("text"))
 
             # Compute character offsets (account for "\n\n" join)
-            char_offsets: List[int] = []
+            char_offsets: list[int] = []
             running = 0
             for idx, page_text in enumerate(text_parts):
                 char_offsets.append(running)
@@ -565,7 +578,7 @@ class PDFExtractor:
                 if idx < total_pages - 1:
                     running += 2  # "\n\n" separator
 
-            all_images: List[ExtractedImage] = []
+            all_images: list[ExtractedImage] = []
             seen_hashes: set = set()
             seen_lock = threading.Lock()
             extraction_errors = 0
@@ -586,7 +599,9 @@ class PDFExtractor:
             else:
                 # Parallel processing for larger documents (isolated document per worker)
                 max_workers = min(MAX_PARALLEL_WORKERS, (os.cpu_count() or 2))
-                logger.info(f"Extracting images from {total_pages} pages with {max_workers} workers")
+                logger.info(
+                    f"Extracting images from {total_pages} pages with {max_workers} workers"
+                )
 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_page = {
@@ -609,7 +624,9 @@ class PDFExtractor:
                             all_images.extend(page_images)
                         except TimeoutError:
                             extraction_errors += 1
-                            logger.error(f"Timeout extracting images from page {page_num + 1} after {PDF_PAGE_TIMEOUT_SECONDS}s")
+                            logger.error(
+                                f"Timeout extracting images from page {page_num + 1} after {PDF_PAGE_TIMEOUT_SECONDS}s"
+                            )
                         except Exception as e:
                             extraction_errors += 1
                             logger.error(f"Failed to extract images from page {page_num + 1}: {e}")
@@ -673,12 +690,12 @@ class DOCXExtractor:
         context_chars: int = DEFAULT_CONTEXT_CHARS,
     ):
         """Initialize DOCX extractor.
-        
+
         Args:
             min_width: Minimum image width to extract (default: 50)
             min_height: Minimum image height to extract (default: 50)
             context_chars: Number of context characters to extract (default: 500)
-            
+
         Raises:
             ValueError: If dimensions are invalid
         """
@@ -686,7 +703,7 @@ class DOCXExtractor:
             raise ValueError("Image dimensions must be positive")
         if context_chars < 0:
             raise ValueError("Context chars must be non-negative")
-            
+
         self.min_width = min_width
         self.min_height = min_height
         self.context_chars = context_chars
@@ -708,10 +725,10 @@ class DOCXExtractor:
 
     def _extract_sync(self, content: bytes) -> DocumentExtractionResult:
         """Synchronous extraction.
-        
+
         Args:
             content: DOCX file bytes
-            
+
         Returns:
             DocumentExtractionResult containing text and images
         """
@@ -720,8 +737,8 @@ class DOCXExtractor:
         extraction_errors = 0
         try:
             doc = Document(io.BytesIO(content))
-            text_parts: List[str] = []
-            images: List[ExtractedImage] = []
+            text_parts: list[str] = []
+            images: list[ExtractedImage] = []
             seen_hashes: set = set()
 
             # Extract text from paragraphs
@@ -748,23 +765,27 @@ class DOCXExtractor:
                         width, height = get_image_dimensions(img_bytes, mime_type)
 
                         # Skip small images
-                        if not _is_valid_image_dimensions(width, height, self.min_width, self.min_height):
+                        if not _is_valid_image_dimensions(
+                            width, height, self.min_width, self.min_height
+                        ):
                             logger.debug(f"Skipping small DOCX image: {width}x{height}")
                             continue
 
                         # Get filename from content type
                         filename = getattr(img_part, "partname", "").split("/")[-1]
 
-                        images.append(ExtractedImage(
-                            image_id=generate_image_id(img_bytes),
-                            content=img_bytes,
-                            mime_type=mime_type,
-                            width=width,
-                            height=height,
-                            source_location="document_body",
-                            filename=filename,
-                            metadata={"relationship_id": rel.rId},
-                        ))
+                        images.append(
+                            ExtractedImage(
+                                image_id=generate_image_id(img_bytes),
+                                content=img_bytes,
+                                mime_type=mime_type,
+                                width=width,
+                                height=height,
+                                source_location="document_body",
+                                filename=filename,
+                                metadata={"relationship_id": rel.rId},
+                            )
+                        )
 
                     except Exception as e:
                         extraction_errors += 1
@@ -801,17 +822,17 @@ class HTMLExtractor:
         min_height: int = MIN_IMAGE_HEIGHT,
         context_chars: int = DEFAULT_CONTEXT_CHARS,
         download_images: bool = False,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         """Initialize HTML extractor.
-        
+
         Args:
             min_width: Minimum image width to extract (default: 50)
             min_height: Minimum image height to extract (default: 50)
             context_chars: Number of context characters to extract (default: 500)
             download_images: Whether to download external images (default: False)
             base_url: Base URL for resolving relative image URLs (optional)
-            
+
         Raises:
             ValueError: If dimensions are invalid
         """
@@ -819,7 +840,7 @@ class HTMLExtractor:
             raise ValueError("Image dimensions must be positive")
         if context_chars < 0:
             raise ValueError("Context chars must be non-negative")
-            
+
         self.min_width = min_width
         self.min_height = min_height
         self.context_chars = context_chars
@@ -828,15 +849,15 @@ class HTMLExtractor:
 
     async def extract(
         self,
-        content: Union[bytes, str],
-        base_url: Optional[str] = None,
+        content: bytes | str,
+        base_url: str | None = None,
     ) -> DocumentExtractionResult:
         """Extract text and images from HTML.
-        
+
         Args:
             content: HTML content as bytes or string
             base_url: Base URL for resolving relative image URLs (optional)
-            
+
         Returns:
             DocumentExtractionResult containing text and images
         """
@@ -864,7 +885,7 @@ class HTMLExtractor:
             text = soup.get_text(separator="\n", strip=True)
 
             # Extract images
-            images: List[ExtractedImage] = []
+            images: list[ExtractedImage] = []
             seen_hashes: set = set()
 
             resolved_base_url = base_url or self.base_url
@@ -892,22 +913,28 @@ class HTMLExtractor:
 
                             width, height = get_image_dimensions(content_bytes, mime_type)
 
-                            if _is_valid_image_dimensions(width, height, self.min_width, self.min_height):
+                            if _is_valid_image_dimensions(
+                                width, height, self.min_width, self.min_height
+                            ):
                                 # Get surrounding text
                                 context = self._get_surrounding_text(img_tag, self.context_chars)
 
-                                images.append(ExtractedImage(
-                                    image_id=generate_image_id(content_bytes),
-                                    content=content_bytes,
-                                    mime_type=mime_type,
-                                    width=width,
-                                    height=height,
-                                    source_location="inline_data_uri",
-                                    alt_text=alt,
-                                    context_text=context,
-                                ))
+                                images.append(
+                                    ExtractedImage(
+                                        image_id=generate_image_id(content_bytes),
+                                        content=content_bytes,
+                                        mime_type=mime_type,
+                                        width=width,
+                                        height=height,
+                                        source_location="inline_data_uri",
+                                        alt_text=alt,
+                                        context_text=context,
+                                    )
+                                )
                             else:
-                                logger.debug(f"Skipping small HTML data URI image: {width}x{height}")
+                                logger.debug(
+                                    f"Skipping small HTML data URI image: {width}x{height}"
+                                )
 
                     elif self.download_images:
                         # Download external images (async)
@@ -922,23 +949,29 @@ class HTMLExtractor:
 
                             width, height = get_image_dimensions(content_bytes, mime_type)
 
-                            if _is_valid_image_dimensions(width, height, self.min_width, self.min_height):
+                            if _is_valid_image_dimensions(
+                                width, height, self.min_width, self.min_height
+                            ):
                                 context = self._get_surrounding_text(img_tag, self.context_chars)
                                 filename = src.split("/")[-1].split("?")[0]
 
-                                images.append(ExtractedImage(
-                                    image_id=generate_image_id(content_bytes),
-                                    content=content_bytes,
-                                    mime_type=mime_type,
-                                    width=width,
-                                    height=height,
-                                    source_location=src,
-                                    alt_text=alt,
-                                    filename=filename,
-                                    context_text=context,
-                                ))
+                                images.append(
+                                    ExtractedImage(
+                                        image_id=generate_image_id(content_bytes),
+                                        content=content_bytes,
+                                        mime_type=mime_type,
+                                        width=width,
+                                        height=height,
+                                        source_location=src,
+                                        alt_text=alt,
+                                        filename=filename,
+                                        context_text=context,
+                                    )
+                                )
                             else:
-                                logger.debug(f"Skipping small HTML downloaded image: {width}x{height}")
+                                logger.debug(
+                                    f"Skipping small HTML downloaded image: {width}x{height}"
+                                )
 
                 except Exception as e:
                     extraction_errors += 1
@@ -963,12 +996,12 @@ class HTMLExtractor:
                 metadata={"error": str(e)},
             )
 
-    def _parse_data_uri(self, data_uri: str) -> Optional[Tuple[bytes, str]]:
+    def _parse_data_uri(self, data_uri: str) -> tuple[bytes, str] | None:
         """Parse a data URI into bytes and MIME type.
-        
+
         Args:
             data_uri: Data URI string (e.g., 'data:image/png;base64,...')
-            
+
         Returns:
             Tuple of (content_bytes, mime_type) or None if parsing fails
         """
@@ -994,22 +1027,24 @@ class HTMLExtractor:
         # Get preceding text
         prev = element.find_previous(string=True)
         if prev:
-            parts.append(str(prev).strip()[:max_chars // 2])
+            parts.append(str(prev).strip()[: max_chars // 2])
 
         # Get following text
         next_elem = element.find_next(string=True)
         if next_elem:
-            parts.append(str(next_elem).strip()[:max_chars // 2])
+            parts.append(str(next_elem).strip()[: max_chars // 2])
 
         return " ".join(parts)
 
-    async def _download_image(self, url: str, base_url: Optional[str] = None) -> Optional[Tuple[bytes, str]]:
+    async def _download_image(
+        self, url: str, base_url: str | None = None
+    ) -> tuple[bytes, str] | None:
         """Download an image from URL.
-        
+
         Args:
             url: Image URL (absolute or relative)
             base_url: Base URL for resolving relative URLs (optional)
-            
+
         Returns:
             Tuple of (content_bytes, mime_type) or None if download fails
         """
@@ -1037,22 +1072,26 @@ class HTMLExtractor:
                 headers=headers,
             ) as client:
                 response = await client.get(url)
-                
+
                 if response.status_code == 200:
                     content = response.content
-                    
+
                     # Check content size
                     if len(content) > MAX_IMAGE_SIZE_BYTES:
-                        logger.info(f"Downloaded image too large: {len(content)} bytes from {url[:100]}")
+                        logger.info(
+                            f"Downloaded image too large: {len(content)} bytes from {url[:100]}"
+                        )
                         return None
-                    
+
                     mime_type = response.headers.get("content-type", "").split(";")[0]
                     if not mime_type.startswith("image/"):
                         mime_type = detect_mime_type(content)
-                    
+
                     return content, mime_type
                 else:
-                    logger.debug(f"Failed to download image: HTTP {response.status_code} from {url[:100]}")
+                    logger.debug(
+                        f"Failed to download image: HTTP {response.status_code} from {url[:100]}"
+                    )
                     return None
 
         except Exception as e:
@@ -1063,6 +1102,7 @@ class HTMLExtractor:
 # ============================================================
 # Unified Document Image Extractor
 # ============================================================
+
 
 class DocumentImageExtractor:
     """Unified image extractor supporting multiple document formats.
@@ -1100,7 +1140,7 @@ class DocumentImageExtractor:
             min_height: Minimum image height to extract (default: 50)
             context_chars: Characters of context to extract (default: 500)
             download_html_images: Whether to download external images in HTML (default: False)
-            
+
         Raises:
             ValueError: If dimensions are invalid
         """
@@ -1108,7 +1148,7 @@ class DocumentImageExtractor:
             raise ValueError("Image dimensions must be positive")
         if context_chars < 0:
             raise ValueError("Context chars must be non-negative")
-            
+
         self.min_width = min_width
         self.min_height = min_height
         self.context_chars = context_chars
@@ -1118,17 +1158,19 @@ class DocumentImageExtractor:
         self._pdf_extractor = PDFExtractor(min_width, min_height, context_chars)
         self._docx_extractor = DOCXExtractor(min_width, min_height, context_chars)
         self._html_extractor = HTMLExtractor(
-            min_width, min_height, context_chars,
+            min_width,
+            min_height,
+            context_chars,
             download_images=download_html_images,
         )
 
     def _detect_document_type(self, filename: str, content: bytes) -> str:
         """Detect document type from filename or content.
-        
+
         Args:
             filename: Document filename
             content: Document content bytes
-            
+
         Returns:
             Document type: 'pdf', 'docx', 'html', or 'unknown'
         """
@@ -1159,7 +1201,10 @@ class DocumentImageExtractor:
         # HTML detection (check first 1KB safely)
         try:
             check_length = min(len(content), 1000)
-            if b"<html" in content[:check_length].lower() or b"<!doctype html" in content[:check_length].lower():
+            if (
+                b"<html" in content[:check_length].lower()
+                or b"<!doctype html" in content[:check_length].lower()
+            ):
                 return "html"
         except Exception as e:
             logger.debug(f"Failed HTML detection: {e}")
@@ -1170,8 +1215,8 @@ class DocumentImageExtractor:
         self,
         filename: str,
         content: bytes,
-        document_type: Optional[str] = None,
-        base_url: Optional[str] = None,
+        document_type: str | None = None,
+        base_url: str | None = None,
     ) -> DocumentExtractionResult:
         """Extract text and images from a document.
 
@@ -1183,19 +1228,19 @@ class DocumentImageExtractor:
 
         Returns:
             DocumentExtractionResult with text and images
-            
+
         Raises:
             ValueError: If content is empty or too large
         """
         # Input validation
         if not content:
             raise ValueError("Document content cannot be empty")
-        
+
         if len(content) > MAX_DOCUMENT_SIZE_BYTES:
             raise ValueError(
                 f"Document too large: {len(content)} bytes (max: {MAX_DOCUMENT_SIZE_BYTES})"
             )
-        
+
         if not filename:
             logger.warning("No filename provided, relying on content detection")
 
@@ -1231,8 +1276,8 @@ class DocumentImageExtractor:
 
     async def extract_from_file(
         self,
-        file_path: Union[str, Path],
-        base_url: Optional[str] = None,
+        file_path: str | Path,
+        base_url: str | None = None,
     ) -> DocumentExtractionResult:
         """Extract from a file path.
 
@@ -1242,28 +1287,26 @@ class DocumentImageExtractor:
 
         Returns:
             DocumentExtractionResult
-            
+
         Raises:
             FileNotFoundError: If file doesn't exist
             ValueError: If file is too large or empty
         """
         path = Path(file_path)
-        
+
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
-        
+
         if not path.is_file():
             raise ValueError(f"Not a file: {file_path}")
-        
+
         file_size = path.stat().st_size
         if file_size == 0:
             raise ValueError(f"File is empty: {file_path}")
-        
+
         if file_size > MAX_DOCUMENT_SIZE_BYTES:
-            raise ValueError(
-                f"File too large: {file_size} bytes (max: {MAX_DOCUMENT_SIZE_BYTES})"
-            )
-        
+            raise ValueError(f"File too large: {file_size} bytes (max: {MAX_DOCUMENT_SIZE_BYTES})")
+
         content = path.read_bytes()
         return await self.extract(path.name, content, base_url=base_url)
 
@@ -1272,11 +1315,12 @@ class DocumentImageExtractor:
 # Convenience Functions
 # ============================================================
 
+
 async def extract_images_from_document(
     filename: str,
     content: bytes,
     min_size: int = MIN_IMAGE_WIDTH,
-) -> List[ExtractedImage]:
+) -> list[ExtractedImage]:
     """Convenience function to extract embeddable images from a document.
 
     Args:
@@ -1286,13 +1330,13 @@ async def extract_images_from_document(
 
     Returns:
         List of embeddable images
-        
+
     Raises:
         ValueError: If content is empty or invalid parameters
     """
     if min_size <= 0:
         raise ValueError("min_size must be positive")
-        
+
     extractor = DocumentImageExtractor(min_width=min_size, min_height=min_size)
     result = await extractor.extract(filename, content)
     return result.embeddable_images

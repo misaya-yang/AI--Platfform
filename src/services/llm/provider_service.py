@@ -5,11 +5,11 @@ Manages LLM provider configurations including API keys and endpoints.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
-from ...core.crypto import encrypt_value, decrypt_value
+from ...core.crypto import decrypt_value, encrypt_value
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
 
@@ -27,7 +27,7 @@ class ProviderService:
         self,
         tenant_id: str,
         include_disabled: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List all providers for a tenant."""
         if include_disabled:
             query = """
@@ -54,7 +54,7 @@ class ProviderService:
         self,
         tenant_id: str,
         provider_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get a specific provider."""
         query = """
             SELECT provider_id, tenant_id, display_name, api_type, base_url,
@@ -71,10 +71,10 @@ class ProviderService:
         provider_id: str,
         display_name: str,
         api_type: str = "openai",
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
         is_enabled: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a new provider."""
         # Encrypt API key if provided
         api_key_encrypted = None
@@ -91,8 +91,13 @@ class ProviderService:
         """
         row = await self.db.fetchrow(
             query,
-            provider_id, tenant_id, display_name, api_type, base_url,
-            api_key_encrypted, is_enabled,
+            provider_id,
+            tenant_id,
+            display_name,
+            api_type,
+            base_url,
+            api_key_encrypted,
+            is_enabled,
         )
         return self._row_to_dict(row)
 
@@ -100,12 +105,12 @@ class ProviderService:
         self,
         tenant_id: str,
         provider_id: str,
-        display_name: Optional[str] = None,
-        api_type: Optional[str] = None,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        is_enabled: Optional[bool] = None,
-    ) -> Optional[Dict[str, Any]]:
+        display_name: str | None = None,
+        api_type: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        is_enabled: bool | None = None,
+    ) -> dict[str, Any] | None:
         """Update a provider."""
         # Build dynamic update query
         updates = []
@@ -149,7 +154,7 @@ class ProviderService:
 
         query = f"""
             UPDATE llm_providers
-            SET {', '.join(updates)}
+            SET {", ".join(updates)}
             WHERE tenant_id = ${param_idx} AND provider_id = ${param_idx + 1}
             RETURNING provider_id, tenant_id, display_name, api_type, base_url,
                       api_key_encrypted, is_enabled, created_at, updated_at
@@ -166,12 +171,14 @@ class ProviderService:
         # First delete all models for this provider
         await self.db.execute(
             "DELETE FROM llm_models WHERE tenant_id = $1 AND provider_id = $2",
-            tenant_id, provider_id,
+            tenant_id,
+            provider_id,
         )
         # Then delete the provider
         result = await self.db.execute(
             "DELETE FROM llm_providers WHERE tenant_id = $1 AND provider_id = $2",
-            tenant_id, provider_id,
+            tenant_id,
+            provider_id,
         )
         return "DELETE 1" in str(result)
 
@@ -179,7 +186,7 @@ class ProviderService:
         self,
         tenant_id: str,
         provider_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Test API connection for a provider."""
         provider = await self.get_provider(tenant_id, provider_id)
         if not provider:
@@ -248,7 +255,7 @@ class ProviderService:
         self,
         tenant_id: str,
         provider_id: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Get decrypted API key for a provider."""
         query = """
             SELECT api_key_encrypted
@@ -260,7 +267,7 @@ class ProviderService:
             return None
         return decrypt_value(row["api_key_encrypted"], self.encryption_key)
 
-    def _row_to_dict(self, row) -> Dict[str, Any]:
+    def _row_to_dict(self, row) -> dict[str, Any]:
         """Convert database row to dictionary."""
         if not row:
             return {}

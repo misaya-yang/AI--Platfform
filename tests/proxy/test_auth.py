@@ -14,31 +14,28 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import jwt
 import pytest
-from fastapi import Request, HTTPException
-from starlette.testclient import TestClient
+from fastapi import Request
 
+from src.core.auth.user_resolver import UserContext
 from src.core.middleware.auth import (
-    AuthMiddleware,
     AuthConfig,
+    AuthMiddleware,
+    RemoteJWTValidator,
     UserInfo,
     default_jwt_decoder,
-    RemoteJWTValidator,
 )
-from src.core.auth.user_resolver import UserContext
-
 from tests.conftest import (
-    TEST_JWT_SECRET,
     TEST_JWT_ALGORITHM,
+    TEST_JWT_SECRET,
     create_test_token,
 )
 
-
 # ============ Auth Config Tests ============
+
 
 class TestAuthConfig:
     """AuthConfig 配置测试"""
@@ -80,6 +77,7 @@ class TestAuthConfig:
 
 
 # ============ UserInfo Tests ============
+
 
 class TestUserInfo:
     """UserInfo 测试"""
@@ -136,6 +134,7 @@ class TestUserInfo:
 
 
 # ============ JWT Authentication Tests ============
+
 
 class TestJWTAuthentication:
     """JWT 认证测试"""
@@ -270,6 +269,7 @@ class TestJWTAuthentication:
 
 # ============ Auth Middleware Tests ============
 
+
 class TestAuthMiddleware:
     """认证中间件测试"""
 
@@ -288,27 +288,29 @@ class TestAuthMiddleware:
     @pytest.fixture
     def mock_call_next(self):
         """Mock call_next 函数"""
+
         async def call_next(request):
             response = MagicMock()
             response.headers = {}
             return response
+
         return call_next
 
     @pytest.fixture
     def jwt_decoder(self):
         """JWT 解码器"""
+
         async def decoder(token, **kwargs):
             return jwt.decode(
                 token,
                 kwargs.get("secret", TEST_JWT_SECRET),
                 algorithms=kwargs.get("algorithms", [TEST_JWT_ALGORITHM]),
             )
+
         return decoder
 
     @pytest.mark.asyncio
-    async def test_whitelist_path_bypasses_auth(
-        self, mock_request, mock_call_next
-    ):
+    async def test_whitelist_path_bypasses_auth(self, mock_request, mock_call_next):
         """测试白名单路径跳过认证"""
         mock_request.url.path = "/health"
 
@@ -377,12 +379,14 @@ class TestAuthMiddleware:
 
 # ============ API Key Authentication Tests ============
 
+
 class TestAPIKeyAuthentication:
     """API Key 认证测试"""
 
     @pytest.fixture
     def api_key_validator(self):
         """API Key 验证器"""
+
         async def validator(api_key):
             valid_keys = {
                 "valid_key_001": {
@@ -399,6 +403,7 @@ class TestAPIKeyAuthentication:
                 },
             }
             return valid_keys.get(api_key)
+
         return validator
 
     @pytest.mark.asyncio
@@ -429,12 +434,14 @@ class TestAPIKeyAuthentication:
 
 # ============ Guest Session Authentication Tests ============
 
+
 class TestGuestSessionAuthentication:
     """Guest Session 认证测试"""
 
     @pytest.fixture
     def guest_session_validator(self):
         """Guest Session 验证器"""
+
         async def validator(session_id):
             valid_sessions = {
                 "guest_session_001": {
@@ -444,6 +451,7 @@ class TestGuestSessionAuthentication:
                 "expired_session": None,  # 模拟过期会话
             }
             return valid_sessions.get(session_id)
+
         return validator
 
     @pytest.mark.asyncio
@@ -470,6 +478,7 @@ class TestGuestSessionAuthentication:
 
 
 # ============ Anonymous User Tests ============
+
 
 class TestAnonymousUser:
     """匿名用户测试"""
@@ -509,6 +518,7 @@ class TestAnonymousUser:
 
 
 # ============ Remote JWT Validator Tests ============
+
 
 class TestRemoteJWTValidator:
     """远程 JWT 验证器测试"""
@@ -555,6 +565,7 @@ class TestRemoteJWTValidator:
 
 
 # ============ Tier Extraction Tests ============
+
 
 class TestTierExtraction:
     """用户层级提取测试"""
@@ -618,6 +629,7 @@ class TestTierExtraction:
 
 
 # ============ Edge Cases Tests ============
+
 
 class TestAuthEdgeCases:
     """认证边界情况测试"""

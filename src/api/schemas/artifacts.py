@@ -5,7 +5,7 @@ Artifacts represent outputs from code execution, document generation,
 image generation, or other tool invocations.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -20,18 +20,18 @@ class ArtifactInfo(BaseModel):
     title: str
     filename: str
     size_bytes: int
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
     source: str = "ai"  # ai | user | code_execution
-    message_id: Optional[str] = None
-    download_url: Optional[str] = None  # Presigned URL for download
-    metadata: Optional[Dict[str, Any]] = None
-    created_at: Optional[str] = None
+    message_id: str | None = None
+    download_url: str | None = None  # Presigned URL for download
+    metadata: dict[str, Any] | None = None
+    created_at: str | None = None
 
 
 class ArtifactListResponse(BaseModel):
     """Response with list of artifacts."""
 
-    artifacts: List[ArtifactInfo]
+    artifacts: list[ArtifactInfo]
     total: int
 
 
@@ -45,5 +45,5 @@ class ArtifactCreateRequest(BaseModel):
     filename: str
     content_base64: str  # Base64 encoded content
     source: str = "ai"
-    message_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    message_id: str | None = None
+    metadata: dict[str, Any] | None = None

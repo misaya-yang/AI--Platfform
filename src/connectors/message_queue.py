@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import BaseConnector
 from ..models.service import ServiceDefinition
+from .base import BaseConnector
 
 
 class MessageQueueConnector(BaseConnector):

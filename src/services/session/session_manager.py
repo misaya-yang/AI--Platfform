@@ -4,10 +4,9 @@ import asyncio
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
 
-from ...models.session import Session, SessionMessage
 from ...core.exceptions import PermissionDeniedError
+from ...models.session import Session, SessionMessage
 
 
 class SessionManager:
@@ -38,14 +37,15 @@ class SessionManager:
         # Lock to protect concurrent access to _sessions
         self._lock = asyncio.Lock()
 
-    async def _cleanup_expired(self, now: Optional[datetime] = None) -> int:
+    async def _cleanup_expired(self, now: datetime | None = None) -> int:
         """清理过期会话，返回清理数量。线程安全。"""
         if now is None:
             now = datetime.utcnow()
         async with self._lock:
             # Create snapshot to avoid modification during iteration
             expired_keys = [
-                sid for sid, session in self._sessions.items()
+                sid
+                for sid, session in self._sessions.items()
                 if session.expires_at and session.expires_at < now
             ]
             for sid in expired_keys:
@@ -65,10 +65,10 @@ class SessionManager:
         self,
         user_id: str,
         tenant_id: str = "",
-        service_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        metadata: Optional[dict] = None,
-        ttl: Optional[int] = None,
+        service_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict | None = None,
+        ttl: int | None = None,
     ) -> Session:
         # 定期清理过期会话
         now = datetime.utcnow()
@@ -105,7 +105,7 @@ class SessionManager:
             self._sessions[session.session_id] = session
         return session
 
-    async def get(self, session_id: str) -> Optional[Session]:
+    async def get(self, session_id: str) -> Session | None:
         async with self._lock:
             session = self._sessions.get(session_id)
             if not session:
@@ -122,11 +122,11 @@ class SessionManager:
 
     async def get_or_create(
         self,
-        session_id: Optional[str],
+        session_id: str | None,
         user_id: str,
         tenant_id: str = "",
-        service_id: Optional[str] = None,
-        ttl: Optional[int] = None,
+        service_id: str | None = None,
+        ttl: int | None = None,
     ) -> Session:
         if session_id:
             existing = await self.get(session_id)
@@ -151,18 +151,16 @@ class SessionManager:
 
     async def list_sessions(
         self,
-        user_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        service_id: Optional[str] = None,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_id: str | None = None,
         limit: int = 100,
-    ) -> List[Session]:
+    ) -> list[Session]:
         now = datetime.utcnow()
         async with self._lock:
             # Create snapshot to avoid modification during iteration
             sessions = [
-                s
-                for s in list(self._sessions.values())
-                if not s.expires_at or s.expires_at >= now
+                s for s in list(self._sessions.values()) if not s.expires_at or s.expires_at >= now
             ]
         if user_id:
             sessions = [s for s in sessions if s.user_id == user_id]
@@ -182,7 +180,7 @@ class SessionManager:
         session_id: str,
         role: str,
         content: str,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -203,7 +201,7 @@ class SessionManager:
             # 更新 LRU 顺序
             self._sessions.move_to_end(session_id)
 
-    async def history(self, session_id: str, limit: int = 50) -> List[SessionMessage]:
+    async def history(self, session_id: str, limit: int = 50) -> list[SessionMessage]:
         async with self._lock:
             session = self._sessions.get(session_id)
             if not session:
@@ -216,10 +214,7 @@ class SessionManager:
         now = datetime.utcnow()
         async with self._lock:
             total = len(self._sessions)
-            expired = sum(
-                1 for s in self._sessions.values()
-                if s.expires_at and s.expires_at < now
-            )
+            expired = sum(1 for s in self._sessions.values() if s.expires_at and s.expires_at < now)
         return {
             "total_sessions": total,
             "active_sessions": total - expired,

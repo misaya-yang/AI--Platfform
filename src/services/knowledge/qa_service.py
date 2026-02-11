@@ -14,9 +14,8 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -28,6 +27,7 @@ logger = get_logger(__name__)
 
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
+
     DEEPSEEK = "deepseek"
     GEMINI = "gemini"
     DASHSCOPE = "dashscope"
@@ -37,19 +37,20 @@ class LLMProvider(str, Enum):
 @dataclass
 class LLMConfig:
     """LLM configuration for QA testing."""
+
     provider: LLMProvider = LLMProvider.DEEPSEEK
     model: str = ""  # Will use LLM_MODEL env or "deepseek-chat"
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
+    api_key: str | None = None
+    base_url: str | None = None
     temperature: float = 0.1
     max_tokens: int = 2048
     timeout_seconds: float = 60.0
-    
+
     def __post_init__(self):
         # Use environment variable for model if not set
         if not self.model:
             self.model = os.getenv("LLM_MODEL", "deepseek-chat")
-    
+
     # System prompt for QA
     system_prompt: str = """You are a helpful assistant that answers questions based on the provided context.
 
@@ -62,16 +63,16 @@ Rules:
 Context will be provided in the user message."""
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "LLMConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> LLMConfig:
         if not data:
             return cls()
-        
+
         provider_str = str(data.get("provider", "deepseek")).lower()
         try:
             provider = LLMProvider(provider_str)
         except ValueError:
             provider = LLMProvider.CUSTOM
-        
+
         return cls(
             provider=provider,
             model=str(data.get("model", "deepseek-chat")),
@@ -82,8 +83,8 @@ Context will be provided in the user message."""
             timeout_seconds=float(data.get("timeout_seconds", 60.0)),
             system_prompt=str(data.get("system_prompt", cls.system_prompt)),
         )
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider.value,
             "model": self.model,
@@ -93,70 +94,71 @@ Context will be provided in the user message."""
             "timeout_seconds": self.timeout_seconds,
             "system_prompt": self.system_prompt,
         }
-    
+
     def get_base_url(self) -> str:
         """Get the appropriate base URL for the provider."""
         if self.base_url:
             return self.base_url.rstrip("/")
-        
+
         # Try environment variable first
         env_url = os.getenv("LLM_BASE_URL")
         if env_url:
             return env_url.rstrip("/")
-        
+
         defaults = {
             LLMProvider.DEEPSEEK: "https://api.deepseek.com/v1",
             LLMProvider.GEMINI: "https://generativelanguage.googleapis.com/v1beta/openai",
             LLMProvider.DASHSCOPE: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
         return defaults.get(self.provider, "https://api.deepseek.com/v1")
-    
-    def get_api_key(self) -> Optional[str]:
+
+    def get_api_key(self) -> str | None:
         """Get API key from config or environment."""
         if self.api_key:
             return self.api_key
-        
+
         # Try generic LLM_API_KEY first
         key = os.getenv("LLM_API_KEY")
         if key:
             return key
-        
+
         # Then try provider-specific keys
         env_keys = {
             LLMProvider.DEEPSEEK: ["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"],
             LLMProvider.GEMINI: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             LLMProvider.DASHSCOPE: ["DASHSCOPE_API_KEY", "ALIYUN_KEY", "Aliyun_KEY"],
         }
-        
+
         for env_var in env_keys.get(self.provider, []):
             key = os.getenv(env_var)
             if key:
                 return key
-        
+
         return None
 
 
 @dataclass
 class QAResult:
     """Result of a QA query."""
+
     query: str
     answer: str
-    context_segments: List[Dict[str, Any]]
-    retrieval_metadata: Dict[str, Any]
-    
+    context_segments: list[dict[str, Any]]
+    retrieval_metadata: dict[str, Any]
+
     # Timing information
     retrieval_time_ms: int
     llm_time_ms: int
     total_time_ms: int
-    
+
     # LLM metadata
     model: str
-    tokens_used: Optional[int] = None
-    
+    tokens_used: int | None = None
+
     # Optional evaluation
-    relevance_score: Optional[float] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
+    relevance_score: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query,
             "answer": self.answer,
@@ -176,24 +178,26 @@ class QAResult:
 @dataclass
 class QATestCase:
     """A test case for QA evaluation."""
+
     query: str
-    expected_answer: Optional[str] = None
-    expected_segments: Optional[List[str]] = None  # segment_ids that should be retrieved
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    expected_answer: str | None = None
+    expected_segments: list[str] | None = None  # segment_ids that should be retrieved
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class QATestResult:
     """Result of running a QA test case."""
+
     test_case: QATestCase
     qa_result: QAResult
-    
+
     # Evaluation metrics
-    answer_correct: Optional[bool] = None
-    retrieval_recall: Optional[float] = None  # How many expected segments were retrieved
-    retrieval_precision: Optional[float] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
+    answer_correct: bool | None = None
+    retrieval_recall: float | None = None  # How many expected segments were retrieved
+    retrieval_precision: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "test_case": {
                 "query": self.test_case.query,
@@ -211,68 +215,68 @@ class QATestResult:
 
 class LLMClient:
     """Async client for LLM API calls."""
-    
+
     def __init__(self, config: LLMConfig):
         self.config = config
-        self._client: Optional[httpx.AsyncClient] = None
-    
+        self._client: httpx.AsyncClient | None = None
+
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             api_key = self.config.get_api_key()
             headers = {"Content-Type": "application/json"}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            
+
             self._client = httpx.AsyncClient(
                 base_url=self.config.get_base_url(),
                 headers=headers,
                 timeout=self.config.timeout_seconds,
             )
         return self._client
-    
+
     async def close(self) -> None:
         if self._client:
             await self._client.aclose()
             self._client = None
-    
+
     async def chat_completion(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         **kwargs,
-    ) -> Tuple[str, Optional[int]]:
+    ) -> tuple[str, int | None]:
         """
         Send a chat completion request.
-        
+
         Returns: (response_text, tokens_used)
         """
         client = await self._get_client()
-        
+
         payload = {
             "model": self.config.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.config.temperature),
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
-        
+
         try:
             response = await client.post("/chat/completions", json=payload)
             response.raise_for_status()
-            
+
             data = response.json()
-            
+
             # Extract response text
             choices = data.get("choices", [])
             if not choices:
                 raise ValueError("No choices in response")
-            
+
             text = choices[0].get("message", {}).get("content", "")
-            
+
             # Extract token usage
             usage = data.get("usage", {})
             tokens = usage.get("total_tokens")
-            
+
             return text, tokens
-            
+
         except httpx.HTTPStatusError as e:
             logger.error(f"LLM API error: {e.response.status_code} - {e.response.text}")
             raise
@@ -282,7 +286,7 @@ class LLMClient:
 
     async def chat_completion_stream(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         **kwargs,
     ):
         """
@@ -307,10 +311,9 @@ class LLMClient:
                 async for line in response.aiter_lines():
                     if not line:
                         continue
-                    if line.startswith("data:"):
-                        data = line[len("data:"):].strip()
-                    else:
-                        data = line.strip()
+                    data = (
+                        line[len("data:") :].strip() if line.startswith("data:") else line.strip()
+                    )
                     if not data:
                         continue
                     if data == "[DONE]":
@@ -342,80 +345,80 @@ class LLMClient:
 class QAService:
     """
     QA testing service for knowledge base validation.
-    
+
     Provides:
     - Single query QA with retrieval
     - Batch testing with evaluation
     - Answer quality assessment
     """
-    
+
     def __init__(
         self,
         knowledge_service: KnowledgeService,
-        llm_config: Optional[LLMConfig] = None,
+        llm_config: LLMConfig | None = None,
     ):
         self.kb = knowledge_service
         self.llm_config = llm_config or LLMConfig()
-        self._llm_client: Optional[LLMClient] = None
-    
+        self._llm_client: LLMClient | None = None
+
     def _get_llm_client(self) -> LLMClient:
         if self._llm_client is None:
             self._llm_client = LLMClient(self.llm_config)
         return self._llm_client
-    
+
     async def close(self) -> None:
         if self._llm_client:
             await self._llm_client.close()
             self._llm_client = None
-    
+
     def _format_context(
         self,
-        results: List[RetrieveResult],
+        results: list[RetrieveResult],
         max_tokens: int = 4000,
     ) -> str:
         """Format retrieval results as context for LLM."""
         if not results:
             return "No relevant context found."
-        
+
         # Estimate ~4 chars per token
         max_chars = max_tokens * 4
-        
+
         context_parts = []
         total_chars = 0
-        
+
         for i, result in enumerate(results):
-            segment_text = f"[{i+1}] {result.text.strip()}"
-            
+            segment_text = f"[{i + 1}] {result.text.strip()}"
+
             # Check if we have room
             if total_chars + len(segment_text) > max_chars:
                 break
-            
+
             context_parts.append(segment_text)
             total_chars += len(segment_text)
-        
+
         return "\n\n".join(context_parts)
-    
+
     def _build_messages(
         self,
         query: str,
         context: str,
-        system_prompt: Optional[str] = None,
-    ) -> List[Dict[str, str]]:
+        system_prompt: str | None = None,
+    ) -> list[dict[str, str]]:
         """Build message list for LLM."""
         system = system_prompt or self.llm_config.system_prompt
-        
+
         user_content = f"""Context:
 {context}
 
 Question: {query}
 
 Please answer the question based on the context provided above."""
-        
+
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ]
-    
+
     async def query(
         self,
         user_context: Any,  # UserContext from auth
@@ -425,14 +428,14 @@ Please answer the question based on the context provided above."""
         mode: str = "hybrid",
         rerank: bool = False,
         mmr: bool = False,
-        document_id: Optional[str] = None,
-        llm_config: Optional[LLMConfig] = None,
+        document_id: str | None = None,
+        llm_config: LLMConfig | None = None,
         include_raw_results: bool = False,
         **retrieval_kwargs,
     ) -> QAResult:
         """
         Execute a complete QA flow: query → retrieve → LLM answer.
-        
+
         Args:
             user_context: User context for authorization
             dataset_id: Target dataset
@@ -445,15 +448,15 @@ Please answer the question based on the context provided above."""
             llm_config: Optional LLM config override
             include_raw_results: Include raw retrieval results in response
             **retrieval_kwargs: Additional retrieval parameters
-        
+
         Returns:
             QAResult with answer and metadata
         """
         start_time = time.time()
-        
+
         # Step 1: Retrieve relevant segments
         retrieval_start = time.time()
-        
+
         results, meta = await self.kb.retrieve(
             user=user_context,
             dataset_id=dataset_id,
@@ -465,30 +468,30 @@ Please answer the question based on the context provided above."""
             mmr=mmr,
             **retrieval_kwargs,
         )
-        
+
         retrieval_time = int((time.time() - retrieval_start) * 1000)
-        
+
         # Step 2: Format context
         context = self._format_context(results)
-        
+
         # Step 3: Generate answer
         config = llm_config or self.llm_config
         client = self._get_llm_client() if llm_config is None else LLMClient(config)
-        
+
         llm_start = time.time()
-        
+
         try:
             messages = self._build_messages(query, context)
             answer, tokens = await client.chat_completion(messages)
-            
+
             llm_time = int((time.time() - llm_start) * 1000)
-            
+
         finally:
             if llm_config is not None:
                 await client.close()
-        
+
         total_time = int((time.time() - start_time) * 1000)
-        
+
         # Build result
         context_segments = [
             {
@@ -500,7 +503,7 @@ Please answer the question based on the context provided above."""
             }
             for r in results
         ]
-        
+
         return QAResult(
             query=query,
             answer=answer,
@@ -522,8 +525,8 @@ Please answer the question based on the context provided above."""
         mode: str = "hybrid",
         rerank: bool = False,
         mmr: bool = False,
-        document_id: Optional[str] = None,
-        llm_config: Optional[LLMConfig] = None,
+        document_id: str | None = None,
+        llm_config: LLMConfig | None = None,
         include_raw_results: bool = False,
         **retrieval_kwargs,
     ):
@@ -576,8 +579,8 @@ Please answer the question based on the context provided above."""
         config = llm_config or self.llm_config
         client = self._get_llm_client() if llm_config is None else LLMClient(config)
         llm_start = time.time()
-        tokens_used: Optional[int] = None
-        answer_parts: List[str] = []
+        tokens_used: int | None = None
+        answer_parts: list[str] = []
 
         try:
             messages = self._build_messages(query, context)
@@ -611,22 +614,22 @@ Please answer the question based on the context provided above."""
         )
 
         yield {"event": "done", "data": {"result": result.to_dict()}}
-    
+
     async def evaluate_answer(
         self,
         query: str,
         answer: str,
         expected_answer: str,
-        llm_config: Optional[LLMConfig] = None,
-    ) -> Tuple[bool, float, str]:
+        llm_config: LLMConfig | None = None,
+    ) -> tuple[bool, float, str]:
         """
         Use LLM to evaluate if an answer is correct.
-        
+
         Returns: (is_correct, confidence_score, explanation)
         """
         config = llm_config or self.llm_config
         client = LLMClient(config)
-        
+
         eval_prompt = f"""You are an answer evaluator. Compare the given answer with the expected answer and determine if they are semantically equivalent.
 
 Question: {query}
@@ -641,15 +644,18 @@ Respond in JSON format:
     "confidence": 0.0-1.0,
     "explanation": "brief explanation"
 }}"""
-        
+
         try:
             messages = [
-                {"role": "system", "content": "You are a precise answer evaluator. Output only valid JSON."},
+                {
+                    "role": "system",
+                    "content": "You are a precise answer evaluator. Output only valid JSON.",
+                },
                 {"role": "user", "content": eval_prompt},
             ]
-            
+
             response, _ = await client.chat_completion(messages, temperature=0)
-            
+
             # Parse JSON response
             try:
                 result = json.loads(response)
@@ -662,10 +668,10 @@ Respond in JSON format:
                 # Try to extract from text
                 is_correct = "true" in response.lower() and "is_correct" in response.lower()
                 return is_correct, 0.5, response
-            
+
         finally:
             await client.close()
-    
+
     async def run_test_case(
         self,
         user_context: Any,
@@ -674,7 +680,7 @@ Respond in JSON format:
         **qa_kwargs,
     ) -> QATestResult:
         """Run a single test case and evaluate results."""
-        
+
         # Execute QA
         qa_result = await self.query(
             user_context=user_context,
@@ -683,13 +689,13 @@ Respond in JSON format:
             include_raw_results=True,
             **qa_kwargs,
         )
-        
+
         # Initialize test result
         test_result = QATestResult(
             test_case=test_case,
             qa_result=qa_result,
         )
-        
+
         # Evaluate answer correctness
         if test_case.expected_answer:
             is_correct, confidence, _ = await self.evaluate_answer(
@@ -698,34 +704,36 @@ Respond in JSON format:
                 expected_answer=test_case.expected_answer,
             )
             test_result.answer_correct = is_correct
-        
+
         # Evaluate retrieval quality
         if test_case.expected_segments:
             retrieved_ids = {s["segment_id"] for s in qa_result.context_segments}
             expected_ids = set(test_case.expected_segments)
-            
+
             # Recall: how many expected segments were retrieved
             if expected_ids:
                 test_result.retrieval_recall = len(retrieved_ids & expected_ids) / len(expected_ids)
-            
+
             # Precision: how many retrieved segments were expected
             if retrieved_ids:
-                test_result.retrieval_precision = len(retrieved_ids & expected_ids) / len(retrieved_ids)
-        
+                test_result.retrieval_precision = len(retrieved_ids & expected_ids) / len(
+                    retrieved_ids
+                )
+
         return test_result
-    
+
     async def run_test_batch(
         self,
         user_context: Any,
         dataset_id: str,
-        test_cases: List[QATestCase],
+        test_cases: list[QATestCase],
         concurrency: int = 3,
         **qa_kwargs,
-    ) -> List[QATestResult]:
+    ) -> list[QATestResult]:
         """Run multiple test cases with controlled concurrency."""
-        
+
         semaphore = asyncio.Semaphore(concurrency)
-        
+
         async def run_one(test_case: QATestCase) -> QATestResult:
             async with semaphore:
                 return await self.run_test_case(
@@ -734,48 +742,51 @@ Respond in JSON format:
                     test_case=test_case,
                     **qa_kwargs,
                 )
-        
+
         tasks = [run_one(tc) for tc in test_cases]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Filter out exceptions
         return [r for r in results if isinstance(r, QATestResult)]
-    
+
     def aggregate_test_results(
         self,
-        results: List[QATestResult],
-    ) -> Dict[str, Any]:
+        results: list[QATestResult],
+    ) -> dict[str, Any]:
         """Aggregate test results into summary statistics."""
         if not results:
             return {"total": 0}
-        
+
         total = len(results)
-        
+
         # Answer accuracy
         answer_results = [r for r in results if r.answer_correct is not None]
         answer_accuracy = (
             sum(1 for r in answer_results if r.answer_correct) / len(answer_results)
-            if answer_results else None
+            if answer_results
+            else None
         )
-        
+
         # Retrieval metrics
         recall_results = [r for r in results if r.retrieval_recall is not None]
         avg_recall = (
             sum(r.retrieval_recall for r in recall_results) / len(recall_results)
-            if recall_results else None
+            if recall_results
+            else None
         )
-        
+
         precision_results = [r for r in results if r.retrieval_precision is not None]
         avg_precision = (
             sum(r.retrieval_precision for r in precision_results) / len(precision_results)
-            if precision_results else None
+            if precision_results
+            else None
         )
-        
+
         # Timing stats
         avg_retrieval_ms = sum(r.qa_result.retrieval_time_ms for r in results) / total
         avg_llm_ms = sum(r.qa_result.llm_time_ms for r in results) / total
         avg_total_ms = sum(r.qa_result.total_time_ms for r in results) / total
-        
+
         return {
             "total": total,
             "answer_accuracy": answer_accuracy,
@@ -790,7 +801,7 @@ Respond in JSON format:
 
 
 # Convenience function to create default DeepSeek config
-def get_deepseek_config(api_key: Optional[str] = None) -> LLMConfig:
+def get_deepseek_config(api_key: str | None = None) -> LLMConfig:
     """Create a DeepSeek LLM configuration."""
     return LLMConfig(
         provider=LLMProvider.DEEPSEEK,
@@ -802,7 +813,7 @@ def get_deepseek_config(api_key: Optional[str] = None) -> LLMConfig:
 
 
 def get_gemini_config(
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     model: str = "gemini-2.0-flash",
 ) -> LLMConfig:
     """Create a Gemini LLM configuration."""
@@ -813,4 +824,3 @@ def get_gemini_config(
         temperature=0.1,
         max_tokens=2048,
     )
-

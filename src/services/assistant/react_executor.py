@@ -19,50 +19,53 @@ References:
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
 from ...models.enums import StreamEventType
-from .working_memory import WorkingMemory, TaskStatus, TaskItem
-from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask
+from .task_planner import ExecutionPlan, PlannedTask, TaskPlanner
+from .working_memory import TaskItem, TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
-    from .tools import ToolCallRequest, ToolCallResult
+    pass
 
 logger = get_logger(__name__)
 
 
 class ReActPhase(str, Enum):
     """Current phase in ReAct loop."""
-    ANALYZING = "analyzing"      # Initial task analysis
-    THINKING = "thinking"        # Reasoning about next step
-    PLANNING = "planning"        # Creating execution plan
-    EXECUTING = "executing"      # Running a tool
-    OBSERVING = "observing"      # Analyzing tool result
-    WRITING = "writing"          # Generating content
-    COMPLETING = "completing"    # Finishing up
+
+    ANALYZING = "analyzing"  # Initial task analysis
+    THINKING = "thinking"  # Reasoning about next step
+    PLANNING = "planning"  # Creating execution plan
+    EXECUTING = "executing"  # Running a tool
+    OBSERVING = "observing"  # Analyzing tool result
+    WRITING = "writing"  # Generating content
+    COMPLETING = "completing"  # Finishing up
 
 
 @dataclass
 class ReActState:
     """State tracking for ReAct execution."""
+
     phase: ReActPhase = ReActPhase.ANALYZING
-    current_task_id: Optional[str] = None
+    current_task_id: str | None = None
     iteration: int = 0
     max_iterations: int = 10
     thinking_content: str = ""
-    action_history: List[Dict[str, Any]] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    action_history: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ReActEvent:
     """Event emitted during ReAct execution."""
+
     event_type: str
     data: Any
     timestamp: float = field(default_factory=time.time)
@@ -99,9 +102,9 @@ class ReActExecutor:
 
     def __init__(
         self,
-        task_planner: Optional[TaskPlanner] = None,
-        tool_executor: Optional[Callable] = None,
-        llm_caller: Optional[Callable] = None,
+        task_planner: TaskPlanner | None = None,
+        tool_executor: Callable | None = None,
+        llm_caller: Callable | None = None,
         max_iterations: int = 10,
     ):
         """
@@ -121,9 +124,9 @@ class ReActExecutor:
     async def execute(
         self,
         user_message: str,
-        available_tools: List[Any],
-        context: Optional[Dict[str, Any]] = None,
-        working_memory: Optional[WorkingMemory] = None,
+        available_tools: list[Any],
+        context: dict[str, Any] | None = None,
+        working_memory: WorkingMemory | None = None,
     ) -> AsyncGenerator[ReActEvent, None]:
         """
         Execute user request using ReAct paradigm.
@@ -156,7 +159,7 @@ class ReActExecutor:
             data={
                 "run_id": run_id,
                 "timestamp": time.time(),
-            }
+            },
         )
 
         # Phase 1: ANALYZE - Understand the task
@@ -165,7 +168,7 @@ class ReActExecutor:
             data={
                 "phase": ReActPhase.ANALYZING.value,
                 "message": "分析任务需求...",
-            }
+            },
         )
 
         # Detect if this is a document generation task
@@ -178,7 +181,7 @@ class ReActExecutor:
                 data={
                     "phase": ReActPhase.PLANNING.value,
                     "message": "制定执行计划...",
-                }
+                },
             )
 
             try:
@@ -201,7 +204,7 @@ class ReActExecutor:
                         "goal": plan.goal,
                         "tasks": [t.to_dict() for t in plan.tasks],
                         "parallel_groups": plan.parallel_groups,
-                    }
+                    },
                 )
 
                 # Execute plan
@@ -211,7 +214,9 @@ class ReActExecutor:
             except Exception as e:
                 logger.error(f"Planning failed: {e}")
                 # Fall back to direct execution
-                async for event in self._execute_direct(user_message, working_memory, state, context):
+                async for event in self._execute_direct(
+                    user_message, working_memory, state, context
+                ):
                     yield event
         else:
             # For document generation or simple tasks, use direct execution
@@ -224,7 +229,7 @@ class ReActExecutor:
             data={
                 "phase": ReActPhase.COMPLETING.value,
                 "message": "任务完成",
-            }
+            },
         )
 
         # === AG-UI: RUN_FINISHED ===
@@ -233,16 +238,33 @@ class ReActExecutor:
             data={
                 "run_id": run_id,
                 "timestamp": time.time(),
-            }
+            },
         )
 
     def _is_document_generation_task(self, message: str) -> bool:
         """Check if the message requests document generation."""
         doc_keywords = [
-            "写", "撰写", "生成文档", "写报告", "写计划", "写文章",
-            "帮我写", "写一个", "写一份", "文档", "报告", "计划书",
-            "write", "generate", "create", "document", "report", "plan",
-            "docx", "pdf", "markdown",
+            "写",
+            "撰写",
+            "生成文档",
+            "写报告",
+            "写计划",
+            "写文章",
+            "帮我写",
+            "写一个",
+            "写一份",
+            "文档",
+            "报告",
+            "计划书",
+            "write",
+            "generate",
+            "create",
+            "document",
+            "report",
+            "plan",
+            "docx",
+            "pdf",
+            "markdown",
         ]
         message_lower = message.lower()
         return any(kw in message_lower for kw in doc_keywords)
@@ -252,12 +274,12 @@ class ReActExecutor:
         plan: ExecutionPlan,
         working_memory: WorkingMemory,
         state: ReActState,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """Execute a structured plan with AG-UI compatible events."""
-        now = time.time()
+        time.time()
 
-        for group_idx, group in enumerate(plan.parallel_groups):
+        for _group_idx, group in enumerate(plan.parallel_groups):
             # Execute tasks in parallel group
             for task_id in group:
                 task = plan.get_task(task_id)
@@ -275,7 +297,7 @@ class ReActExecutor:
                             "run_id": context.get("run_id", "default"),
                             "error": f"达到最大迭代次数 ({state.max_iterations})",
                             "timestamp": time.time(),
-                        }
+                        },
                     )
                     return
 
@@ -290,15 +312,12 @@ class ReActExecutor:
                         "description": f"执行工具: {task.tool}" if task.tool else None,
                         "icon": tool_icon,
                         "timestamp": time.time(),
-                    }
+                    },
                 )
 
                 # Update task status: in_progress
                 self._update_task_status(working_memory, task_id, TaskStatus.IN_PROGRESS)
-                yield ReActEvent(
-                    event_type="working_memory_update",
-                    data=working_memory.to_dict()
-                )
+                yield ReActEvent(event_type="working_memory_update", data=working_memory.to_dict())
 
                 # === THINK Phase: Generate reasoning about the task ===
                 yield ReActEvent(
@@ -307,7 +326,7 @@ class ReActExecutor:
                         "phase": ReActPhase.THINKING.value,
                         "message": f"思考: {task.description}",
                         "task_id": task_id,
-                    }
+                    },
                 )
 
                 # Use LLM to reason about the task (if available)
@@ -324,7 +343,7 @@ class ReActExecutor:
                             "phase": ReActPhase.EXECUTING.value,
                             "message": f"执行: {task.tool}",
                             "task_id": task_id,
-                        }
+                        },
                     )
 
                     # === AG-UI: TOOL_CALL_START ===
@@ -336,7 +355,7 @@ class ReActExecutor:
                             "tool_name": task.tool,
                             "step_id": task_id,
                             "timestamp": time.time(),
-                        }
+                        },
                     )
 
                     # Legacy tool_call event for backwards compatibility
@@ -347,7 +366,7 @@ class ReActExecutor:
                             "name": task.tool,
                             "arguments": task.parameters,
                             "status": "running",
-                        }
+                        },
                     )
 
                     try:
@@ -358,8 +377,8 @@ class ReActExecutor:
                         )
 
                         tool_duration_ms = (time.time() - task_start_time) * 1000
-                        success = result.success if hasattr(result, 'success') else True
-                        result_data = result.result if hasattr(result, 'result') else str(result)
+                        success = result.success if hasattr(result, "success") else True
+                        result_data = result.result if hasattr(result, "result") else str(result)
 
                         # === AG-UI: TOOL_CALL_END ===
                         yield ReActEvent(
@@ -367,7 +386,7 @@ class ReActExecutor:
                             data={
                                 "tool_call_id": tool_call_id,
                                 "timestamp": time.time(),
-                            }
+                            },
                         )
 
                         # === AG-UI: TOOL_CALL_RESULT ===
@@ -379,7 +398,7 @@ class ReActExecutor:
                                 "success": success,
                                 "duration_ms": tool_duration_ms,
                                 "timestamp": time.time(),
-                            }
+                            },
                         )
 
                         # Legacy tool_result event
@@ -390,7 +409,7 @@ class ReActExecutor:
                                 "name": task.tool,
                                 "result": result_data,
                                 "success": success,
-                            }
+                            },
                         )
 
                         # OBSERVE: Update status based on result
@@ -398,7 +417,9 @@ class ReActExecutor:
                             self._update_task_status(working_memory, task_id, TaskStatus.COMPLETED)
                         else:
                             self._update_task_status(working_memory, task_id, TaskStatus.FAILED)
-                            error_msg = result.error if hasattr(result, 'error') else "Unknown error"
+                            error_msg = (
+                                result.error if hasattr(result, "error") else "Unknown error"
+                            )
                             state.errors.append(f"Task {task_id}: {error_msg}")
                             working_memory.add_note(f"任务 {task_id} 失败: {error_msg}")
 
@@ -414,7 +435,7 @@ class ReActExecutor:
                             data={
                                 "tool_call_id": tool_call_id,
                                 "timestamp": time.time(),
-                            }
+                            },
                         )
 
                         yield ReActEvent(
@@ -423,12 +444,16 @@ class ReActExecutor:
                                 "tool_name": task.tool,
                                 "tool_call_id": task_id,
                                 "error_message": str(e),
-                            }
+                            },
                         )
 
                 # === AG-UI: STEP_FINISHED ===
                 step_duration_ms = (time.time() - task_start_time) * 1000
-                step_status = "completed" if task_id not in [e.split(":")[0].replace("Task ", "") for e in state.errors] else "failed"
+                step_status = (
+                    "completed"
+                    if task_id not in [e.split(":")[0].replace("Task ", "") for e in state.errors]
+                    else "failed"
+                )
                 yield ReActEvent(
                     event_type=StreamEventType.STEP_FINISHED.value,
                     data={
@@ -436,25 +461,24 @@ class ReActExecutor:
                         "status": step_status,
                         "duration_ms": step_duration_ms,
                         "timestamp": time.time(),
-                    }
+                    },
                 )
 
                 # UPDATE: Emit working memory update
-                yield ReActEvent(
-                    event_type="working_memory_update",
-                    data=working_memory.to_dict()
-                )
+                yield ReActEvent(event_type="working_memory_update", data=working_memory.to_dict())
 
                 # Record action in history
-                state.action_history.append({
-                    "task_id": task_id,
-                    "tool": task.tool,
-                    "iteration": state.iteration,
-                })
+                state.action_history.append(
+                    {
+                        "task_id": task_id,
+                        "tool": task.tool,
+                        "iteration": state.iteration,
+                    }
+                )
 
     async def _stream_thinking(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         task_id: str,
         max_tokens: int = 200,
         temperature: float = 0.7,
@@ -479,27 +503,27 @@ class ReActExecutor:
 
         # Signal start of thinking
         yield ReActEvent(
-            event_type="thinking_start",
-            data={"task_id": task_id, "timestamp": time.time()}
+            event_type="thinking_start", data={"task_id": task_id, "timestamp": time.time()}
         )
 
         thinking_content = ""
         try:
             # Stream from LLM
-            async for delta in self.llm_caller(messages, max_tokens=max_tokens, temperature=temperature):
+            async for delta in self.llm_caller(
+                messages, max_tokens=max_tokens, temperature=temperature
+            ):
                 content = ""
-                if hasattr(delta, 'content') and delta.content:
+                if hasattr(delta, "content") and delta.content:
                     content = delta.content
-                elif isinstance(delta, dict) and delta.get('content'):
-                    content = delta['content']
+                elif isinstance(delta, dict) and delta.get("content"):
+                    content = delta["content"]
                 elif isinstance(delta, str):
                     content = delta
 
                 if content:
                     thinking_content += content
                     yield ReActEvent(
-                        event_type="thinking_delta",
-                        data={"content": content, "task_id": task_id}
+                        event_type="thinking_delta", data={"content": content, "task_id": task_id}
                     )
 
             # Signal end of thinking
@@ -509,14 +533,13 @@ class ReActExecutor:
                     "task_id": task_id,
                     "content": thinking_content,
                     "timestamp": time.time(),
-                }
+                },
             )
 
         except Exception as e:
             logger.warning(f"Thinking generation failed for {task_id}: {e}")
             yield ReActEvent(
-                event_type="thinking_error",
-                data={"task_id": task_id, "error": str(e)}
+                event_type="thinking_error", data={"task_id": task_id, "error": str(e)}
             )
 
     async def _think_about_task(
@@ -524,7 +547,7 @@ class ReActExecutor:
         task: PlannedTask,
         working_memory: WorkingMemory,
         state: ReActState,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """
         Generate LLM reasoning about the current task.
@@ -555,7 +578,9 @@ class ReActExecutor:
 
         # Use common streaming helper
         thinking_content = ""
-        async for event in self._stream_thinking(messages, task.id, max_tokens=200, temperature=0.7):
+        async for event in self._stream_thinking(
+            messages, task.id, max_tokens=200, temperature=0.7
+        ):
             yield event
             # Capture content for working memory
             if event.event_type == "thinking_end":
@@ -571,7 +596,7 @@ class ReActExecutor:
         task: PlannedTask,
         working_memory: WorkingMemory,
         state: ReActState,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> str:
         """Build the prompt for task reasoning."""
         parts = []
@@ -632,7 +657,7 @@ class ReActExecutor:
         user_message: str,
         working_memory: WorkingMemory,
         state: ReActState,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """
         Direct execution for document generation and simple tasks.
@@ -652,7 +677,7 @@ class ReActExecutor:
                 data={
                     "phase": ReActPhase.THINKING.value,
                     "message": "分析文档需求...",
-                }
+                },
             )
 
             # Use LLM to reason about document requirements
@@ -666,25 +691,19 @@ class ReActExecutor:
                 TaskItem(id="write", description="撰写内容", status=TaskStatus.IN_PROGRESS),
                 TaskItem(id="generate", description="生成文档", status=TaskStatus.PENDING),
             ]
-            yield ReActEvent(
-                event_type="working_memory_update",
-                data=working_memory.to_dict()
-            )
+            yield ReActEvent(event_type="working_memory_update", data=working_memory.to_dict())
 
             yield ReActEvent(
                 event_type="status",
                 data={
                     "phase": ReActPhase.WRITING.value,
                     "message": "撰写文档内容...",
-                }
+                },
             )
 
             # Update task status
             self._update_task_status(working_memory, "write", TaskStatus.COMPLETED)
-            yield ReActEvent(
-                event_type="working_memory_update",
-                data=working_memory.to_dict()
-            )
+            yield ReActEvent(event_type="working_memory_update", data=working_memory.to_dict())
 
             # Stage 2: ACT - Will be handled when tool is called
             self._update_task_status(working_memory, "generate", TaskStatus.IN_PROGRESS)
@@ -693,12 +712,9 @@ class ReActExecutor:
                 data={
                     "phase": ReActPhase.EXECUTING.value,
                     "message": "准备生成文档文件...",
-                }
+                },
             )
-            yield ReActEvent(
-                event_type="working_memory_update",
-                data=working_memory.to_dict()
-            )
+            yield ReActEvent(event_type="working_memory_update", data=working_memory.to_dict())
         else:
             # Simple task: Direct response with thinking
             yield ReActEvent(
@@ -706,7 +722,7 @@ class ReActExecutor:
                 data={
                     "phase": ReActPhase.THINKING.value,
                     "message": "思考回答...",
-                }
+                },
             )
 
             # Use LLM to reason about simple tasks too
@@ -717,7 +733,7 @@ class ReActExecutor:
     async def _think_about_document(
         self,
         user_message: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """
         Generate thinking about document requirements.
@@ -744,13 +760,15 @@ class ReActExecutor:
         ]
 
         # Use common streaming helper
-        async for event in self._stream_thinking(messages, "document_analysis", max_tokens=150, temperature=0.5):
+        async for event in self._stream_thinking(
+            messages, "document_analysis", max_tokens=150, temperature=0.5
+        ):
             yield event
 
     async def _think_about_simple_task(
         self,
         user_message: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """
         Generate thinking about simple tasks.
@@ -778,7 +796,9 @@ class ReActExecutor:
         ]
 
         # Use common streaming helper
-        async for event in self._stream_thinking(messages, "simple_task", max_tokens=100, temperature=0.5):
+        async for event in self._stream_thinking(
+            messages, "simple_task", max_tokens=100, temperature=0.5
+        ):
             yield event
 
     def _update_task_status(
@@ -795,9 +815,9 @@ class ReActExecutor:
 
 
 def create_react_executor(
-    task_planner: Optional[TaskPlanner] = None,
-    tool_executor: Optional[Callable] = None,
-    llm_caller: Optional[Callable] = None,
+    task_planner: TaskPlanner | None = None,
+    tool_executor: Callable | None = None,
+    llm_caller: Callable | None = None,
     max_iterations: int = 10,
 ) -> ReActExecutor:
     """

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from ..task_planner import ExecutionPlan, PlannedTask, TaskType
 from .scenario import OfficeScenario
 from .templates import MEETING_MINUTES_TEMPLATE
-from ..task_planner import ExecutionPlan, PlannedTask, TaskType
 
 
 def build_plan_for_scenario(scenario: OfficeScenario, request: str) -> ExecutionPlan | None:

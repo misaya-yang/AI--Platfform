@@ -259,6 +259,7 @@ SCENARIO_GUARDRAILS_MAP = {
 # Helper Functions
 # =============================================================================
 
+
 def get_guardrails(scenario: str = "default") -> str:
     """
     Get guardrails for a specific scenario.

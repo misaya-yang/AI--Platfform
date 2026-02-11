@@ -7,19 +7,19 @@ Artifacts include: images, documents, charts, code files, etc.
 
 from __future__ import annotations
 
-import uuid
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .image_storage import (
-    StorageConfig,
-    StorageBackend,
     BaseStorageBackend,
-    S3StorageBackend,
-    OSSStorageBackend,
     LocalStorageBackend,
+    OSSStorageBackend,
+    S3StorageBackend,
+    StorageBackend,
+    StorageConfig,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ArtifactInfo:
     """Artifact metadata."""
+
     artifact_id: str
     session_id: str
     tenant_id: str
@@ -41,14 +42,14 @@ class ArtifactInfo:
     filename: str
     storage_key: str
     size_bytes: int = 0
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
     source: str = "ai"  # ai | user | code_execution
-    message_id: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    message_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
         return {
             "artifact_id": self.artifact_id,
@@ -114,7 +115,7 @@ class ArtifactStorageService:
     def __init__(
         self,
         config: StorageConfig,
-        database: Optional["DatabaseStorage"] = None,
+        database: DatabaseStorage | None = None,
     ):
         self.config = config
         self.database = database
@@ -171,8 +172,8 @@ class ArtifactStorageService:
         filename: str,
         content: bytes,
         source: str = "ai",
-        message_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> ArtifactInfo:
         """
         Create a new artifact: upload to storage and save metadata to database.
@@ -270,7 +271,7 @@ class ArtifactStorageService:
                 artifact.updated_at,
             )
 
-    async def get_artifact(self, artifact_id: str) -> Optional[ArtifactInfo]:
+    async def get_artifact(self, artifact_id: str) -> ArtifactInfo | None:
         """Get artifact by ID."""
         if not self.database or not self.database._pool:
             return None
@@ -289,8 +290,8 @@ class ArtifactStorageService:
     async def get_session_artifacts(
         self,
         session_id: str,
-        tenant_id: Optional[str] = None,
-    ) -> List[ArtifactInfo]:
+        tenant_id: str | None = None,
+    ) -> list[ArtifactInfo]:
         """Get all artifacts for a session."""
         if not self.database or not self.database._pool:
             return []
@@ -303,7 +304,8 @@ class ArtifactStorageService:
                     WHERE session_id = $1 AND tenant_id = $2
                     ORDER BY created_at ASC
                     """,
-                    session_id, tenant_id,
+                    session_id,
+                    tenant_id,
                 )
             else:
                 rows = await conn.fetch(
@@ -364,7 +366,7 @@ class ArtifactStorageService:
         self,
         artifact: ArtifactInfo,
         expiry_seconds: int = 3600,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Get presigned download URL (for S3)."""
         if isinstance(self._backend, S3StorageBackend):
             return await self._backend.generate_presigned_download_url(
@@ -374,7 +376,7 @@ class ArtifactStorageService:
             )
         return self.get_download_url(artifact, expiry_seconds)
 
-    async def download_artifact(self, artifact_id: str) -> Optional[bytes]:
+    async def download_artifact(self, artifact_id: str) -> bytes | None:
         """Download artifact content."""
         artifact = await self.get_artifact(artifact_id)
         if not artifact:
@@ -416,17 +418,17 @@ class ArtifactStorageService:
 
 
 # Global instance
-_artifact_storage: Optional[ArtifactStorageService] = None
+_artifact_storage: ArtifactStorageService | None = None
 
 
-def get_artifact_storage() -> Optional[ArtifactStorageService]:
+def get_artifact_storage() -> ArtifactStorageService | None:
     """Get global artifact storage instance."""
     return _artifact_storage
 
 
 def init_artifact_storage(
     config: StorageConfig,
-    database: Optional["DatabaseStorage"] = None,
+    database: DatabaseStorage | None = None,
 ) -> ArtifactStorageService:
     """Initialize global artifact storage."""
     global _artifact_storage

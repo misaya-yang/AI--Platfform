@@ -23,92 +23,89 @@ References:
 from __future__ import annotations
 
 import asyncio
-
-from ...core.observability.logging import get_logger
 import time
-import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from ...core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from .memory_service import MemoryService
     from ...services.session.database_session_manager import DatabaseSessionManager
+    from .memory_service import MemoryService
+import contextlib
+
 from ...core.auth.user_resolver import UserContext
 from ..knowledge.knowledge_service import KnowledgeService
-from .model_registry import ChatMessage, ModelProvider, ModelRegistry, StreamDelta
-from .tools import TavilySearchTool
-from .context_manager import ContextManager, ContextConfig, get_context_manager
+from ..metrics.realtime_metrics import get_realtime_metrics
+from ..metrics.usage_recorder import get_usage_recorder
+from ..storage import get_artifact_storage, get_file_storage
+from .cache_optimizer import CacheConfig, ContextCacheOptimizer
+from .code_executor import CodeExecutorService
+from .context_engine import ContextEngine, ContextStructure
+from .context_manager import ContextConfig, get_context_manager
+from .domain_policies import DomainPolicyResolver, ImamPolicy
+from .file_processor import ProcessedFiles, create_file_processor
+from .guardrails import (
+    DocumentType,
+    QualityGuardrails,
+    ToolCallValidation,
+    ToolConstraintValidator,
+    ValidationResult,
+)
+from .memory import MemoryManager
+from .model_registry import ChatMessage, ModelProvider, ModelRegistry
+from .prompts.system_prompt_v2 import (
+    build_system_prompt_v2,
+    get_ttft_optimized_prompt,
+    inject_document_context,
+    inject_kb_context,
+    inject_user_preferences,
+    inject_web_context,
+)
 from .rag_metrics import (
-    RAGEvaluator,
-    RAGMetrics,
     Citation,
+    RAGMetrics,
     get_rag_evaluator,
-    evaluate_rag,
-    extract_citations,
+)
+from .react_executor import ReActPhase
+from .scenario_analyzer import (
+    ScenarioDetectionResult,
+    create_scenario_analyzer,
 )
 from .structured_output import (
     OutputFormat,
     OutputGuardrail,
-    validate_output,
 )
-from .code_executor import CodeExecutorService, CodeExecutionConfig, get_code_executor
-from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor, register_code_executor_tool
-from .cache_optimizer import ContextCacheOptimizer, CacheConfig, CacheMetrics
-from .file_processor import FileProcessor, ProcessedFiles, create_file_processor
-from .context_engine import ContextEngine, ContextStructure
-from .working_memory import WorkingMemory, TaskStatus
-from .task_planner import TaskPlanner, ExecutionPlan, PlannedTask, TaskType, create_task_planner
-from .react_executor import ReActExecutor, ReActPhase, create_react_executor
-from .tool_orchestrator import ToolOrchestrator, ToolExecutionResult, create_tool_orchestrator
-from .memory import MemoryManager
-from .guardrails import (
-    QualityGuardrails,
-    ToolConstraintValidator,
-    DocumentType,
-    ValidationResult,
-    ToolCallValidation,
-)
-from .scenario_analyzer import (
-    ScenarioAnalyzer,
-    ScenarioType,
-    ScenarioDetectionResult,
-    create_scenario_analyzer,
-)
-from .prompts.system_prompt_v2 import (
-    build_system_prompt_v2,
-    get_ttft_optimized_prompt,
-    inject_kb_context,
-    inject_web_context,
-    inject_document_context,
-    inject_user_preferences,
-)
-from .domain_policies import DomainPolicyResolver, ImamPolicy
-from .scenario_aware_retriever import (
-    ScenarioAwareRetriever,
-    create_scenario_aware_retriever,
-)
-from ..metrics.usage_recorder import get_usage_recorder
-from ..metrics.realtime_metrics import get_realtime_metrics
-from ..storage import get_artifact_storage, get_file_storage, ArtifactStorageService
+from .task_planner import TaskPlanner, create_task_planner
+from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator, create_tool_orchestrator
+from .tools import TavilySearchTool
+from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
+from .working_memory import WorkingMemory
+from .agent_loop import AgentLoopEvent
 
 if TYPE_CHECKING:
     from ..session.database_session_manager import DatabaseSessionManager
+    from .code_executor import InputFile, KBDocument
+    from ..knowledge.chunking import Chunk
 
 logger = get_logger(__name__)
 
 
 class RAGMode(str, Enum):
     """RAG behavior mode."""
-    AUTO = "auto"       # Auto-retrieve on each message
-    TOOL = "tool"       # KB exposed as callable tool
-    DISABLED = "off"    # No KB retrieval
+
+    AUTO = "auto"  # Auto-retrieve on each message
+    TOOL = "tool"  # KB exposed as callable tool
+    DISABLED = "off"  # No KB retrieval
 
 
 class StreamEventType(str, Enum):
     """SSE event types for assistant streaming responses."""
+
     # Core streaming events
     TEXT_DELTA = "text_delta"
     THINKING_DELTA = "thinking_delta"
@@ -118,8 +115,8 @@ class StreamEventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     TOOL_CALL_RESULT = "tool_call_result"  # AG-UI compatible tool result
-    TOOL_CALL_START = "tool_call_start"    # AG-UI tool call lifecycle start
-    TOOL_CALL_END = "tool_call_end"        # AG-UI tool call lifecycle end
+    TOOL_CALL_START = "tool_call_start"  # AG-UI tool call lifecycle start
+    TOOL_CALL_END = "tool_call_end"  # AG-UI tool call lifecycle end
 
     # Context and retrieval events
     CONTEXT_RETRIEVED = "context_retrieved"
@@ -182,14 +179,15 @@ class StreamEventType(str, Enum):
 @dataclass
 class AssistantConfig:
     """Configuration for an assistant conversation."""
+
     # Model settings
     model_provider: ModelProvider = ModelProvider.GOOGLE
     model_id: str = "gemini-3-flash-preview"
     temperature: float = 0.7
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None
 
     # Knowledge base settings (TTFT-optimized defaults)
-    kb_dataset_ids: List[str] = field(default_factory=list)
+    kb_dataset_ids: list[str] = field(default_factory=list)
     kb_mode: RAGMode = RAGMode.AUTO
     kb_top_k: int = 5  # Number of KB results to retrieve
     kb_score_threshold: float = 0.65  # Increased from 0.5 for higher quality results
@@ -201,13 +199,13 @@ class AssistantConfig:
     web_search_max_results: int = 5
 
     # File attachments
-    file_paths: List[str] = field(default_factory=list)
+    file_paths: list[str] = field(default_factory=list)
 
     # System prompt
-    system_prompt: Optional[str] = None
+    system_prompt: str | None = None
 
     # Tools (future extension)
-    tools_enabled: List[str] = field(default_factory=list)
+    tools_enabled: list[str] = field(default_factory=list)
 
     # Phase 4: Output validation settings
     output_max_length: int = 10000
@@ -216,17 +214,23 @@ class AssistantConfig:
 
     # Context Engine settings (Phase 5: KV-Cache optimization)
     use_context_engine: bool = True  # ENABLED: Use Context Engine for KV-Cache optimization
-    user_preferences: Optional[str] = None  # User-level preferences for context
-    long_term_memory: Optional[str] = None  # Persistent user knowledge
+    user_preferences: str | None = None  # User-level preferences for context
+    long_term_memory: str | None = None  # Persistent user knowledge
 
     # Task Planning settings (Phase 2.4: Multi-step task planning)
-    enable_task_planning: bool = False  # Disabled by default - enable for complex multi-step tasks only
-    confirm_plan: bool = False  # When True, pause and require user confirmation before executing template plans
+    enable_task_planning: bool = (
+        False  # Disabled by default - enable for complex multi-step tasks only
+    )
+    confirm_plan: bool = (
+        False  # When True, pause and require user confirmation before executing template plans
+    )
     max_parallel_tools: int = 5  # Maximum number of tools to execute in parallel
 
     # Agent Loop settings (Enterprise unified 8-step flow)
     use_agent_loop: bool = True  # Enabled for streaming-first TTFT optimization
-    use_scenario_retrieval: bool = False  # Disabled - scenario detection still runs but no heavy retrieval
+    use_scenario_retrieval: bool = (
+        False  # Disabled - scenario detection still runs but no heavy retrieval
+    )
     enable_rag_metrics: bool = False  # Disabled in production for performance
 
     # Memory and ReAct settings (Manus architecture core features)
@@ -237,6 +241,7 @@ class AssistantConfig:
 @dataclass
 class AssistantStreamEvent:
     """Event emitted during streaming."""
+
     event_type: str  # context_retrieved, text_delta, tool_call, tool_result, usage, done
     data: Any = None
     timestamp: float = field(default_factory=time.time)
@@ -245,9 +250,10 @@ class AssistantStreamEvent:
 @dataclass
 class RetrievedContext:
     """Context retrieved from knowledge bases."""
+
     dataset_id: str
     dataset_name: str
-    chunks: List[Dict[str, Any]]
+    chunks: list[dict[str, Any]]
     query: str
     took_ms: float
 
@@ -259,8 +265,9 @@ class RetrievedContext:
 @dataclass
 class RAGEvaluation:
     """Phase 3: RAG evaluation results for a conversation turn."""
-    metrics: Optional[RAGMetrics] = None
-    citations: List[Citation] = field(default_factory=list)
+
+    metrics: RAGMetrics | None = None
+    citations: list[Citation] = field(default_factory=list)
     quality_score: float = 0.0
     grounding_ratio: float = 0.0  # What % of response is grounded in sources
 
@@ -285,12 +292,13 @@ class ToolErrorInfo:
         suggestion: Optional suggestion for how to fix the issue
         timestamp: When the error occurred
     """
+
     tool_name: str
     tool_call_id: str
     error_type: str
     error_message: str
-    arguments: Dict[str, Any] = field(default_factory=dict)
-    suggestion: Optional[str] = None
+    arguments: dict[str, Any] = field(default_factory=dict)
+    suggestion: str | None = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     def to_rich_context(self) -> str:
@@ -380,8 +388,8 @@ When asked to create a document:
     def build_default_system_prompt(
         cls,
         user_role: str = "user",
-        available_datasets: Optional[List[str]] = None,
-        enabled_tools: Optional[List[str]] = None,
+        available_datasets: list[str] | None = None,
+        enabled_tools: list[str] | None = None,
         scenario_rules: str = "",
     ) -> str:
         """
@@ -463,20 +471,20 @@ Please use this web search context to inform your response when relevant."""
     def __init__(
         self,
         model_registry: ModelRegistry,
-        kb_service: Optional[KnowledgeService] = None,
-        tavily_api_key: Optional[str] = None,
-        session_manager: Optional["DatabaseSessionManager"] = None,
-        context_config: Optional[ContextConfig] = None,
+        kb_service: KnowledgeService | None = None,
+        tavily_api_key: str | None = None,
+        session_manager: DatabaseSessionManager | None = None,
+        context_config: ContextConfig | None = None,
         enable_rag_evaluation: bool = True,
-        code_executor: Optional[CodeExecutorService] = None,
-        task_planner: Optional[TaskPlanner] = None,
-        tool_orchestrator: Optional[ToolOrchestrator] = None,
-        db: Optional[Any] = None,  # DatabaseStorage for MemoryManager
-        vlm_service: Optional[Any] = None,  # DashScopeVLMService for image descriptions
-        redis_client: Optional[Any] = None,  # Redis client for caching
-        memory_service: Optional["MemoryService"] = None,
-        quality_guardrails: Optional[QualityGuardrails] = None,
-        tool_constraint_validator: Optional[ToolConstraintValidator] = None,
+        code_executor: CodeExecutorService | None = None,
+        task_planner: TaskPlanner | None = None,
+        tool_orchestrator: ToolOrchestrator | None = None,
+        db: Any | None = None,  # DatabaseStorage for MemoryManager
+        vlm_service: Any | None = None,  # DashScopeVLMService for image descriptions
+        redis_client: Any | None = None,  # Redis client for caching
+        memory_service: MemoryService | None = None,
+        quality_guardrails: QualityGuardrails | None = None,
+        tool_constraint_validator: ToolConstraintValidator | None = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -515,7 +523,9 @@ Please use this web search context to inform your response when relevant."""
         # File storage (for accessing user uploads from S3/OSS)
         try:
             self.file_storage = get_file_storage()
-            logger.info(f"[AssistantService] File storage initialized: backend={self.file_storage.config.backend.value if self.file_storage else 'None'}")
+            logger.info(
+                f"[AssistantService] File storage initialized: backend={self.file_storage.config.backend.value if self.file_storage else 'None'}"
+            )
         except RuntimeError as e:
             self.file_storage = None  # Not initialized, local storage only
             logger.warning(f"[AssistantService] File storage not available (will use local): {e}")
@@ -528,7 +538,9 @@ Please use this web search context to inform your response when relevant."""
         storage_base_path = None
         if self.file_storage:
             storage_base_path = Path(self.file_storage.config.local_base_path)
-            logger.info(f"[AssistantService] FileProcessor using storage_base_path: {storage_base_path}")
+            logger.info(
+                f"[AssistantService] FileProcessor using storage_base_path: {storage_base_path}"
+            )
         self.file_processor = create_file_processor(
             vlm_service=vlm_service,
             knowledge_service=kb_service,
@@ -539,7 +551,7 @@ Please use this web search context to inform your response when relevant."""
 
         # Context Engine for KV-Cache optimization (Phase 5)
         # Per-session working memory for task tracking
-        self._working_memories: Dict[str, WorkingMemory] = {}
+        self._working_memories: dict[str, WorkingMemory] = {}
 
         # Quality Guardrails (ensure content meets minimum quality standards)
         self.quality_guardrails = quality_guardrails or QualityGuardrails()
@@ -572,17 +584,15 @@ Please use this web search context to inform your response when relevant."""
     async def _resolve_domain_policy(
         self,
         user: UserContext,
-        dataset_ids: List[str],
-    ) -> tuple[Optional[ImamPolicy], List[Dict[str, Any]]]:
+        dataset_ids: list[str],
+    ) -> tuple[ImamPolicy | None, list[dict[str, Any]]]:
         """Resolve domain policy based on dataset metadata."""
         if not dataset_ids or not self.kb_service:
             return None, []
 
-        async def _load_dataset(ds_id: str) -> Optional[Dict[str, Any]]:
+        async def _load_dataset(ds_id: str) -> dict[str, Any] | None:
             try:
-                return await self.kb_service.require_dataset_access(
-                    user, ds_id, required="viewer"
-                )
+                return await self.kb_service.require_dataset_access(user, ds_id, required="viewer")
             except Exception as exc:
                 logger.warning(f"Failed to load dataset {ds_id} for policy resolution: {exc}")
                 return None
@@ -603,8 +613,8 @@ Please use this web search context to inform your response when relevant."""
         answer: str,
         model_id: str,
         temperature: float,
-        max_tokens: Optional[int],
-        issues: List[str],
+        max_tokens: int | None,
+        issues: list[str],
     ) -> str:
         """Attempt a single repair pass to satisfy policy constraints."""
         repair_instructions = policy.build_repair_instructions(issues)
@@ -633,8 +643,8 @@ Please use this web search context to inform your response when relevant."""
     def validate_tool_call(
         self,
         tool_name: str,
-        arguments: Dict[str, Any],
-        context: Dict[str, Any],
+        arguments: dict[str, Any],
+        context: dict[str, Any],
     ) -> ToolCallValidation:
         """
         Validate a tool call against constraints.
@@ -647,17 +657,15 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             ToolCallValidation with allowed status
         """
-        return self.tool_constraint_validator.validate_tool_call(
-            tool_name, arguments, context
-        )
+        return self.tool_constraint_validator.validate_tool_call(tool_name, arguments, context)
 
     async def _persist_artifacts(
         self,
         user: UserContext,
         session_id: str,
-        output_files: List[Dict[str, Any]],
+        output_files: list[dict[str, Any]],
         source: str = "code_execution",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Persist output files as artifacts and return updated file info with artifact IDs.
 
@@ -686,7 +694,7 @@ Please use this web search context to inform your response when relevant."""
         session_id: str,
         message: str,
         config: AssistantConfig,
-        history: Optional[List[Dict[str, str]]] = None,
+        history: list[dict[str, str]] | None = None,
         persist_messages: bool = True,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
@@ -811,7 +819,6 @@ Please use this web search context to inform your response when relevant."""
         # ========== ReAct Phase 1: ANALYZING ==========
         # Detect task type for appropriate ReAct phase handling
         is_document_task = self._is_document_generation_task(message)
-        is_complex_task = config.enable_task_planning
 
         # Emit initial status - analyzing
         yield AssistantStreamEvent(
@@ -820,12 +827,12 @@ Please use this web search context to inform your response when relevant."""
                 "phase": ReActPhase.ANALYZING.value,
                 "message": "分析任务需求...",
                 "is_document_task": is_document_task,
-            }
+            },
         )
 
         # Enhanced scenario detection using ScenarioAnalyzer
         # This enables intelligent KB retrieval and expert-level analysis
-        scenario_detection: Optional[ScenarioDetectionResult] = None
+        scenario_detection: ScenarioDetectionResult | None = None
         try:
             scenario_detection = self.scenario_analyzer.detect_scenario_fast(message)
             logger.info(
@@ -845,24 +852,21 @@ Please use this web search context to inform your response when relevant."""
                 # Add 500ms timeout to prevent slow DB queries from blocking TTFT
                 session = await asyncio.wait_for(
                     self.session_manager.get(session_id),
-                    timeout=0.5  # 500ms timeout
+                    timeout=0.5,  # 500ms timeout
                 )
                 if session and session.history:
-                    history = [
-                        {"role": m.role, "content": m.content}
-                        for m in session.history
-                    ]
+                    history = [{"role": m.role, "content": m.content} for m in session.history]
                 else:
                     history = []
             except asyncio.TimeoutError:
-                logger.warning(f"[LATENCY] Session history load timed out (>500ms), skipping")
+                logger.warning("[LATENCY] Session history load timed out (>500ms), skipping")
                 history = []
             except Exception as e:
                 logger.warning(f"Failed to load session history: {e}")
                 history = []
         else:
             history = history or []
-        logger.info(f"[LATENCY] Step 0 (history load): {(time.time() - step_start)*1000:.1f}ms")
+        logger.info(f"[LATENCY] Step 0 (history load): {(time.time() - step_start) * 1000:.1f}ms")
 
         # Step 0.5: Apply context management (sliding window + token truncation)
         step_start = time.time()
@@ -886,20 +890,25 @@ Please use this web search context to inform your response when relevant."""
                 f"Session {session_id}: Context truncated {context_result.original_count} -> "
                 f"{len(processed_history)} messages (tokens: {context_result.total_tokens})"
             )
-        logger.info(f"[LATENCY] Step 0.5 (context mgmt): {(time.time() - step_start)*1000:.1f}ms")
+        logger.info(f"[LATENCY] Step 0.5 (context mgmt): {(time.time() - step_start) * 1000:.1f}ms")
 
         # Step 0.6: Persist user message to session (fire-and-forget for lower latency)
         if persist_messages and self.session_manager:
             try:
                 # Build metadata with file attachments if present
-                user_msg_metadata: Dict[str, Any] = {
+                user_msg_metadata: dict[str, Any] = {
                     "timestamp": datetime.utcnow().isoformat(),
                 }
                 # Save file paths as attachments for UI restoration
                 if config.file_paths:
                     user_msg_metadata["attachments"] = [
                         {
-                            "type": "image" if any(fp.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]) else "file",
+                            "type": "image"
+                            if any(
+                                fp.lower().endswith(ext)
+                                for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]
+                            )
+                            else "file",
                             "url": fp,
                             "filename": fp.split("/")[-1] if "/" in fp else fp,
                         }
@@ -917,7 +926,9 @@ Please use this web search context to inform your response when relevant."""
                             metadata=user_msg_metadata,
                         )
                     except Exception as persist_err:
-                        logger.error(f"[CRITICAL] User message persistence failed for session {session_id}: {persist_err}")
+                        logger.error(
+                            f"[CRITICAL] User message persistence failed for session {session_id}: {persist_err}"
+                        )
 
                 asyncio.create_task(_persist_user_message())
             except Exception as e:
@@ -929,8 +940,8 @@ Please use this web search context to inform your response when relevant."""
         # ==========================================================================
         step_start = time.time()
 
-        user_preferences: Optional[str] = None
-        retrieved_contexts: List[RetrievedContext] = []
+        user_preferences: str | None = None
+        retrieved_contexts: list[RetrievedContext] = []
 
         # Prepare coroutines for parallel execution
         memory_task = self._load_user_memory(user=user, session_id=session_id)
@@ -946,7 +957,7 @@ Please use this web search context to inform your response when relevant."""
             # Emit status event before starting parallel tasks
             yield AssistantStreamEvent(
                 event_type="status",
-                data={"status": "searching_kb", "message": "Searching knowledge base..."}
+                data={"status": "searching_kb", "message": "Searching knowledge base..."},
             )
             logger.info(f"Starting KB retrieval for {len(config.kb_dataset_ids)} datasets")
             kb_task = self._retrieve_context(
@@ -961,9 +972,7 @@ Please use this web search context to inform your response when relevant."""
         # Run memory loading and KB retrieval in PARALLEL
         if kb_task:
             memory_result, kb_result = await asyncio.gather(
-                memory_task,
-                kb_task,
-                return_exceptions=True
+                memory_task, kb_task, return_exceptions=True
             )
         else:
             memory_result = await memory_task
@@ -975,7 +984,7 @@ Please use this web search context to inform your response when relevant."""
             if memory_data:
                 yield AssistantStreamEvent(
                     event_type=StreamEventType.MEMORY_LOADED.value,
-                    data={"preferences_loaded": True, "preferences": memory_data}
+                    data={"preferences_loaded": True, "preferences": memory_data},
                 )
         else:
             logger.warning(f"Memory loading failed: {memory_result}")
@@ -993,24 +1002,26 @@ Please use this web search context to inform your response when relevant."""
                             "chunks": ctx.chunks,
                             "query": ctx.query,
                             "took_ms": ctx.took_ms,
-                        }
+                        },
                     )
             else:
                 logger.warning(f"KB retrieval failed: {kb_result}")
                 yield AssistantStreamEvent(
                     event_type="error",
-                    data={"message": f"KB retrieval failed: {str(kb_result)}", "recoverable": True}
+                    data={"message": f"KB retrieval failed: {str(kb_result)}", "recoverable": True},
                 )
-        logger.info(f"[LATENCY] Step 1 (memory + KB parallel): {(time.time() - step_start)*1000:.1f}ms")
+        logger.info(
+            f"[LATENCY] Step 1 (memory + KB parallel): {(time.time() - step_start) * 1000:.1f}ms"
+        )
 
         # Step 2: Web search if enabled
         step_start = time.time()
-        web_search_context: Optional[str] = None
-        web_search_results_data: Optional[Dict] = None  # Store for persistence
+        web_search_context: str | None = None
+        web_search_results_data: dict | None = None  # Store for persistence
         if config.web_search_enabled and self.tavily_tool.is_configured:
             yield AssistantStreamEvent(
                 event_type="status",
-                data={"status": "searching_web", "message": "Searching the web..."}
+                data={"status": "searching_web", "message": "Searching the web..."},
             )
             try:
                 search_response = await self.tavily_tool.search(
@@ -1020,26 +1031,25 @@ Please use this web search context to inform your response when relevant."""
                 web_search_context = self.tavily_tool.format_for_context(search_response)
                 web_search_results_data = self.tavily_tool.format_for_display(search_response)
                 yield AssistantStreamEvent(
-                    event_type="web_search_results",
-                    data=web_search_results_data
+                    event_type="web_search_results", data=web_search_results_data
                 )
             except Exception as e:
                 logger.warning(f"Web search failed: {e}")
                 yield AssistantStreamEvent(
                     event_type="error",
-                    data={"message": f"Web search failed: {str(e)}", "recoverable": True}
+                    data={"message": f"Web search failed: {str(e)}", "recoverable": True},
                 )
-        logger.info(f"[LATENCY] Step 2 (web search): {(time.time() - step_start)*1000:.1f}ms")
+        logger.info(f"[LATENCY] Step 2 (web search): {(time.time() - step_start) * 1000:.1f}ms")
 
         # Step 2.5: Process uploaded files if any
         step_start = time.time()
-        processed_files: Optional[ProcessedFiles] = None
+        processed_files: ProcessedFiles | None = None
         model_supports_vision = model_info.supports_vision if model_info else False
 
         if config.file_paths:
             yield AssistantStreamEvent(
                 event_type="status",
-                data={"status": "processing_files", "message": "Analyzing uploaded files..."}
+                data={"status": "processing_files", "message": "Analyzing uploaded files..."},
             )
             try:
                 processed_files = await self.file_processor.process_files(
@@ -1058,7 +1068,7 @@ Please use this web search context to inform your response when relevant."""
                         "description_count": len(processed_files.image_descriptions),
                         "requires_rag": processed_files.requires_rag,
                         "file_metadata": processed_files.file_metadata,
-                    }
+                    },
                 )
                 logger.info(
                     f"[FILE PROCESS] Processed {len(config.file_paths)} files: "
@@ -1072,22 +1082,26 @@ Please use this web search context to inform your response when relevant."""
                 # This happens when text exceeds max_text_chars (32000)
                 if processed_files.requires_rag and not processed_files.text_content:
                     logger.warning(
-                        f"[FILE PROCESS] Document too large for inline processing. "
-                        f"Uploaded file RAG not implemented - model won't see document content."
+                        "[FILE PROCESS] Document too large for inline processing. "
+                        "Uploaded file RAG not implemented - model won't see document content."
                     )
                     yield AssistantStreamEvent(
                         event_type="status",
                         data={
                             "status": "file_too_large",
-                            "message": "文档内容较大，正在尝试处理核心部分..."
-                        }
+                            "message": "文档内容较大，正在尝试处理核心部分...",
+                        },
                     )
                     # For now, extract a truncated preview from metadata
                     for metadata in processed_files.file_metadata:
                         if metadata.get("truncated_preview"):
                             truncated = metadata["truncated_preview"]
-                            processed_files.text_content = f"[文档内容过长，以下为前1000字符预览]\n{truncated}"
-                            logger.info(f"[FILE PROCESS] Using truncated preview: {len(truncated)} chars")
+                            processed_files.text_content = (
+                                f"[文档内容过长，以下为前1000字符预览]\n{truncated}"
+                            )
+                            logger.info(
+                                f"[FILE PROCESS] Using truncated preview: {len(truncated)} chars"
+                            )
                             break
 
                 # Handle case where document parsing failed
@@ -1098,7 +1112,9 @@ Please use this web search context to inform your response when relevant."""
                         # Check both 'parse_error' and 'error' keys
                         error_msg = metadata.get("parse_error") or metadata.get("error")
                         if error_msg:
-                            parse_errors.append(f"- {metadata.get('file_name', 'unknown')}: {error_msg}")
+                            parse_errors.append(
+                                f"- {metadata.get('file_name', 'unknown')}: {error_msg}"
+                            )
 
                     if parse_errors:
                         error_msg = "文档解析失败:\n" + "\n".join(parse_errors)
@@ -1107,8 +1123,8 @@ Please use this web search context to inform your response when relevant."""
                             event_type="status",
                             data={
                                 "status": "file_parse_error",
-                                "message": "文档解析遇到问题，请尝试其他格式"
-                            }
+                                "message": "文档解析遇到问题，请尝试其他格式",
+                            },
                         )
                         # Add error message as text content so model can explain to user
                         processed_files.text_content = f"[文件处理错误]\n{error_msg}\n\n请告知用户文件解析失败，建议尝试其他格式（如PDF、TXT、DOCX）或确保文件内容完整。"
@@ -1122,12 +1138,15 @@ Please use this web search context to inform your response when relevant."""
                 logger.error(f"File processing failed: {e}", exc_info=True)
                 yield AssistantStreamEvent(
                     event_type="error",
-                    data={"message": f"File processing failed: {str(e)}", "recoverable": True}
+                    data={"message": f"File processing failed: {str(e)}", "recoverable": True},
                 )
                 # Create a ProcessedFiles with error message so the model can explain the issue
                 processed_files = ProcessedFiles()
                 error_details = str(e)
-                if "remote storage not available" in error_details.lower() or "file_storage is none" in error_details.lower():
+                if (
+                    "remote storage not available" in error_details.lower()
+                    or "file_storage is none" in error_details.lower()
+                ):
                     processed_files.text_content = (
                         f"[文件处理错误]\n"
                         f"无法读取上传的文件。错误信息: {error_details}\n\n"
@@ -1145,7 +1164,9 @@ Please use this web search context to inform your response when relevant."""
                         f"2. 确保文件内容完整且未损坏\n"
                         f"3. 尝试较小的文件"
                     )
-        logger.info(f"[LATENCY] Step 2.5 (file processing): {(time.time() - step_start)*1000:.1f}ms")
+        logger.info(
+            f"[LATENCY] Step 2.5 (file processing): {(time.time() - step_start) * 1000:.1f}ms"
+        )
 
         # Step 2.6: Task Planning Mode (Phase 2.4)
         # If task planning is enabled, use the planner and orchestrator
@@ -1184,7 +1205,7 @@ Please use this web search context to inform your response when relevant."""
                     web_search_context = web_search_context + "\n\n" + results_summary
                 else:
                     web_search_context = results_summary
-                logger.info(f"[TASK PLANNING] Injected execution results into context")
+                logger.info("[TASK PLANNING] Injected execution results into context")
 
         # Step 3: Build messages (use processed_history with context management applied)
         messages = self._build_messages(
@@ -1202,10 +1223,11 @@ Please use this web search context to inform your response when relevant."""
 
         # Step 4: Stream from model
         total_content = ""
-        usage: Dict[str, int] = {}
+        usage: dict[str, int] = {}
 
         # Get tools from registry (always load tools, not just when code executor exists)
         from .tools import get_tool_registry
+
         registry = get_tool_registry()
         tools = registry.get_openai_schemas()
 
@@ -1213,7 +1235,9 @@ Please use this web search context to inform your response when relevant."""
         # This prevents the LLM from calling the KB search tool when it would result
         # in searching ALL datasets (which is very slow - can cause 80+ second delays)
         if not config.kb_dataset_ids:
-            tools = [t for t in tools if t.get("function", {}).get("name") != "search_knowledge_base"]
+            tools = [
+                t for t in tools if t.get("function", {}).get("name") != "search_knowledge_base"
+            ]
             logger.info("KB search tool disabled - no datasets configured")
 
         # Filter out code executor tool if not available
@@ -1228,37 +1252,43 @@ Please use this web search context to inform your response when relevant."""
         iteration = 0
 
         total_prep_time = (time.time() - start_time) * 1000
-        logger.info(f"[LATENCY] Total preprocessing time: {total_prep_time:.1f}ms, starting LLM stream now")
+        logger.info(
+            f"[LATENCY] Total preprocessing time: {total_prep_time:.1f}ms, starting LLM stream now"
+        )
 
         # Determine thinking level and task type
         thinking_level = None
         is_ppt_request = False
-        
-        last_user_msg = next((m.content for m in reversed(messages) if m.role == "user"), "").lower()
+
+        last_user_msg = next(
+            (m.content for m in reversed(messages) if m.role == "user"), ""
+        ).lower()
         ppt_keywords = ["ppt", "slide", "powerpoint", "演示文稿", "幻灯片"]
         if any(kw in last_user_msg for kw in ppt_keywords):
             is_ppt_request = True
             logger.info(f"[TASK_DETECT] PPT generation request detected. Model: {config.model_id}")
-            
+
             # Only apply thinking level for Gemini 3 models
             if "gemini-3" in config.model_id:
                 thinking_level = "high"
-                logger.info(f"[THINKING] High thinking level enabled for Gemini 3 PPT task")
+                logger.info("[THINKING] High thinking level enabled for Gemini 3 PPT task")
 
-        next_iteration_tool_config = None # Initialize variable for tool forcing
-        current_thinking_level = thinking_level # Track thinking level for current iteration
+        next_iteration_tool_config = None  # Initialize variable for tool forcing
+        current_thinking_level = thinking_level  # Track thinking level for current iteration
 
         # TTFT (Time To First Token) measurement
-        first_token_time: Optional[float] = None
+        first_token_time: float | None = None
 
         while iteration < max_tool_iterations:
             iteration += 1
-            tool_calls_accumulated: Dict[int, Dict[str, Any]] = {}
+            tool_calls_accumulated: dict[int, dict[str, Any]] = {}
             finish_reason = None
-            thought_signature_accumulated = None # Track standalone thought signature
+            thought_signature_accumulated = None  # Track standalone thought signature
 
             # Log iteration context
-            logger.info(f"[ITERATION {iteration}] Starting chat stream. ToolConfig: {bool(next_iteration_tool_config)}, Thinking: {current_thinking_level}")
+            logger.info(
+                f"[ITERATION {iteration}] Starting chat stream. ToolConfig: {bool(next_iteration_tool_config)}, Thinking: {current_thinking_level}"
+            )
 
             # Emit ReAct phase status based on task type
             if iteration == 1:
@@ -1275,7 +1305,7 @@ Please use this web search context to inform your response when relevant."""
                 data={
                     "phase": phase.value,
                     "message": phase_message,
-                }
+                },
             )
 
             try:
@@ -1286,7 +1316,7 @@ Please use this web search context to inform your response when relevant."""
                     max_tokens=config.max_tokens,
                     tools=tools,
                     thinking_level=current_thinking_level,
-                    tool_config=next_iteration_tool_config # Pass tool_config if set
+                    tool_config=next_iteration_tool_config,  # Pass tool_config if set
                 ):
                     if delta.content:
                         # TTFT measurement: log time to first token
@@ -1295,14 +1325,13 @@ Please use this web search context to inform your response when relevant."""
                             ttft_ms = (first_token_time - start_time) * 1000
                             logger.info(f"[TTFT] First token received after {ttft_ms:.0f}ms")
                         total_content += delta.content
-                        yield AssistantStreamEvent(
-                            event_type="text_delta",
-                            data=delta.content
-                        )
-                    
+                        yield AssistantStreamEvent(event_type="text_delta", data=delta.content)
+
                     if delta.thought_signature:
                         thought_signature_accumulated = delta.thought_signature
-                        logger.info(f"[GEMINI3] Received standalone thought_signature of length {len(thought_signature_accumulated)}")
+                        logger.info(
+                            f"[GEMINI3] Received standalone thought_signature of length {len(thought_signature_accumulated)}"
+                        )
 
                     if delta.tool_calls:
                         # Accumulate tool call chunks
@@ -1312,23 +1341,26 @@ Please use this web search context to inform your response when relevant."""
                                 tool_calls_accumulated[idx] = {
                                     "id": tc.get("id", ""),
                                     "type": "function",
-                                    "function": {"name": "", "arguments": ""}
+                                    "function": {"name": "", "arguments": ""},
                                 }
                             if tc.get("id"):
                                 tool_calls_accumulated[idx]["id"] = tc["id"]
                             if tc.get("function", {}).get("name"):
-                                tool_calls_accumulated[idx]["function"]["name"] = tc["function"]["name"]
+                                tool_calls_accumulated[idx]["function"]["name"] = tc["function"][
+                                    "name"
+                                ]
                             if tc.get("function", {}).get("arguments"):
-                                tool_calls_accumulated[idx]["function"]["arguments"] += tc["function"]["arguments"]
+                                tool_calls_accumulated[idx]["function"]["arguments"] += tc[
+                                    "function"
+                                ]["arguments"]
                             # CRITICAL: Preserve thoughtSignature for Gemini 3
                             # Must be passed back in subsequent requests
                             if tc.get("thoughtSignature"):
-                                tool_calls_accumulated[idx]["thoughtSignature"] = tc["thoughtSignature"]
+                                tool_calls_accumulated[idx]["thoughtSignature"] = tc[
+                                    "thoughtSignature"
+                                ]
 
-                        yield AssistantStreamEvent(
-                            event_type="tool_call",
-                            data=delta.tool_calls
-                        )
+                        yield AssistantStreamEvent(event_type="tool_call", data=delta.tool_calls)
 
                     if delta.usage:
                         usage.update(delta.usage)
@@ -1339,16 +1371,15 @@ Please use this web search context to inform your response when relevant."""
             except Exception as e:
                 logger.error(f"Model streaming failed: {e}")
                 yield AssistantStreamEvent(
-                    event_type="error",
-                    data={"message": str(e), "recoverable": False}
+                    event_type="error", data={"message": str(e), "recoverable": False}
                 )
                 return
 
             # Add assistant response to history
             assistant_msg = ChatMessage(
-                role="assistant", 
+                role="assistant",
                 content=total_content,
-                thought_signature=thought_signature_accumulated
+                thought_signature=thought_signature_accumulated,
             )
             if tool_calls_accumulated:
                 assistant_msg.tool_calls = [
@@ -1359,7 +1390,9 @@ Please use this web search context to inform your response when relevant."""
             # Check if we should execute tools
             # IMPORTANT: Execute tools if we have ANY accumulated tool calls, regardless of finish_reason
             # Some providers (like Gemini) return finish_reason="stop" even when making tool calls
-            logger.info(f"[DEBUG] Iteration {iteration}: finish_reason={finish_reason}, tool_calls_accumulated={list(tool_calls_accumulated.keys())}, is_ppt_request={is_ppt_request}")
+            logger.info(
+                f"[DEBUG] Iteration {iteration}: finish_reason={finish_reason}, tool_calls_accumulated={list(tool_calls_accumulated.keys())}, is_ppt_request={is_ppt_request}"
+            )
 
             # If we have tool calls, execute them regardless of finish_reason
             if not tool_calls_accumulated:
@@ -1368,12 +1401,14 @@ Please use this web search context to inform your response when relevant."""
                 # Trigger if it's a PPT request, first iteration, and no tool calls were made
                 # This works for ALL models (Gemini Flash, Pro, etc.)
                 if is_ppt_request and iteration == 1:
-                    logger.info(f"[SELF-CORRECTION] PPT task finished without tool call (Model: {config.model_id}). Forcing tool call iteration.")
+                    logger.info(
+                        f"[SELF-CORRECTION] PPT task finished without tool call (Model: {config.model_id}). Forcing tool call iteration."
+                    )
 
                     # Append a system message to force tool execution
                     correction_msg = ChatMessage(
                         role="user",
-                        content="规划已完成。请立即调用 `generate_pptx` 工具，将上述大纲转换为 JSON 参数生成文件。无需再解释。"
+                        content="规划已完成。请立即调用 `generate_pptx` 工具，将上述大纲转换为 JSON 参数生成文件。无需再解释。",
                     )
                     current_messages.append(correction_msg)
 
@@ -1381,10 +1416,12 @@ Please use this web search context to inform your response when relevant."""
                     tool_config = {
                         "functionCallingConfig": {
                             "mode": "ANY",
-                            "allowedFunctionNames": ["generate_pptx"]
+                            "allowedFunctionNames": ["generate_pptx"],
                         }
                     }
-                    logger.info("[SELF-CORRECTION] Enabling forced tool execution for generate_pptx and disabling thinking")
+                    logger.info(
+                        "[SELF-CORRECTION] Enabling forced tool execution for generate_pptx and disabling thinking"
+                    )
 
                     # Emit a status event to let user know we are proceeding
                     yield AssistantStreamEvent(
@@ -1392,7 +1429,7 @@ Please use this web search context to inform your response when relevant."""
                         data={
                             "phase": ReActPhase.EXECUTING.value,
                             "message": "大纲规划完成，正在生成文件...",
-                        }
+                        },
                     )
 
                     # Update variables for next iteration
@@ -1400,19 +1437,17 @@ Please use this web search context to inform your response when relevant."""
 
                     # Optimization: Use lower thinking level for the mechanical tool call step
                     # This saves tokens and reduces latency since the plan is already done
-                    if "flash" in config.model_id:
-                        current_thinking_level = "minimal"
-                    else:
-                        current_thinking_level = "low"
+                    current_thinking_level = "minimal" if "flash" in config.model_id else "low"
 
-                    logger.info(f"[SELF-CORRECTION] Setting thinking_level='{current_thinking_level}' for tool execution")
+                    logger.info(
+                        f"[SELF-CORRECTION] Setting thinking_level='{current_thinking_level}' for tool execution"
+                    )
 
                     continue
 
                 # No tool calls and not PPT self-correction, we're done
                 yield AssistantStreamEvent(
-                    event_type="finish",
-                    data={"reason": finish_reason or "stop"}
+                    event_type="finish", data={"reason": finish_reason or "stop"}
                 )
                 break
 
@@ -1431,11 +1466,12 @@ Please use this web search context to inform your response when relevant."""
                         "phase": ReActPhase.EXECUTING.value,
                         "message": f"执行 {tool_name}...",
                         "task_id": tool_id,
-                    }
+                    },
                 )
 
                 try:
                     import json as json_module
+
                     tool_args = json_module.loads(tool_args_str) if tool_args_str else {}
                 except json_module.JSONDecodeError:
                     tool_args = {}
@@ -1445,14 +1481,16 @@ Please use this web search context to inform your response when relevant."""
                     code = tool_args.get("code", "")
                     yield AssistantStreamEvent(
                         event_type=StreamEventType.CODE_EXECUTION_START,
-                        data={"execution_id": tool_id, "language": "python", "code": code}
+                        data={"execution_id": tool_id, "language": "python", "code": code},
                     )
 
                     try:
                         # Prepare input files and KB documents for code execution
                         input_files, kb_documents = await self._prepare_code_execution_files(
-                            file_paths=config.file_paths if hasattr(config, 'file_paths') else None,
-                            retrieved_contexts=retrieved_contexts if 'retrieved_contexts' in dir() else None,
+                            file_paths=config.file_paths if hasattr(config, "file_paths") else None,
+                            retrieved_contexts=retrieved_contexts
+                            if "retrieved_contexts" in dir()
+                            else None,
                         )
 
                         result = await self.code_executor.execute(
@@ -1461,18 +1499,26 @@ Please use this web search context to inform your response when relevant."""
                             kb_documents=kb_documents,
                         )
                         success = result.is_success()
-                        output = result.stdout if success else f"Error: {result.stderr or result.error_message}"
+                        output = (
+                            result.stdout
+                            if success
+                            else f"Error: {result.stderr or result.error_message}"
+                        )
 
                         # Prepare output files
-                        output_files = [
-                            {
-                                "filename": f.filename,
-                                "content_base64": f.to_base64(),
-                                "mime_type": f.mime_type,
-                                "size_bytes": f.size_bytes,
-                            }
-                            for f in result.output_files
-                        ] if result.output_files else []
+                        output_files = (
+                            [
+                                {
+                                    "filename": f.filename,
+                                    "content_base64": f.to_base64(),
+                                    "mime_type": f.mime_type,
+                                    "size_bytes": f.size_bytes,
+                                }
+                                for f in result.output_files
+                            ]
+                            if result.output_files
+                            else []
+                        )
 
                         # Persist artifacts to storage
                         if output_files:
@@ -1492,7 +1538,7 @@ Please use this web search context to inform your response when relevant."""
                                 "stderr": result.stderr,
                                 "execution_time_ms": result.duration_ms,
                                 "output_files": output_files,
-                            }
+                            },
                         )
 
                         # Send ARTIFACT_CREATED events for persisted artifacts
@@ -1502,22 +1548,34 @@ Please use this web search context to inform your response when relevant."""
                                     event_type=StreamEventType.ARTIFACT_CREATED,
                                     data={
                                         "artifact_id": file_info["artifact_id"],
-                                        "type": file_info.get("type", "image" if file_info.get("mime_type", "").startswith("image/") else "file"),
-                                        "format": file_info.get("format", file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "bin"),
+                                        "type": file_info.get(
+                                            "type",
+                                            "image"
+                                            if file_info.get("mime_type", "").startswith("image/")
+                                            else "file",
+                                        ),
+                                        "format": file_info.get(
+                                            "format",
+                                            file_info.get("mime_type", "").split("/")[-1]
+                                            if file_info.get("mime_type")
+                                            else "bin",
+                                        ),
                                         "title": file_info.get("filename", "output"),
                                         "filename": file_info.get("filename"),
                                         "mime_type": file_info.get("mime_type"),
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "code_execution",
                                         "download_url": file_info.get("download_url"),
-                                    }
+                                    },
                                 )
 
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": output,
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": output,
+                            }
+                        )
                     except Exception as e:
                         logger.error(f"Code execution failed: {e}", exc_info=True)
                         # Create structured error for better agent recovery
@@ -1536,25 +1594,28 @@ Please use this web search context to inform your response when relevant."""
                                 "error_type": error_info.error_type,
                                 "error_message": error_info.error_message,
                                 "suggestion": error_info.suggestion,
-                            }
+                            },
                         )
                         # Add rich error context to tool results for model
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": error_info.to_rich_context(),
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": error_info.to_rich_context(),
+                            }
+                        )
 
                 elif tool_name == "generate_image":
                     # Image generation with streaming events
                     prompt = tool_args.get("prompt", "")
                     yield AssistantStreamEvent(
                         event_type=StreamEventType.IMAGE_GENERATION_START,
-                        data={"execution_id": tool_id, "prompt": prompt}
+                        data={"execution_id": tool_id, "prompt": prompt},
                     )
 
                     try:
-                        from .tools import get_tool_registry, ToolCallRequest
+                        from .tools import ToolCallRequest, get_tool_registry
+
                         registry = get_tool_registry()
                         tool_result = await registry.execute(
                             ToolCallRequest(
@@ -1584,7 +1645,7 @@ Please use this web search context to inform your response when relevant."""
                                 "error": tool_result.error,
                                 "output_files": output_files,
                                 "duration_ms": tool_result.duration_ms,
-                            }
+                            },
                         )
 
                         # Send ARTIFACT_CREATED events for persisted artifacts
@@ -1595,21 +1656,30 @@ Please use this web search context to inform your response when relevant."""
                                     data={
                                         "artifact_id": file_info["artifact_id"],
                                         "type": "image",
-                                        "format": file_info.get("format", file_info.get("mime_type", "").split("/")[-1] if file_info.get("mime_type") else "png"),
+                                        "format": file_info.get(
+                                            "format",
+                                            file_info.get("mime_type", "").split("/")[-1]
+                                            if file_info.get("mime_type")
+                                            else "png",
+                                        ),
                                         "title": file_info.get("filename", "generated_image"),
                                         "filename": file_info.get("filename"),
                                         "mime_type": file_info.get("mime_type"),
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "image_generation",
                                         "download_url": file_info.get("download_url"),
-                                    }
+                                    },
                                 )
 
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": tool_result.result
+                                if tool_result.success
+                                else f"Error: {tool_result.error}",
+                            }
+                        )
                     except Exception as e:
                         logger.error(f"Image generation failed: {e}", exc_info=True)
                         # Create structured error for better agent recovery
@@ -1628,28 +1698,31 @@ Please use this web search context to inform your response when relevant."""
                                 "error_type": error_info.error_type,
                                 "error_message": error_info.error_message,
                                 "suggestion": error_info.suggestion,
-                            }
+                            },
                         )
                         # Add rich error context to tool results for model
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": error_info.to_rich_context(),
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": error_info.to_rich_context(),
+                            }
+                        )
 
                 elif tool_name == "generate_document":
                     # Document generation with streaming events
                     title = tool_args.get("title", "Document")
-                    content = tool_args.get("content", "")
+                    tool_args.get("content", "")
                     format_type = tool_args.get("format", "docx")
 
                     yield AssistantStreamEvent(
                         event_type=StreamEventType.DOCUMENT_GENERATION_START,
-                        data={"execution_id": tool_id, "title": title, "format": format_type}
+                        data={"execution_id": tool_id, "title": title, "format": format_type},
                     )
 
                     try:
-                        from .tools import get_tool_registry, ToolCallRequest
+                        from .tools import ToolCallRequest, get_tool_registry
+
                         registry = get_tool_registry()
                         tool_result = await registry.execute(
                             ToolCallRequest(
@@ -1679,7 +1752,7 @@ Please use this web search context to inform your response when relevant."""
                                 "error": tool_result.error,
                                 "output_files": output_files,
                                 "duration_ms": tool_result.duration_ms,
-                            }
+                            },
                         )
 
                         # Send ARTIFACT_CREATED events for persisted documents
@@ -1699,14 +1772,18 @@ Please use this web search context to inform your response when relevant."""
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "document_generation",
                                         "download_url": file_info.get("download_url"),
-                                    }
+                                    },
                                 )
 
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": tool_result.result
+                                if tool_result.success
+                                else f"Error: {tool_result.error}",
+                            }
+                        )
                     except Exception as e:
                         logger.error(f"Document generation failed: {e}", exc_info=True)
                         # Create structured error for better agent recovery
@@ -1725,14 +1802,16 @@ Please use this web search context to inform your response when relevant."""
                                 "error_type": error_info.error_type,
                                 "error_message": error_info.error_message,
                                 "suggestion": error_info.suggestion,
-                            }
+                            },
                         )
                         # Add rich error context to tool results for model
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": error_info.to_rich_context(),
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": error_info.to_rich_context(),
+                            }
+                        )
 
                 elif tool_name == "generate_pptx":
                     # PPTX generation with streaming events (Manus-style workflow)
@@ -1751,7 +1830,7 @@ Please use this web search context to inform your response when relevant."""
                             "description": f"创建 {len(slides)} 页演示文稿",
                             "icon": "ppt",
                             "timestamp": int(time.time() * 1000),
-                        }
+                        },
                     )
 
                     # Emit Manus-style OUTLINE_READY event before generation
@@ -1769,13 +1848,17 @@ Please use this web search context to inform your response when relevant."""
                             "section": "section",
                             "blank": "blank",
                         }
-                        outline_slides.append({
-                            "number": i,
-                            "title": slide.get("title", f"Slide {i}"),
-                            "subtitle": slide.get("subtitle"),
-                            "type": type_map.get(slide_type, "content"),
-                            "bulletCount": len(slide.get("bullets", [])) if slide.get("bullets") else 0,
-                        })
+                        outline_slides.append(
+                            {
+                                "number": i,
+                                "title": slide.get("title", f"Slide {i}"),
+                                "subtitle": slide.get("subtitle"),
+                                "type": type_map.get(slide_type, "content"),
+                                "bulletCount": len(slide.get("bullets", []))
+                                if slide.get("bullets")
+                                else 0,
+                            }
+                        )
 
                     yield AssistantStreamEvent(
                         event_type=StreamEventType.OUTLINE_READY,
@@ -1787,16 +1870,17 @@ Please use this web search context to inform your response when relevant."""
                                 "totalSlides": len(slides),
                             },
                             "format": "pptx",
-                        }
+                        },
                     )
 
                     yield AssistantStreamEvent(
                         event_type=StreamEventType.DOCUMENT_GENERATION_START,
-                        data={"execution_id": tool_id, "title": title, "format": "pptx"}
+                        data={"execution_id": tool_id, "title": title, "format": "pptx"},
                     )
 
                     try:
-                        from .tools import get_tool_registry, ToolCallRequest
+                        from .tools import ToolCallRequest, get_tool_registry
+
                         registry = get_tool_registry()
                         tool_result = await registry.execute(
                             ToolCallRequest(
@@ -1826,7 +1910,7 @@ Please use this web search context to inform your response when relevant."""
                                 "error": tool_result.error,
                                 "output_files": output_files,
                                 "duration_ms": tool_result.duration_ms,
-                            }
+                            },
                         )
 
                         # Send ARTIFACT_CREATED events for persisted PPTX
@@ -1840,11 +1924,14 @@ Please use this web search context to inform your response when relevant."""
                                         "format": "pptx",
                                         "title": file_info.get("filename", title),
                                         "filename": file_info.get("filename"),
-                                        "mime_type": file_info.get("mime_type", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                                        "mime_type": file_info.get(
+                                            "mime_type",
+                                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                        ),
                                         "size_bytes": file_info.get("size_bytes"),
                                         "source": "pptx_generation",
                                         "download_url": file_info.get("download_url"),
-                                    }
+                                    },
                                 )
 
                         # Emit STEP_FINISHED for task panel visualization
@@ -1857,14 +1944,18 @@ Please use this web search context to inform your response when relevant."""
                                 "result": f"PPT已生成: {title} ({len(slides)}页)",
                                 "duration_ms": pptx_duration_ms,
                                 "timestamp": int(time.time() * 1000),
-                            }
+                            },
                         )
 
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": tool_result.result
+                                if tool_result.success
+                                else f"Error: {tool_result.error}",
+                            }
+                        )
                     except Exception as e:
                         logger.error(f"PPTX generation failed: {e}", exc_info=True)
                         # Create structured error for better agent recovery
@@ -1883,7 +1974,7 @@ Please use this web search context to inform your response when relevant."""
                                 "error_type": error_info.error_type,
                                 "error_message": error_info.error_message,
                                 "suggestion": error_info.suggestion,
-                            }
+                            },
                         )
                         # Emit STEP_FINISHED with failed status
                         pptx_duration_ms = int((time.time() - pptx_start_time) * 1000)
@@ -1895,19 +1986,22 @@ Please use this web search context to inform your response when relevant."""
                                 "error": str(e),
                                 "duration_ms": pptx_duration_ms,
                                 "timestamp": int(time.time() * 1000),
-                            }
+                            },
                         )
                         # Add rich error context to tool results for model
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": error_info.to_rich_context(),
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": error_info.to_rich_context(),
+                            }
+                        )
 
                 else:
                     # Execute other registered tools via registry
                     try:
-                        from .tools import get_tool_registry, ToolCallRequest
+                        from .tools import ToolCallRequest, get_tool_registry
+
                         registry = get_tool_registry()
 
                         if registry.get_tool(tool_name):
@@ -1919,11 +2013,15 @@ Please use this web search context to inform your response when relevant."""
                                     user=user,
                                 )
                             )
-                            tool_results.append({
-                                "tool_call_id": tool_id,
-                                "role": "tool",
-                                "content": tool_result.result if tool_result.success else f"Error: {tool_result.error}",
-                            })
+                            tool_results.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "role": "tool",
+                                    "content": tool_result.result
+                                    if tool_result.success
+                                    else f"Error: {tool_result.error}",
+                                }
+                            )
                         else:
                             # Unknown tool - create structured error
                             error_info = ToolErrorInfo(
@@ -1942,13 +2040,15 @@ Please use this web search context to inform your response when relevant."""
                                     "error_type": error_info.error_type,
                                     "error_message": error_info.error_message,
                                     "suggestion": error_info.suggestion,
+                                },
+                            )
+                            tool_results.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "role": "tool",
+                                    "content": error_info.to_rich_context(),
                                 }
                             )
-                            tool_results.append({
-                                "tool_call_id": tool_id,
-                                "role": "tool",
-                                "content": error_info.to_rich_context(),
-                            })
                     except Exception as e:
                         logger.error(f"Tool {tool_name} execution failed: {e}", exc_info=True)
                         # Create structured error for better agent recovery
@@ -1967,14 +2067,16 @@ Please use this web search context to inform your response when relevant."""
                                 "error_type": error_info.error_type,
                                 "error_message": error_info.error_message,
                                 "suggestion": error_info.suggestion,
-                            }
+                            },
                         )
                         # Add rich error context to tool results for model
-                        tool_results.append({
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "content": error_info.to_rich_context(),
-                        })
+                        tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "role": "tool",
+                                "content": error_info.to_rich_context(),
+                            }
+                        )
 
             # Emit ReAct OBSERVING phase status after tool execution
             yield AssistantStreamEvent(
@@ -1982,23 +2084,31 @@ Please use this web search context to inform your response when relevant."""
                 data={
                     "phase": ReActPhase.OBSERVING.value,
                     "message": "分析工具执行结果...",
-                }
+                },
             )
 
             # Add assistant message with tool calls and tool results
-            current_messages.append(ChatMessage(
-                role="assistant",
-                content="",
-                tool_calls=[tool_calls_accumulated[idx] for idx in sorted(tool_calls_accumulated.keys())]
-            ))
+            current_messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        tool_calls_accumulated[idx] for idx in sorted(tool_calls_accumulated.keys())
+                    ],
+                )
+            )
             for tr in tool_results:
-                current_messages.append(ChatMessage(
-                    role="tool",
-                    content=tr["content"],
-                    tool_call_id=tr["tool_call_id"],
-                ))
+                current_messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=tr["content"],
+                        tool_call_id=tr["tool_call_id"],
+                    )
+                )
 
-            logger.info(f"Tool iteration {iteration}: executed {len(tool_results)} tools, continuing...")
+            logger.info(
+                f"Tool iteration {iteration}: executed {len(tool_results)} tools, continuing..."
+            )
 
         # Safeguard: Handle empty content after agentic loop
         # If model generated output tokens but no text content, it likely only produced
@@ -2024,11 +2134,10 @@ Please use this web search context to inform your response when relevant."""
             if first_token_time is None:
                 first_token_time = time.time()
                 ttft_ms = (first_token_time - start_time) * 1000
-                logger.info(f"[TTFT] Fallback message after {ttft_ms:.0f}ms (no content from model)")
-            yield AssistantStreamEvent(
-                event_type="text_delta",
-                data=fallback_message
-            )
+                logger.info(
+                    f"[TTFT] Fallback message after {ttft_ms:.0f}ms (no content from model)"
+                )
+            yield AssistantStreamEvent(event_type="text_delta", data=fallback_message)
 
         # Step 5: Persist assistant response to session
         if persist_messages and self.session_manager and total_content:
@@ -2036,15 +2145,17 @@ Please use this web search context to inform your response when relevant."""
                 # Serialize contexts for persistence
                 contexts_data = []
                 for ctx in retrieved_contexts:
-                    contexts_data.append({
-                        "dataset_id": ctx.dataset_id,
-                        "dataset_name": ctx.dataset_name,
-                        "chunks": ctx.chunks,
-                        "query": ctx.query,
-                        "took_ms": ctx.took_ms,
-                        "avg_score": ctx.avg_score,
-                        "top_score": ctx.top_score,
-                    })
+                    contexts_data.append(
+                        {
+                            "dataset_id": ctx.dataset_id,
+                            "dataset_name": ctx.dataset_name,
+                            "chunks": ctx.chunks,
+                            "query": ctx.query,
+                            "took_ms": ctx.took_ms,
+                            "avg_score": ctx.avg_score,
+                            "top_score": ctx.top_score,
+                        }
+                    )
 
                 await self.session_manager.add_message(
                     session_id=session_id,
@@ -2062,8 +2173,8 @@ Please use this web search context to inform your response when relevant."""
                 logger.warning(f"Failed to persist assistant message: {e}")
 
         # Step 6: RAG Evaluation (Phase 3)
-        rag_evaluation: Optional[RAGEvaluation] = None
-        citations: List[Citation] = []
+        rag_evaluation: RAGEvaluation | None = None
+        citations: list[Citation] = []
 
         if self.enable_rag_evaluation and retrieved_contexts and total_content:
             try:
@@ -2076,10 +2187,12 @@ Please use this web search context to inform your response when relevant."""
                     dataset_names[ctx.dataset_id] = ctx.dataset_name
                     total_retrieval_time += ctx.took_ms
                     for chunk in ctx.chunks:
-                        all_chunks.append({
-                            **chunk,
-                            "dataset_id": ctx.dataset_id,
-                        })
+                        all_chunks.append(
+                            {
+                                **chunk,
+                                "dataset_id": ctx.dataset_id,
+                            }
+                        )
 
                 # Evaluate RAG quality
                 rag_metrics = self.rag_evaluator.evaluate(
@@ -2114,7 +2227,7 @@ Please use this web search context to inform your response when relevant."""
                         "response_grounding": rag_metrics.response_grounding,
                         "citations": [c.to_dict() for c in citations],
                         "evaluation_time_ms": rag_metrics.evaluation_time_ms,
-                    }
+                    },
                 )
 
                 logger.info(
@@ -2127,7 +2240,7 @@ Please use this web search context to inform your response when relevant."""
                 logger.warning(f"RAG evaluation failed: {e}")
 
         # Step 6.5: Output validation (Phase 4)
-        output_warnings: List[str] = []
+        output_warnings: list[str] = []
         if total_content:
             # Build context for hallucination check
             context_text = ""
@@ -2141,21 +2254,19 @@ Please use this web search context to inform your response when relevant."""
             )
 
             if retrieved_contexts:
-                output_warnings.extend(
-                    self._validate_citations(total_content, citations)
-                )
+                output_warnings.extend(self._validate_citations(total_content, citations))
 
             if output_warnings:
                 logger.warning(f"Output warnings: {output_warnings}")
                 yield AssistantStreamEvent(
-                    event_type="output_warnings",
-                    data={"warnings": output_warnings}
+                    event_type="output_warnings", data={"warnings": output_warnings}
                 )
 
         # Step 6.6: Extract user preferences for memory
         if self.memory_service and message:
             try:
                 from .memory.preference_extractor import extract_preferences
+
                 prefs = extract_preferences(message)
                 for key, value in prefs.items():
                     await self.memory_service.set_user_memory(
@@ -2185,7 +2296,7 @@ Please use this web search context to inform your response when relevant."""
                 await memory_manager.remember(
                     key="last_query_topic",
                     value={"query": message[:100], "timestamp": datetime.utcnow().isoformat()},
-                    layer="session"
+                    layer="session",
                 )
                 logger.debug(f"Stored session memory for query: {message[:50]}...")
             except Exception as e:
@@ -2195,10 +2306,7 @@ Please use this web search context to inform your response when relevant."""
         elapsed_ms = (time.time() - start_time) * 1000
 
         if usage:
-            yield AssistantStreamEvent(
-                event_type="usage",
-                data=usage
-            )
+            yield AssistantStreamEvent(event_type="usage", data=usage)
 
             # Emit cache metrics event
             try:
@@ -2215,7 +2323,7 @@ Please use this web search context to inform your response when relevant."""
                             "cache_hit_rate": cache_metrics.cache_hit_rate,
                             "estimated_savings_usd": cache_metrics.estimated_savings_usd,
                             "system_prefix_hash": cache_metrics.system_prefix_hash,
-                        }
+                        },
                     )
                     logger.info(
                         f"Cache metrics: {cache_metrics.cached_tokens}/{cache_metrics.total_input_tokens} tokens cached "
@@ -2254,7 +2362,9 @@ Please use this web search context to inform your response when relevant."""
                 realtime_metrics = get_realtime_metrics()
                 if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
                     await realtime_metrics.record_token_usage(input_tokens, output_tokens)
-                    logger.debug(f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}")
+                    logger.debug(
+                        f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to update realtime metrics: {e}")
 
@@ -2264,7 +2374,7 @@ Please use this web search context to inform your response when relevant."""
             data={
                 "phase": ReActPhase.COMPLETING.value,
                 "message": "完成",
-            }
+            },
         )
 
         yield AssistantStreamEvent(
@@ -2281,7 +2391,7 @@ Please use this web search context to inform your response when relevant."""
                 "citations_count": len(citations),
                 # Phase 4: Output validation
                 "output_warnings": output_warnings,
-            }
+            },
         )
 
     async def chat(
@@ -2290,8 +2400,8 @@ Please use this web search context to inform your response when relevant."""
         session_id: str,
         message: str,
         config: AssistantConfig,
-        history: Optional[List[Dict[str, str]]] = None,
-    ) -> Dict[str, Any]:
+        history: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         """
         Non-streaming chat completion.
 
@@ -2317,7 +2427,7 @@ Please use this web search context to inform your response when relevant."""
                 }
 
         # Retrieve KB context
-        retrieved_contexts: List[RetrievedContext] = []
+        retrieved_contexts: list[RetrievedContext] = []
         if config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service:
             retrieved_contexts = await self._retrieve_context(
                 user=user,
@@ -2330,7 +2440,11 @@ Please use this web search context to inform your response when relevant."""
 
         if domain_policy:
             ctx_payload = [
-                {"dataset_id": ctx.dataset_id, "dataset_name": ctx.dataset_name, "chunks": ctx.chunks}
+                {
+                    "dataset_id": ctx.dataset_id,
+                    "dataset_name": ctx.dataset_name,
+                    "chunks": ctx.chunks,
+                }
                 for ctx in retrieved_contexts
             ]
             decision = domain_policy.precheck_context(message, ctx_payload)
@@ -2416,7 +2530,9 @@ Please use this web search context to inform your response when relevant."""
                 realtime_metrics = get_realtime_metrics()
                 if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
                     await realtime_metrics.record_token_usage(input_tokens, output_tokens)
-                    logger.debug(f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}")
+                    logger.debug(
+                        f"Updated realtime token metrics: input={input_tokens}, output={output_tokens}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to update realtime metrics: {e}")
 
@@ -2439,21 +2555,23 @@ Please use this web search context to inform your response when relevant."""
         self,
         user: UserContext,
         query: str,
-        dataset_ids: List[str],
+        dataset_ids: list[str],
         top_k: int,
         score_threshold: float,
         include_images: bool,
-    ) -> List[RetrievedContext]:
+    ) -> list[RetrievedContext]:
         """Retrieve context from knowledge bases - PARALLEL retrieval for performance."""
-        logger.info(f"_retrieve_context called with datasets={dataset_ids}, query='{query[:50]}...'")
+        logger.info(
+            f"_retrieve_context called with datasets={dataset_ids}, query='{query[:50]}...'"
+        )
 
-        async def retrieve_single_dataset(dataset_id: str) -> Optional[RetrievedContext]:
+        async def retrieve_single_dataset(dataset_id: str) -> RetrievedContext | None:
             """Retrieve from a single dataset - designed for parallel execution."""
             start = time.time()
             logger.info(f"Retrieving from dataset '{dataset_id}'")
             try:
                 # Use retrieve_with_images if available and requested
-                if include_images and hasattr(self.kb_service, 'retrieve_with_images'):
+                if include_images and hasattr(self.kb_service, "retrieve_with_images"):
                     results, meta = await self.kb_service.retrieve_with_images(
                         user=user,
                         dataset_id=dataset_id,
@@ -2483,16 +2601,16 @@ Please use this web search context to inform your response when relevant."""
                     content_type_counts[ct] = content_type_counts.get(ct, 0) + 1
                     if r.image_url:
                         image_url_count += 1
-                logger.info(f"Dataset '{dataset_id}' returned {len(results)} results in {took_ms:.1f}ms - content_types={content_type_counts}, with_image_url={image_url_count}")
+                logger.info(
+                    f"Dataset '{dataset_id}' returned {len(results)} results in {took_ms:.1f}ms - content_types={content_type_counts}, with_image_url={image_url_count}"
+                )
 
                 # Convert results to serializable format
                 chunks = []
-                scores: List[float] = []
+                scores: list[float] = []
                 for r in results:
-                    try:
+                    with contextlib.suppress(TypeError, ValueError):
                         scores.append(float(r.score))
-                    except (TypeError, ValueError):
-                        pass
                     chunk = {
                         "content": r.text,
                         "score": r.score,
@@ -2503,7 +2621,9 @@ Please use this web search context to inform your response when relevant."""
                     citation_text = (r.metadata or {}).get("citation_text")
                     if citation_text:
                         chunk["citation_text"] = citation_text
-                    source_url = (r.metadata or {}).get("source_url") or (r.metadata or {}).get("source_uri")
+                    source_url = (r.metadata or {}).get("source_url") or (r.metadata or {}).get(
+                        "source_uri"
+                    )
                     if source_url:
                         chunk["source_url"] = source_url
                     if r.image_url:
@@ -2530,29 +2650,30 @@ Please use this web search context to inform your response when relevant."""
 
         # PARALLEL retrieval using asyncio.gather - significant latency improvement
         results = await asyncio.gather(
-            *[retrieve_single_dataset(ds_id) for ds_id in dataset_ids],
-            return_exceptions=True
+            *[retrieve_single_dataset(ds_id) for ds_id in dataset_ids], return_exceptions=True
         )
 
         # Filter out None results and exceptions
         contexts = [r for r in results if r is not None and not isinstance(r, Exception)]
 
-        logger.info(f"[KB RETRIEVE] Total: {len(contexts)} contexts with chunks (parallel retrieval)")
+        logger.info(
+            f"[KB RETRIEVE] Total: {len(contexts)} contexts with chunks (parallel retrieval)"
+        )
         return contexts
 
     async def _load_user_memory(
         self,
         user: UserContext,
         session_id: str,
-    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """
         Load user memory/preferences - designed for parallel execution.
 
         Returns:
             tuple of (user_preferences_text, memory_dict_for_event)
         """
-        user_preferences: Optional[str] = None
-        memory_data: Optional[Dict[str, Any]] = None
+        user_preferences: str | None = None
+        memory_data: dict[str, Any] | None = None
 
         # Use MemoryService if available (preferred)
         if self.memory_service:
@@ -2570,7 +2691,9 @@ Please use this web search context to inform your response when relevant."""
                         memory_lines.append(f"- {k}: {val_str}")
 
                     if memory_lines:
-                        user_preferences = "## User Memories (Facts & Preferences)\n\n" + "\n".join(memory_lines)
+                        user_preferences = "## User Memories (Facts & Preferences)\n\n" + "\n".join(
+                            memory_lines
+                        )
                         memory_data = memories
                         logger.info(f"Loaded {len(memories)} user memories for {user.user_id}")
             except Exception as e:
@@ -2595,7 +2718,9 @@ Please use this web search context to inform your response when relevant."""
                     if pref_lines:
                         user_preferences = "\n".join(pref_lines)
                         memory_data = prefs
-                        logger.info(f"Loaded user preferences for {user.user_id}: {list(prefs.keys())}")
+                        logger.info(
+                            f"Loaded user preferences for {user.user_id}: {list(prefs.keys())}"
+                        )
             except Exception as e:
                 logger.warning(f"Failed to load user preferences: {e}")
 
@@ -2605,8 +2730,8 @@ Please use this web search context to inform your response when relevant."""
         """Lazy load task planner."""
         if not self._task_planner:
             # We need a model client for the planner
-            # Use the same model as the assistant
-            provider = config.model_provider if 'config' in locals() else ModelProvider.OPENAI
+            # Use default provider (OPENAI) for task planning
+            provider = ModelProvider.OPENAI
             model_client = self.model_registry.get_client(provider)
             self._task_planner = create_task_planner(model_client=model_client)
         return self._task_planner
@@ -2615,16 +2740,15 @@ Please use this web search context to inform your response when relevant."""
         """Lazy load tool orchestrator."""
         if not self._tool_orchestrator:
             from .tools import get_tool_registry
-            self._tool_orchestrator = create_tool_orchestrator(
-                tool_registry=get_tool_registry()
-            )
+
+            self._tool_orchestrator = create_tool_orchestrator(tool_registry=get_tool_registry())
         return self._tool_orchestrator
 
     def get_working_memory(self, session_id: str) -> WorkingMemory:
         """Get or create working memory for a session."""
         if not hasattr(self, "_working_memories"):
             self._working_memories = {}
-        
+
         if session_id not in self._working_memories:
             self._working_memories[session_id] = WorkingMemory(session_id=session_id)
 
@@ -2636,7 +2760,7 @@ Please use this web search context to inform your response when relevant."""
         session_id: str,
         message: str,
         config: AssistantConfig,
-        history: Optional[List[Dict[str, str]]] = None,
+        history: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
         Execute using the unified 8-step AgentLoop.
@@ -2657,7 +2781,7 @@ Please use this web search context to inform your response when relevant."""
         Yields:
             AssistantStreamEvent objects
         """
-        from .agent_loop import AgentLoop, AgentLoopConfig, AgentLoopEvent
+        from .agent_loop import AgentLoop, AgentLoopConfig
 
         # Create AgentLoop configuration with Streaming-First mode enabled
         loop_config = AgentLoopConfig(
@@ -2695,7 +2819,7 @@ Please use this web search context to inform your response when relevant."""
         agent_loop = AgentLoop(
             model_registry=self.model_registry,
             kb_service=self.kb_service,
-            memory_service=self.memory_service if hasattr(self, 'memory_service') else None,
+            memory_service=self.memory_service if hasattr(self, "memory_service") else None,
             session_manager=self.session_manager,
             artifact_storage=self.artifact_storage,
             file_processor=self.file_processor,
@@ -2706,10 +2830,7 @@ Please use this web search context to inform your response when relevant."""
             try:
                 session = await self.session_manager.get(session_id)
                 if session and session.history:
-                    history = [
-                        {"role": m.role, "content": m.content}
-                        for m in session.history
-                    ]
+                    history = [{"role": m.role, "content": m.content} for m in session.history]
                 else:
                     history = []
             except Exception as e:
@@ -2734,8 +2855,12 @@ Please use this web search context to inform your response when relevant."""
                     data=usage_data if usage_data else {"input_tokens": 0, "output_tokens": 0},
                 )
                 # Extract duration and emit done event
-                duration_ms = event.data.get("total_time_ms", 0) if isinstance(event.data, dict) else 0
-                content_length = event.data.get("content_length", 0) if isinstance(event.data, dict) else 0
+                duration_ms = (
+                    event.data.get("total_time_ms", 0) if isinstance(event.data, dict) else 0
+                )
+                content_length = (
+                    event.data.get("content_length", 0) if isinstance(event.data, dict) else 0
+                )
                 yield AssistantStreamEvent(
                     event_type="done",
                     data={
@@ -2753,6 +2878,7 @@ Please use this web search context to inform your response when relevant."""
                 args_str = data.get("arguments", "{}")
                 try:
                     import json
+
                     args_dict = json.loads(args_str) if args_str else {}
                 except (json.JSONDecodeError, TypeError):
                     args_dict = {"raw": args_str} if args_str else {}
@@ -2774,7 +2900,9 @@ Please use this web search context to inform your response when relevant."""
                 tool_call_id = data.get("tool_id", "")
                 tool_name = data.get("tool_name", "")
                 metadata = data.get("metadata", {})
-                total_results = metadata.get("total_results") if isinstance(metadata, dict) else None
+                total_results = (
+                    metadata.get("total_results") if isinstance(metadata, dict) else None
+                )
                 duration_ms = data.get("duration_ms")
                 if duration_ms is None and isinstance(metadata, dict):
                     duration_ms = metadata.get("duration_ms")
@@ -2803,7 +2931,9 @@ Please use this web search context to inform your response when relevant."""
                         "tool_name": tool_name,
                         "result": data.get("result_preview", ""),
                         "success": data.get("success", True),
-                        "result_count": metadata.get("total_results"),  # For KB/Web search result count
+                        "result_count": metadata.get(
+                            "total_results"
+                        ),  # For KB/Web search result count
                         "duration_ms": duration_ms,
                         "timestamp": event.timestamp,
                     },
@@ -2815,10 +2945,9 @@ Please use this web search context to inform your response when relevant."""
 
     def _convert_agent_loop_event(
         self,
-        event: "AgentLoopEvent",
+        event: AgentLoopEvent,
     ) -> AssistantStreamEvent:
         """Convert AgentLoopEvent to AssistantStreamEvent for compatibility."""
-        from .agent_loop import AgentLoopPhase
 
         # Map event types
         event_type_map = {
@@ -2858,9 +2987,9 @@ Please use this web search context to inform your response when relevant."""
         session_id: str,
         message: str,
         config: AssistantConfig,
-        history: List[Dict[str, str]],
-        retrieved_contexts: List[RetrievedContext],
-        web_search_context: Optional[str] = None,
+        history: list[dict[str, str]],
+        retrieved_contexts: list[RetrievedContext],
+        web_search_context: str | None = None,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
         Execute user request using Task Planning (Phase 2.5).
@@ -2869,66 +2998,66 @@ Please use this web search context to inform your response when relevant."""
             planner = self._get_task_planner()
             orchestrator = self._get_tool_orchestrator()
             working_memory = self.get_working_memory(session_id)
-            
+
             # Clear previous task state for new request
             working_memory.clear()
             # Restore goal (optional, but for now we set new goal from plan)
-            
+
             # Context for planner
             planner_context = {
                 "history_summary": history[-3:] if history else [],
                 "retrieved_context_count": len(retrieved_contexts),
             }
-            
+
             # Create plan
             yield AssistantStreamEvent(
                 event_type=StreamEventType.STATUS.value,
-                data={"status": "planning", "message": "Analyzing request and creating plan..."}
+                data={"status": "planning", "message": "Analyzing request and creating plan..."},
             )
-            
+
             # Get available tools (full definitions for better planning)
             tools = self.model_registry.get_tools()
-            
+
             plan = await planner.create_plan(
-                user_request=message,
-                available_tools=tools,
-                context=planner_context
+                user_request=message, available_tools=tools, context=planner_context
             )
-            
+
             # Emit plan event
             yield AssistantStreamEvent(
-                event_type=StreamEventType.TASK_PLANNING.value,
-                data=plan.to_dict()
+                event_type=StreamEventType.TASK_PLANNING.value, data=plan.to_dict()
             )
-            
+
             # Execute plan
             yield AssistantStreamEvent(
                 event_type=StreamEventType.STATUS.value,
-                data={"status": "executing_plan", "message": f"Executing {len(plan.tasks)} tasks..."}
+                data={
+                    "status": "executing_plan",
+                    "message": f"Executing {len(plan.tasks)} tasks...",
+                },
             )
-            
+
             async for result in orchestrator.execute_plan(plan, working_memory):
                 # Emit result update
                 yield AssistantStreamEvent(
                     event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
-                    data=working_memory.to_dict()
+                    data=working_memory.to_dict(),
                 )
-                
+
                 # Emit tool result event
                 yield AssistantStreamEvent(
                     event_type=StreamEventType.TOOL_RESULT.value,
                     data={
                         "tool_call_id": result.task_id,
                         "name": result.tool,
-                        "result": str(result.result)[:1000], # Truncate for display
-                        "success": result.success
-                    }
+                        "result": str(result.result)[:1000],  # Truncate for display
+                        "success": result.success,
+                    },
                 )
         except Exception as e:
             logger.error(f"Task planning execution failed: {e}", exc_info=True)
             yield AssistantStreamEvent(
                 event_type=StreamEventType.ERROR.value,
-                data={"message": f"Planning execution failed: {str(e)}", "recoverable": True}
+                data={"message": f"Planning execution failed: {str(e)}", "recoverable": True},
             )
 
     def _is_document_generation_task(self, message: str) -> bool:
@@ -2945,12 +3074,36 @@ Please use this web search context to inform your response when relevant."""
         """
         doc_keywords = [
             # Chinese keywords
-            "写", "撰写", "生成文档", "写报告", "写计划", "写文章",
-            "帮我写", "写一个", "写一份", "文档", "报告", "计划书",
-            "研究报告", "分析报告", "总结", "论文", "方案",
+            "写",
+            "撰写",
+            "生成文档",
+            "写报告",
+            "写计划",
+            "写文章",
+            "帮我写",
+            "写一个",
+            "写一份",
+            "文档",
+            "报告",
+            "计划书",
+            "研究报告",
+            "分析报告",
+            "总结",
+            "论文",
+            "方案",
             # English keywords
-            "write", "generate", "create", "document", "report", "plan",
-            "docx", "pdf", "markdown", "article", "paper", "summary",
+            "write",
+            "generate",
+            "create",
+            "document",
+            "report",
+            "plan",
+            "docx",
+            "pdf",
+            "markdown",
+            "article",
+            "paper",
+            "summary",
         ]
         message_lower = message.lower()
         return any(kw in message_lower for kw in doc_keywords)
@@ -2967,14 +3120,16 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             Expert analysis prompt string to inject into system prompt.
         """
-        from .prompts.scenario_analysis_prompts import SCENARIO_TYPES, EXPERT_TEMPLATES
+        from .prompts.scenario_analysis_prompts import EXPERT_TEMPLATES, SCENARIO_TYPES
 
         scenario_type = scenario.primary_scenario.value
         scenario_info = SCENARIO_TYPES.get(scenario_type, SCENARIO_TYPES.get("general_inquiry", {}))
 
         scenario_name = scenario_info.get("name", "通用")
         dimensions = scenario_info.get("analysis_dimensions", [])
-        expert_template = EXPERT_TEMPLATES.get(scenario_type, EXPERT_TEMPLATES.get("general_inquiry", ""))
+        expert_template = EXPERT_TEMPLATES.get(
+            scenario_type, EXPERT_TEMPLATES.get("general_inquiry", "")
+        )
 
         # Build the expert analysis prompt
         prompt_parts = [
@@ -2988,25 +3143,29 @@ Please use this web search context to inform your response when relevant."""
         for dim in dimensions:
             prompt_parts.append(f"- {dim}")
 
-        prompt_parts.extend([
-            "",
-            "### 回答框架",
-            expert_template,
-            "",
-            "### 回答要求",
-            "1. **准确诊断**：准确识别问题的本质和根源",
-            "2. **方案实用**：提供具体可操作的建议",
-            "3. **表达专业**：使用恰当的专业术语",
-            "4. **逻辑清晰**：层次分明，条理清楚",
-            "5. **考虑周全**：涵盖边界情况和注意事项",
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "### 回答框架",
+                expert_template,
+                "",
+                "### 回答要求",
+                "1. **准确诊断**：准确识别问题的本质和根源",
+                "2. **方案实用**：提供具体可操作的建议",
+                "3. **表达专业**：使用恰当的专业术语",
+                "4. **逻辑清晰**：层次分明，条理清楚",
+                "5. **考虑周全**：涵盖边界情况和注意事项",
+            ]
+        )
 
         # Add urgency hint if urgent
         if scenario.urgency.value == "urgent":
-            prompt_parts.extend([
-                "",
-                "**注意**：用户的问题标记为紧急，请优先给出最关键的解决步骤。",
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "**注意**：用户的问题标记为紧急，请优先给出最关键的解决步骤。",
+                ]
+            )
 
         return "\n".join(prompt_parts)
 
@@ -3032,12 +3191,14 @@ Please use this web search context to inform your response when relevant."""
 
         # Add structure information if available
         if structure:
-            prompt_parts.extend([
-                "",
-                "### 文档结构概览",
-                f"- 总字符数：{structure.total_chars:,}",
-                f"- 预计阅读时间：{structure.estimated_reading_time_min} 分钟",
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "### 文档结构概览",
+                    f"- 总字符数：{structure.total_chars:,}",
+                    f"- 预计阅读时间：{structure.estimated_reading_time_min} 分钟",
+                ]
+            )
 
             # Add section outline if available
             if structure.sections:
@@ -3061,42 +3222,44 @@ Please use this web search context to inform your response when relevant."""
                 prompt_parts.append(f"- 内容特点：{', '.join(characteristics)}")
 
         # Add analysis framework
-        prompt_parts.extend([
-            "",
-            "### 分析框架",
-            "根据用户问题，从以下维度进行深度分析：",
-            "",
-            "1. **文档概览**：类型、主题、主要内容",
-            "2. **核心内容**：关键信息、主要观点、重要数据",
-            "3. **结构分析**：文档组织、逻辑脉络",
-            "4. **深度洞察**：隐含信息、潜在价值",
-            "5. **应用建议**：基于文档内容的行动建议",
-            "",
-            "### 回答要求",
-            "- 准确引用文档中的具体内容",
-            "- 对数据和信息进行解读，不只是复述",
-            "- 如果文档未涵盖某方面，明确指出",
-            "- 提供结构化的分析，便于理解",
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "### 分析框架",
+                "根据用户问题，从以下维度进行深度分析：",
+                "",
+                "1. **文档概览**：类型、主题、主要内容",
+                "2. **核心内容**：关键信息、主要观点、重要数据",
+                "3. **结构分析**：文档组织、逻辑脉络",
+                "4. **深度洞察**：隐含信息、潜在价值",
+                "5. **应用建议**：基于文档内容的行动建议",
+                "",
+                "### 回答要求",
+                "- 准确引用文档中的具体内容",
+                "- 对数据和信息进行解读，不只是复述",
+                "- 如果文档未涵盖某方面，明确指出",
+                "- 提供结构化的分析，便于理解",
+            ]
+        )
 
         return "\n".join(prompt_parts)
 
     def _build_messages(
         self,
         message: str,
-        history: List[Dict[str, str]],
+        history: list[dict[str, str]],
         config: AssistantConfig,
-        retrieved_contexts: List[RetrievedContext],
-        web_search_context: Optional[str] = None,
-        processed_files: Optional[ProcessedFiles] = None,
+        retrieved_contexts: list[RetrievedContext],
+        web_search_context: str | None = None,
+        processed_files: ProcessedFiles | None = None,
         model_supports_vision: bool = False,
-        session_id: Optional[str] = None,
-        user_preferences: Optional[str] = None,
-        scenario_detection: Optional[ScenarioDetectionResult] = None,
+        session_id: str | None = None,
+        user_preferences: str | None = None,
+        scenario_detection: ScenarioDetectionResult | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
         authority_sort: bool = False,
-    ) -> List[ChatMessage]:
+    ) -> list[ChatMessage]:
         """Build the message list for the model.
 
         Args:
@@ -3132,7 +3295,7 @@ Please use this web search context to inform your response when relevant."""
             )
 
         # Legacy message building (original implementation) - Now with Manus-style prompts
-        messages: List[ChatMessage] = []
+        messages: list[ChatMessage] = []
 
         # System prompt - Use Manus-style modular prompt builder
         if config.system_prompt:
@@ -3146,11 +3309,19 @@ Please use this web search context to inform your response when relevant."""
             # Only inject scenario framework when agent_loop is enabled (complex tasks)
             # For simple queries, skip scenario injection to follow "minimal effective context" principle
             scenario_rules = ""
-            if config.use_agent_loop and scenario_detection and scenario_detection.confidence >= 0.6:
+            if (
+                config.use_agent_loop
+                and scenario_detection
+                and scenario_detection.confidence >= 0.6
+            ):
                 scenario_rules = self._build_scenario_prompt(scenario_detection)
-                logger.info(f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}")
+                logger.info(
+                    f"[SCENARIO INJECT] Building prompt with scenario: {scenario_detection.primary_scenario.value}"
+                )
             elif scenario_detection:
-                logger.info(f"[SCENARIO SKIP] Skipping scenario injection (agent_loop={config.use_agent_loop}, confidence={scenario_detection.confidence:.2f})")
+                logger.info(
+                    f"[SCENARIO SKIP] Skipping scenario injection (agent_loop={config.use_agent_loop}, confidence={scenario_detection.confidence:.2f})"
+                )
 
             if domain_rules:
                 scenario_rules = f"{scenario_rules}\n{domain_rules}".strip()
@@ -3170,7 +3341,9 @@ Please use this web search context to inform your response when relevant."""
         # Inject user preferences using new modular function
         if user_preferences:
             system_content = inject_user_preferences(system_content, user_preferences)
-            logger.info(f"[MEMORY INJECT] Injected user preferences, length: {len(user_preferences)}")
+            logger.info(
+                f"[MEMORY INJECT] Injected user preferences, length: {len(user_preferences)}"
+            )
 
         # Inject KB context using new modular function
         if retrieved_contexts:
@@ -3179,7 +3352,9 @@ Please use this web search context to inform your response when relevant."""
                 include_citations=include_citations,
                 authority_sort=authority_sort,
             )
-            logger.info(f"[KB INJECT] Injecting context from {len(retrieved_contexts)} datasets, text length: {len(context_text)}")
+            logger.info(
+                f"[KB INJECT] Injecting context from {len(retrieved_contexts)} datasets, text length: {len(context_text)}"
+            )
             logger.debug(f"[KB INJECT] Context preview: {context_text[:500]}...")
             system_content = inject_kb_context(system_content, context_text)
         else:
@@ -3194,7 +3369,10 @@ Please use this web search context to inform your response when relevant."""
         if processed_files and processed_files.text_content:
             # Build document structure info
             structure_info = ""
-            if hasattr(processed_files, 'document_structure') and processed_files.document_structure:
+            if (
+                hasattr(processed_files, "document_structure")
+                and processed_files.document_structure
+            ):
                 struct = processed_files.document_structure
                 structure_info = f"总字符数: {struct.total_chars}, 总行数: {struct.total_lines}"
                 if struct.sections:
@@ -3205,7 +3383,7 @@ Please use this web search context to inform your response when relevant."""
                 content=processed_files.text_content,
                 structure_info=structure_info,
             )
-            logger.info(f"[DOC INJECT] Injected document context with Manus-style template")
+            logger.info("[DOC INJECT] Injected document context with Manus-style template")
 
         messages.append(ChatMessage(role="system", content=system_content))
         logger.info(f"[SYSTEM PROMPT] Total length: {len(system_content)} chars")
@@ -3222,7 +3400,7 @@ Please use this web search context to inform your response when relevant."""
 
         # Build user message with potential file content
         final_message = message
-        user_images: Optional[List[str]] = None
+        user_images: list[str] | None = None
 
         if processed_files:
             if model_supports_vision and processed_files.has_images:
@@ -3248,17 +3426,21 @@ Please use this web search context to inform your response when relevant."""
             # Inject text content and image descriptions into the user message
             if processed_files.text_content:
                 final_message += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
-                logger.info(f"[FILE INJECT] Added text content: {len(processed_files.text_content)} chars")
+                logger.info(
+                    f"[FILE INJECT] Added text content: {len(processed_files.text_content)} chars"
+                )
 
             if processed_files.image_descriptions and not model_supports_vision:
                 # Only add image descriptions for text-only models
                 # Vision models can see the images directly
                 descriptions = "\n".join(
-                    f"- 图像 {i+1}: {desc}"
+                    f"- 图像 {i + 1}: {desc}"
                     for i, desc in enumerate(processed_files.image_descriptions)
                 )
                 final_message += f"\n\n---\n[图像描述]\n{descriptions}"
-                logger.info(f"[FILE INJECT] Added {len(processed_files.image_descriptions)} image descriptions for text model")
+                logger.info(
+                    f"[FILE INJECT] Added {len(processed_files.image_descriptions)} image descriptions for text model"
+                )
 
             # Log warning if files were processed but no content was extracted
             if not processed_files.text_content and not processed_files.has_images:
@@ -3276,18 +3458,18 @@ Please use this web search context to inform your response when relevant."""
     def _build_messages_with_context_engine(
         self,
         message: str,
-        history: List[Dict[str, str]],
+        history: list[dict[str, str]],
         config: AssistantConfig,
-        retrieved_contexts: List[RetrievedContext],
-        web_search_context: Optional[str] = None,
-        processed_files: Optional[ProcessedFiles] = None,
+        retrieved_contexts: list[RetrievedContext],
+        web_search_context: str | None = None,
+        processed_files: ProcessedFiles | None = None,
         model_supports_vision: bool = False,
-        session_id: Optional[str] = None,
-        user_preferences: Optional[str] = None,
+        session_id: str | None = None,
+        user_preferences: str | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
         authority_sort: bool = False,
-    ) -> List[ChatMessage]:
+    ) -> list[ChatMessage]:
         """Build messages using Context Engine for KV-Cache optimization.
 
         This method uses the ContextEngine class to construct messages with
@@ -3318,7 +3500,7 @@ Please use this web search context to inform your response when relevant."""
         context_engine = ContextEngine(provider=provider)
 
         # Build current context (KB + web search results)
-        current_context_parts: List[str] = []
+        current_context_parts: list[str] = []
         if retrieved_contexts:
             context_text = self._format_context(
                 retrieved_contexts,
@@ -3329,11 +3511,13 @@ Please use this web search context to inform your response when relevant."""
             logger.info(f"[CONTEXT ENGINE] KB context: {len(context_text)} chars")
 
         if web_search_context:
-            current_context_parts.append(self.WEB_CONTEXT_TEMPLATE.format(context=web_search_context))
+            current_context_parts.append(
+                self.WEB_CONTEXT_TEMPLATE.format(context=web_search_context)
+            )
             logger.info(f"[CONTEXT ENGINE] Web context: {len(web_search_context)} chars")
 
         # Get working memory task state if available
-        task_state: Optional[str] = None
+        task_state: str | None = None
         if session_id and session_id in self._working_memories:
             working_memory = self._working_memories[session_id]
             task_state = working_memory.to_markdown()
@@ -3343,7 +3527,9 @@ Please use this web search context to inform your response when relevant."""
         # fallback to config.user_preferences
         effective_user_preferences = user_preferences or config.user_preferences
         if effective_user_preferences:
-            logger.info(f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars")
+            logger.info(
+                f"[CONTEXT ENGINE] User preferences: {len(effective_user_preferences)} chars"
+            )
 
         # Build ContextStructure with layered content
         # Use TTFT-optimized prompt when context engine is enabled (no timestamps!)
@@ -3378,7 +3564,7 @@ Please use this web search context to inform your response when relevant."""
         raw_messages = context_engine.build_messages(context_structure)
 
         # Convert to ChatMessage objects and handle file content
-        messages: List[ChatMessage] = []
+        messages: list[ChatMessage] = []
         for i, msg in enumerate(raw_messages):
             role = msg["role"]
             content = msg["content"]
@@ -3402,7 +3588,7 @@ Please use this web search context to inform your response when relevant."""
         content: str,
         processed_files: ProcessedFiles,
         model_supports_vision: bool,
-    ) -> tuple[str, Optional[List[str]]]:
+    ) -> tuple[str, list[str] | None]:
         """Inject file content into user message.
 
         Args:
@@ -3413,7 +3599,7 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             Tuple of (updated content, optional image list).
         """
-        user_images: Optional[List[str]] = None
+        user_images: list[str] | None = None
 
         if model_supports_vision and processed_files.has_images:
             user_images = []
@@ -3433,15 +3619,19 @@ Please use this web search context to inform your response when relevant."""
 
         if processed_files.text_content:
             content += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
-            logger.info(f"[CONTEXT ENGINE] Added text content: {len(processed_files.text_content)} chars")
+            logger.info(
+                f"[CONTEXT ENGINE] Added text content: {len(processed_files.text_content)} chars"
+            )
 
         if processed_files.image_descriptions and not model_supports_vision:
             descriptions = "\n".join(
-                f"- 图像 {i+1}: {desc}"
+                f"- 图像 {i + 1}: {desc}"
                 for i, desc in enumerate(processed_files.image_descriptions)
             )
             content += f"\n\n---\n[图像描述]\n{descriptions}"
-            logger.info(f"[CONTEXT ENGINE] Added {len(processed_files.image_descriptions)} image descriptions")
+            logger.info(
+                f"[CONTEXT ENGINE] Added {len(processed_files.image_descriptions)} image descriptions"
+            )
 
         return content, user_images
 
@@ -3512,6 +3702,7 @@ Please use this web search context to inform your response when relevant."""
         """
         if self._tool_orchestrator is None:
             from .tools import get_tool_registry
+
             registry = get_tool_registry()
             self._tool_orchestrator = ToolOrchestrator(
                 tool_registry=registry,
@@ -3525,9 +3716,9 @@ Please use this web search context to inform your response when relevant."""
         session_id: str,
         message: str,
         config: AssistantConfig,
-        history: List[Dict[str, str]],
-        retrieved_contexts: List[RetrievedContext],
-        web_search_context: Optional[str] = None,
+        history: list[dict[str, str]],
+        retrieved_contexts: list[RetrievedContext],
+        web_search_context: str | None = None,
     ) -> AsyncIterator[AssistantStreamEvent]:
         """
         Execute a complex request using task planning and parallel tool execution.
@@ -3559,13 +3750,13 @@ Please use this web search context to inform your response when relevant."""
 
         # Get available tools from registry
         from .tools import get_tool_registry
+
         registry = get_tool_registry()
         available_tools = [tool.name for tool in registry.list_tools()]
 
         # Add KB retrieval tool if KB service is available
-        if self.kb_service and config.kb_dataset_ids:
-            if "kb_search" not in available_tools:
-                available_tools.append("kb_search")
+        if self.kb_service and config.kb_dataset_ids and "kb_search" not in available_tools:
+            available_tools.append("kb_search")
 
         # Add web search tool if enabled
         if config.web_search_enabled and self.tavily_tool.is_configured:
@@ -3576,8 +3767,8 @@ Please use this web search context to inform your response when relevant."""
 
         # Step 1: Create execution plan using office templates or TaskPlanner
         try:
-            from .office.scenario import detect_scenario
             from .office.planner import build_plan_for_scenario
+            from .office.scenario import detect_scenario
 
             scenario = detect_scenario(message)
             plan = build_plan_for_scenario(scenario, message)
@@ -3604,7 +3795,7 @@ Please use this web search context to inform your response when relevant."""
                     "parallel_groups": plan.parallel_groups,
                     "metadata": plan.metadata,
                     "estimated_duration_ms": plan.get_total_estimated_duration(),
-                }
+                },
             )
 
             logger.info(
@@ -3616,7 +3807,7 @@ Please use this web search context to inform your response when relevant."""
             logger.error(f"[TASK PLANNING] Failed to create plan: {e}")
             yield AssistantStreamEvent(
                 event_type=StreamEventType.ERROR.value,
-                data={"message": f"Task planning failed: {str(e)}", "recoverable": True}
+                data={"message": f"Task planning failed: {str(e)}", "recoverable": True},
             )
             return
 
@@ -3674,12 +3865,12 @@ Please use this web search context to inform your response when relevant."""
                 "goal": working_memory.goal,
                 "tasks": [t.to_dict() for t in working_memory.tasks],
                 "progress": working_memory.get_progress(),
-            }
+            },
         )
 
         # Step 3: Execute plan using ToolOrchestrator
         orchestrator = self.get_tool_orchestrator(max_parallel=config.max_parallel_tools)
-        collected_results: List[ToolExecutionResult] = []
+        collected_results: list[ToolExecutionResult] = []
 
         try:
             async for result in orchestrator.execute_plan(plan, working_memory):
@@ -3701,7 +3892,7 @@ Please use this web search context to inform your response when relevant."""
                             "duration_ms": result.duration_ms,
                             "error": result.error,
                         },
-                    }
+                    },
                 )
 
                 # Also yield tool result event for frontend visualization
@@ -3714,7 +3905,7 @@ Please use this web search context to inform your response when relevant."""
                         "result": str(result.result)[:1000] if result.result else None,
                         "error": result.error,
                         "duration_ms": result.duration_ms,
-                    }
+                    },
                 )
 
                 logger.info(
@@ -3726,7 +3917,7 @@ Please use this web search context to inform your response when relevant."""
             logger.error(f"[TASK PLANNING] Execution failed: {e}")
             yield AssistantStreamEvent(
                 event_type=StreamEventType.ERROR.value,
-                data={"message": f"Task execution failed: {str(e)}", "recoverable": True}
+                data={"message": f"Task execution failed: {str(e)}", "recoverable": True},
             )
 
         # Step 4: Generate final response using collected results
@@ -3734,9 +3925,7 @@ Please use this web search context to inform your response when relevant."""
         results_context = self._format_execution_results(collected_results)
         if results_context:
             working_memory.add_info(
-                key="execution_results",
-                value=results_context,
-                source="tool_orchestrator"
+                key="execution_results", value=results_context, source="tool_orchestrator"
             )
 
         # Store collected results in working memory for downstream use
@@ -3758,14 +3947,12 @@ Please use this web search context to inform your response when relevant."""
                 "progress": working_memory.get_progress(),
                 "collected_info": [info.to_dict() for info in working_memory.collected_info],
                 "complete": True,
-            }
+            },
         )
 
-        logger.info(
-            f"[TASK PLANNING] Execution complete: {working_memory.get_progress()}"
-        )
+        logger.info(f"[TASK PLANNING] Execution complete: {working_memory.get_progress()}")
 
-    def _format_execution_results(self, results: List[ToolExecutionResult]) -> str:
+    def _format_execution_results(self, results: list[ToolExecutionResult]) -> str:
         """Format tool execution results for context injection.
 
         Args:
@@ -3796,7 +3983,7 @@ Please use this web search context to inform your response when relevant."""
         return "\n".join(parts)
 
     @staticmethod
-    def _validate_citations(answer: str, citations: List[Citation]) -> List[str]:
+    def _validate_citations(answer: str, citations: list[Citation]) -> list[str]:
         """Validate that citations are present when RAG is used."""
         if answer and not citations:
             return ["Missing citations for RAG response."]
@@ -3804,7 +3991,7 @@ Please use this web search context to inform your response when relevant."""
 
     def _format_context(
         self,
-        contexts: List[RetrievedContext],
+        contexts: list[RetrievedContext],
         max_content_length: int = 400,  # TTFT optimization: truncate long chunks
         include_citations: bool = False,
         authority_sort: bool = False,
@@ -3827,12 +4014,10 @@ Please use this web search context to inform your response when relevant."""
                 try:
                     from ..knowledge.islamic_metadata import get_authority_order
 
-                    def _authority_key(ch: Dict[str, Any]) -> int:
+                    def _authority_key(ch: dict[str, Any]) -> int:
                         meta = ch.get("metadata") or {}
                         source_type = (
-                            meta.get("source_type")
-                            or meta.get("islamic_source_type")
-                            or "unknown"
+                            meta.get("source_type") or meta.get("islamic_source_type") or "unknown"
                         )
                         return get_authority_order(str(source_type))
 
@@ -3867,7 +4052,7 @@ Please use this web search context to inform your response when relevant."""
         tool_name: str,
         tool_call_id: str,
         error: Exception,
-        arguments: Dict[str, Any],
+        arguments: dict[str, Any],
     ) -> ToolErrorInfo:
         """
         Create a structured ToolErrorInfo from an exception.
@@ -3905,8 +4090,8 @@ Please use this web search context to inform your response when relevant."""
         tool_name: str,
         error_type: str,
         error_message: str,
-        arguments: Dict[str, Any],
-    ) -> Optional[str]:
+        arguments: dict[str, Any],
+    ) -> str | None:
         """
         Generate a suggestion for recovering from a tool error.
 
@@ -3951,7 +4136,9 @@ Please use this web search context to inform your response when relevant."""
             if "format" in error_lower:
                 return "The document format is not supported. Use docx, pdf, or md."
             if "content" in error_lower and "empty" in error_lower:
-                return "Document content cannot be empty. Provide content to include in the document."
+                return (
+                    "Document content cannot be empty. Provide content to include in the document."
+                )
 
         # JSON parsing errors (common across tools)
         if error_type == "JSONDecodeError":
@@ -3969,7 +4156,7 @@ Please use this web search context to inform your response when relevant."""
 
         return None
 
-    def get_available_models(self) -> List[Dict[str, Any]]:
+    def get_available_models(self) -> list[dict[str, Any]]:
         """Get list of available models with metadata."""
         models = self.model_registry.get_available_models()
         return [
@@ -3995,6 +4182,7 @@ Please use this web search context to inform your response when relevant."""
             return
 
         from .tools import get_tool_registry
+
         registry = get_tool_registry()
         executor = CodeExecutorToolExecutor(code_executor=self.code_executor)
         registry.register(CODE_EXECUTOR_TOOL, executor)
@@ -4013,9 +4201,9 @@ Please use this web search context to inform your response when relevant."""
 
     async def _prepare_code_execution_files(
         self,
-        file_paths: Optional[List[str]],
-        retrieved_contexts: Optional[List["RetrievedContext"]],
-    ) -> tuple[Optional[List["InputFile"]], Optional[List["KBDocument"]]]:
+        file_paths: list[str] | None,
+        retrieved_contexts: list[RetrievedContext] | None,
+    ) -> tuple[list[InputFile] | None, list[KBDocument] | None]:
         """
         Prepare files for code execution in Docker container.
 
@@ -4028,11 +4216,12 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             Tuple of (input_files, kb_documents) for code executor
         """
-        from .code_executor import InputFile, KBDocument
         import mimetypes
 
-        input_files: Optional[List[InputFile]] = None
-        kb_documents: Optional[List[KBDocument]] = None
+        from .code_executor import InputFile, KBDocument
+
+        input_files: list[InputFile] | None = None
+        kb_documents: list[KBDocument] | None = None
 
         # Convert uploaded files to InputFile objects
         if file_paths and self.file_storage:
@@ -4040,7 +4229,7 @@ Please use this web search context to inform your response when relevant."""
             for path in file_paths:
                 try:
                     # Extract filename from path
-                    filename = path.split('/')[-1] if '/' in path else path
+                    filename = path.split("/")[-1] if "/" in path else path
 
                     # Download file content from storage
                     content = await self.file_storage.download_file(path)
@@ -4048,11 +4237,13 @@ Please use this web search context to inform your response when relevant."""
                     # Guess MIME type
                     mime_type, _ = mimetypes.guess_type(filename)
 
-                    input_files.append(InputFile(
-                        filename=filename,
-                        content=content,
-                        mime_type=mime_type,
-                    ))
+                    input_files.append(
+                        InputFile(
+                            filename=filename,
+                            content=content,
+                            mime_type=mime_type,
+                        )
+                    )
                     logger.debug(f"Prepared input file for code execution: {filename}")
                 except Exception as e:
                     logger.warning(f"Failed to load file {path} for code execution: {e}")
@@ -4066,16 +4257,20 @@ Please use this web search context to inform your response when relevant."""
             for ctx in retrieved_contexts:
                 for i, chunk in enumerate(ctx.chunks):
                     try:
-                        chunk_text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                        chunk_text = (
+                            chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                        )
                         doc_id = chunk.get("document_id", "") if isinstance(chunk, dict) else None
                         metadata = chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
 
-                        kb_documents.append(KBDocument(
-                            filename=f"{ctx.dataset_id}_chunk_{i}.txt",
-                            content=chunk_text,
-                            document_id=doc_id,
-                            metadata=metadata,
-                        ))
+                        kb_documents.append(
+                            KBDocument(
+                                filename=f"{ctx.dataset_id}_chunk_{i}.txt",
+                                content=chunk_text,
+                                document_id=doc_id,
+                                metadata=metadata,
+                            )
+                        )
                     except Exception as e:
                         logger.warning(f"Failed to convert KB chunk: {e}")
 

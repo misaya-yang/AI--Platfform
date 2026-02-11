@@ -4,31 +4,28 @@ Tests for Code Executor Tool
 Tests the CODE_EXECUTOR_TOOL definition and CodeExecutorToolExecutor class.
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from dataclasses import dataclass
 from datetime import datetime
-from typing import List
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from src.services.assistant.code_executor import (
+    CodeExecutionResult,
+    CodeExecutorService,
+    ExecutionStatus,
+    OutputFile,
+)
 from src.services.assistant.tools.code_executor_tool import (
     CODE_EXECUTOR_TOOL,
     CodeExecutorToolExecutor,
     register_code_executor_tool,
 )
 from src.services.assistant.tools.tool_registry import (
-    ToolCategory,
-    ToolRiskLevel,
     ToolCallRequest,
-    ToolCallResult,
+    ToolCategory,
     ToolRegistry,
+    ToolRiskLevel,
 )
-from src.services.assistant.code_executor import (
-    CodeExecutorService,
-    CodeExecutionResult,
-    ExecutionStatus,
-    OutputFile,
-)
-
 
 # =============================================================================
 # Tests for CODE_EXECUTOR_TOOL Definition
@@ -290,9 +287,7 @@ class TestCodeExecutorToolExecutor:
     @pytest.mark.asyncio
     async def test_execute_exception_handling(self, executor, mock_code_executor, sample_request):
         """Test that exceptions are handled gracefully."""
-        mock_code_executor.execute = AsyncMock(
-            side_effect=Exception("Unexpected Docker error")
-        )
+        mock_code_executor.execute = AsyncMock(side_effect=Exception("Unexpected Docker error"))
 
         result = await executor.execute(sample_request)
 
@@ -485,14 +480,13 @@ class TestArgumentValidation:
     def test_validate_code_type(self, executor):
         """Test validation of code parameter type."""
         errors = executor.validate_arguments(
-            CODE_EXECUTOR_TOOL, {"code": 12345}  # Should be string
+            CODE_EXECUTOR_TOOL,
+            {"code": 12345},  # Should be string
         )
         assert len(errors) == 1
         assert "string" in errors[0].lower()
 
     def test_validate_valid_arguments(self, executor):
         """Test validation passes for valid arguments."""
-        errors = executor.validate_arguments(
-            CODE_EXECUTOR_TOOL, {"code": "print('valid code')"}
-        )
+        errors = executor.validate_arguments(CODE_EXECUTOR_TOOL, {"code": "print('valid code')"})
         assert len(errors) == 0

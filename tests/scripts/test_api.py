@@ -1,12 +1,15 @@
-# -*- coding: utf-8 -*-
 """Test API with and without auth"""
+
 import asyncio
-import sys
 import os
+import sys
+
 import httpx
-sys.stdout.reconfigure(encoding='utf-8')
+
+sys.stdout.reconfigure(encoding="utf-8")
 os.chdir("C:/Projects/Agent_Gateway")
 sys.path.insert(0, "C:/Projects/Agent_Gateway")
+
 
 async def main():
     base_url = "http://localhost:8080"
@@ -26,6 +29,7 @@ async def main():
             print(f"  Response: {resp.json()}")
         else:
             print(f"  Response: {resp.text[:200]}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

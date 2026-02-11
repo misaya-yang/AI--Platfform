@@ -18,9 +18,8 @@ def test_knowledge_service_integration(pdf_path: str):
 
     try:
         from src.config.settings import Settings
-        from src.services.knowledge.knowledge_service import KnowledgeService
 
-        settings = Settings()
+        Settings()
         print("✅ 配置加载成功")
 
         # 完整测试需要数据库，此处仅做导入与配置检查

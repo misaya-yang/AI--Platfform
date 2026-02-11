@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Awaitable, Callable, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..exceptions import CircuitBreakerOpenError
 
@@ -16,7 +17,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         success_threshold: int = 3,
         timeout: int = 30,
-        excluded_exceptions: Optional[List[type[Exception]]] = None,
+        excluded_exceptions: list[type[Exception]] | None = None,
     ):
         self.service_id = service_id
         self.failure_threshold = failure_threshold
@@ -27,7 +28,7 @@ class CircuitBreaker:
         self.state = "CLOSED"
         self.failure_count = 0
         self.success_count = 0
-        self.last_failure_time: Optional[float] = None
+        self.last_failure_time: float | None = None
         self._lock = asyncio.Lock()
 
     def _should_attempt_reset(self) -> bool:
@@ -64,9 +65,7 @@ class CircuitBreaker:
                 else:
                     raise CircuitBreakerOpenError(self.service_id)
 
-    async def call(
-        self, func: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
-    ) -> Any:
+    async def call(self, func: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> Any:
         await self.allow()
         try:
             result = await func(*args, **kwargs)

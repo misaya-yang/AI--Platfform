@@ -3,22 +3,21 @@ Authentication API - Login, Logout, Password Management
 
 Provides endpoints for user authentication and password management.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, validator
 
-from ..deps import get_settings, get_user_context
 from ...config.settings import Settings
-from ...core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
+from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ...core.auth.password import (
     ALLOWED_EMAIL_DOMAIN,
     DEFAULT_PASSWORD,
     create_access_token,
-    decode_token,
     extract_username_from_email,
     get_token_id,
     hash_password,
@@ -29,6 +28,7 @@ from ...core.auth.password import (
     verify_password,
 )
 from ...core.auth.user_resolver import UserContext
+from ..deps import get_settings, get_user_context
 
 # Token expiration time (3 hours)
 TOKEN_EXPIRATION_HOURS = 3
@@ -42,8 +42,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # Request/Response Models
 # ============================================================
 
+
 class LoginRequest(BaseModel):
     """Login request with email and password."""
+
     email: str
     password: str = Field(..., min_length=1)
 
@@ -62,45 +64,48 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     """Login response with access token and user info."""
+
     access_token: str
     token_type: str = "bearer"
     expires_in: int
-    user: Dict[str, Any]
+    user: dict[str, Any]
     force_password_change: bool
 
 
 class PasswordChangeRequest(BaseModel):
     """Password change request."""
+
     current_password: str = Field(..., min_length=1)
     new_password: str = Field(..., min_length=8)
     confirm_password: str = Field(..., min_length=8)
 
-    @validator('confirm_password')
+    @validator("confirm_password")
     def passwords_match(cls, v, values):
-        if 'new_password' in values and v != values['new_password']:
-            raise ValueError('Passwords do not match')
+        if "new_password" in values and v != values["new_password"]:
+            raise ValueError("Passwords do not match")
         return v
 
-    @validator('new_password')
+    @validator("new_password")
     def validate_new_password(cls, v, values):
         errors = validate_password_strength(v)
         if errors:
-            raise ValueError('; '.join(errors))
+            raise ValueError("; ".join(errors))
         # Check that new password is different from current
-        if 'current_password' in values and v == values['current_password']:
-            raise ValueError('New password must be different from current password')
+        if "current_password" in values and v == values["current_password"]:
+            raise ValueError("New password must be different from current password")
         return v
 
 
 class CurrentUserResponse(BaseModel):
     """Current user information response."""
+
     user_id: str
-    email: Optional[str]
-    display_name: Optional[str]
-    department: Optional[str]
-    roles: List[str]
-    permissions: List[str]
-    effective_permissions: List[str] = Field(default_factory=list)
+    email: str | None
+    display_name: str | None
+    department: str | None
+    roles: list[str]
+    permissions: list[str]
+    effective_permissions: list[str] = Field(default_factory=list)
     tier: str
     force_password_change: bool
 
@@ -108,6 +113,7 @@ class CurrentUserResponse(BaseModel):
 # ============================================================
 # Helper Functions
 # ============================================================
+
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP from request headers."""
@@ -124,11 +130,11 @@ def _get_client_ip(request: Request) -> str:
 
 def _compute_effective_permissions(
     request: Request,
-    roles: Optional[List[str]],
-    explicit_permissions: Optional[List[str]],
-) -> List[str]:
+    roles: list[str] | None,
+    explicit_permissions: list[str] | None,
+) -> list[str]:
     """Build a de-duplicated permission view for frontend governance UI."""
-    effective: List[str] = []
+    effective: list[str] = []
 
     for perm in explicit_permissions or []:
         value = str(perm or "").strip()
@@ -156,6 +162,7 @@ def _compute_effective_permissions(
 # ============================================================
 # API Endpoints
 # ============================================================
+
 
 @router.post("/login", response_model=LoginResponse)
 async def login(
@@ -194,6 +201,7 @@ async def login(
             existing_id = await db.get_user(user_id)
             if existing_id:
                 import uuid
+
                 user_id = f"{user_id}_{uuid.uuid4().hex[:6]}"
 
             password_hash = hash_password(DEFAULT_PASSWORD)
@@ -226,7 +234,7 @@ async def login(
             action="login_failed",
             ip_address=client_ip,
             user_agent=user_agent,
-            details={"reason": "user_not_found"}
+            details={"reason": "user_not_found"},
         )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -237,8 +245,7 @@ async def login(
     if is_account_locked(locked_until):
         remaining = (locked_until - datetime.utcnow()).seconds // 60 + 1
         raise HTTPException(
-            status_code=423,
-            detail=f"Account is locked. Please try again in {remaining} minutes."
+            status_code=423, detail=f"Account is locked. Please try again in {remaining} minutes."
         )
 
     # Check if account is active
@@ -249,7 +256,7 @@ async def login(
             action="login_failed",
             ip_address=client_ip,
             user_agent=user_agent,
-            details={"reason": "account_disabled"}
+            details={"reason": "account_disabled"},
         )
         raise HTTPException(status_code=403, detail="Account is disabled")
 
@@ -266,7 +273,7 @@ async def login(
             action="login_failed",
             ip_address=client_ip,
             user_agent=user_agent,
-            details={"reason": "invalid_password", "attempts": current_attempts}
+            details={"reason": "invalid_password", "attempts": current_attempts},
         )
 
         # Lock account if too many failed attempts
@@ -274,7 +281,7 @@ async def login(
             await db.lock_user_account(user_id, minutes=30)
             raise HTTPException(
                 status_code=423,
-                detail="Account locked due to too many failed attempts. Try again in 30 minutes."
+                detail="Account locked due to too many failed attempts. Try again in 30 minutes.",
             )
 
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -289,7 +296,7 @@ async def login(
         action="login_success",
         ip_address=client_ip,
         user_agent=user_agent,
-        details={"auto_created": auto_created} if auto_created else {}
+        details={"auto_created": auto_created} if auto_created else {},
     )
 
     # Get user permissions
@@ -390,7 +397,7 @@ async def logout(
             action="logout",
             ip_address=client_ip,
             user_agent=user_agent,
-            details={}
+            details={},
         )
 
     return {"status": "success", "message": "Logged out successfully"}
@@ -440,7 +447,7 @@ async def change_password(
         action="password_change",
         ip_address=client_ip,
         user_agent=user_agent,
-        details={}
+        details={},
     )
 
     return {"status": "success", "message": "Password changed successfully"}
@@ -483,7 +490,7 @@ async def get_current_user(
             )
 
     # Fallback to context info if DB unavailable
-    fallback_permissions: List[str] = []
+    fallback_permissions: list[str] = []
     fallback_roles = user.roles or []
     for token in fallback_roles:
         value = str(token or "").strip()

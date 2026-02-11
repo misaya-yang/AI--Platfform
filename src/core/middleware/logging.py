@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from .base import InvocationContext, InvocationMiddleware
-from ..observability.logging import get_logger, LogContext, set_log_context
+from ..observability.logging import LogContext, get_logger, set_log_context
 from ..observability.metrics import get_metrics
+from .base import InvocationContext, InvocationMiddleware
 
 logger = get_logger(__name__)
 
@@ -19,16 +20,16 @@ logger = get_logger(__name__)
 class LoggingMiddleware(InvocationMiddleware):
     """
     日志中间件
-    
+
     记录请求处理的完整生命周期：
     - 请求开始
     - 请求结束
     - 异常信息
     - 性能指标
     """
-    
+
     name = "logging"
-    
+
     def __init__(
         self,
         log_request: bool = True,
@@ -47,7 +48,7 @@ class LoggingMiddleware(InvocationMiddleware):
         self.log_response = log_response
         self.log_errors = log_errors
         self.record_metrics = record_metrics
-    
+
     async def process(
         self,
         context: InvocationContext,
@@ -56,7 +57,7 @@ class LoggingMiddleware(InvocationMiddleware):
         """记录日志"""
         service_id = context.service.service_id
         request = context.request
-        
+
         # 设置日志上下文
         log_context = LogContext(
             user_id=request.user_id,
@@ -66,7 +67,7 @@ class LoggingMiddleware(InvocationMiddleware):
             client_ip=context.client_ip,
         )
         set_log_context(log_context)
-        
+
         # 记录请求日志
         if self.log_request:
             logger.info(
@@ -77,15 +78,14 @@ class LoggingMiddleware(InvocationMiddleware):
                     "has_session": bool(request.session_id),
                 },
             )
-        
+
         start_time = time.time()
         status_code = 200
-        error = None
-        
+
         try:
             # 执行下一个中间件
             result = await next_middleware(context)
-            
+
             # 记录响应日志
             if self.log_response:
                 duration_ms = (time.time() - start_time) * 1000
@@ -97,13 +97,12 @@ class LoggingMiddleware(InvocationMiddleware):
                         "status": "success",
                     },
                 )
-            
+
             return result
-            
+
         except Exception as exc:
             status_code = 500
-            error = exc
-            
+
             # 记录错误日志
             if self.log_errors:
                 duration_ms = (time.time() - start_time) * 1000
@@ -118,9 +117,9 @@ class LoggingMiddleware(InvocationMiddleware):
                     },
                     exc_info=True,
                 )
-            
+
             raise
-            
+
         finally:
             # 记录指标
             if self.record_metrics:
@@ -133,7 +132,6 @@ class LoggingMiddleware(InvocationMiddleware):
                     duration_ms=duration_ms,
                     service_id=service_id,
                 )
-            
+
             # 记录耗时到上下文
             context.record_timing("total", (time.time() - start_time) * 1000)
-

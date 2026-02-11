@@ -2,28 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .request import ContentItem
 from .enums import StreamEventType
+from .request import ContentItem
 
 
 @dataclass
 class UnifiedResponse:
     request_id: str
     status: str
-    outputs: List[ContentItem]
-    session_id: Optional[str] = None
-    task_id: Optional[str] = None
-    usage: Optional[Dict[str, Any]] = None
-    error: Optional[Dict[str, Any]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    outputs: list[ContentItem]
+    session_id: str | None = None
+    task_id: str | None = None
+    usage: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
 
 @dataclass
 class ToolCall:
     """工具调用信息"""
+
     tool_call_id: str
     name: str
     arguments: str = ""  # JSON 字符串格式的参数
@@ -37,5 +38,5 @@ class StreamChunk:
     content: ContentItem
     is_final: bool = False
     event_type: StreamEventType = StreamEventType.TEXT_DELTA
-    tool_call: Optional[ToolCall] = None
-    metadata: Optional[Dict[str, Any]] = None
+    tool_call: ToolCall | None = None
+    metadata: dict[str, Any] | None = None

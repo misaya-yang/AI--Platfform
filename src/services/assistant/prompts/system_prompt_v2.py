@@ -41,25 +41,22 @@ References:
 - https://cookbook.openai.com/examples/gpt4-1_prompting_guide
 """
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from .guardrails import (
-    GUARDRAILS,
-    get_guardrails,
-    get_minimal_guardrails,
-    get_anti_hallucination_guardrails,
-    get_guardrails_for_scenario,
-)
 from .agent_freedom import (
     AGENT_FREEDOM,
-    COMMUNICATION_STYLE,
     get_agent_freedom,
-    get_minimal_agent_freedom,
     get_agentic_freedom,
     get_freedom_for_scenario,
+    get_minimal_agent_freedom,
 )
-
+from .guardrails import (
+    GUARDRAILS,
+    get_anti_hallucination_guardrails,
+    get_guardrails,
+    get_guardrails_for_scenario,
+    get_minimal_guardrails,
+)
 
 # =============================================================================
 # Core System Prompt Sections (Static - High KV-Cache Potential)
@@ -509,11 +506,12 @@ Use this context to maintain continuity and avoid redundant questions.
 # Builder Functions
 # =============================================================================
 
+
 def build_system_prompt_v2(
     user_role: str = "user",
-    available_datasets: Optional[List[str]] = None,
-    enabled_tools: Optional[List[str]] = None,
-    tool_descriptions: Optional[str] = None,
+    available_datasets: list[str] | None = None,
+    enabled_tools: list[str] | None = None,
+    tool_descriptions: str | None = None,
     scenario: str = "default",
     scenario_rules: str = "",
     include_guardrails: bool = True,
@@ -590,9 +588,7 @@ def build_system_prompt_v2(
 
     # Build scenario rules section
     if scenario_rules:
-        scenario_section = SCENARIO_RULES_TEMPLATE.format(
-            scenario_specific_rules=scenario_rules
-        )
+        scenario_section = SCENARIO_RULES_TEMPLATE.format(scenario_specific_rules=scenario_rules)
     else:
         scenario_section = ""
 
@@ -659,8 +655,8 @@ def build_system_prompt_v2(
 def build_scenario_aware_prompt(
     scenario: str,
     user_role: str = "user",
-    available_datasets: Optional[List[str]] = None,
-    enabled_tools: Optional[List[str]] = None,
+    available_datasets: list[str] | None = None,
+    enabled_tools: list[str] | None = None,
     additional_rules: str = "",
 ) -> str:
     """
@@ -706,6 +702,7 @@ def build_scenario_aware_prompt(
 # =============================================================================
 # Context Injection Functions
 # =============================================================================
+
 
 def inject_kb_context(base_prompt: str, context: str) -> str:
     """Inject knowledge base context into the prompt."""
@@ -806,6 +803,7 @@ def inject_all_context(
 # Convenience Functions
 # =============================================================================
 
+
 def get_default_system_prompt() -> str:
     """Get the default system prompt with all sections."""
     return build_system_prompt_v2()
@@ -838,7 +836,7 @@ def get_minimal_system_prompt() -> str:
     )
 
 
-def get_tool_focused_system_prompt(enabled_tools: List[str]) -> str:
+def get_tool_focused_system_prompt(enabled_tools: list[str]) -> str:
     """
     Get a system prompt optimized for tool-heavy workflows.
 
@@ -889,7 +887,7 @@ def get_tool_focused_system_prompt(enabled_tools: List[str]) -> str:
 
 
 def get_agentic_system_prompt(
-    enabled_tools: Optional[List[str]] = None,
+    enabled_tools: list[str] | None = None,
     scenario: str = "default",
 ) -> str:
     """
@@ -1006,6 +1004,7 @@ def get_document_analysis_prompt(
 # Token Estimation (Utility)
 # =============================================================================
 
+
 def estimate_prompt_tokens(prompt: str, chars_per_token: float = 4.0) -> int:
     """
     Estimate the number of tokens in a prompt.
@@ -1022,7 +1021,7 @@ def estimate_prompt_tokens(prompt: str, chars_per_token: float = 4.0) -> int:
     return int(len(prompt) / chars_per_token)
 
 
-def get_prompt_size_info(prompt: str) -> Dict[str, Any]:
+def get_prompt_size_info(prompt: str) -> dict[str, Any]:
     """
     Get size information about a prompt.
 
@@ -1055,10 +1054,11 @@ def get_prompt_size_info(prompt: str) -> Dict[str, Any]:
 # TTFT-Optimized System Prompt (KV-Cache Friendly)
 # =============================================================================
 
+
 def get_ttft_optimized_prompt(
     user_role: str = "user",
-    available_datasets: Optional[List[str]] = None,
-    enabled_tools: Optional[List[str]] = None,
+    available_datasets: list[str] | None = None,
+    enabled_tools: list[str] | None = None,
     scenario_rules: str = "",
 ) -> str:
     """
@@ -1089,22 +1089,22 @@ def get_ttft_optimized_prompt(
         enabled_tools=enabled_tools,
         scenario_rules=scenario_rules,
         # Minimal sections for smaller token footprint
-        include_guardrails=True,           # Essential: safety rules
-        include_agent_freedom=False,       # Remove: adds ~500 tokens
-        include_parallel_tools=False,      # Remove: adds ~300 tokens
-        include_thinking=False,            # Remove: adds ~400 tokens
-        include_state_tracking=False,      # Remove: adds ~300 tokens
-        include_anti_hallucination=True,   # Keep: quality critical
-        include_error_recovery=False,      # Remove: adds ~300 tokens
+        include_guardrails=True,  # Essential: safety rules
+        include_agent_freedom=False,  # Remove: adds ~500 tokens
+        include_parallel_tools=False,  # Remove: adds ~300 tokens
+        include_thinking=False,  # Remove: adds ~400 tokens
+        include_state_tracking=False,  # Remove: adds ~300 tokens
+        include_anti_hallucination=True,  # Keep: quality critical
+        include_error_recovery=False,  # Remove: adds ~300 tokens
         include_context_management=False,  # Remove: adds ~400 tokens
-        minimal_mode=True,                 # Use minimal guardrails/freedom
+        minimal_mode=True,  # Use minimal guardrails/freedom
     )
 
 
 def get_cache_stable_prompt_hash(
     user_role: str = "user",
-    available_datasets: Optional[List[str]] = None,
-    enabled_tools: Optional[List[str]] = None,
+    available_datasets: list[str] | None = None,
+    enabled_tools: list[str] | None = None,
 ) -> str:
     """
     Get a hash of the stable system prompt prefix for cache key generation.
@@ -1123,16 +1123,17 @@ def get_cache_stable_prompt_hash(
         MD5 hash of the stable prompt prefix (first 16 chars)
     """
     import hashlib
+
     prompt = get_ttft_optimized_prompt(user_role, available_datasets, enabled_tools)
     return hashlib.md5(prompt.encode()).hexdigest()[:16]
 
 
 def get_streaming_first_prompt(
-    available_datasets: Optional[List[str]] = None,
+    available_datasets: list[str] | None = None,
     kb_mode: str = "auto",
     web_search_enabled: bool = False,
-    available_tools: Optional[List[str]] = None,
-    dataset_name_map: Optional[Dict[str, str]] = None,
+    available_tools: list[str] | None = None,
+    dataset_name_map: dict[str, str] | None = None,
 ) -> str:
     """
     Get an ultra-minimal system prompt for Streaming-First mode.
@@ -1190,7 +1191,7 @@ You have access to company knowledge bases:
         # Keep this short to preserve Streaming-first TTFT advantages.
         tools_hint = f"""
 ## Available Tools
-You can call these tools when needed: {', '.join(sorted(set(available_tools)))}.
+You can call these tools when needed: {", ".join(sorted(set(available_tools)))}.
 """
 
     # Generate web search guidance based on user preference
@@ -1215,7 +1216,7 @@ Web search is available. Use it intelligently when:
 For general knowledge questions you can answer confidently, respond directly without searching.
 """
 
-    return f'''You are an enterprise AI assistant.
+    return f"""You are an enterprise AI assistant.
 
 ## Response Priority (CRITICAL)
 1. For simple questions you can answer confidently: respond directly without tools
@@ -1232,4 +1233,4 @@ For general knowledge questions you can answer confidently, respond directly wit
 - Use clear, professional language
 - Format with markdown when helpful
 - Keep responses focused
-'''
+"""

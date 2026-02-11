@@ -14,7 +14,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from qdrant_client.http import models as qmodels
 
@@ -25,30 +25,31 @@ logger = get_logger(__name__)
 
 class IndexLevel(IntEnum):
     """Index levels for hierarchical retrieval."""
-    DOCUMENT = 1   # L1: Document summary
-    SECTION = 2    # L2: Section/chapter
+
+    DOCUMENT = 1  # L1: Document summary
+    SECTION = 2  # L2: Section/chapter
     PARAGRAPH = 3  # L3: Paragraph (current default)
 
 
 @dataclass
 class HierarchicalSegment:
     """A segment with hierarchical metadata."""
-    
+
     segment_id: str
     document_id: str
     dataset_id: str
     level: IndexLevel
     text: str
-    summary: Optional[str] = None
-    keywords: List[str] = field(default_factory=list)
+    summary: str | None = None
+    keywords: list[str] = field(default_factory=list)
     position: int = 0
-    page_start: Optional[int] = None
-    page_end: Optional[int] = None
-    parent_id: Optional[str] = None
-    children_ids: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    vector: Optional[List[float]] = None
-    
+    page_start: int | None = None
+    page_end: int | None = None
+    parent_id: str | None = None
+    children_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    vector: list[float] | None = None
+
     @property
     def hash_id(self) -> str:
         """Generate deterministic hash for deduplication."""
@@ -59,14 +60,14 @@ class HierarchicalSegment:
 @dataclass
 class IndexingResult:
     """Result of hierarchical indexing."""
-    
+
     document_id: str
     l1_count: int = 0
     l2_count: int = 0
     l3_count: int = 0
     total_vectors: int = 0
-    errors: List[str] = field(default_factory=list)
-    
+    errors: list[str] = field(default_factory=list)
+
     @property
     def success(self) -> bool:
         return len(self.errors) == 0 and self.total_vectors > 0
@@ -75,13 +76,13 @@ class IndexingResult:
 class HierarchicalIndexer:
     """
     Hierarchical document indexer.
-    
+
     Creates three-level index structure:
     - L1: Document summaries for fast document-level filtering
     - L2: Section chunks for chapter/section level search
     - L3: Paragraph chunks for precise retrieval
     """
-    
+
     # Default chunk sizes (token-targeted; char size derived at ~4 chars/token)
     DEFAULT_L2_TOKEN_LIMIT = 1500
     DEFAULT_L3_TOKEN_LIMIT = 400
@@ -90,23 +91,23 @@ class HierarchicalIndexer:
     DEFAULT_L3_CHUNK_SIZE = DEFAULT_L3_TOKEN_LIMIT * 4
     DEFAULT_L3_CHUNK_OVERLAP = 50
     L2_POSITION_OFFSET = 1_000_000
-    
+
     # Collection name patterns
     SUMMARY_COLLECTION_SUFFIX = "_summary"
     SECTION_COLLECTION_SUFFIX = "_sections"
-    
+
     def __init__(
         self,
         vector_store: Any,
         database: Any,
         embedder: Any,
-        summary_generator: Optional[Any] = None,
-        levels: List[int] = None,
-        knowledge_settings: Optional[Any] = None,
+        summary_generator: Any | None = None,
+        levels: list[int] = None,
+        knowledge_settings: Any | None = None,
     ):
         """
         Initialize the hierarchical indexer.
-        
+
         Args:
             vector_store: Qdrant vector store
             database: Database for segment storage
@@ -121,43 +122,47 @@ class HierarchicalIndexer:
         self.levels = levels or [1, 2, 3]
         ks = knowledge_settings or {}
         self.l2_chunk_size = getattr(ks, "hierarchical_l2_chunk_size", self.DEFAULT_L2_CHUNK_SIZE)
-        self.l2_chunk_overlap = getattr(ks, "hierarchical_l2_chunk_overlap", self.DEFAULT_L2_CHUNK_OVERLAP)
+        self.l2_chunk_overlap = getattr(
+            ks, "hierarchical_l2_chunk_overlap", self.DEFAULT_L2_CHUNK_OVERLAP
+        )
         self.l3_chunk_size = getattr(ks, "hierarchical_l3_chunk_size", self.DEFAULT_L3_CHUNK_SIZE)
-        self.l3_chunk_overlap = getattr(ks, "hierarchical_l3_chunk_overlap", self.DEFAULT_L3_CHUNK_OVERLAP)
-    
+        self.l3_chunk_overlap = getattr(
+            ks, "hierarchical_l3_chunk_overlap", self.DEFAULT_L3_CHUNK_OVERLAP
+        )
+
     async def index_document(
         self,
         document_id: str,
         dataset_id: str,
         text: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        chunking_config: Optional[Any] = None,
-        levels_override: Optional[List[int]] = None,
+        metadata: dict[str, Any] | None = None,
+        chunking_config: Any | None = None,
+        levels_override: list[int] | None = None,
     ) -> IndexingResult:
         """
         Index a document at multiple hierarchy levels.
-        
+
         Args:
             document_id: Document ID
             dataset_id: Dataset ID
             text: Full document text
             metadata: Optional document metadata
             chunking_config: Optional chunking configuration
-            
+
         Returns:
             IndexingResult with counts and status
         """
         result = IndexingResult(document_id=document_id)
         metadata = metadata or {}
         levels = levels_override or self.levels
-        
+
         try:
             # Get embedding dimension
             vector_dim = await self._get_vector_dimension()
             base_collection = await self._resolve_base_collection(dataset_id, vector_dim)
 
-            l2_segments: List[HierarchicalSegment] = []
-            l3_segments: List[HierarchicalSegment] = []
+            l2_segments: list[HierarchicalSegment] = []
+            l3_segments: list[HierarchicalSegment] = []
             if IndexLevel.SECTION in levels or IndexLevel.PARAGRAPH in levels:
                 l2_segments, l3_segments = await self._create_l2_l3_chunks(
                     document_id, dataset_id, text, metadata, chunking_config
@@ -174,38 +179,36 @@ class HierarchicalIndexer:
                 await self._index_sections(l2_segments, dataset_id, vector_dim, base_collection)
                 result.l2_count = len(l2_segments)
                 result.total_vectors += len(l2_segments)
-            
+
             # L1: Document summary
             if IndexLevel.DOCUMENT in levels and self.summary_generator:
-                l1_segment = await self._create_l1_summary(
-                    document_id, dataset_id, text, metadata
-                )
+                l1_segment = await self._create_l1_summary(document_id, dataset_id, text, metadata)
                 if l1_segment:
                     await self._index_summary(l1_segment, dataset_id, vector_dim, base_collection)
                     result.l1_count = 1
                     result.total_vectors += 1
-            
+
             logger.info(
                 f"[HierarchicalIndexer] Indexed {document_id}: "
                 f"L1={result.l1_count}, L2={result.l2_count}, L3={result.l3_count}"
             )
-            
+
         except Exception as e:
             logger.error(f"[HierarchicalIndexer] Failed to index {document_id}: {e}")
             result.errors.append(str(e))
-        
+
         return result
-    
+
     async def _create_l2_l3_chunks(
         self,
         document_id: str,
         dataset_id: str,
         text: str,
-        metadata: Dict[str, Any],
-        chunking_config: Optional[Any] = None,
-    ) -> Tuple[List[HierarchicalSegment], List[HierarchicalSegment]]:
+        metadata: dict[str, Any],
+        chunking_config: Any | None = None,
+    ) -> tuple[list[HierarchicalSegment], list[HierarchicalSegment]]:
         """Create L2 section and L3 paragraph chunks with parent links."""
-        from .chunking import create_chunker, ChunkingConfig, ChunkingMode
+        from .chunking import ChunkingConfig, ChunkingMode, create_chunker
 
         # Base hierarchical config with default values (token-targeted)
         default_child_tokens = self.DEFAULT_L3_TOKEN_LIMIT
@@ -225,9 +228,11 @@ class HierarchicalIndexer:
 
         # Merge with user-provided chunking config if available
         if chunking_config:
-            child_token_limit = getattr(chunking_config, "child_token_limit", None) or getattr(
-                chunking_config, "token_limit", None
-            ) or default_child_tokens
+            child_token_limit = (
+                getattr(chunking_config, "child_token_limit", None)
+                or getattr(chunking_config, "token_limit", None)
+                or default_child_tokens
+            )
             parent_token_limit = getattr(chunking_config, "parent_token_limit", None) or max(
                 int(child_token_limit) * 4, 900
             )
@@ -237,9 +242,11 @@ class HierarchicalIndexer:
             parent_size = getattr(chunking_config, "parent_chunk_size", None) or max(
                 int(parent_token_limit) * 4, default_parent_tokens * 4
             )
-            child_overlap = getattr(chunking_config, "child_overlap", None) or getattr(
-                chunking_config, "chunk_overlap", None
-            ) or self.l3_chunk_overlap
+            child_overlap = (
+                getattr(chunking_config, "child_overlap", None)
+                or getattr(chunking_config, "chunk_overlap", None)
+                or self.l3_chunk_overlap
+            )
             parent_overlap = getattr(chunking_config, "parent_overlap", None) or child_overlap
 
             config = ChunkingConfig(
@@ -269,9 +276,9 @@ class HierarchicalIndexer:
         chunker = create_chunker(config)
         parents = chunker.chunk(text)
 
-        l2_segments: List[HierarchicalSegment] = []
-        l3_segments: List[HierarchicalSegment] = []
-        parent_map: Dict[str, str] = {}
+        l2_segments: list[HierarchicalSegment] = []
+        l3_segments: list[HierarchicalSegment] = []
+        parent_map: dict[str, str] = {}
         l3_position = 0
 
         for idx, parent in enumerate(parents):
@@ -327,22 +334,22 @@ class HierarchicalIndexer:
                 l3_position += 1
 
         return l2_segments, l3_segments
-    
+
     async def _create_l1_summary(
         self,
         document_id: str,
         dataset_id: str,
         text: str,
-        metadata: Dict[str, Any],
-    ) -> Optional[HierarchicalSegment]:
+        metadata: dict[str, Any],
+    ) -> HierarchicalSegment | None:
         """Create L1 document summary."""
         if not self.summary_generator:
             return None
-        
+
         try:
             # Generate document summary and keywords
             summary_result = await self.summary_generator.summarize_document(text)
-            
+
             segment = HierarchicalSegment(
                 segment_id=str(uuid.uuid4()),
                 document_id=document_id,
@@ -359,14 +366,14 @@ class HierarchicalIndexer:
                 },
             )
             return segment
-            
+
         except Exception as e:
             logger.error(f"Failed to generate document summary: {e}")
             return None
-    
+
     async def _index_segments(
         self,
-        segments: List[HierarchicalSegment],
+        segments: list[HierarchicalSegment],
         dataset_id: str,
         vector_dim: int,
         base_collection: str,
@@ -380,24 +387,24 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=base_collection,
         )
-        
+
         # Generate embeddings
         texts = [s.text for s in segments]
         vectors = await self._embed_texts(texts)
-        
+
         if not vectors or len(vectors) != len(segments):
             raise ValueError("Embedding count mismatch")
-        
+
         # Build points and segment rows
         points = []
         segment_rows = []
         failed_segments = []
-        
-        for segment, vector in zip(segments, vectors):
+
+        for segment, vector in zip(segments, vectors, strict=False):
             if vector is None:
                 failed_segments.append(segment.segment_id)
                 continue
-            
+
             payload = {
                 "dataset_id": segment.dataset_id,
                 "document_id": segment.document_id,
@@ -409,31 +416,35 @@ class HierarchicalIndexer:
                 "parent_segment_id": segment.parent_id,
                 **segment.metadata,
             }
-            
-            points.append(qmodels.PointStruct(
-                id=segment.segment_id,
-                vector=vector,
-                payload=payload,
-            ))
-            
-            segment_rows.append({
-                "segment_id": segment.segment_id,
-                "dataset_id": segment.dataset_id,
-                "document_id": segment.document_id,
-                "position": segment.position,
-                "level": segment.level,
-                "parent_segment_id": segment.parent_id,
-                "text": segment.text,
-                "token_count": len(segment.text) // 4,
-                "vector_id": segment.segment_id,
-                "content_type": "text",
-                "metadata": segment.metadata,
-            })
-        
+
+            points.append(
+                qmodels.PointStruct(
+                    id=segment.segment_id,
+                    vector=vector,
+                    payload=payload,
+                )
+            )
+
+            segment_rows.append(
+                {
+                    "segment_id": segment.segment_id,
+                    "dataset_id": segment.dataset_id,
+                    "document_id": segment.document_id,
+                    "position": segment.position,
+                    "level": segment.level,
+                    "parent_segment_id": segment.parent_id,
+                    "text": segment.text,
+                    "token_count": len(segment.text) // 4,
+                    "vector_id": segment.segment_id,
+                    "content_type": "text",
+                    "metadata": segment.metadata,
+                }
+            )
+
         if not points:
             logger.warning(f"No valid embeddings generated for {len(segments)} segments")
             return
-        
+
         vector_success = False
 
         try:
@@ -445,7 +456,9 @@ class HierarchicalIndexer:
             await self.db.insert_segments(segment_rows)
 
             if failed_segments:
-                logger.warning(f"Partial indexing: {len(failed_segments)} segments failed embedding")
+                logger.warning(
+                    f"Partial indexing: {len(failed_segments)} segments failed embedding"
+                )
 
         except Exception as e:
             logger.error(f"Indexing failed - vector upsert success: {vector_success}: {e}")
@@ -468,10 +481,10 @@ class HierarchicalIndexer:
 
             # Re-raise the original exception to preserve traceback
             raise
-    
+
     async def _index_sections(
         self,
-        segments: List[HierarchicalSegment],
+        segments: list[HierarchicalSegment],
         dataset_id: str,
         vector_dim: int,
         base_collection: str,
@@ -485,20 +498,20 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=f"{base_collection}{self.SECTION_COLLECTION_SUFFIX}",
         )
-        
+
         # Use summary for embedding if available, otherwise full text
         texts = [s.summary or s.text[:2000] for s in segments]
         vectors = await self._embed_texts(texts)
-        
+
         if not vectors:
             return
-        
+
         points = []
         segment_rows = []
-        for segment, vector in zip(segments, vectors):
+        for segment, vector in zip(segments, vectors, strict=False):
             if vector is None:
                 continue
-            
+
             payload = {
                 "dataset_id": segment.dataset_id,
                 "document_id": segment.document_id,
@@ -509,30 +522,34 @@ class HierarchicalIndexer:
                 "summary": segment.summary,
                 "content_type": "section",
             }
-            
-            points.append(qmodels.PointStruct(
-                id=segment.segment_id,
-                vector=vector,
-                payload=payload,
-            ))
-            segment_rows.append({
-                "segment_id": segment.segment_id,
-                "dataset_id": segment.dataset_id,
-                "document_id": segment.document_id,
-                "position": segment.position,
-                "level": segment.level,
-                "text": segment.text,
-                "summary": segment.summary,
-                "token_count": len(segment.text) // 4,
-                "vector_id": segment.segment_id,
-                "content_type": "text",
-                "metadata": segment.metadata,
-            })
-        
+
+            points.append(
+                qmodels.PointStruct(
+                    id=segment.segment_id,
+                    vector=vector,
+                    payload=payload,
+                )
+            )
+            segment_rows.append(
+                {
+                    "segment_id": segment.segment_id,
+                    "dataset_id": segment.dataset_id,
+                    "document_id": segment.document_id,
+                    "position": segment.position,
+                    "level": segment.level,
+                    "text": segment.text,
+                    "summary": segment.summary,
+                    "token_count": len(segment.text) // 4,
+                    "vector_id": segment.segment_id,
+                    "content_type": "text",
+                    "metadata": segment.metadata,
+                }
+            )
+
         if not points:
             logger.warning(f"No valid embeddings for {len(segments)} sections")
             return
-        
+
         # Transactional consistency: vectors first, then DB (with rollback on DB failure)
         vector_success = False
         try:
@@ -559,7 +576,7 @@ class HierarchicalIndexer:
                     ) from e
 
             raise
-    
+
     async def _index_summary(
         self,
         segment: HierarchicalSegment,
@@ -573,14 +590,14 @@ class HierarchicalIndexer:
             dimension=vector_dim,
             collection_name=f"{base_collection}{self.SUMMARY_COLLECTION_SUFFIX}",
         )
-        
+
         # Embed the summary
         vectors = await self._embed_texts([segment.summary or segment.text])
-        
+
         if not vectors or not vectors[0]:
             logger.warning(f"No embedding generated for document summary: {segment.document_id}")
             return
-        
+
         payload = {
             "dataset_id": segment.dataset_id,
             "document_id": segment.document_id,
@@ -590,32 +607,38 @@ class HierarchicalIndexer:
             "keywords": segment.keywords,
             "content_type": "document_summary",
         }
-        
+
         point = qmodels.PointStruct(
             id=segment.segment_id,
             vector=vectors[0],
             payload=payload,
         )
-        
+
         # Transactional consistency: vectors first, then DB (with rollback on DB failure)
         vector_success = False
         try:
             await self.vector_store.upsert(collection_name=collection, points=[point])
             vector_success = True
 
-            await self.db.save_document_summary({
-                "document_id": segment.document_id,
-                "summary": segment.summary,
-                "keywords": segment.keywords,
-                "topics": segment.metadata.get("topics", []),
-                "vector_id": segment.segment_id,
-            })
+            await self.db.save_document_summary(
+                {
+                    "document_id": segment.document_id,
+                    "summary": segment.summary,
+                    "keywords": segment.keywords,
+                    "topics": segment.metadata.get("topics", []),
+                    "vector_id": segment.segment_id,
+                }
+            )
 
         except Exception as e:
-            logger.error(f"Summary indexing failed for {segment.document_id} - vector upsert success: {vector_success}: {e}")
+            logger.error(
+                f"Summary indexing failed for {segment.document_id} - vector upsert success: {vector_success}: {e}"
+            )
 
             if vector_success:
-                logger.warning(f"Summary vector written but DB failed - attempting vector cleanup for {segment.document_id}")
+                logger.warning(
+                    f"Summary vector written but DB failed - attempting vector cleanup for {segment.document_id}"
+                )
                 try:
                     await self.vector_store.delete(
                         collection_name=collection,
@@ -629,61 +652,59 @@ class HierarchicalIndexer:
                     ) from e
 
             raise
-    
+
     async def _embed_texts(
-        self, 
-        texts: List[str],
+        self,
+        texts: list[str],
         max_retries: int = 3,
-    ) -> List[Optional[List[float]]]:
+    ) -> list[list[float] | None]:
         """Generate embeddings for texts with retry.
-        
+
         Args:
             texts: List of texts to embed
             max_retries: Maximum retry attempts
-            
+
         Returns:
             List of embedding vectors (None for failed texts)
         """
         for attempt in range(max_retries):
             try:
                 vectors = await self.embedder.embed_documents(texts)
-                
+
                 # Validate return result
                 if len(vectors) != len(texts):
-                    raise ValueError(
-                        f"Embedding count mismatch: {len(vectors)} vs {len(texts)}"
-                    )
-                
+                    raise ValueError(f"Embedding count mismatch: {len(vectors)} vs {len(texts)}")
+
                 # Check for None values in results
                 none_count = sum(1 for v in vectors if v is None)
                 if none_count > 0:
                     logger.warning(f"Embedding returned {none_count} None values")
-                
+
                 return vectors
-                
+
             except Exception as e:
                 if attempt == max_retries - 1:
                     logger.error(f"Embedding failed after {max_retries} attempts: {e}")
                     return [None] * len(texts)
-                
+
                 wait_time = 0.5 * (attempt + 1)  # Linear backoff
                 logger.warning(
                     f"Embedding attempt {attempt + 1} failed, retrying in {wait_time}s: {e}"
                 )
                 await asyncio.sleep(wait_time)
-    
+
     async def _get_vector_dimension(self) -> int:
         """Get embedding dimension from embedder."""
         try:
             return self.embedder.dimension
         except AttributeError:
             return 1024  # Default for most models
-    
+
     async def _ensure_collection(
         self,
         dataset_id: str,
         dimension: int,
-        collection_name: Optional[str] = None,
+        collection_name: str | None = None,
     ) -> str:
         """Ensure Qdrant collection exists."""
         try:
@@ -706,37 +727,37 @@ class HierarchicalIndexer:
             except Exception:
                 collection_name = None
         return await self._ensure_collection(dataset_id, vector_dim, collection_name)
-    
+
     async def delete_document_index(
-        self, 
-        document_id: str, 
+        self,
+        document_id: str,
         dataset_id: str,
         max_retries: int = 3,
-    ) -> Dict[str, bool]:
+    ) -> dict[str, bool]:
         """Delete all index entries for a document across all levels.
-        
+
         Args:
             document_id: Document ID to delete
             dataset_id: Dataset ID
             max_retries: Maximum retry attempts per collection
-            
+
         Returns:
             Dictionary mapping collection names to success status
         """
         vector_dim = await self._get_vector_dimension()
-        
+
         collections = [
             f"kb_{dataset_id}_{vector_dim}",
             f"kb_{dataset_id}_{vector_dim}{self.SECTION_COLLECTION_SUFFIX}",
             f"kb_{dataset_id}_{vector_dim}{self.SUMMARY_COLLECTION_SUFFIX}",
         ]
-        
+
         results = {}
-        
+
         for collection in collections:
             success = False
             last_error = None
-            
+
             for attempt in range(max_retries):
                 try:
                     await self.vector_store.delete(
@@ -767,9 +788,9 @@ class HierarchicalIndexer:
                         logger.error(
                             f"Failed to delete from {collection} after {max_retries} attempts: {e}"
                         )
-            
+
             results[collection] = success
             if not success and last_error:
                 logger.error(f"Final delete error for {collection}: {last_error}")
-        
+
         return results

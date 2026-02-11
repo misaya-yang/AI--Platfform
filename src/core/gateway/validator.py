@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from jsonschema import ValidationError as JSONSchemaValidationError
 from jsonschema import validate as jsonschema_validate
 
-from ..auth.rbac import RBAC
+from ...models.request import ContentItem, UnifiedRequest
+from ...models.service import ServiceDefinition
 from ..auth.permissions import Capability, require_capability
+from ..auth.rbac import RBAC
 from ..exceptions import (
     AuthenticationRequiredError,
     InvalidContentTypeError,
     PermissionDeniedError,
     ValidationFailedError,
 )
-from ...models.request import ContentItem, UnifiedRequest
-from ...models.service import ServiceDefinition
 
 
 class RequestValidator:
@@ -22,7 +22,7 @@ class RequestValidator:
         self.rbac = rbac
 
     async def validate(
-        self, request: UnifiedRequest, service: ServiceDefinition, roles: List[str]
+        self, request: UnifiedRequest, service: ServiceDefinition, roles: list[str]
     ) -> None:
         self._validate_required_fields(request)
         self._validate_content_types(request.inputs, service)
@@ -41,7 +41,7 @@ class RequestValidator:
         )
 
     def _validate_service_auth(
-        self, request: UnifiedRequest, service: ServiceDefinition, roles: List[str]
+        self, request: UnifiedRequest, service: ServiceDefinition, roles: list[str]
     ) -> None:
         """验证服务级别的鉴权配置"""
         config = service.get_service_config()
@@ -61,9 +61,7 @@ class RequestValidator:
                 roles and all(r == "guest" for r in roles)
             )
             if is_anon or not request.user_id:
-                raise AuthenticationRequiredError(
-                    f"服务 {service.service_id} 需要鉴权"
-                )
+                raise AuthenticationRequiredError(f"服务 {service.service_id} 需要鉴权")
 
         # 检查允许的角色
         if auth_config.allowed_roles:
@@ -79,7 +77,7 @@ class RequestValidator:
             raise ValidationFailedError("inputs is required")
 
     def _validate_content_types(
-        self, inputs: List[ContentItem], service: ServiceDefinition
+        self, inputs: list[ContentItem], service: ServiceDefinition
     ) -> None:
         accepted = set(service.accepted_content_types or [])
         if not accepted:
@@ -88,12 +86,13 @@ class RequestValidator:
             if item.type not in accepted:
                 raise InvalidContentTypeError(item.type.value, [a.value for a in accepted])
 
-    def _validate_schema(self, parameters: Dict[str, Any], schema: Dict[str, Any]) -> None:
+    def _validate_schema(self, parameters: dict[str, Any], schema: dict[str, Any]) -> None:
         if not schema:
             return
         # 防止 schema 为字符串的情况（数据库反序列化问题）
         if isinstance(schema, str):
             import json
+
             try:
                 schema = json.loads(schema)
             except (json.JSONDecodeError, TypeError):
@@ -105,7 +104,7 @@ class RequestValidator:
         except JSONSchemaValidationError as exc:
             raise ValidationFailedError(str(exc)) from exc
 
-    def _validate_content_items(self, inputs: List[ContentItem]) -> None:
+    def _validate_content_items(self, inputs: list[ContentItem]) -> None:
         for item in inputs:
             if item.data is None and not item.url:
                 raise ValidationFailedError("content item must have data or url")

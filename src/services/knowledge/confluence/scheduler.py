@@ -8,9 +8,11 @@ Uses asyncio for lightweight scheduling without external dependencies.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .sync_service import ConfluenceSyncService
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+def _to_naive_utc(dt: datetime | None) -> datetime | None:
     """
     Convert a datetime to naive UTC for comparison.
 
@@ -50,13 +52,13 @@ class PollingTask:
         self.binding_id = binding_id
         self.interval_minutes = interval_minutes
         self.callback = callback
-        self.last_run: Optional[datetime] = None
-        self.next_run: Optional[datetime] = None
+        self.last_run: datetime | None = None
+        self.next_run: datetime | None = None
         self.is_running: bool = False
         self.run_count: int = 0
         self.error_count: int = 0
-        self.last_error: Optional[str] = None
-        self._task: Optional[asyncio.Task] = None
+        self.last_error: str | None = None
+        self._task: asyncio.Task | None = None
 
     @property
     def interval_seconds(self) -> int:
@@ -89,12 +91,12 @@ class PagePollingTask:
         self.page_record_id = page_record_id
         self.interval_minutes = interval_minutes
         self.priority = priority
-        self.last_run: Optional[datetime] = None
-        self.next_run: Optional[datetime] = None
+        self.last_run: datetime | None = None
+        self.next_run: datetime | None = None
         self.is_running: bool = False
         self.run_count: int = 0
         self.error_count: int = 0
-        self.last_error: Optional[str] = None
+        self.last_error: str | None = None
 
     def schedule_next(self) -> None:
         """计算下次运行时间"""
@@ -127,7 +129,7 @@ class ConfluenceScheduler:
 
     def __init__(
         self,
-        sync_service: "ConfluenceSyncService",
+        sync_service: ConfluenceSyncService,
         max_concurrent: int = 3,
         error_backoff_minutes: int = 5,
         max_error_backoff_minutes: int = 60,
@@ -155,13 +157,13 @@ class ConfluenceScheduler:
         self.test_mode = test_mode
         self.test_interval_seconds = test_interval_seconds
 
-        self._tasks: Dict[str, PollingTask] = {}
-        self._page_tasks: Dict[str, PagePollingTask] = {}  # 页面级轮询任务
+        self._tasks: dict[str, PollingTask] = {}
+        self._page_tasks: dict[str, PagePollingTask] = {}  # 页面级轮询任务
         self._running: bool = False
-        self._scheduler_task: Optional[asyncio.Task] = None
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._active_syncs: Set[str] = set()
-        self._active_page_syncs: Set[str] = set()  # 正在同步的页面
+        self._scheduler_task: asyncio.Task | None = None
+        self._semaphore: asyncio.Semaphore | None = None
+        self._active_syncs: set[str] = set()
+        self._active_page_syncs: set[str] = set()  # 正在同步的页面
 
     @property
     def is_running(self) -> bool:
@@ -231,10 +233,8 @@ class ConfluenceScheduler:
         # 取消调度任务（停止新任务调度）
         if self._scheduler_task:
             self._scheduler_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
-            except asyncio.CancelledError:
-                pass
 
         # 等待所有活动同步完成
         active_bindings = set(self._active_syncs)
@@ -243,8 +243,7 @@ class ConfluenceScheduler:
 
         if active_count > 0:
             logger.info(
-                f"Waiting for {active_count} active syncs to complete "
-                f"(timeout={timeout_seconds}s)"
+                f"Waiting for {active_count} active syncs to complete (timeout={timeout_seconds}s)"
             )
             logger.debug(f"Active binding syncs: {active_bindings}")
             logger.debug(f"Active page syncs: {active_pages}")
@@ -360,34 +359,38 @@ class ConfluenceScheduler:
         self._tasks[binding_id].next_run = _utc_now()
         return True
 
-    async def get_status(self) -> Dict:
+    async def get_status(self) -> dict:
         """获取调度器状态"""
         tasks_status = []
         for binding_id, task in self._tasks.items():
-            tasks_status.append({
-                "binding_id": binding_id,
-                "interval_minutes": task.interval_minutes,
-                "is_running": task.is_running,
-                "last_run": task.last_run.isoformat() if task.last_run else None,
-                "next_run": task.next_run.isoformat() if task.next_run else None,
-                "run_count": task.run_count,
-                "error_count": task.error_count,
-                "last_error": task.last_error,
-            })
+            tasks_status.append(
+                {
+                    "binding_id": binding_id,
+                    "interval_minutes": task.interval_minutes,
+                    "is_running": task.is_running,
+                    "last_run": task.last_run.isoformat() if task.last_run else None,
+                    "next_run": task.next_run.isoformat() if task.next_run else None,
+                    "run_count": task.run_count,
+                    "error_count": task.error_count,
+                    "last_error": task.last_error,
+                }
+            )
 
         page_tasks_status = []
         for page_id, task in self._page_tasks.items():
-            page_tasks_status.append({
-                "page_record_id": page_id,
-                "interval_minutes": task.interval_minutes,
-                "priority": task.priority,
-                "is_running": task.is_running,
-                "last_run": task.last_run.isoformat() if task.last_run else None,
-                "next_run": task.next_run.isoformat() if task.next_run else None,
-                "run_count": task.run_count,
-                "error_count": task.error_count,
-                "last_error": task.last_error,
-            })
+            page_tasks_status.append(
+                {
+                    "page_record_id": page_id,
+                    "interval_minutes": task.interval_minutes,
+                    "priority": task.priority,
+                    "is_running": task.is_running,
+                    "last_run": task.last_run.isoformat() if task.last_run else None,
+                    "next_run": task.next_run.isoformat() if task.next_run else None,
+                    "run_count": task.run_count,
+                    "error_count": task.error_count,
+                    "last_error": task.last_error,
+                }
+            )
 
         return {
             "is_running": self._running,
@@ -470,9 +473,7 @@ class ConfluenceScheduler:
         check_interval = self.check_interval_seconds
         if self.test_mode:
             check_interval = min(check_interval, 5)  # 测试模式下更频繁检查
-            logger.info(
-                f"Scheduler running in TEST MODE with check_interval={check_interval}s"
-            )
+            logger.info(f"Scheduler running in TEST MODE with check_interval={check_interval}s")
         logger.debug(f"Scheduler loop started (check_interval={check_interval}s)")
 
         while self._running:
@@ -571,15 +572,12 @@ class ConfluenceScheduler:
                 task.is_running = False
                 self._active_syncs.discard(binding_id)
 
-    async def _update_binding_next_sync(
-        self, binding_id: str, interval_minutes: int
-    ) -> None:
+    async def _update_binding_next_sync(self, binding_id: str, interval_minutes: int) -> None:
         """更新绑定的下次同步时间到数据库"""
         try:
             next_sync_at = _utc_now() + timedelta(minutes=interval_minutes)
             await self.sync_service.db.update_confluence_binding(
-                binding_id,
-                {"next_sync_at": next_sync_at}
+                binding_id, {"next_sync_at": next_sync_at}
             )
         except Exception as e:
             logger.warning(f"Failed to update next_sync_at for binding {binding_id}: {e}")
@@ -653,15 +651,12 @@ class ConfluenceScheduler:
                 task.is_running = False
                 self._active_page_syncs.discard(page_record_id)
 
-    async def _update_page_next_sync(
-        self, page_record_id: str, interval_minutes: int
-    ) -> None:
+    async def _update_page_next_sync(self, page_record_id: str, interval_minutes: int) -> None:
         """更新页面的下次同步时间到数据库"""
         try:
             next_sync_at = _utc_now() + timedelta(minutes=interval_minutes)
             await self.sync_service.db.update_confluence_page_sync_config(
-                page_record_id,
-                {"next_sync_at": next_sync_at}
+                page_record_id, {"next_sync_at": next_sync_at}
             )
         except Exception as e:
             logger.warning(f"Failed to update next_sync_at for page {page_record_id}: {e}")
@@ -784,7 +779,7 @@ class ConfluenceScheduler:
         self,
         page_record_id: str,
         interval_minutes: int,
-        priority: Optional[int] = None,
+        priority: int | None = None,
     ) -> None:
         """
         重新调度页面（当配置变更时调用）
@@ -876,17 +871,17 @@ class SchedulerManager:
     提供全局单例访问和生命周期管理。
     """
 
-    _instance: Optional[ConfluenceScheduler] = None
+    _instance: ConfluenceScheduler | None = None
 
     @classmethod
-    def get_instance(cls) -> Optional[ConfluenceScheduler]:
+    def get_instance(cls) -> ConfluenceScheduler | None:
         """获取调度器实例"""
         return cls._instance
 
     @classmethod
     def initialize(
         cls,
-        sync_service: "ConfluenceSyncService",
+        sync_service: ConfluenceSyncService,
         **kwargs,
     ) -> ConfluenceScheduler:
         """

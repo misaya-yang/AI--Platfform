@@ -6,22 +6,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .base import ClientError, ServerError, BusinessError, ExternalDependencyError
+from .base import BusinessError, ClientError, ExternalDependencyError, ServerError
 from .codes import ErrorCode
-
 
 # ============ 客户端错误 (1xxx) ============
 
+
 class ValidationError(ClientError):
     """请求参数验证错误"""
-    
+
     def __init__(
         self,
         message: str = "Validation failed",
-        field: Optional[str] = None,
-        errors: Optional[List[Dict[str, Any]]] = None,
+        field: str | None = None,
+        errors: list[dict[str, Any]] | None = None,
         **kwargs,
     ):
         details = kwargs.pop("details", {})
@@ -29,7 +29,7 @@ class ValidationError(ClientError):
             details["field"] = field
         if errors:
             details["errors"] = errors
-        
+
         super().__init__(
             code=ErrorCode.INVALID_PARAMETER,
             message=message,
@@ -40,36 +40,36 @@ class ValidationError(ClientError):
 
 class AuthenticationError(ClientError):
     """认证错误"""
-    
+
     def __init__(
         self,
         code: ErrorCode = ErrorCode.AUTHENTICATION_REQUIRED,
-        message: Optional[str] = None,
+        message: str | None = None,
         **kwargs,
     ):
         super().__init__(code=code, message=message, **kwargs)
-    
+
     @classmethod
-    def token_expired(cls, **kwargs) -> "AuthenticationError":
+    def token_expired(cls, **kwargs) -> AuthenticationError:
         return cls(code=ErrorCode.TOKEN_EXPIRED, **kwargs)
-    
+
     @classmethod
-    def token_invalid(cls, **kwargs) -> "AuthenticationError":
+    def token_invalid(cls, **kwargs) -> AuthenticationError:
         return cls(code=ErrorCode.TOKEN_INVALID, **kwargs)
-    
+
     @classmethod
-    def api_key_invalid(cls, **kwargs) -> "AuthenticationError":
+    def api_key_invalid(cls, **kwargs) -> AuthenticationError:
         return cls(code=ErrorCode.API_KEY_INVALID, **kwargs)
 
 
 class AuthorizationError(ClientError):
     """授权错误"""
-    
+
     def __init__(
         self,
         message: str = "Permission denied",
-        resource: Optional[str] = None,
-        action: Optional[str] = None,
+        resource: str | None = None,
+        action: str | None = None,
         **kwargs,
     ):
         details = kwargs.pop("details", {})
@@ -77,7 +77,7 @@ class AuthorizationError(ClientError):
             details["resource"] = resource
         if action:
             details["action"] = action
-        
+
         super().__init__(
             code=ErrorCode.PERMISSION_DENIED,
             message=message,
@@ -88,18 +88,18 @@ class AuthorizationError(ClientError):
 
 class ResourceNotFoundError(ClientError):
     """资源不存在错误"""
-    
+
     def __init__(
         self,
         resource_type: str,
         resource_id: str,
-        code: Optional[ErrorCode] = None,
+        code: ErrorCode | None = None,
         **kwargs,
     ):
         # 根据资源类型选择合适的错误码
         if code is None:
             code = _RESOURCE_TYPE_CODES.get(resource_type, ErrorCode.RESOURCE_NOT_FOUND)
-        
+
         super().__init__(
             code=code,
             message=f"{resource_type} not found: {resource_id}",
@@ -120,7 +120,7 @@ _RESOURCE_TYPE_CODES = {
 
 class RateLimitError(ClientError):
     """限流错误"""
-    
+
     def __init__(
         self,
         dimension: str = "global",
@@ -132,7 +132,7 @@ class RateLimitError(ClientError):
     ):
         # 根据维度选择错误码
         code = _RATE_LIMIT_DIMENSION_CODES.get(dimension, ErrorCode.RATE_LIMIT_EXCEEDED)
-        
+
         super().__init__(
             code=code,
             message=f"Rate limit exceeded ({dimension})",
@@ -159,19 +159,20 @@ _RATE_LIMIT_DIMENSION_CODES = {
 
 # ============ 服务端错误 (2xxx) ============
 
+
 class InternalError(ServerError):
     """内部错误"""
-    
+
     def __init__(
         self,
         message: str = "Internal server error",
-        cause: Optional[str] = None,
+        cause: str | None = None,
         **kwargs,
     ):
         details = kwargs.pop("details", {})
         if cause:
             details["cause"] = cause
-        
+
         super().__init__(
             code=ErrorCode.INTERNAL_ERROR,
             message=message,
@@ -182,11 +183,11 @@ class InternalError(ServerError):
 
 class ServiceUnavailableError(ServerError):
     """服务不可用错误"""
-    
+
     def __init__(
         self,
-        service_id: Optional[str] = None,
-        reason: Optional[str] = None,
+        service_id: str | None = None,
+        reason: str | None = None,
         **kwargs,
     ):
         details = kwargs.pop("details", {})
@@ -194,7 +195,7 @@ class ServiceUnavailableError(ServerError):
             details["service_id"] = service_id
         if reason:
             details["reason"] = reason
-        
+
         super().__init__(
             code=ErrorCode.SERVICE_UNAVAILABLE,
             message=f"Service unavailable: {service_id}" if service_id else "Service unavailable",
@@ -206,17 +207,17 @@ class ServiceUnavailableError(ServerError):
 
 class CircuitBreakerError(ServerError):
     """熔断器打开错误"""
-    
+
     def __init__(
         self,
         service_id: str,
-        recovery_time: Optional[int] = None,
+        recovery_time: int | None = None,
         **kwargs,
     ):
         details = {"service_id": service_id}
         if recovery_time:
             details["recovery_time"] = recovery_time
-        
+
         super().__init__(
             code=ErrorCode.CIRCUIT_BREAKER_OPEN,
             message=f"Circuit breaker open for service: {service_id}",
@@ -229,11 +230,11 @@ class CircuitBreakerError(ServerError):
 
 class TimeoutError(ServerError):
     """超时错误"""
-    
+
     def __init__(
         self,
         operation: str = "request",
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         code: ErrorCode = ErrorCode.TIMEOUT,
         **kwargs,
     ):
@@ -241,7 +242,7 @@ class TimeoutError(ServerError):
         details["operation"] = operation
         if timeout:
             details["timeout"] = timeout
-        
+
         super().__init__(
             code=code,
             message=f"{operation.capitalize()} timeout",
@@ -253,7 +254,7 @@ class TimeoutError(ServerError):
 
 class ConcurrencyLimitError(ServerError):
     """并发限制错误"""
-    
+
     def __init__(
         self,
         service_id: str,
@@ -271,13 +272,14 @@ class ConcurrencyLimitError(ServerError):
 
 # ============ 业务逻辑错误 (3xxx) ============
 
+
 class SessionError(BusinessError):
     """会话错误"""
-    
+
     def __init__(
         self,
-        session_id: Optional[str] = None,
-        reason: Optional[str] = None,
+        session_id: str | None = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.SESSION_ERROR,
         **kwargs,
     ):
@@ -286,11 +288,15 @@ class SessionError(BusinessError):
             details["session_id"] = session_id
         if reason:
             details["reason"] = reason
-        
+
         message = f"Session error: {reason}" if reason else "Session error"
         if session_id:
-            message = f"Session error ({session_id}): {reason}" if reason else f"Session error: {session_id}"
-        
+            message = (
+                f"Session error ({session_id}): {reason}"
+                if reason
+                else f"Session error: {session_id}"
+            )
+
         super().__init__(
             code=code,
             message=message,
@@ -301,11 +307,11 @@ class SessionError(BusinessError):
 
 class TaskError(BusinessError):
     """任务错误"""
-    
+
     def __init__(
         self,
         task_id: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.TASK_ERROR,
         **kwargs,
     ):
@@ -313,31 +319,31 @@ class TaskError(BusinessError):
         details["task_id"] = task_id
         if reason:
             details["reason"] = reason
-        
+
         super().__init__(
             code=code,
             message=f"Task error ({task_id}): {reason}" if reason else f"Task error: {task_id}",
             details=details,
             **kwargs,
         )
-    
+
     @classmethod
-    def cancelled(cls, task_id: str, **kwargs) -> "TaskError":
+    def cancelled(cls, task_id: str, **kwargs) -> TaskError:
         return cls(task_id=task_id, code=ErrorCode.TASK_CANCELLED, reason="cancelled", **kwargs)
-    
+
     @classmethod
-    def failed(cls, task_id: str, reason: str, **kwargs) -> "TaskError":
+    def failed(cls, task_id: str, reason: str, **kwargs) -> TaskError:
         return cls(task_id=task_id, code=ErrorCode.TASK_FAILED, reason=reason, **kwargs)
 
 
 class QuotaExceededError(BusinessError):
     """配额超限错误"""
-    
+
     def __init__(
         self,
         quota_type: str,
-        limit: Optional[int] = None,
-        used: Optional[int] = None,
+        limit: int | None = None,
+        used: int | None = None,
         **kwargs,
     ):
         details = kwargs.pop("details", {})
@@ -346,7 +352,7 @@ class QuotaExceededError(BusinessError):
             details["limit"] = limit
         if used is not None:
             details["used"] = used
-        
+
         super().__init__(
             code=ErrorCode.QUOTA_EXCEEDED,
             message=f"Quota exceeded: {quota_type}",
@@ -357,13 +363,14 @@ class QuotaExceededError(BusinessError):
 
 # ============ 外部依赖错误 (4xxx) ============
 
+
 class AdapterError(ExternalDependencyError):
     """适配器错误"""
-    
+
     def __init__(
         self,
         adapter_type: str,
-        reason: Optional[str] = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.ADAPTER_ERROR,
         **kwargs,
     ):
@@ -371,10 +378,12 @@ class AdapterError(ExternalDependencyError):
         details["adapter_type"] = adapter_type
         if reason:
             details["reason"] = reason
-        
+
         super().__init__(
             code=code,
-            message=f"Adapter error ({adapter_type}): {reason}" if reason else f"Adapter error: {adapter_type}",
+            message=f"Adapter error ({adapter_type}): {reason}"
+            if reason
+            else f"Adapter error: {adapter_type}",
             details=details,
             **kwargs,
         )
@@ -382,12 +391,12 @@ class AdapterError(ExternalDependencyError):
 
 class UpstreamServiceError(ExternalDependencyError):
     """上游服务错误"""
-    
+
     def __init__(
         self,
         service_name: str,
-        status_code: Optional[int] = None,
-        reason: Optional[str] = None,
+        status_code: int | None = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.UPSTREAM_ERROR,
         **kwargs,
     ):
@@ -397,11 +406,11 @@ class UpstreamServiceError(ExternalDependencyError):
             details["status_code"] = status_code
         if reason:
             details["reason"] = reason
-        
+
         message = f"Upstream service error ({service_name})"
         if reason:
             message = f"{message}: {reason}"
-        
+
         super().__init__(
             code=code,
             message=message,
@@ -412,11 +421,11 @@ class UpstreamServiceError(ExternalDependencyError):
 
 class DatabaseError(ExternalDependencyError):
     """数据库错误"""
-    
+
     def __init__(
         self,
-        operation: Optional[str] = None,
-        reason: Optional[str] = None,
+        operation: str | None = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.DATABASE_ERROR,
         **kwargs,
     ):
@@ -425,13 +434,13 @@ class DatabaseError(ExternalDependencyError):
             details["operation"] = operation
         if reason:
             details["reason"] = reason
-        
+
         message = "Database error"
         if operation:
             message = f"Database error during {operation}"
         if reason:
             message = f"{message}: {reason}"
-        
+
         super().__init__(
             code=code,
             message=message,
@@ -442,11 +451,11 @@ class DatabaseError(ExternalDependencyError):
 
 class CacheError(ExternalDependencyError):
     """缓存错误"""
-    
+
     def __init__(
         self,
-        operation: Optional[str] = None,
-        reason: Optional[str] = None,
+        operation: str | None = None,
+        reason: str | None = None,
         code: ErrorCode = ErrorCode.CACHE_ERROR,
         **kwargs,
     ):
@@ -455,17 +464,16 @@ class CacheError(ExternalDependencyError):
             details["operation"] = operation
         if reason:
             details["reason"] = reason
-        
+
         message = "Cache error"
         if operation:
             message = f"Cache error during {operation}"
         if reason:
             message = f"{message}: {reason}"
-        
+
         super().__init__(
             code=code,
             message=message,
             details=details,
             **kwargs,
         )
-

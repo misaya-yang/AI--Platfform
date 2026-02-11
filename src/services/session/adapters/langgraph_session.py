@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 
 class LangGraphSessionAdapter:
-    def __init__(self, checkpointer: Optional[Any] = None):
+    def __init__(self, checkpointer: Any | None = None):
         self.checkpointer = checkpointer
 
     async def load(self, session_id: str) -> Any:

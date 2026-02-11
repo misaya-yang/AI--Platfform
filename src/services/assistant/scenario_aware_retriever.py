@@ -22,14 +22,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
-from .scenario_analyzer import ScenarioType, ScenarioDetectionResult
+from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
-    from ..knowledge.knowledge_service import KnowledgeService
     from ...core.auth.user_resolver import UserContext
+    from ..knowledge.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
 
@@ -38,15 +38,17 @@ logger = get_logger(__name__)
 # Data Classes
 # =============================================================================
 
+
 @dataclass
 class RetrievalResult:
     """A single retrieval result with metadata."""
+
     content: str
     source: str
     score: float
     chunk_id: str
     dataset_id: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def content_hash(self) -> str:
@@ -57,10 +59,11 @@ class RetrievalResult:
 @dataclass
 class ScenarioRetrievalContext:
     """Complete retrieval context for a scenario."""
+
     user_query: str
     scenario: ScenarioDetectionResult
-    results: List[RetrievalResult] = field(default_factory=list)
-    queries_used: List[str] = field(default_factory=list)
+    results: list[RetrievalResult] = field(default_factory=list)
+    queries_used: list[str] = field(default_factory=list)
     total_retrieved: int = 0
     after_dedupe: int = 0
     retrieval_time_ms: float = 0.0
@@ -83,6 +86,7 @@ class ScenarioRetrievalContext:
 # =============================================================================
 # Query Expansion Strategies
 # =============================================================================
+
 
 class QueryExpander:
     """
@@ -150,7 +154,7 @@ class QueryExpander:
         user_query: str,
         scenario: ScenarioType,
         max_queries: int = 5,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Expand user query into multiple search queries.
 
@@ -163,8 +167,7 @@ class QueryExpander:
             List of expanded queries
         """
         templates = cls.EXPANSION_TEMPLATES.get(
-            scenario,
-            cls.EXPANSION_TEMPLATES[ScenarioType.GENERAL_INQUIRY]
+            scenario, cls.EXPANSION_TEMPLATES[ScenarioType.GENERAL_INQUIRY]
         )
 
         queries = []
@@ -186,9 +189,9 @@ class QueryExpander:
         cls,
         user_query: str,
         scenario: ScenarioType,
-        entities: Dict[str, str],
+        entities: dict[str, str],
         max_queries: int = 5,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Expand queries using detected entities.
 
@@ -222,6 +225,7 @@ class QueryExpander:
 # Scenario-Aware Retriever
 # =============================================================================
 
+
 class ScenarioAwareRetriever:
     """
     Intelligent retriever that adapts to user scenarios.
@@ -235,7 +239,7 @@ class ScenarioAwareRetriever:
 
     def __init__(
         self,
-        knowledge_service: "KnowledgeService",
+        knowledge_service: KnowledgeService,
         default_top_k: int = 5,
         max_queries: int = 5,
         results_per_query: int = 3,
@@ -258,9 +262,9 @@ class ScenarioAwareRetriever:
         self,
         user_query: str,
         scenario: ScenarioDetectionResult,
-        dataset_ids: List[str],
-        user: "UserContext",
-        top_k: Optional[int] = None,
+        dataset_ids: list[str],
+        user: UserContext,
+        top_k: int | None = None,
     ) -> ScenarioRetrievalContext:
         """
         Perform scenario-aware retrieval.
@@ -276,6 +280,7 @@ class ScenarioAwareRetriever:
             ScenarioRetrievalContext with ranked results
         """
         import time
+
         start_time = time.time()
 
         top_k = top_k or self.default_top_k
@@ -283,7 +288,7 @@ class ScenarioAwareRetriever:
         # Step 1: Expand queries based on scenario
         if scenario.suggested_kb_queries:
             # Use LLM-suggested queries if available
-            queries = scenario.suggested_kb_queries[:self.max_queries]
+            queries = scenario.suggested_kb_queries[: self.max_queries]
             # Always include original query
             if user_query not in queries:
                 queries.insert(0, user_query)
@@ -302,7 +307,7 @@ class ScenarioAwareRetriever:
         )
 
         # Step 2: Parallel retrieval for all queries
-        all_results: List[RetrievalResult] = []
+        all_results: list[RetrievalResult] = []
         retrieval_tasks = []
 
         for query in queries:
@@ -312,7 +317,7 @@ class ScenarioAwareRetriever:
         # Execute all retrievals in parallel
         query_results = await asyncio.gather(*retrieval_tasks, return_exceptions=True)
 
-        for query, result in zip(queries, query_results):
+        for query, result in zip(queries, query_results, strict=False):
             if isinstance(result, Exception):
                 logger.warning(f"[SCENARIO RETRIEVE] Query failed: '{query[:50]}...' - {result}")
                 continue
@@ -361,12 +366,12 @@ class ScenarioAwareRetriever:
     async def _retrieve_single(
         self,
         query: str,
-        dataset_ids: List[str],
-        user: "UserContext",
-    ) -> List[RetrievalResult]:
+        dataset_ids: list[str],
+        user: UserContext,
+    ) -> list[RetrievalResult]:
         """Retrieve results for a single query across multiple datasets (parallel)."""
 
-        async def _retrieve_from_dataset(dataset_id: str) -> List[RetrievalResult]:
+        async def _retrieve_from_dataset(dataset_id: str) -> list[RetrievalResult]:
             """Retrieve from a single dataset."""
             try:
                 results, _meta = await self.knowledge_service.retrieve(
@@ -379,24 +384,28 @@ class ScenarioAwareRetriever:
 
                 dataset_results = []
                 for r in results:
-                    if hasattr(r, 'content'):
-                        dataset_results.append(RetrievalResult(
-                            content=r.content or "",
-                            source=r.document_name or r.source or "Unknown",
-                            score=r.score or 0.0,
-                            chunk_id=r.segment_id or "",
-                            dataset_id=dataset_id,
-                            metadata=r.metadata or {},
-                        ))
+                    if hasattr(r, "content"):
+                        dataset_results.append(
+                            RetrievalResult(
+                                content=r.content or "",
+                                source=r.document_name or r.source or "Unknown",
+                                score=r.score or 0.0,
+                                chunk_id=r.segment_id or "",
+                                dataset_id=dataset_id,
+                                metadata=r.metadata or {},
+                            )
+                        )
                     else:
-                        dataset_results.append(RetrievalResult(
-                            content=r.get("content", ""),
-                            source=r.get("source", r.get("document_name", "Unknown")),
-                            score=r.get("score", 0.0),
-                            chunk_id=r.get("segment_id", r.get("chunk_id", "")),
-                            dataset_id=dataset_id,
-                            metadata=r.get("metadata", {}),
-                        ))
+                        dataset_results.append(
+                            RetrievalResult(
+                                content=r.get("content", ""),
+                                source=r.get("source", r.get("document_name", "Unknown")),
+                                score=r.get("score", 0.0),
+                                chunk_id=r.get("segment_id", r.get("chunk_id", "")),
+                                dataset_id=dataset_id,
+                                metadata=r.get("metadata", {}),
+                            )
+                        )
                 return dataset_results
             except Exception as e:
                 logger.error(f"[SCENARIO RETRIEVE] Dataset {dataset_id} query failed: {e}")
@@ -415,10 +424,10 @@ class ScenarioAwareRetriever:
 
     def _rank_results(
         self,
-        results: List[RetrievalResult],
+        results: list[RetrievalResult],
         scenario: ScenarioType,
         user_query: str,
-    ) -> List[RetrievalResult]:
+    ) -> list[RetrievalResult]:
         """
         Rank results by combined score.
 
@@ -429,6 +438,7 @@ class ScenarioAwareRetriever:
         """
         # Get scenario keywords for boosting
         from .prompts.scenario_analysis_prompts import SCENARIO_TYPES
+
         scenario_info = SCENARIO_TYPES.get(scenario.value, {})
         keywords = scenario_info.get("keywords", [])
 
@@ -458,8 +468,8 @@ class ScenarioAwareRetriever:
     async def retrieve_simple(
         self,
         user_query: str,
-        dataset_ids: List[str],
-        top_k: Optional[int] = None,
+        dataset_ids: list[str],
+        top_k: int | None = None,
     ) -> ScenarioRetrievalContext:
         """
         Simple retrieval without scenario detection.
@@ -486,8 +496,9 @@ class ScenarioAwareRetriever:
 # Factory Function
 # =============================================================================
 
+
 def create_scenario_aware_retriever(
-    knowledge_service: "KnowledgeService",
+    knowledge_service: KnowledgeService,
     **kwargs,
 ) -> ScenarioAwareRetriever:
     """Create a scenario-aware retriever instance."""

@@ -17,22 +17,22 @@ Storage backends:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from ..deps import get_user_context
 from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
 from ...core.file_cleanup import get_cleanup_service
-from ...services.storage import get_file_storage, FileStorageService
+from ...core.observability.logging import get_logger
+from ...services.storage import FileStorageService, get_file_storage
+from ..deps import get_user_context
 
 logger = get_logger(__name__)
 
@@ -47,11 +47,9 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Admin user IDs (可从环境变量配置)
-ADMIN_USER_IDS = set(
-    uid.strip()
-    for uid in os.getenv("FILE_ADMIN_USER_IDS", "").split(",")
-    if uid.strip()
-)
+ADMIN_USER_IDS = {
+    uid.strip() for uid in os.getenv("FILE_ADMIN_USER_IDS", "").split(",") if uid.strip()
+}
 
 # File ID format: exactly 8 hex characters
 FILE_ID_PATTERN = re.compile(r"^[a-f0-9]{8}$")
@@ -63,16 +61,29 @@ USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 # 支持的文件类型
 ALLOWED_EXTENSIONS = {
     # Documents
-    ".pdf", ".docx", ".doc", ".md", ".txt", ".csv", ".xlsx",
+    ".pdf",
+    ".docx",
+    ".doc",
+    ".md",
+    ".txt",
+    ".csv",
+    ".xlsx",
     # Images
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
 }
 
 
 # ============ Schemas ============
 
+
 class FileUploadResponse(BaseModel):
     """Response after successful file upload."""
+
     file_id: str = Field(..., description="Unique file identifier")
     file_path: str = Field(..., description="Path to use in analysis requests")
     filename: str = Field(..., description="Original filename")
@@ -84,6 +95,7 @@ class FileUploadResponse(BaseModel):
 
 class FileInfo(BaseModel):
     """File information."""
+
     file_id: str
     file_path: str
     filename: str
@@ -94,13 +106,15 @@ class FileInfo(BaseModel):
 
 class FilesListResponse(BaseModel):
     """List of user's uploaded files."""
-    files: List[FileInfo]
+
+    files: list[FileInfo]
     total: int
 
 
 # ============ Helper Functions ============
 
-def _get_storage_service() -> Optional[FileStorageService]:
+
+def _get_storage_service() -> FileStorageService | None:
     """
     Get the file storage service if available.
 
@@ -112,7 +126,9 @@ def _get_storage_service() -> Optional[FileStorageService]:
         return None
 
 
-async def _stream_upload_file(upload_file: UploadFile, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]:
+async def _stream_upload_file(
+    upload_file: UploadFile, chunk_size: int = 64 * 1024
+) -> AsyncIterator[bytes]:
     """Convert UploadFile to async iterator for streaming upload."""
     while True:
         chunk = await upload_file.read(chunk_size)
@@ -141,7 +157,7 @@ def validate_user_id(user_id: str) -> str:
         logger.warning(f"[Security] Invalid user_id format attempted: {user_id[:50]}")
         raise HTTPException(
             status_code=400,
-            detail="Invalid user ID format. Only alphanumeric, underscore, and hyphen allowed (max 64 chars)"
+            detail="Invalid user ID format. Only alphanumeric, underscore, and hyphen allowed (max 64 chars)",
         )
 
     return user_id
@@ -166,7 +182,7 @@ def validate_file_id(file_id: str) -> str:
     if not FILE_ID_PATTERN.match(file_id):
         raise HTTPException(
             status_code=400,
-            detail="Invalid file ID format. Must be exactly 8 hexadecimal characters"
+            detail="Invalid file ID format. Must be exactly 8 hexadecimal characters",
         )
 
     return file_id
@@ -191,13 +207,8 @@ def require_admin(user: UserContext) -> None:
     if "admin" in user_roles or "file_admin" in user_roles:
         return
 
-    logger.warning(
-        f"[Security] Non-admin user attempted admin operation: user_id={user.user_id}"
-    )
-    raise HTTPException(
-        status_code=403,
-        detail="Admin access required for this operation"
-    )
+    logger.warning(f"[Security] Non-admin user attempted admin operation: user_id={user.user_id}")
+    raise HTTPException(status_code=403, detail="Admin access required for this operation")
 
 
 def get_uploads_path() -> Path:
@@ -236,7 +247,7 @@ def validate_file_extension(filename: str) -> str:
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"File type not allowed: {ext}. Allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            detail=f"File type not allowed: {ext}. Allowed types: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
     return ext
 
@@ -267,6 +278,7 @@ def generate_file_id() -> str:
 
 
 # ============ Endpoints ============
+
 
 @router.post(
     "/upload",
@@ -332,7 +344,7 @@ async def upload_file(
                             "file_path": relative_path,
                             "user_id": user.user_id,
                             "tenant_id": user.tenant_id,
-                        }
+                        },
                     )
             except Exception as e:
                 logger.warning(f"Failed to trigger async processing: {e}")
@@ -353,6 +365,7 @@ async def upload_file(
         except Exception as e:
             # Log full error details for debugging
             import traceback
+
             logger.error(
                 f"Storage service upload failed: {e}\n"
                 f"File: {file.filename}, User: {user.user_id}\n"
@@ -390,7 +403,7 @@ async def upload_file(
                     temp_path.unlink(missing_ok=True)
                     raise HTTPException(
                         status_code=413,
-                        detail=f"File too large: exceeds {MAX_FILE_SIZE_MB} MB limit"
+                        detail=f"File too large: exceeds {MAX_FILE_SIZE_MB} MB limit",
                     )
 
                 f.write(chunk)
@@ -425,7 +438,7 @@ async def upload_file(
                     "file_path": relative_path,
                     "user_id": user.user_id,
                     "tenant_id": user.tenant_id,
-                }
+                },
             )
     except Exception as e:
         logger.warning(f"Failed to trigger async processing: {e}")
@@ -443,14 +456,14 @@ async def upload_file(
 
 @router.post(
     "/upload/multiple",
-    response_model=List[FileUploadResponse],
+    response_model=list[FileUploadResponse],
     summary="Upload multiple files",
 )
 async def upload_multiple_files(
     request: Request,
-    files: List[UploadFile] = File(..., max_length=5),
+    files: list[UploadFile] = File(..., max_length=5),
     user: UserContext = Depends(get_user_context),
-) -> List[FileUploadResponse]:
+) -> list[FileUploadResponse]:
     """Upload multiple files (max 5)."""
 
     if len(files) > 5:
@@ -478,21 +491,29 @@ async def list_files(
 
     files = []
     if user_dir.exists():
-        for file_path in sorted(user_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+        for file_path in sorted(user_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[
+            :50
+        ]:
             if file_path.is_file():
                 stat = file_path.stat()
                 # Extract file_id from filename (first 8 chars before _)
-                file_id = file_path.stem.split("_")[0] if "_" in file_path.stem else file_path.stem[:8]
+                file_id = (
+                    file_path.stem.split("_")[0] if "_" in file_path.stem else file_path.stem[:8]
+                )
                 ext = file_path.suffix.lower()
 
-                files.append(FileInfo(
-                    file_id=file_id,
-                    file_path=f"/uploads/{user.user_id}/{file_path.name}",
-                    filename=file_path.name,
-                    size_bytes=stat.st_size,
-                    mime_type=get_mime_type(ext),
-                    uploaded_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                ))
+                files.append(
+                    FileInfo(
+                        file_id=file_id,
+                        file_path=f"/uploads/{user.user_id}/{file_path.name}",
+                        filename=file_path.name,
+                        size_bytes=stat.st_size,
+                        mime_type=get_mime_type(ext),
+                        uploaded_at=datetime.fromtimestamp(
+                            stat.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                    )
+                )
 
     return FilesListResponse(files=files, total=len(files))
 
@@ -582,6 +603,7 @@ async def delete_file(
 
 # ============ Admin Endpoints ============
 
+
 @router.get(
     "/admin/stats",
     summary="Get storage statistics",
@@ -604,7 +626,7 @@ async def get_storage_stats(
     description="Manually trigger file cleanup based on TTL and quota rules. Requires admin access.",
 )
 async def trigger_cleanup(
-    user_id: Optional[str] = Query(None, description="Clean up specific user only"),
+    user_id: str | None = Query(None, description="Clean up specific user only"),
     user: UserContext = Depends(get_user_context),
 ) -> dict:
     """Trigger manual file cleanup."""
@@ -669,10 +691,8 @@ async def delete_user_files(
                 logger.error(f"Failed to delete {file_path}: {e}")
 
     # Remove empty directory
-    try:
+    with contextlib.suppress(Exception):
         user_dir.rmdir()
-    except Exception:
-        pass
 
     logger.info(
         f"[FileDelete] Admin delete all files: target_user={target_user_id} "

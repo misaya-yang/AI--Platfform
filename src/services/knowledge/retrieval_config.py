@@ -15,26 +15,29 @@ Compatible with Dify / Alibaba Cloud style configurations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class RetrievalMode(str, Enum):
     """Retrieval mode"""
+
     VECTOR = "vector"
-    KEYWORD = "keyword" 
+    KEYWORD = "keyword"
     HYBRID = "hybrid"
 
 
 class FusionStrategy(str, Enum):
     """Fusion strategy for hybrid retrieval"""
-    RRF = "rrf"              # Reciprocal Rank Fusion
-    WEIGHTED = "weighted"     # Alpha-weighted combination
+
+    RRF = "rrf"  # Reciprocal Rank Fusion
+    WEIGHTED = "weighted"  # Alpha-weighted combination
 
 
 class RerankProvider(str, Enum):
     """Supported rerank model providers"""
+
     DASHSCOPE = "dashscope"
     COHERE = "cohere"
     JINA = "jina"
@@ -45,40 +48,44 @@ class RerankProvider(str, Enum):
 @dataclass
 class VectorRetrievalConfig:
     """Vector retrieval configuration"""
+
     enabled: bool = True
     top_k: int = 20
-    score_threshold: Optional[float] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
+    score_threshold: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "top_k": self.top_k,
             "score_threshold": self.score_threshold,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "VectorRetrievalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> VectorRetrievalConfig:
         if not data:
             return cls()
         return cls(
             enabled=bool(data.get("enabled", True)),
             top_k=int(data.get("top_k", 20)),
-            score_threshold=float(data["score_threshold"]) if data.get("score_threshold") is not None else None,
+            score_threshold=float(data["score_threshold"])
+            if data.get("score_threshold") is not None
+            else None,
         )
 
 
 @dataclass
 class KeywordRetrievalConfig:
     """Keyword (BM25) retrieval configuration"""
+
     enabled: bool = True
     top_k: int = 20
     candidate_pool_size: int = 200  # Initial candidate pool for BM25 scoring
-    
+
     # BM25 parameters
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "top_k": self.top_k,
@@ -86,9 +93,9 @@ class KeywordRetrievalConfig:
             "bm25_k1": self.bm25_k1,
             "bm25_b": self.bm25_b,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "KeywordRetrievalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> KeywordRetrievalConfig:
         if not data:
             return cls()
         return cls(
@@ -103,31 +110,32 @@ class KeywordRetrievalConfig:
 @dataclass
 class FusionConfig:
     """Fusion configuration for hybrid retrieval"""
+
     strategy: FusionStrategy = FusionStrategy.RRF
-    
+
     # RRF parameters
     rrf_k: int = 60  # RRF constant (higher = more weight to lower ranks)
-    rrf_weights: Dict[str, float] = field(default_factory=lambda: {"vector": 1.0, "keyword": 1.0})
-    
+    rrf_weights: dict[str, float] = field(default_factory=lambda: {"vector": 1.0, "keyword": 1.0})
+
     # Weighted fusion parameters
     alpha: float = 0.75  # Weight for vector scores (1-alpha for keyword)
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "strategy": self.strategy.value,
             "rrf_k": self.rrf_k,
             "rrf_weights": self.rrf_weights,
             "alpha": self.alpha,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "FusionConfig":
+    def from_dict(cls, data: dict[str, Any]) -> FusionConfig:
         if not data:
             return cls()
-        
+
         strategy_str = str(data.get("strategy", "rrf")).lower()
         strategy = FusionStrategy.RRF if strategy_str == "rrf" else FusionStrategy.WEIGHTED
-        
+
         return cls(
             strategy=strategy,
             rrf_k=int(data.get("rrf_k", 60)),
@@ -139,17 +147,20 @@ class FusionConfig:
 @dataclass
 class RerankConfig:
     """Reranking configuration"""
-    enabled: bool = False  # Off by default; preset configs (balanced/accurate/sota) enable it explicitly
+
+    enabled: bool = (
+        False  # Off by default; preset configs (balanced/accurate/sota) enable it explicitly
+    )
     provider: RerankProvider = RerankProvider.DASHSCOPE
     model: str = "gte-rerank"
-    top_n: Optional[int] = None  # Number of results to keep after reranking
-    score_threshold: Optional[float] = None
-    
+    top_n: int | None = None  # Number of results to keep after reranking
+    score_threshold: float | None = None
+
     # Provider-specific settings
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    
-    def to_dict(self) -> Dict[str, Any]:
+    api_key: str | None = None
+    base_url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "provider": self.provider.value,
@@ -157,15 +168,15 @@ class RerankConfig:
             "top_n": self.top_n,
             "score_threshold": self.score_threshold,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "RerankConfig":
+    def from_dict(cls, data: dict[str, Any]) -> RerankConfig:
         if not data:
             return cls()
-        
+
         if isinstance(data, bool):
             return cls(enabled=data)
-        
+
         provider_str = str(data.get("provider", "dashscope")).lower()
         provider_map = {
             "dashscope": RerankProvider.DASHSCOPE,
@@ -174,13 +185,15 @@ class RerankConfig:
             "bge": RerankProvider.BGE,
         }
         provider = provider_map.get(provider_str, RerankProvider.DASHSCOPE)
-        
+
         return cls(
             enabled=bool(data.get("enabled", False)),
             provider=provider,
             model=str(data.get("model", "gte-rerank")),
             top_n=int(data["top_n"]) if data.get("top_n") is not None else None,
-            score_threshold=float(data["score_threshold"]) if data.get("score_threshold") is not None else None,
+            score_threshold=float(data["score_threshold"])
+            if data.get("score_threshold") is not None
+            else None,
             api_key=data.get("api_key"),
             base_url=data.get("base_url"),
         )
@@ -189,35 +202,39 @@ class RerankConfig:
 @dataclass
 class MMRConfig:
     """MMR (Maximal Marginal Relevance) configuration for diversity"""
+
     enabled: bool = False
     lambda_mult: float = 0.5  # Balance between relevance (1.0) and diversity (0.0)
-    similarity_threshold: Optional[float] = None  # Filter out very similar results
-    
-    def to_dict(self) -> Dict[str, Any]:
+    similarity_threshold: float | None = None  # Filter out very similar results
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "lambda": self.lambda_mult,
             "similarity_threshold": self.similarity_threshold,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MMRConfig":
+    def from_dict(cls, data: dict[str, Any]) -> MMRConfig:
         if not data:
             return cls()
-        
+
         if isinstance(data, bool):
             return cls(enabled=data)
-        
+
         return cls(
             enabled=bool(data.get("enabled", False)),
             lambda_mult=float(data.get("lambda", data.get("lambda_mult", 0.5))),
-            similarity_threshold=float(data["similarity_threshold"]) if data.get("similarity_threshold") is not None else None,
+            similarity_threshold=float(data["similarity_threshold"])
+            if data.get("similarity_threshold") is not None
+            else None,
         )
 
 
 @dataclass
 class MultimodalConfig:
     """Multimodal retrieval configuration for image-text cross-modal search"""
+
     enabled: bool = True  # Enable multimodal retrieval for datasets with images
 
     # Image search settings
@@ -234,9 +251,9 @@ class MultimodalConfig:
     vlm_rerank_weight: float = 0.4  # Weight of VLM score in combined ranking
 
     # Content type filtering
-    content_type_filter: Optional[str] = None  # "text" | "image" | None (all)
+    content_type_filter: str | None = None  # "text" | "image" | None (all)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "image_search_enabled": self.image_search_enabled,
@@ -250,7 +267,7 @@ class MultimodalConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "MultimodalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> MultimodalConfig:
         if not data:
             return cls()
 
@@ -277,16 +294,21 @@ class IslamicEnhancementConfig:
     All features default to OFF. Enable per-dataset via index_config.retrieval.islamic.
     When disabled, these hooks are never executed — zero overhead for non-Islamic datasets.
     """
-    multi_query: bool = False       # PRE_RETRIEVAL: expand query with Islamic synonyms/transliterations
-    citation_format: bool = False   # POST_RANKING: attach formatted citations to results
-    authority_sort: bool = False    # POST_RANKING: sort results by Quran > Hadith > Tafseer > Fiqh
-    contextual_prefix: bool = False # INDEX-TIME: prepend context prefix before embedding (requires re-index)
-    strict_section_traceability: bool = False  # INDEX-TIME: enforce section_title on every chunk (Imam-type datasets)
+
+    multi_query: bool = False  # PRE_RETRIEVAL: expand query with Islamic synonyms/transliterations
+    citation_format: bool = False  # POST_RANKING: attach formatted citations to results
+    authority_sort: bool = False  # POST_RANKING: sort results by Quran > Hadith > Tafseer > Fiqh
+    contextual_prefix: bool = (
+        False  # INDEX-TIME: prepend context prefix before embedding (requires re-index)
+    )
+    strict_section_traceability: bool = (
+        False  # INDEX-TIME: enforce section_title on every chunk (Imam-type datasets)
+    )
 
     # multi_query parameters
-    max_expanded_queries: int = 3   # Maximum number of expanded queries (including original)
+    max_expanded_queries: int = 3  # Maximum number of expanded queries (including original)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "multi_query": self.multi_query,
             "citation_format": self.citation_format,
@@ -297,7 +319,7 @@ class IslamicEnhancementConfig:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "IslamicEnhancementConfig":
+    def from_dict(cls, data: dict[str, Any]) -> IslamicEnhancementConfig:
         if not data:
             return cls()
         if isinstance(data, bool):
@@ -316,9 +338,10 @@ class IslamicEnhancementConfig:
 @dataclass
 class RetrievalConfig:
     """Complete retrieval pipeline configuration"""
+
     mode: RetrievalMode = RetrievalMode.HYBRID
     top_k: int = 5  # Final number of results to return
-    score_threshold: Optional[float] = None  # Minimum score threshold
+    score_threshold: float | None = None  # Minimum score threshold
 
     # Component configs
     vector: VectorRetrievalConfig = field(default_factory=VectorRetrievalConfig)
@@ -327,9 +350,11 @@ class RetrievalConfig:
     rerank: RerankConfig = field(default_factory=RerankConfig)
     mmr: MMRConfig = field(default_factory=MMRConfig)
     multimodal: MultimodalConfig = field(default_factory=MultimodalConfig)  # Multimodal retrieval
-    islamic: IslamicEnhancementConfig = field(default_factory=IslamicEnhancementConfig)  # Islamic enhancements
+    islamic: IslamicEnhancementConfig = field(
+        default_factory=IslamicEnhancementConfig
+    )  # Islamic enhancements
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = {
             "mode": self.mode.value,
             "top_k": self.top_k,
@@ -343,15 +368,24 @@ class RetrievalConfig:
         }
         # Only include islamic config if any feature is enabled (keep output clean for non-Islamic datasets)
         islamic_dict = self.islamic.to_dict()
-        if any(islamic_dict.get(k) for k in ("multi_query", "citation_format", "authority_sort", "contextual_prefix", "strict_section_traceability")):
+        if any(
+            islamic_dict.get(k)
+            for k in (
+                "multi_query",
+                "citation_format",
+                "authority_sort",
+                "contextual_prefix",
+                "strict_section_traceability",
+            )
+        ):
             result["islamic"] = islamic_dict
         return result
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "RetrievalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> RetrievalConfig:
         if not data:
             return cls()
-        
+
         mode_str = str(data.get("mode", "hybrid")).lower()
         mode_map = {
             "vector": RetrievalMode.VECTOR,
@@ -361,11 +395,13 @@ class RetrievalConfig:
             "fulltext": RetrievalMode.KEYWORD,
         }
         mode = mode_map.get(mode_str, RetrievalMode.HYBRID)
-        
+
         return cls(
             mode=mode,
             top_k=int(data.get("top_k", 5)),
-            score_threshold=float(data["score_threshold"]) if data.get("score_threshold") is not None else None,
+            score_threshold=float(data["score_threshold"])
+            if data.get("score_threshold") is not None
+            else None,
             vector=VectorRetrievalConfig.from_dict(data.get("vector") or {}),
             keyword=KeywordRetrievalConfig.from_dict(data.get("keyword") or {}),
             fusion=FusionConfig.from_dict(data.get("fusion") or {}),
@@ -376,11 +412,11 @@ class RetrievalConfig:
         )
 
     @classmethod
-    def from_flat_dict(cls, data: Dict[str, Any]) -> "RetrievalConfig":
+    def from_flat_dict(cls, data: dict[str, Any]) -> RetrievalConfig:
         """Create from flat parameter dict (for API compatibility)"""
         if not data:
             return cls()
-        
+
         mode_str = str(data.get("mode", "hybrid")).lower()
         mode_map = {
             "vector": RetrievalMode.VECTOR,
@@ -388,11 +424,13 @@ class RetrievalConfig:
             "hybrid": RetrievalMode.HYBRID,
         }
         mode = mode_map.get(mode_str, RetrievalMode.HYBRID)
-        
+
         return cls(
             mode=mode,
             top_k=int(data.get("top_k", 5)),
-            score_threshold=float(data["score_threshold"]) if data.get("score_threshold") is not None else None,
+            score_threshold=float(data["score_threshold"])
+            if data.get("score_threshold") is not None
+            else None,
             vector=VectorRetrievalConfig(
                 enabled=mode in (RetrievalMode.VECTOR, RetrievalMode.HYBRID),
                 top_k=int(data.get("vector_top_k", 20)),
@@ -403,7 +441,9 @@ class RetrievalConfig:
                 candidate_pool_size=int(data.get("keyword_candidate_k", 200)),
             ),
             fusion=FusionConfig(
-                strategy=FusionStrategy.RRF if data.get("fusion", "rrf") == "rrf" else FusionStrategy.WEIGHTED,
+                strategy=FusionStrategy.RRF
+                if data.get("fusion", "rrf") == "rrf"
+                else FusionStrategy.WEIGHTED,
                 rrf_k=int(data.get("rrf_k", 60)),
                 alpha=float(data.get("alpha", 0.75)),
             ),
@@ -415,7 +455,9 @@ class RetrievalConfig:
             mmr=MMRConfig(
                 enabled=bool(data.get("mmr", False)),
                 lambda_mult=float(data.get("mmr_lambda", 0.5)),
-                similarity_threshold=float(data["mmr_threshold"]) if data.get("mmr_threshold") is not None else None,
+                similarity_threshold=float(data["mmr_threshold"])
+                if data.get("mmr_threshold") is not None
+                else None,
             ),
         )
 
@@ -423,23 +465,24 @@ class RetrievalConfig:
 @dataclass
 class DatasetIndexConfig:
     """Complete dataset index configuration (chunking + retrieval)"""
-    chunking: Dict[str, Any] = field(default_factory=dict)
+
+    chunking: dict[str, Any] = field(default_factory=dict)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         chunking_dict = self.chunking
-        if hasattr(self.chunking, 'to_dict'):
+        if hasattr(self.chunking, "to_dict"):
             chunking_dict = self.chunking.to_dict()
         return {
             "chunking": chunking_dict,
             "retrieval": self.retrieval.to_dict(),
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "DatasetIndexConfig":
+    def from_dict(cls, data: dict[str, Any]) -> DatasetIndexConfig:
         if not data:
             return cls()
-        
+
         return cls(
             chunking=data.get("chunking") or {},
             retrieval=RetrievalConfig.from_dict(data.get("retrieval") or {}),

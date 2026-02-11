@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from ..core.observability.logging import get_logger
 from ..services.metrics.usage_parser import extract_model
@@ -21,7 +21,7 @@ _THREAD_RUNS_WAIT_PATTERN = re.compile(r"^/threads/[^/]+/runs/wait$")
 @dataclass(frozen=True)
 class CachedProxyResponse:
     status_code: int
-    headers: Dict[str, str]
+    headers: dict[str, str]
     body: bytes
 
 
@@ -31,7 +31,7 @@ class ResponseCache:
     MAX_CACHEABLE_BODY_BYTES = 512 * 1024
     CACHE_SCHEMA_VERSION = "proxy-response-v1"
 
-    def __init__(self, database: Optional[Any] = None):
+    def __init__(self, database: Any | None = None):
         self.database = database
 
     @staticmethod
@@ -77,7 +77,7 @@ class ResponseCache:
             return "{}"
 
     @classmethod
-    def _normalize_body(cls, body: Optional[bytes]) -> Tuple[str, Optional[str]]:
+    def _normalize_body(cls, body: bytes | None) -> tuple[str, str | None]:
         if not body:
             return "{}", None
         try:
@@ -89,8 +89,8 @@ class ResponseCache:
             return base64.b64encode(body).decode("utf-8"), None
 
     @staticmethod
-    def _normalize_query_params(params: Dict[str, Any]) -> Dict[str, Any]:
-        normalized: Dict[str, Any] = {}
+    def _normalize_query_params(params: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
         for key in sorted(params.keys()):
             value = params[key]
             if isinstance(value, list):
@@ -106,9 +106,9 @@ class ResponseCache:
         config: ProxyServiceConfig,
         method: str,
         path: str,
-        body: Optional[bytes],
-        query_params: Dict[str, Any],
-    ) -> Tuple[str, Optional[str]]:
+        body: bytes | None,
+        query_params: dict[str, Any],
+    ) -> tuple[str, str | None]:
         normalized_body, extracted_model = self._normalize_body(body)
         normalized_path = self._normalize_path(path)
 
@@ -138,10 +138,10 @@ class ResponseCache:
         context: RequestContext,
         method: str,
         path: str,
-        body: Optional[bytes],
-        query_params: Dict[str, Any],
+        body: bytes | None,
+        query_params: dict[str, Any],
         stream: bool,
-    ) -> Tuple[str, Optional[str], Optional[CachedProxyResponse]]:
+    ) -> tuple[str, str | None, CachedProxyResponse | None]:
         if not self.should_use_cache(config=config, method=method, path=path, stream=stream):
             return "BYPASS", None, None
         if not self.database or not getattr(self.database, "enabled", False):
@@ -180,24 +180,28 @@ class ResponseCache:
 
         headers = output_data.get("headers") if isinstance(output_data.get("headers"), dict) else {}
         status_code = int(output_data.get("status_code", 200) or 200)
-        return "HIT", cache_hash, CachedProxyResponse(
-            status_code=status_code,
-            headers={str(k): str(v) for k, v in headers.items()},
-            body=cached_body,
+        return (
+            "HIT",
+            cache_hash,
+            CachedProxyResponse(
+                status_code=status_code,
+                headers={str(k): str(v) for k, v in headers.items()},
+                body=cached_body,
+            ),
         )
 
     async def save_response(
         self,
         *,
-        cache_hash: Optional[str],
+        cache_hash: str | None,
         config: ProxyServiceConfig,
         context: RequestContext,
         method: str,
         path: str,
-        body: Optional[bytes],
-        query_params: Dict[str, Any],
+        body: bytes | None,
+        query_params: dict[str, Any],
         response_status: int,
-        response_headers: Dict[str, str],
+        response_headers: dict[str, str],
         response_body: bytes,
         stream: bool,
     ) -> None:
@@ -210,7 +214,7 @@ class ResponseCache:
         if not self.database or not getattr(self.database, "enabled", False):
             return
 
-        model: Optional[str]
+        model: str | None
         if cache_hash:
             _, extracted_model = self._normalize_body(body)
             model = extracted_model or config.default_model

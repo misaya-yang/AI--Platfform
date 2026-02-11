@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
@@ -22,11 +22,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
-_pricing_service: Optional["ModelPricingService"] = None
+_pricing_service: ModelPricingService | None = None
 
 
 # Default pricing when database is not available
-DEFAULT_PRICING: Dict[str, Dict[str, Any]] = {
+DEFAULT_PRICING: dict[str, dict[str, Any]] = {
     # OpenAI Models
     "gpt-4o": {"input": 0.0025, "output": 0.01, "provider": "openai"},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006, "provider": "openai"},
@@ -54,6 +54,7 @@ DEFAULT_PRICING: Dict[str, Dict[str, Any]] = {
 @dataclass
 class ModelPrice:
     """Model pricing information."""
+
     model: str
     provider: str
     input_price_per_1k: Decimal
@@ -65,7 +66,7 @@ class ModelPrice:
     supports_tools: bool = True
     is_active: bool = True
 
-    def calculate_cost(self, input_tokens: int, output_tokens: int) -> Dict[str, Any]:
+    def calculate_cost(self, input_tokens: int, output_tokens: int) -> dict[str, Any]:
         """
         Calculate cost for given token usage.
 
@@ -85,7 +86,7 @@ class ModelPrice:
             "total_cost_cents": int(total_cost * 100),
         }
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "model": self.model,
@@ -117,16 +118,16 @@ class ModelPricingService:
 
     def __init__(
         self,
-        database: Optional["DatabaseStorage"] = None,
+        database: DatabaseStorage | None = None,
         cache_ttl_seconds: float = 300,  # 5 minutes
     ):
         self.database = database
         self.cache_ttl = cache_ttl_seconds
-        self._cache: Dict[str, ModelPrice] = {}
+        self._cache: dict[str, ModelPrice] = {}
         self._cache_time: float = 0
-        self._all_models_cache: List[ModelPrice] = []
+        self._all_models_cache: list[ModelPrice] = []
 
-    def set_database(self, database: "DatabaseStorage") -> None:
+    def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
         self.database = database
 
@@ -154,7 +155,7 @@ class ModelPricingService:
         # Return default
         return self._cache.get("default", self._get_default_price(model))
 
-    async def get_all_pricing(self, active_only: bool = True) -> List[ModelPrice]:
+    async def get_all_pricing(self, active_only: bool = True) -> list[ModelPrice]:
         """Get all model pricing."""
         await self._ensure_cache()
 
@@ -167,7 +168,7 @@ class ModelPricingService:
         model: str,
         input_tokens: int,
         output_tokens: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Calculate cost for token usage.
 
@@ -185,13 +186,13 @@ class ModelPricingService:
         model: str,
         input_price_per_1k: float,
         output_price_per_1k: float,
-        provider: Optional[str] = None,
-        display_name: Optional[str] = None,
-        context_window: Optional[int] = None,
-        max_output_tokens: Optional[int] = None,
-        supports_vision: Optional[bool] = None,
-        supports_tools: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+        provider: str | None = None,
+        display_name: str | None = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
+        supports_vision: bool | None = None,
+        supports_tools: bool | None = None,
+    ) -> dict[str, Any]:
         """Update or create model pricing."""
         if not self.database or not self.database._pool:
             return {"error": "Database not available"}
@@ -303,7 +304,9 @@ class ModelPricingService:
                         context_window=row["context_window"] or 0,
                         max_output_tokens=row["max_output_tokens"] or 0,
                         supports_vision=row["supports_vision"] or False,
-                        supports_tools=row["supports_tools"] if row["supports_tools"] is not None else True,
+                        supports_tools=row["supports_tools"]
+                        if row["supports_tools"] is not None
+                        else True,
                         is_active=row["is_active"] if row["is_active"] is not None else True,
                     )
                     self._cache[price.model] = price
@@ -351,7 +354,7 @@ def get_pricing_service() -> ModelPricingService:
     return _pricing_service
 
 
-def init_pricing_service(database: "DatabaseStorage") -> ModelPricingService:
+def init_pricing_service(database: DatabaseStorage) -> ModelPricingService:
     """Initialize the global ModelPricingService with database storage."""
     global _pricing_service
     if _pricing_service is None:

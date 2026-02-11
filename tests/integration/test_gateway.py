@@ -10,15 +10,11 @@
 """
 
 import asyncio
-import jwt
-import time
 from datetime import datetime, timedelta, timezone
-from typing import AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
+import jwt
 import pytest
-from fastapi.testclient import TestClient
-from httpx import AsyncClient
 
 # 测试配置
 TEST_JWT_SECRET = "test-secret-key-for-testing"
@@ -59,13 +55,14 @@ def create_expired_token(user_id: str) -> str:
 
 # ============ 鉴权测试 ============
 
+
 class TestAuthentication:
     """鉴权测试"""
 
     @pytest.fixture
     def mock_settings(self):
         """模拟配置"""
-        from src.config.settings import Settings, AuthenticationSettings, AuthJWTSettings
+        from src.config.settings import AuthenticationSettings, AuthJWTSettings, Settings
 
         settings = Settings()
         settings.authentication = AuthenticationSettings(
@@ -80,9 +77,9 @@ class TestAuthentication:
     @pytest.mark.asyncio
     async def test_valid_token_accepted(self, mock_settings):
         """有效 token 可以访问"""
-        from src.core.middleware.auth import AuthMiddleware, AuthConfig
+        from src.core.middleware.auth import AuthConfig
 
-        config = AuthConfig(
+        AuthConfig(
             jwt_enabled=True,
             jwt_secret=TEST_JWT_SECRET,
             jwt_algorithms=[TEST_JWT_ALGORITHM],
@@ -139,6 +136,7 @@ class TestAuthentication:
 
 # ============ 游客会话测试 ============
 
+
 class TestGuestSession:
     """游客会话测试"""
 
@@ -146,8 +144,8 @@ class TestGuestSession:
     async def test_create_guest_session(self):
         """创建游客会话"""
         from src.services.session.guest_session_manager import (
-            GuestSessionManager,
             GuestSessionConfig,
+            GuestSessionManager,
         )
 
         manager = GuestSessionManager(
@@ -164,8 +162,8 @@ class TestGuestSession:
     async def test_validate_guest_session(self):
         """验证游客会话"""
         from src.services.session.guest_session_manager import (
-            GuestSessionManager,
             GuestSessionConfig,
+            GuestSessionManager,
         )
 
         manager = GuestSessionManager(
@@ -187,8 +185,8 @@ class TestGuestSession:
     async def test_guest_session_thread_quota(self):
         """游客会话对话配额"""
         from src.services.session.guest_session_manager import (
-            GuestSessionManager,
             GuestSessionConfig,
+            GuestSessionManager,
         )
 
         config = GuestSessionConfig(max_threads_per_session=2)
@@ -212,8 +210,8 @@ class TestGuestSession:
     async def test_guest_to_user_conversion(self):
         """游客转正式用户"""
         from src.services.session.guest_session_manager import (
-            GuestSessionManager,
             GuestSessionConfig,
+            GuestSessionManager,
         )
 
         manager = GuestSessionManager(
@@ -241,6 +239,7 @@ class TestGuestSession:
 
 
 # ============ 限流测试 ============
+
 
 class TestRateLimit:
     """限流测试"""
@@ -277,8 +276,8 @@ class TestRateLimit:
     async def test_multi_dimension_rate_limit(self):
         """多维度限流"""
         from src.core.gateway.multi_dimension_rate_limiter import (
-            MultiDimensionRateLimiter,
             MultiDimensionRateLimitConfig,
+            MultiDimensionRateLimiter,
             RateLimitContext,
             TierLimit,
         )
@@ -314,13 +313,14 @@ class TestRateLimit:
 
 # ============ 用户隔离测试 ============
 
+
 class TestUserIsolation:
     """用户隔离测试"""
 
     @pytest.mark.asyncio
     async def test_thread_ownership_verification(self):
         """Thread 所有权验证"""
-        from src.adapters.langgraph_proxy import LangGraphProxy, ForbiddenError
+        from src.adapters.langgraph_proxy import ForbiddenError, LangGraphProxy
         from src.core.auth.user_resolver import UserContext
 
         # 模拟 Thread 数据
@@ -407,6 +407,7 @@ class TestUserIsolation:
 
 # ============ Header 注入测试 ============
 
+
 class TestHeaderInjection:
     """Header 注入测试"""
 
@@ -456,6 +457,7 @@ class TestHeaderInjection:
 
 
 # ============ Run 配置注入测试 ============
+
 
 class TestRunConfigInjection:
     """Run 配置注入测试"""
@@ -510,6 +512,7 @@ class TestRunConfigInjection:
 
 
 # ============ 请求日志测试 ============
+
 
 class TestRequestLogging:
     """请求日志测试"""

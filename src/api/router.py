@@ -1,32 +1,32 @@
 from fastapi import APIRouter
 
+from .v1.api_keys import router as api_keys_router
+from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
 from .v1.confluence import router as confluence_router
 from .v1.conversations import router as conversations_router
+from .v1.dashboard import router as dashboard_router
 from .v1.files import router as files_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
-from .v1.langgraph import router as langgraph_router
-from .v1.knowledge import router as knowledge_router
 from .v1.kb_tools import router as kb_tools_router
+from .v1.knowledge import router as knowledge_router
+from .v1.langgraph import router as langgraph_router
 from .v1.metrics import router as metrics_router
-from .v1.dashboard import router as dashboard_router
+from .v1.models import router as models_router
+from .v1.presign import router as presign_router
+from .v1.providers import router as providers_router
 from .v1.proxy import router as proxy_router
+from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
 from .v1.sessions import router as sessions_router
 from .v1.stream import router as stream_router
 from .v1.submit import router as submit_router
 from .v1.tasks import router as tasks_router
-from .v1.users import router as users_router
-from .v1.presign import router as presign_router
-from .v1.assistant import router as assistant_router
 from .v1.usage import router as usage_router
-from .v1.quota import router as quota_router
-from .v1.api_keys import router as api_keys_router
-from .v1.providers import router as providers_router
-from .v1.models import router as models_router
+from .v1.users import router as users_router
 
 api_router = APIRouter()
 

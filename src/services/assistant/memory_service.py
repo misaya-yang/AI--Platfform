@@ -10,10 +10,9 @@ Implements the 3-layer memory architecture:
 
 from __future__ import annotations
 
+import contextlib
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any
 
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
@@ -35,7 +34,7 @@ class MemoryService:
         user_id: str,
         key: str,
         value: Any,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """
         Set a user memory key-value pair.
@@ -61,18 +60,20 @@ class MemoryService:
             # Ensure value is JSON serializable
             if not isinstance(value, (dict, list, str, int, float, bool, type(None))):
                 value = str(value)
-            
+
             # Use json.dumps for the JSONB column if the driver requires string input for JSONB
             # asyncpg usually handles dict/list -> JSONB automatically, but let's be safe if using simple query
             # Assuming DatabaseStorage handles binding correctly.
-            
+
             await self.database.execute(
                 query,
                 tenant_id,
                 user_id,
                 key,
-                json.dumps(value) if isinstance(value, (dict, list)) else value, # Depending on DB wrapper implementation
-                json.dumps(metadata) if metadata else None
+                json.dumps(value)
+                if isinstance(value, (dict, list))
+                else value,  # Depending on DB wrapper implementation
+                json.dumps(metadata) if metadata else None,
             )
             return True
         except Exception as e:
@@ -84,7 +85,7 @@ class MemoryService:
         tenant_id: str,
         user_id: str,
         key: str,
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """
         Get a specific user memory value.
         Updates access count and last_accessed_at.
@@ -109,7 +110,7 @@ class MemoryService:
                 WHERE tenant_id = $1 AND user_id = $2 AND key = $3
             """
             await self.database.execute(update_query, tenant_id, user_id, key)
-            
+
             value = result.get("value")
             # If the driver returns JSON string, parse it. If it returns dict, use it.
             if isinstance(value, str):
@@ -118,7 +119,7 @@ class MemoryService:
                 except (json.JSONDecodeError, ValueError):
                     return value
             return value
-            
+
         return None
 
     async def list_user_memories(
@@ -126,7 +127,7 @@ class MemoryService:
         tenant_id: str,
         user_id: str,
         limit: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         List all memories for a user.
         Returns a dictionary of key-value pairs.
@@ -143,15 +144,13 @@ class MemoryService:
             LIMIT $3
         """
         rows = await self.database.fetch(query, tenant_id, user_id, limit)
-        
+
         memories = {}
         for row in rows:
             val = row.get("value")
             if isinstance(val, str):
-                try:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
                     val = json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    pass
             memories[row.get("key")] = val
 
         return memories
@@ -187,7 +186,7 @@ class MemoryService:
         session_id: str,
         key: str,
         value: Any,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """
         Set session memory.
@@ -211,21 +210,21 @@ class MemoryService:
         try:
             if not isinstance(value, (dict, list, str, int, float, bool, type(None))):
                 value = str(value)
-                
+
             await self.database.execute(
                 query,
                 tenant_id,
                 session_id,
                 key,
                 json.dumps(value) if isinstance(value, (dict, list)) else value,
-                json.dumps(metadata) if metadata else None
+                json.dumps(metadata) if metadata else None,
             )
             return True
         except Exception as e:
             logger.error(f"Failed to set session memory {session_id}:{key}: {e}")
             return False
 
-    async def get_session_memory(self, tenant_id: str, session_id: str, key: str) -> Optional[Any]:
+    async def get_session_memory(self, tenant_id: str, session_id: str, key: str) -> Any | None:
         """
         Get session memory value.
 
@@ -234,9 +233,11 @@ class MemoryService:
             session_id: Session ID
             key: Memory key
         """
-        query = "SELECT value FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+        query = (
+            "SELECT value FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+        )
         result = await self.database.fetchrow(query, tenant_id, session_id, key)
-        
+
         if result:
             value = result.get("value")
             if isinstance(value, str):
@@ -247,7 +248,7 @@ class MemoryService:
             return value
         return None
 
-    async def list_session_memories(self, tenant_id: str, session_id: str) -> Dict[str, Any]:
+    async def list_session_memories(self, tenant_id: str, session_id: str) -> dict[str, Any]:
         """
         List all session memories.
 
@@ -257,15 +258,13 @@ class MemoryService:
         """
         query = "SELECT key, value FROM session_memory WHERE tenant_id = $1 AND session_id = $2"
         rows = await self.database.fetch(query, tenant_id, session_id)
-        
+
         memories = {}
         for row in rows:
             val = row.get("value")
             if isinstance(val, str):
-                try:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
                     val = json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    pass
             memories[row.get("key")] = val
 
         return memories
@@ -284,7 +283,9 @@ class MemoryService:
             False if an error occurred.
         """
         try:
-            query = "DELETE FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+            query = (
+                "DELETE FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+            )
             await self.database.execute(query, tenant_id, session_id, key)
             return True
         except Exception as e:
@@ -295,7 +296,7 @@ class MemoryService:
         self,
         tenant_id: str,
         session_id: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Get the full session context including all session memories.
 
@@ -318,7 +319,7 @@ class MemoryService:
             return None
 
         # Structure the context
-        context: Dict[str, Any] = {
+        context: dict[str, Any] = {
             "conversation_summary": all_memories.get("conversation_summary"),
             "task_state": all_memories.get("task_state"),
             "working_memory": all_memories.get("working_memory"),
@@ -333,7 +334,7 @@ class MemoryService:
         self,
         tenant_id: str,
         user_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get user preferences from long-term memory.
 
@@ -368,7 +369,7 @@ class MemoryService:
         tenant_id: str,
         user_id: str,
         limit: int = 20,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get user's long-term memory context.
 
@@ -403,16 +404,16 @@ class MemoryService:
 
             val = row.get("value")
             if isinstance(val, str):
-                try:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
                     val = json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    pass
 
-            frequent_memories.append({
-                "key": key,
-                "value": val,
-                "access_count": row.get("access_count", 0),
-            })
+            frequent_memories.append(
+                {
+                    "key": key,
+                    "value": val,
+                    "access_count": row.get("access_count", 0),
+                }
+            )
 
         return {
             "preferences": preferences,

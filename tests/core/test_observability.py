@@ -7,21 +7,19 @@
 - 指标收集
 """
 
-import pytest
-
 from src.core.observability.logging import (
     LogContext,
-    set_log_context,
-    get_log_context,
     clear_log_context,
-)
-from src.core.observability.tracing import (
-    TraceContext,
-    Span,
-    generate_trace_id,
-    generate_span_id,
+    get_log_context,
+    set_log_context,
 )
 from src.core.observability.metrics import Counter, Gauge, Histogram
+from src.core.observability.tracing import (
+    Span,
+    TraceContext,
+    generate_span_id,
+    generate_trace_id,
+)
 
 
 class TestLogContext:

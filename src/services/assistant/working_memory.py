@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class TaskStatus(str, Enum):
@@ -51,12 +51,12 @@ class TaskItem:
     id: str
     description: str
     status: TaskStatus = TaskStatus.PENDING
-    result: Optional[str] = None
-    error: Optional[str] = None
+    result: str | None = None
+    error: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "id": self.id,
@@ -69,7 +69,7 @@ class TaskItem:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "TaskItem":
+    def from_dict(cls, data: dict[str, Any]) -> TaskItem:
         """Create from dictionary."""
         return cls(
             id=data["id"],
@@ -79,9 +79,7 @@ class TaskItem:
             error=data.get("error"),
             created_at=datetime.fromisoformat(data["created_at"]),
             completed_at=(
-                datetime.fromisoformat(data["completed_at"])
-                if data.get("completed_at")
-                else None
+                datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
             ),
         )
 
@@ -106,7 +104,7 @@ class CollectedInfo:
     source: str
     timestamp: datetime = field(default_factory=datetime.now)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "key": self.key,
@@ -116,7 +114,7 @@ class CollectedInfo:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "CollectedInfo":
+    def from_dict(cls, data: dict[str, Any]) -> CollectedInfo:
         """Create from dictionary."""
         return cls(
             key=data["key"],
@@ -167,10 +165,10 @@ class WorkingMemory:
             session_id: Unique identifier for the session
         """
         self.session_id = session_id
-        self.goal: Optional[str] = None
-        self.tasks: List[TaskItem] = []
-        self.collected_info: List[CollectedInfo] = []
-        self.notes: List[str] = []
+        self.goal: str | None = None
+        self.tasks: list[TaskItem] = []
+        self.collected_info: list[CollectedInfo] = []
+        self.notes: list[str] = []
 
     def set_goal(self, goal: str) -> None:
         """
@@ -200,8 +198,8 @@ class WorkingMemory:
         self,
         task_id: str,
         status: TaskStatus,
-        result: Optional[str] = None,
-        error: Optional[str] = None,
+        result: str | None = None,
+        error: str | None = None,
     ) -> bool:
         """
         Update task status and optionally set result or error.
@@ -228,7 +226,7 @@ class WorkingMemory:
                 return True
         return False
 
-    def get_task(self, task_id: str) -> Optional[TaskItem]:
+    def get_task(self, task_id: str) -> TaskItem | None:
         """
         Get a task by ID.
 
@@ -243,7 +241,7 @@ class WorkingMemory:
                 return task
         return None
 
-    def get_current_task(self) -> Optional[TaskItem]:
+    def get_current_task(self) -> TaskItem | None:
         """
         Get the currently in-progress task.
 
@@ -264,9 +262,7 @@ class WorkingMemory:
             value: The actual information content
             source: Where this information came from (tool name or "user")
         """
-        self.collected_info.append(
-            CollectedInfo(key=key, value=value, source=source)
-        )
+        self.collected_info.append(CollectedInfo(key=key, value=value, source=source))
 
     def add_note(self, note: str) -> None:
         """
@@ -305,7 +301,7 @@ class WorkingMemory:
             - User prefers table format for comparisons
             ```
         """
-        lines: List[str] = ["# Current Task State", ""]
+        lines: list[str] = ["# Current Task State", ""]
 
         # Goal section
         if self.goal:
@@ -369,7 +365,7 @@ class WorkingMemory:
         }
         return indicators.get(status, "[ ]")
 
-    def get_progress(self) -> Dict[str, Any]:
+    def get_progress(self) -> dict[str, Any]:
         """
         Get task completion progress statistics.
 
@@ -398,7 +394,7 @@ class WorkingMemory:
         self.collected_info = []
         self.notes = []
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Serialize working memory to dictionary.
 
@@ -414,7 +410,7 @@ class WorkingMemory:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "WorkingMemory":
+    def from_dict(cls, data: dict[str, Any]) -> WorkingMemory:
         """
         Deserialize working memory from dictionary.
 
@@ -427,8 +423,6 @@ class WorkingMemory:
         memory = cls(session_id=data["session_id"])
         memory.goal = data.get("goal")
         memory.tasks = [TaskItem.from_dict(t) for t in data.get("tasks", [])]
-        memory.collected_info = [
-            CollectedInfo.from_dict(i) for i in data.get("collected_info", [])
-        ]
+        memory.collected_info = [CollectedInfo.from_dict(i) for i in data.get("collected_info", [])]
         memory.notes = data.get("notes", [])
         return memory

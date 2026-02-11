@@ -17,8 +17,8 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
+from typing import Any
 
 from ...core.observability.logging import get_logger
 
@@ -27,29 +27,31 @@ logger = get_logger(__name__)
 
 class CitationStatus(str, Enum):
     """Status of a citation in the response."""
-    USED = "used"           # Explicitly referenced in response
-    IMPLICIT = "implicit"   # Content used but not explicitly cited
-    UNUSED = "unused"       # Retrieved but not used
+
+    USED = "used"  # Explicitly referenced in response
+    IMPLICIT = "implicit"  # Content used but not explicitly cited
+    UNUSED = "unused"  # Retrieved but not used
     HALLUCINATED = "hallucinated"  # Claimed source not in retrieved context
 
 
 @dataclass
 class ContextChunkMetrics:
     """Metrics for a single retrieved context chunk."""
+
     chunk_id: str
     dataset_id: str
     relevance_score: float  # Original retrieval score
 
     # Grounding analysis
     content_overlap: float = 0.0  # How much of chunk appears in response [0, 1]
-    key_terms_matched: int = 0    # Number of key terms from chunk in response
+    key_terms_matched: int = 0  # Number of key terms from chunk in response
     cited_in_response: bool = False  # Whether explicitly cited
 
     # Source info
-    source_url: Optional[str] = None
-    source_title: Optional[str] = None
+    source_url: str | None = None
+    source_title: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "chunk_id": self.chunk_id,
             "dataset_id": self.dataset_id,
@@ -73,6 +75,7 @@ class RAGMetrics:
     - Citation tracking
     - Overall quality score
     """
+
     query: str
     response: str
 
@@ -99,13 +102,13 @@ class RAGMetrics:
     evaluation_time_ms: float = 0.0
 
     # Per-chunk metrics
-    chunk_metrics: List[ContextChunkMetrics] = field(default_factory=list)
+    chunk_metrics: list[ContextChunkMetrics] = field(default_factory=list)
 
     # Overall quality (0-100)
     quality_score: float = 0.0
-    quality_breakdown: Dict[str, float] = field(default_factory=dict)
+    quality_breakdown: dict[str, float] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "query": self.query[:100] + "..." if len(self.query) > 100 else self.query,
             "retrieval": {
@@ -139,14 +142,15 @@ class RAGMetrics:
 @dataclass
 class Citation:
     """A citation linking response content to source."""
+
     citation_id: str
     chunk_id: str
     dataset_id: str
     dataset_name: str
 
     # Source info
-    source_url: Optional[str] = None
-    source_title: Optional[str] = None
+    source_url: str | None = None
+    source_title: str | None = None
 
     # Citation details
     cited_text: str = ""  # The text that was cited
@@ -156,7 +160,7 @@ class Citation:
     # Status
     status: CitationStatus = CitationStatus.IMPLICIT
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "citation_id": self.citation_id,
             "chunk_id": self.chunk_id,
@@ -204,7 +208,7 @@ class RAGEvaluator:
         self,
         query: str,
         response: str,
-        retrieved_chunks: List[Dict[str, Any]],
+        retrieved_chunks: list[dict[str, Any]],
         retrieval_time_ms: float = 0.0,
     ) -> RAGMetrics:
         """
@@ -234,8 +238,8 @@ class RAGEvaluator:
 
         # Analyze each chunk
         chunk_metrics_list = []
-        datasets_seen: Set[str] = set()
-        sources_seen: Set[str] = set()
+        datasets_seen: set[str] = set()
+        sources_seen: set[str] = set()
         total_relevance = 0.0
         chunks_used = 0
 
@@ -280,7 +284,9 @@ class RAGEvaluator:
 
         # Calculate coverage metrics
         metrics.query_coverage = self._calculate_query_coverage(query, retrieved_chunks)
-        metrics.response_grounding = chunks_used / len(retrieved_chunks) if retrieved_chunks else 0.0
+        metrics.response_grounding = (
+            chunks_used / len(retrieved_chunks) if retrieved_chunks else 0.0
+        )
 
         # Count citations
         explicit, implicit = self._count_citations(response, retrieved_chunks)
@@ -297,9 +303,9 @@ class RAGEvaluator:
     def extract_citations(
         self,
         response: str,
-        retrieved_chunks: List[Dict[str, Any]],
-        dataset_names: Optional[Dict[str, str]] = None,
-    ) -> List[Citation]:
+        retrieved_chunks: list[dict[str, Any]],
+        dataset_names: dict[str, str] | None = None,
+    ) -> list[Citation]:
         """
         Extract citations from a response linked to source chunks.
 
@@ -389,7 +395,7 @@ class RAGEvaluator:
     def _calculate_query_coverage(
         self,
         query: str,
-        chunks: List[Dict[str, Any]],
+        chunks: list[dict[str, Any]],
     ) -> float:
         """Calculate how well retrieved chunks cover the query."""
         if not query or not chunks:
@@ -400,7 +406,7 @@ class RAGEvaluator:
             return 0.0
 
         # Collect all terms from chunks
-        chunk_terms: Set[str] = set()
+        chunk_terms: set[str] = set()
         for chunk in chunks:
             content = chunk.get("content", chunk.get("text", ""))
             chunk_terms.update(self._tokenize(content.lower()))
@@ -412,19 +418,19 @@ class RAGEvaluator:
     def _count_citations(
         self,
         response: str,
-        chunks: List[Dict[str, Any]],
-    ) -> Tuple[int, int]:
+        chunks: list[dict[str, Any]],
+    ) -> tuple[int, int]:
         """Count explicit and implicit citations in response."""
         explicit = 0
         implicit = 0
 
         # Check for citation markers
         citation_patterns = [
-            r'\[\d+\]',           # [1], [2], etc.
-            r'\[Source:.*?\]',    # [Source: ...]
-            r'According to',      # Natural language citations
-            r'Based on',
-            r'As mentioned in',
+            r"\[\d+\]",  # [1], [2], etc.
+            r"\[Source:.*?\]",  # [Source: ...]
+            r"According to",  # Natural language citations
+            r"Based on",
+            r"As mentioned in",
         ]
 
         for pattern in citation_patterns:
@@ -446,7 +452,7 @@ class RAGEvaluator:
         self,
         response: str,
         index: int,
-        chunk: Dict[str, Any],
+        chunk: dict[str, Any],
     ) -> bool:
         """Check if chunk is explicitly cited in response."""
         # Check for numeric citation
@@ -455,15 +461,12 @@ class RAGEvaluator:
 
         # Check for source URL citation
         source_url = chunk.get("source_url", "")
-        if source_url and source_url in response:
-            return True
-
-        return False
+        return bool(source_url and source_url in response)
 
     def _extract_cited_text(self, response: str, content: str) -> str:
         """Extract the portion of response that cites the content."""
         # Find sentences in response that have high overlap with content
-        sentences = re.split(r'[.!?]+', response)
+        sentences = re.split(r"[.!?]+", response)
 
         best_match = ""
         best_overlap = 0.0
@@ -476,7 +479,7 @@ class RAGEvaluator:
 
         return best_match[:200] if best_match else ""
 
-    def _calculate_quality_score(self, metrics: RAGMetrics) -> Tuple[float, Dict[str, float]]:
+    def _calculate_quality_score(self, metrics: RAGMetrics) -> tuple[float, dict[str, float]]:
         """Calculate overall RAG quality score (0-100)."""
         breakdown = {}
 
@@ -485,7 +488,7 @@ class RAGEvaluator:
         breakdown["relevance"] = relevance_score
 
         # Coverage component (25 points)
-        coverage_score = (metrics.query_coverage * 12.5 + metrics.response_grounding * 12.5)
+        coverage_score = metrics.query_coverage * 12.5 + metrics.response_grounding * 12.5
         breakdown["coverage"] = coverage_score
 
         # Usage component (25 points) - How much of retrieved was used
@@ -505,13 +508,13 @@ class RAGEvaluator:
         total = sum(breakdown.values())
         return total, breakdown
 
-    def _tokenize(self, text: str) -> List[str]:
+    def _tokenize(self, text: str) -> list[str]:
         """Simple word tokenization."""
         return [w for w in re.split(r'[\s\-_,.;:!?()"\'\[\]{}]+', text) if w and len(w) > 1]
 
 
 # Global evaluator instance
-_evaluator: Optional[RAGEvaluator] = None
+_evaluator: RAGEvaluator | None = None
 
 
 def get_rag_evaluator() -> RAGEvaluator:
@@ -525,7 +528,7 @@ def get_rag_evaluator() -> RAGEvaluator:
 def evaluate_rag(
     query: str,
     response: str,
-    retrieved_chunks: List[Dict[str, Any]],
+    retrieved_chunks: list[dict[str, Any]],
     retrieval_time_ms: float = 0.0,
 ) -> RAGMetrics:
     """Convenience function to evaluate RAG quality."""
@@ -534,9 +537,9 @@ def evaluate_rag(
 
 def extract_citations(
     response: str,
-    retrieved_chunks: List[Dict[str, Any]],
-    dataset_names: Optional[Dict[str, str]] = None,
-) -> List[Citation]:
+    retrieved_chunks: list[dict[str, Any]],
+    dataset_names: dict[str, str] | None = None,
+) -> list[Citation]:
     """Convenience function to extract citations."""
     return get_rag_evaluator().extract_citations(response, retrieved_chunks, dataset_names)
 
@@ -564,6 +567,7 @@ class RetrievalMetrics:
         top_score: Highest relevance score
         scenario_type: Detected scenario type (if applicable)
     """
+
     queries_expanded: int = 1
     queries_executed: int = 1
     total_retrieved: int = 0
@@ -574,10 +578,10 @@ class RetrievalMetrics:
     scenario_type: str = "general"
 
     # Additional context
-    dataset_ids: List[str] = field(default_factory=list)
+    dataset_ids: list[str] = field(default_factory=list)
     user_query: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "queries_expanded": self.queries_expanded,
@@ -589,9 +593,7 @@ class RetrievalMetrics:
             "top_score": round(self.top_score, 4),
             "scenario_type": self.scenario_type,
             "dataset_ids": self.dataset_ids,
-            "dedup_ratio": round(
-                self.after_dedupe / max(self.total_retrieved, 1), 2
-            ),
+            "dedup_ratio": round(self.after_dedupe / max(self.total_retrieved, 1), 2),
         }
 
 
@@ -630,7 +632,7 @@ class RAGMetricsCollector:
         ```
     """
 
-    def __init__(self, database: Optional[Any] = None):
+    def __init__(self, database: Any | None = None):
         """
         Initialize the RAGMetricsCollector.
 
@@ -639,7 +641,7 @@ class RAGMetricsCollector:
                       If None, metrics are only logged (not persisted)
         """
         self.database = database
-        self._buffer: List[Dict[str, Any]] = []
+        self._buffer: list[dict[str, Any]] = []
         self._buffer_size = 100  # Flush after this many records
 
     async def record_retrieval(
@@ -647,8 +649,8 @@ class RAGMetricsCollector:
         session_id: str,
         tenant_id: str,
         metrics: RetrievalMetrics,
-        user_id: Optional[str] = None,
-        request_id: Optional[str] = None,
+        user_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         """
         Record retrieval metrics.
@@ -683,8 +685,8 @@ class RAGMetricsCollector:
         session_id: str,
         tenant_id: str,
         metrics: RAGMetrics,
-        user_id: Optional[str] = None,
-        request_id: Optional[str] = None,
+        user_id: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         """
         Record evaluation metrics.
@@ -714,17 +716,18 @@ class RAGMetricsCollector:
 
         await self._persist(record)
 
-    async def _persist(self, record: Dict[str, Any]) -> None:
+    async def _persist(self, record: dict[str, Any]) -> None:
         """Persist a record to the database."""
         if self.database is None:
             # No database configured, just buffer for potential export
             self._buffer.append(record)
             if len(self._buffer) > self._buffer_size:
-                self._buffer = self._buffer[-self._buffer_size:]
+                self._buffer = self._buffer[-self._buffer_size :]
             return
 
         try:
             import json
+
             await self.database.execute(
                 """
                 INSERT INTO rag_metrics
@@ -746,9 +749,9 @@ class RAGMetricsCollector:
     async def get_recent_metrics(
         self,
         tenant_id: str,
-        metric_type: Optional[str] = None,
+        metric_type: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get recent metrics for a tenant.
 
@@ -763,7 +766,8 @@ class RAGMetricsCollector:
         if self.database is None:
             # Return from buffer
             filtered = [
-                r for r in self._buffer
+                r
+                for r in self._buffer
                 if r["tenant_id"] == tenant_id
                 and (metric_type is None or r["metric_type"] == metric_type)
             ]
@@ -794,7 +798,7 @@ class RAGMetricsCollector:
         self,
         tenant_id: str,
         hours: int = 24,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get aggregate statistics for a tenant.
 
@@ -827,16 +831,14 @@ class RAGMetricsCollector:
             logger.error(f"Failed to fetch aggregate stats: {e}")
             return {}
 
-    def _compute_buffer_stats(self, tenant_id: str) -> Dict[str, Any]:
+    def _compute_buffer_stats(self, tenant_id: str) -> dict[str, Any]:
         """Compute statistics from the buffer."""
-        tenant_records = [
-            r for r in self._buffer if r["tenant_id"] == tenant_id
-        ]
+        tenant_records = [r for r in self._buffer if r["tenant_id"] == tenant_id]
 
         if not tenant_records:
             return {}
 
-        stats: Dict[str, Dict[str, Any]] = {}
+        stats: dict[str, dict[str, Any]] = {}
         for r in tenant_records:
             mt = r["metric_type"]
             if mt not in stats:
@@ -848,9 +850,7 @@ class RAGMetricsCollector:
                 stats[mt]["quality_scores"].append(r["data"]["quality_score"])
 
             if "retrieval_time_ms" in r.get("data", {}).get("retrieval", {}):
-                stats[mt]["retrieval_times"].append(
-                    r["data"]["retrieval"]["retrieval_time_ms"]
-                )
+                stats[mt]["retrieval_times"].append(r["data"]["retrieval"]["retrieval_time_ms"])
 
         result = {}
         for mt, data in stats.items():
@@ -858,17 +858,19 @@ class RAGMetricsCollector:
                 "count": data["count"],
                 "avg_quality": (
                     sum(data["quality_scores"]) / len(data["quality_scores"])
-                    if data["quality_scores"] else None
+                    if data["quality_scores"]
+                    else None
                 ),
                 "avg_retrieval_time": (
                     sum(data["retrieval_times"]) / len(data["retrieval_times"])
-                    if data["retrieval_times"] else None
+                    if data["retrieval_times"]
+                    else None
                 ),
             }
 
         return result
 
-    def get_buffer(self) -> List[Dict[str, Any]]:
+    def get_buffer(self) -> list[dict[str, Any]]:
         """Get the current buffer contents."""
         return list(self._buffer)
 
@@ -878,10 +880,10 @@ class RAGMetricsCollector:
 
 
 # Global collector instance
-_collector: Optional[RAGMetricsCollector] = None
+_collector: RAGMetricsCollector | None = None
 
 
-def get_rag_metrics_collector(database: Optional[Any] = None) -> RAGMetricsCollector:
+def get_rag_metrics_collector(database: Any | None = None) -> RAGMetricsCollector:
     """Get the global RAG metrics collector instance."""
     global _collector
     if _collector is None:

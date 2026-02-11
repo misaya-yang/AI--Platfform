@@ -3,15 +3,17 @@ Password utilities - hashing, verification, validation
 
 Provides secure password handling for the account management system.
 """
+
 from __future__ import annotations
 
 import re
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 try:
     import bcrypt
+
     HAS_BCRYPT = True
 except ImportError:
     HAS_BCRYPT = False
@@ -19,13 +21,13 @@ except ImportError:
 
 try:
     import jwt
+
     HAS_JWT = True
 except ImportError:
     HAS_JWT = False
     jwt = None
 
 from ..exceptions import AuthError
-
 
 # ============================================================
 # Configuration Constants
@@ -41,6 +43,7 @@ LOCKOUT_DURATION_MINUTES = 30
 # ============================================================
 # Password Hashing
 # ============================================================
+
 
 def hash_password(password: str) -> str:
     """
@@ -59,7 +62,7 @@ def hash_password(password: str) -> str:
         raise RuntimeError("bcrypt is not installed. Run: pip install bcrypt")
 
     salt = bcrypt.gensalt(rounds=BCRYPT_COST_FACTOR)
-    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 
 def verify_password(password: str, hashed: str) -> bool:
@@ -80,7 +83,7 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
     try:
-        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
@@ -89,7 +92,8 @@ def verify_password(password: str, hashed: str) -> bool:
 # Password Validation
 # ============================================================
 
-def validate_password_strength(password: str) -> List[str]:
+
+def validate_password_strength(password: str) -> list[str]:
     """
     Validate password strength requirements.
 
@@ -110,10 +114,10 @@ def validate_password_strength(password: str) -> List[str]:
     if len(password) < MIN_PASSWORD_LENGTH:
         errors.append(f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
 
-    if not re.search(r'[a-zA-Z]', password):
+    if not re.search(r"[a-zA-Z]", password):
         errors.append("Password must contain at least one letter")
 
-    if not re.search(r'\d', password):
+    if not re.search(r"\d", password):
         errors.append("Password must contain at least one number")
 
     if not re.search(r'[!@#$%^&*(),.?":{}|<>\-_=+\[\]\\;\'`~]', password):
@@ -139,6 +143,7 @@ def is_password_valid(password: str) -> bool:
 # Email Validation
 # ============================================================
 
+
 def is_valid_email_domain(email: str) -> bool:
     """
     Check if email belongs to allowed domain.
@@ -151,10 +156,10 @@ def is_valid_email_domain(email: str) -> bool:
     """
     if not email:
         return False
-    return email.lower().endswith(f'@{ALLOWED_EMAIL_DOMAIN}')
+    return email.lower().endswith(f"@{ALLOWED_EMAIL_DOMAIN}")
 
 
-def validate_email(email: str) -> List[str]:
+def validate_email(email: str) -> list[str]:
     """
     Validate email format and domain.
 
@@ -171,7 +176,7 @@ def validate_email(email: str) -> List[str]:
         return errors
 
     # Basic email format validation
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     if not re.match(email_pattern, email):
         errors.append("Invalid email format")
         return errors
@@ -193,24 +198,25 @@ def extract_username_from_email(email: str) -> str:
     Returns:
         Username portion of email with dots replaced by underscores
     """
-    if not email or '@' not in email:
-        return email or ''
+    if not email or "@" not in email:
+        return email or ""
 
-    username = email.split('@')[0]
+    username = email.split("@")[0]
     # Replace dots with underscores for user_id
-    return username.replace('.', '_').lower()
+    return username.replace(".", "_").lower()
 
 
 # ============================================================
 # JWT Token Creation
 # ============================================================
 
+
 def create_access_token(
-    data: Dict[str, Any],
+    data: dict[str, Any],
     secret: str,
-    expires_delta: Optional[timedelta] = None,
+    expires_delta: timedelta | None = None,
     algorithm: str = "HS256",
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """
     Create a JWT access token with a unique token ID (jti).
 
@@ -240,11 +246,13 @@ def create_access_token(
     else:
         expire = datetime.utcnow() + timedelta(hours=3)  # Default 3 hours
 
-    to_encode.update({
-        "exp": expire,
-        "iat": datetime.utcnow(),
-        "jti": token_id,  # JWT ID for token identification
-    })
+    to_encode.update(
+        {
+            "exp": expire,
+            "iat": datetime.utcnow(),
+            "jti": token_id,  # JWT ID for token identification
+        }
+    )
 
     try:
         encoded_jwt = jwt.encode(to_encode, secret, algorithm=algorithm)
@@ -257,7 +265,7 @@ def decode_token(
     token: str,
     secret: str,
     algorithm: str = "HS256",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Decode and verify a JWT token.
 
@@ -281,7 +289,7 @@ def decode_token(
         return None
 
 
-def get_token_id(token: str, secret: str, algorithm: str = "HS256") -> Optional[str]:
+def get_token_id(token: str, secret: str, algorithm: str = "HS256") -> str | None:
     """
     Extract token ID (jti) from a JWT token.
 
@@ -303,7 +311,8 @@ def get_token_id(token: str, secret: str, algorithm: str = "HS256") -> Optional[
 # Account Lockout Utilities
 # ============================================================
 
-def is_account_locked(locked_until: Optional[datetime]) -> bool:
+
+def is_account_locked(locked_until: datetime | None) -> bool:
     """
     Check if account is currently locked.
 

@@ -8,28 +8,28 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ...config.settings import Settings
-from ...core.exceptions import ValidationFailedError
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
 from .chunking import (
-    ChunkingMode,
-    ChunkingConfig,
-    process_document,
-    flatten_chunks,
-    enforce_token_limits,
     Chunk,
+    ChunkingConfig,
+    ChunkingMode,
+    enforce_token_limits,
+    flatten_chunks,
+    get_token_counter,
+    process_document,
 )
+from .embedding import create_embedding
 from .section_extractor import SectionExtractor
-from .embedding import create_embedding, BaseEmbedding, get_cached_embedder
 from .vector_store import VectorStore
 
 logger = get_logger(__name__)
 
 
-def _ensure_dict(value: Any) -> Dict[str, Any]:
+def _ensure_dict(value: Any) -> dict[str, Any]:
     """Ensure value is a dict."""
     if value is None:
         return {}
@@ -66,12 +66,12 @@ class IngestionService:
         dataset_id: str,
         document_id: str,
         text: str,
-        doc_metadata: Optional[Dict[str, Any]] = None,
-        chunking_config: Optional[ChunkingConfig] = None,
-        embedding_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        doc_metadata: dict[str, Any] | None = None,
+        chunking_config: ChunkingConfig | None = None,
+        embedding_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Ingest a document into the knowledge base.
-        
+
         Pipeline:
         1. Segment text into chunks
         2. Generate embeddings
@@ -80,10 +80,10 @@ class IngestionService:
         """
         doc_metadata = doc_metadata or {}
         doc_name = doc_metadata.get("title", document_id)
-        
+
         # Step 1: Update status to parsing
         await self.db.update_document_status(document_id, status="parsing", progress=10)
-        
+
         text = text.strip()
         if not text:
             await self.db.update_document_status(
@@ -93,9 +93,9 @@ class IngestionService:
 
         # Step 2: Segmenting
         await self.db.update_document_status(document_id, status="segmenting", progress=25)
-        
+
         chunks = await self._create_chunks(text, chunking_config, doc_name, document_id, dataset_id)
-        
+
         if not chunks:
             await self.db.update_document_status(
                 document_id, status="failed", progress=100, error="no segments generated"
@@ -104,7 +104,7 @@ class IngestionService:
 
         # Step 3: Embedding
         await self.db.update_document_status(document_id, status="embedding", progress=50)
-        
+
         try:
             await self._embed_and_store_chunks(
                 dataset_id=dataset_id,
@@ -139,9 +139,9 @@ class IngestionService:
 
         # Step 4: Complete
         await self.db.update_document_status(document_id, status="completed", progress=100)
-        
+
         logger.info(f"Document {document_id} ingested successfully with {len(chunks)} chunks")
-        
+
         return {
             "success": True,
             "document_id": document_id,
@@ -153,12 +153,12 @@ class IngestionService:
         dataset_id: str,
         document_id: str,
         new_text: str,
-        chunking_config: Optional[ChunkingConfig] = None,
-    ) -> Dict[str, Any]:
+        chunking_config: ChunkingConfig | None = None,
+    ) -> dict[str, Any]:
         """Reindex a document with new content (incremental update)."""
         # Delete old segments
         old_segments = await self.db.get_segments_by_document(document_id)
-        
+
         # Delete old vectors (batch delete)
         vector_ids = [seg.get("vector_id") for seg in old_segments if seg.get("vector_id")]
         if vector_ids:
@@ -167,13 +167,13 @@ class IngestionService:
             except ConnectionError as e:
                 logger.warning(f"Vector store connection error deleting vectors: {e}")
             except KeyError:
-                logger.debug(f"Vectors not found (may have been deleted)")
+                logger.debug("Vectors not found (may have been deleted)")
             except RuntimeError as e:
                 logger.warning(f"Vector store error deleting vectors: {e}")
-        
+
         # Delete old segments from DB
         await self.db.delete_segments_by_document(document_id)
-        
+
         # Re-ingest
         return await self.ingest_document(
             dataset_id=dataset_id,
@@ -189,19 +189,19 @@ class IngestionService:
     async def _create_chunks(
         self,
         text: str,
-        config: Optional[ChunkingConfig],
+        config: ChunkingConfig | None,
         doc_name: str,
         document_id: str,
         dataset_id: str,
-    ) -> List[Tuple[str, int, str, Dict[str, Any]]]:
+    ) -> list[tuple[str, int, str, dict[str, Any]]]:
         """Create chunks from text.
-        
+
         Returns list of (text, token_count, content_hash, metadata) tuples.
         """
         # CRITICAL FIX: Load chunking config from dataset if not provided
         if config is None:
             config = await self._load_chunking_config(dataset_id)
-        
+
         # VALIDATION LOG: Log actual config values being used for chunking
         min_tokens_log = config.min_chunk_tokens if config.mode == ChunkingMode.FIXED_SIZE else None
         max_tokens_log = config.max_chunk_tokens if config.mode == ChunkingMode.FIXED_SIZE else None
@@ -214,14 +214,14 @@ class IngestionService:
             f"ParentTokenLimit={config.parent_token_limit}, ChildTokenLimit={config.child_token_limit}, "
             f"ParentSize={config.parent_chunk_size}, ChildSize={config.child_chunk_size}"
         )
-        
+
         # Process document
         chunk_objects = process_document(text, config, document_id)
         logger.info(f"Generated {len(chunk_objects)} chunks for document {document_id}")
-        
+
         # Flatten hierarchical chunks
         flat_chunks = flatten_chunks(chunk_objects)
-        
+
         # Apply strict sizing only for fixed-size mode; other modes follow their own logic
         if config.mode == ChunkingMode.FIXED_SIZE and config.use_token_count:
             token_limit = int(config.token_limit or 0)
@@ -231,11 +231,11 @@ class IngestionService:
                     token_limit,
                     min_tokens=None,
                 )
-        
+
         # Apply strict section traceability if enabled
         if config.strict_section_traceability:
             flat_chunks = self._apply_section_traceability(text, flat_chunks, doc_name)
-        
+
         # Add source metadata
         for i, c in enumerate(flat_chunks):
             c.index = i
@@ -244,56 +244,55 @@ class IngestionService:
             c.metadata["source_document"] = doc_name
             c.metadata["source_document_id"] = document_id
             c.metadata["source_dataset_id"] = dataset_id
-        
+
         # Convert to tuple format with content hash
         chunks = []
         for c in flat_chunks:
             content_hash = hashlib.sha256(c.text.encode()).hexdigest()
             chunks.append((c.text, c.token_count, content_hash, c.metadata))
-        
+
         return chunks
 
     def _apply_section_traceability(
         self,
         text: str,
-        chunks: List[Chunk],
+        chunks: list[Chunk],
         doc_name: str,
-    ) -> List[Chunk]:
+    ) -> list[Chunk]:
         """Apply strict section traceability to chunks.
-        
+
         Ensures every chunk has a section_title and includes it in citations.
         """
         extractor = SectionExtractor()
-        
+
         # Get section metadata for all chunks
         section_metadata_list = extractor.assign_section_to_chunks(text, chunks)
-        
+
         # Apply section metadata to chunks
-        for i, (chunk, section_metadata) in enumerate(zip(chunks, section_metadata_list)):
+        for i, (chunk, section_metadata) in enumerate(
+            zip(chunks, section_metadata_list, strict=False)
+        ):
             # Ensure section_title exists
-            if not section_metadata.get('section_title'):
+            if not section_metadata.get("section_title"):
                 # Force section title if missing
                 forced = extractor.force_section_title(
-                    [chunk],
-                    document_title=doc_name,
-                    default_section="Main Content"
+                    [chunk], document_title=doc_name, default_section="Main Content"
                 )
                 if forced:
                     section_metadata.update(forced[0])
-            
+
             # Update chunk metadata
             chunk.metadata.update(section_metadata)
-            
+
             # Build section-aware citation if not already present
-            if not chunk.metadata.get('citation_text'):
+            if not chunk.metadata.get("citation_text"):
                 from .section_extractor import get_section_aware_citation
+
                 citation = get_section_aware_citation(
-                    chunk.metadata,
-                    document_name=doc_name,
-                    position=i
+                    chunk.metadata, document_name=doc_name, position=i
                 )
-                chunk.metadata['citation_text'] = citation
-        
+                chunk.metadata["citation_text"] = citation
+
         return chunks
 
     async def _load_chunking_config(self, dataset_id: str) -> ChunkingConfig:
@@ -307,20 +306,24 @@ class IngestionService:
                         index_config = json.loads(index_config)
                     except json.JSONDecodeError:
                         index_config = {}
-                chunking_dict = index_config.get("chunking") if isinstance(index_config, dict) else {}
+                chunking_dict = (
+                    index_config.get("chunking") if isinstance(index_config, dict) else {}
+                )
                 if chunking_dict:
-                    logger.info(f"[Chunking] Loaded config from dataset {dataset_id}: {chunking_dict}")
+                    logger.info(
+                        f"[Chunking] Loaded config from dataset {dataset_id}: {chunking_dict}"
+                    )
                     return ChunkingConfig.from_dict(chunking_dict)
         except Exception as e:
             logger.warning(f"[Chunking] Failed to load config for {dataset_id}: {e}")
-        
+
         # Fallback to default
         logger.info(f"[Chunking] Using default config for dataset {dataset_id}")
         return ChunkingConfig()
 
-    def _validate_chunk_sizes(self, chunks: List[Chunk], config: ChunkingConfig) -> List[Chunk]:
+    def _validate_chunk_sizes(self, chunks: list[Chunk], config: ChunkingConfig) -> list[Chunk]:
         """Validate and enforce strict token limits on chunks.
-        
+
         This is a safety pass that splits any chunks exceeding max_tokens.
         """
         if not config.use_token_count:
@@ -328,11 +331,11 @@ class IngestionService:
         max_tokens = config.max_chunk_tokens if config.max_chunk_tokens is not None else None
         if max_tokens is None:
             return chunks
-        
+
         validated = []
         for chunk in chunks:
             chunk_tokens = chunk.token_count
-            
+
             if chunk_tokens > max_tokens:
                 # Split oversized chunk
                 logger.warning(
@@ -347,49 +350,53 @@ class IngestionService:
                 validated.append(chunk)
             else:
                 validated.append(chunk)
-        
+
         return validated
 
-    def _split_chunk_strict(self, chunk: Chunk, max_tokens: int) -> List[Chunk]:
+    def _split_chunk_strict(self, chunk: Chunk, max_tokens: int) -> list[Chunk]:
         """Split a chunk strictly by token count."""
         words = chunk.text.split()
         if not words:
             return [chunk]
-        
+
         token_counter = get_token_counter()
         result = []
         current_words = []
         current_tokens = 0
         index = 0
-        
+
         for word in words:
             word_tokens = token_counter.count_tokens(word + " ")
             if current_tokens + word_tokens > max_tokens and current_words:
                 # Create chunk from current buffer
                 text = " ".join(current_words)
-                result.append(Chunk(
-                    text=text,
-                    index=chunk.index + index,
-                    metadata={**chunk.metadata, "_split_from": chunk.hash_id},
-                    parent_id=chunk.parent_id,
-                ))
+                result.append(
+                    Chunk(
+                        text=text,
+                        index=chunk.index + index,
+                        metadata={**chunk.metadata, "_split_from": chunk.hash_id},
+                        parent_id=chunk.parent_id,
+                    )
+                )
                 index += 1
                 current_words = [word]
                 current_tokens = word_tokens
             else:
                 current_words.append(word)
                 current_tokens += word_tokens
-        
+
         # Don't forget remaining words
         if current_words:
             text = " ".join(current_words)
-            result.append(Chunk(
-                text=text,
-                index=chunk.index + index,
-                metadata={**chunk.metadata, "_split_from": chunk.hash_id},
-                parent_id=chunk.parent_id,
-            ))
-        
+            result.append(
+                Chunk(
+                    text=text,
+                    index=chunk.index + index,
+                    metadata={**chunk.metadata, "_split_from": chunk.hash_id},
+                    parent_id=chunk.parent_id,
+                )
+            )
+
         return result if result else [chunk]
 
     # ========================================================================
@@ -400,27 +407,27 @@ class IngestionService:
         self,
         dataset_id: str,
         document_id: str,
-        chunks: List[Tuple[str, int, str, Dict[str, Any]]],
-        embedding_config: Optional[Dict[str, Any]],
+        chunks: list[tuple[str, int, str, dict[str, Any]]],
+        embedding_config: dict[str, Any] | None,
     ) -> None:
         """Embed chunks and store in vector database."""
         config = embedding_config or {}
-        provider = config.get("provider", "local")
-        model = config.get("model", "hash-384")
-        
+        config.get("provider", "local")
+        config.get("model", "hash-384")
+
         # Create embedder
         embedder = create_embedding(config)
-        
+
         # Ensure collection exists
         if embedder._dimension is None:
             await embedder.embed_query("test")
-        
+
         dim = embedder._dimension or 1024  # fallback dimension for unknown embedders
         await self.vector_store.ensure_collection(
             dataset_id=dataset_id,
             dimension=dim,
         )
-        
+
         # Process in smaller batches to avoid Qdrant timeout
         # For large documents, use smaller batch size to prevent timeout
         total_chunks = len(chunks)
@@ -431,53 +438,55 @@ class IngestionService:
             batch_size = 24
         else:
             batch_size = 32
-            
+
         # Further reduce batch size for Qdrant upsert to avoid timeout
         qdrant_batch_size = 16
-        
+
         total_inserted = 0
-        
+
         for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            
+            batch = chunks[i : i + batch_size]
+
             # Generate embeddings
             texts = [c[0] for c in batch]
             try:
                 embeddings = await embedder.embed_documents(texts)
             except Exception as embed_err:
-                logger.error(f"Embedding failed for batch {i//batch_size + 1}: {embed_err}")
+                logger.error(f"Embedding failed for batch {i // batch_size + 1}: {embed_err}")
                 # Mark document as partially failed
                 await self.db.update_document_status(
                     document_id,
                     status="partially_failed",
                     progress=50 + int((total_inserted / len(chunks)) * 40),
-                    error=f"Embedding failed for batch {i//batch_size + 1}: {str(embed_err)[:200]}",
+                    error=f"Embedding failed for batch {i // batch_size + 1}: {str(embed_err)[:200]}",
                 )
                 # Continue with next batch instead of failing entire document
                 continue
-            
+
             # Prepare segments for DB
             segments = []
             for j, (text, token_count, content_hash, meta) in enumerate(batch):
                 segment_id = f"{document_id}_{i + j}"
-                segments.append({
-                    "segment_id": segment_id,
-                    "document_id": document_id,
-                    "dataset_id": dataset_id,
-                    "position": i + j,
-                    "text": text,
-                    "token_count": token_count,
-                    "content_hash": content_hash,
-                    "metadata": meta,
-                })
-            
+                segments.append(
+                    {
+                        "segment_id": segment_id,
+                        "document_id": document_id,
+                        "dataset_id": dataset_id,
+                        "position": i + j,
+                        "text": text,
+                        "token_count": token_count,
+                        "content_hash": content_hash,
+                        "metadata": meta,
+                    }
+                )
+
             # Insert to DB first (more reliable)
             try:
                 await self.db.insert_segments(segments)
             except Exception as db_err:
-                logger.error(f"Database insert failed for batch {i//batch_size + 1}: {db_err}")
+                logger.error(f"Database insert failed for batch {i // batch_size + 1}: {db_err}")
                 # Continue - segments can be re-inserted on retry
-            
+
             # Insert to vector store in smaller sub-batches
             points = []
             for j, seg in enumerate(segments):
@@ -501,35 +510,37 @@ class IngestionService:
                         )
                         if meta.get(key) is not None
                     }
-                    points.append({
-                        "id": seg["segment_id"],
-                        "vector": embeddings[j],
-                        "payload": {
-                            "document_id": document_id,
-                            "dataset_id": dataset_id,
-                            "text": seg["text"][:500],  # Truncate for payload
-                            "metadata": payload_meta,
-                            "source_type": payload_meta.get("source_type"),
-                            "citation_text": payload_meta.get("citation_text"),
-                            "source_reference": payload_meta.get("source_reference"),
-                        },
-                    })
-            
+                    points.append(
+                        {
+                            "id": seg["segment_id"],
+                            "vector": embeddings[j],
+                            "payload": {
+                                "document_id": document_id,
+                                "dataset_id": dataset_id,
+                                "text": seg["text"][:500],  # Truncate for payload
+                                "metadata": payload_meta,
+                                "source_type": payload_meta.get("source_type"),
+                                "citation_text": payload_meta.get("citation_text"),
+                                "source_reference": payload_meta.get("source_reference"),
+                            },
+                        }
+                    )
+
             # Upsert in smaller sub-batches to avoid Qdrant timeout
             for q_start in range(0, len(points), qdrant_batch_size):
-                q_batch = points[q_start:q_start + qdrant_batch_size]
+                q_batch = points[q_start : q_start + qdrant_batch_size]
                 try:
                     await self.vector_store.upsert(dataset_id, q_batch)
                 except Exception as qdrant_err:
                     logger.error(
-                        f"Qdrant upsert failed for sub-batch {q_start//qdrant_batch_size + 1} "
-                        f"in batch {i//batch_size + 1}: {qdrant_err}"
+                        f"Qdrant upsert failed for sub-batch {q_start // qdrant_batch_size + 1} "
+                        f"in batch {i // batch_size + 1}: {qdrant_err}"
                     )
                     # Continue with other batches - failed segments can be recovered
                     # by reindexing the document later
-            
+
             total_inserted += len(batch)
-            
+
             # Update progress
             progress = 50 + int((total_inserted / len(chunks)) * 40)
             await self.db.update_document_status(document_id, status="embedding", progress=progress)
@@ -540,35 +551,35 @@ class IngestionService:
 
     async def compute_content_hashes(
         self,
-        chunks: List[Tuple[str, int, str, Dict[str, Any]]],
-    ) -> Dict[int, str]:
+        chunks: list[tuple[str, int, str, dict[str, Any]]],
+    ) -> dict[int, str]:
         """Compute content hashes for chunks by position."""
         return {i: chunk[2] for i, chunk in enumerate(chunks)}
 
     async def get_changed_chunks(
         self,
         document_id: str,
-        new_chunks: List[Tuple[str, int, str, Dict[str, Any]]],
-    ) -> Tuple[List[int], List[int], List[int]]:
+        new_chunks: list[tuple[str, int, str, dict[str, Any]]],
+    ) -> tuple[list[int], list[int], list[int]]:
         """Compare new chunks with existing to find changes.
-        
+
         Returns:
             (unchanged_positions, changed_positions, excess_positions)
         """
         existing = await self.db.get_segment_hashes_by_document(document_id)
-        
+
         unchanged = []
         changed = []
-        
+
         for pos, (_, _, new_hash, _) in enumerate(new_chunks):
             old = existing.get(pos)
             if old and old.get("content_hash") == new_hash:
                 unchanged.append(pos)
             else:
                 changed.append(pos)
-        
+
         # Find excess old positions
         max_new_pos = len(new_chunks) - 1
-        excess = [pos for pos in existing.keys() if pos > max_new_pos]
-        
+        excess = [pos for pos in existing if pos > max_new_pos]
+
         return unchanged, changed, excess

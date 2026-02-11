@@ -7,16 +7,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Optional, Set, Type
+from collections.abc import Callable
+from typing import Any
 
-from .base import InvocationContext, InvocationMiddleware
-from ..observability.logging import get_logger
 from ..errors.base import GatewayException
+from ..observability.logging import get_logger
+from .base import InvocationContext, InvocationMiddleware
 
 logger = get_logger(__name__)
 
 # 默认可重试的异常类型
-DEFAULT_RETRYABLE_EXCEPTIONS: Set[Type[Exception]] = {
+DEFAULT_RETRYABLE_EXCEPTIONS: set[type[Exception]] = {
     ConnectionError,
     TimeoutError,
     asyncio.TimeoutError,
@@ -30,29 +31,25 @@ def is_retryable_error(exc: Exception) -> bool:
         return exc.retryable
 
     # 检查是否属于可重试异常类型
-    for exc_type in DEFAULT_RETRYABLE_EXCEPTIONS:
-        if isinstance(exc, exc_type):
-            return True
-
-    return False
+    return any(isinstance(exc, exc_type) for exc_type in DEFAULT_RETRYABLE_EXCEPTIONS)
 
 
 class RetryMiddleware(InvocationMiddleware):
     """
     重试中间件
-    
+
     在调用失败时进行重试：
     - 支持配置最大重试次数
     - 支持配置重试间隔
     - 支持指数退避
     """
-    
+
     name = "retry"
-    
+
     def __init__(
         self,
-        max_retries: Optional[int] = None,
-        retry_delay: Optional[float] = None,
+        max_retries: int | None = None,
+        retry_delay: float | None = None,
         exponential_backoff: bool = False,
         max_delay: float = 60.0,
     ):
@@ -67,7 +64,7 @@ class RetryMiddleware(InvocationMiddleware):
         self.default_retry_delay = retry_delay
         self.exponential_backoff = exponential_backoff
         self.max_delay = max_delay
-    
+
     async def process(
         self,
         context: InvocationContext,
@@ -75,17 +72,17 @@ class RetryMiddleware(InvocationMiddleware):
     ) -> Any:
         """执行重试逻辑"""
         service = context.service
-        
+
         # 获取重试配置
         max_retries = self.default_max_retries or service.max_retries
         retry_delay = self.default_retry_delay or service.retry_delay
-        
+
         # 如果不需要重试，直接执行
         if max_retries <= 1:
             return await next_middleware(context)
-        
-        last_exception: Optional[Exception] = None
-        
+
+        last_exception: Exception | None = None
+
         for attempt in range(max_retries):
             try:
                 return await next_middleware(context)
@@ -118,15 +115,14 @@ class RetryMiddleware(InvocationMiddleware):
 
                 # 计算等待时间
                 if self.exponential_backoff:
-                    delay = min(retry_delay * (2 ** attempt), self.max_delay)
+                    delay = min(retry_delay * (2**attempt), self.max_delay)
                 else:
                     delay = retry_delay
 
                 await asyncio.sleep(delay)
-        
+
         # 所有重试都失败，抛出最后的异常
         if last_exception:
             raise last_exception
-        
-        raise RuntimeError("Retry failed with no exception")
 
+        raise RuntimeError("Retry failed with no exception")

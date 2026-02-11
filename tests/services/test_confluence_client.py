@@ -6,8 +6,7 @@ Confluence 客户端单元测试
 
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -127,7 +126,9 @@ class TestGetPageChildrenPagination:
             if call_count == 1:
                 return {
                     "results": page1,
-                    "_links": {"next": "https://test.atlassian.net/wiki/api/v2/pages/123/children?cursor=xyz789&limit=100"},
+                    "_links": {
+                        "next": "https://test.atlassian.net/wiki/api/v2/pages/123/children?cursor=xyz789&limit=100"
+                    },
                 }
             else:
                 # 验证第二次调用时使用了正确的 cursor

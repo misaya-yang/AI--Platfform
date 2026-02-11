@@ -3,9 +3,9 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-
+from typing import Any
 
 # =============================================================================
 # Multilingual Tokenization Patterns (Latin, CJK, Arabic)
@@ -24,59 +24,201 @@ _RE_QUOTED = re.compile(r'["\']([^"\']+)["\']')
 _RE_ARABIC_RUN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]+")
 
 # Arabic diacritics (tashkeel) - remove for tokenization
-_RE_ARABIC_DIACRITICS = re.compile(r'[\u064b-\u0652\u0670]')
+_RE_ARABIC_DIACRITICS = re.compile(r"[\u064b-\u0652\u0670]")
 
 # Arabic stopwords (common words to filter out for better BM25)
-ARABIC_STOPWORDS = frozenset({
-    # Definite article
-    "ال", "الى", "إلى", "على", "عن", "من", "في", "إلي", "إن", "أن",
-    # Prepositions and conjunctions
-    "و", "ف", "ب", "ل", "ك", "لا", "ما", "مع", "أو", "ثم", "هذا", "هذه", "ذلك", "تلك",
-    # Pronouns
-    "هو", "هي", "هم", "نحن", "أنا", "أنت", "أنتم", "هن",
-    # Question words
-    "كيف", "متى", "أين", "لماذا", "من", "ماذا",
-    # Common verbs
-    "كان", "يكون", "كانت", "كانوا", "يكونون", "قال", "قالوا",
-    # Common words in Islamic texts
-    "عليه", "وسلم", "صلى", "الله", "رسول", "النبي", "عنه", "رضي",
-})
+ARABIC_STOPWORDS = frozenset(
+    {
+        # Definite article
+        "ال",
+        "الى",
+        "إلى",
+        "على",
+        "عن",
+        "من",
+        "في",
+        "إلي",
+        "إن",
+        "أن",
+        # Prepositions and conjunctions
+        "و",
+        "ف",
+        "ب",
+        "ل",
+        "ك",
+        "لا",
+        "ما",
+        "مع",
+        "أو",
+        "ثم",
+        "هذا",
+        "هذه",
+        "ذلك",
+        "تلك",
+        # Pronouns
+        "هو",
+        "هي",
+        "هم",
+        "نحن",
+        "أنا",
+        "أنت",
+        "أنتم",
+        "هن",
+        # Question words
+        "كيف",
+        "متى",
+        "أين",
+        "لماذا",
+        "ماذا",
+        # Common verbs
+        "كان",
+        "يكون",
+        "كانت",
+        "كانوا",
+        "يكونون",
+        "قال",
+        "قالوا",
+        # Common words in Islamic texts
+        "عليه",
+        "وسلم",
+        "صلى",
+        "الله",
+        "رسول",
+        "النبي",
+        "عنه",
+        "رضي",
+    }
+)
 
 # English stopwords (minimal set for BM25)
-ENGLISH_STOPWORDS = frozenset({
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
-    "may", "might", "must", "shall", "can", "need", "of", "in", "to", "for",
-    "with", "on", "at", "by", "from", "as", "into", "through", "during",
-    "before", "after", "above", "below", "between", "under", "and", "but",
-    "or", "nor", "so", "yet", "both", "either", "neither", "not", "only",
-    "own", "same", "than", "too", "very", "just", "also", "now", "here", "there",
-    "when", "where", "why", "how", "all", "each", "every", "both", "few",
-    "more", "most", "other", "some", "such", "no", "any", "this", "that",
-    "these", "those", "it", "its", "he", "she", "him", "her", "his", "hers",
-    "they", "them", "their", "theirs", "we", "us", "our", "ours", "you", "your",
-})
+ENGLISH_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "need",
+        "of",
+        "in",
+        "to",
+        "for",
+        "with",
+        "on",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "under",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "so",
+        "yet",
+        "both",
+        "either",
+        "neither",
+        "not",
+        "only",
+        "own",
+        "same",
+        "than",
+        "too",
+        "very",
+        "just",
+        "also",
+        "now",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "any",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "he",
+        "she",
+        "him",
+        "her",
+        "his",
+        "hers",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "you",
+        "your",
+    }
+)
 
 
 def detect_language(text: str) -> str:
     """
     Detect primary language from text.
-    
+
     Returns: "ar" | "en" | "zh" | "mixed"
     """
     if not text:
         return "en"
-    
+
     sample = text[:2000]
     total = max(len(sample), 1)
-    
+
     arabic_count = len(_RE_ARABIC_RUN.findall(sample))
     cjk_count = len(_RE_CJK_RUN.findall(sample))
     latin_count = len(_RE_LATIN_WORD.findall(sample))
-    
+
     arabic_ratio = arabic_count / total
     cjk_ratio = cjk_count / total
-    
+
     if arabic_ratio > 0.2:
         if latin_count > arabic_count * 0.3:
             return "mixed"
@@ -90,7 +232,7 @@ def detect_language(text: str) -> str:
 def normalize_arabic(text: str) -> str:
     """
     Normalize Arabic text for better matching.
-    
+
     - Remove diacritics (tashkeel)
     - Normalize alef variations (أ إ آ ا → ا)
     - Normalize taa marbuta (ة → ه)
@@ -98,30 +240,30 @@ def normalize_arabic(text: str) -> str:
     """
     if not text:
         return ""
-    
+
     # Remove diacritics
-    result = _RE_ARABIC_DIACRITICS.sub('', text)
-    
+    result = _RE_ARABIC_DIACRITICS.sub("", text)
+
     # Normalize alef variations
-    result = re.sub(r'[أإآٱ]', 'ا', result)
-    
+    result = re.sub(r"[أإآٱ]", "ا", result)
+
     # Normalize taa marbuta
-    result = result.replace('ة', 'ه')
-    
+    result = result.replace("ة", "ه")
+
     # Normalize alef maksura
-    result = result.replace('ى', 'ي')
-    
+    result = result.replace("ى", "ي")
+
     return result
 
 
-def tokenize_arabic(text: str, remove_stopwords: bool = True) -> List[str]:
+def tokenize_arabic(text: str, remove_stopwords: bool = True) -> list[str]:
     """
     Tokenize Arabic text with proper handling.
-    
+
     Arabic morphology is complex:
     - Agglutinative: prefixes (و, ب, ف, ل, ك) + root + suffixes
     - Rich morphology based on trilateral roots
-    
+
     Strategy:
     - Normalize text first
     - Split by whitespace and punctuation
@@ -130,10 +272,10 @@ def tokenize_arabic(text: str, remove_stopwords: bool = True) -> List[str]:
     """
     if not text:
         return []
-    
+
     # Normalize
     normalized = normalize_arabic(text.lower())
-    
+
     # Extract Arabic words
     arabic_tokens = []
     for run in _RE_ARABIC_RUN.findall(normalized):
@@ -143,27 +285,27 @@ def tokenize_arabic(text: str, remove_stopwords: bool = True) -> List[str]:
             word = word.strip()
             if not word or len(word) < 2:
                 continue
-            
+
             # Remove stopwords if enabled
             if remove_stopwords and word in ARABIC_STOPWORDS:
                 continue
-            
+
             arabic_tokens.append(word)
-            
+
             # For common prefixes, also add the word without prefix
             # This helps match "والصلاة" with "صلاة"
             if len(word) > 3:
-                for prefix in ['و', 'ف', 'ب', 'ل', 'ك', 'ال', 'وال', 'فال', 'بال', 'لل']:
+                for prefix in ["و", "ف", "ب", "ل", "ك", "ال", "وال", "فال", "بال", "لل"]:
                     if word.startswith(prefix):
-                        stem = word[len(prefix):]
+                        stem = word[len(prefix) :]
                         if len(stem) >= 2 and stem not in ARABIC_STOPWORDS:
                             arabic_tokens.append(stem)
                         break
-    
+
     return arabic_tokens
 
 
-def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = False) -> List[str]:
+def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = False) -> list[str]:
     """
     Tokenize text for multilingual lexical search (BM25).
 
@@ -172,12 +314,12 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
     - CJK: whole run, bigrams, and single characters
     - Arabic: normalized words with prefix handling
     - Quoted phrases: kept intact
-    
+
     Args:
         text: Input text to tokenize
         keep_original: If True, include the original query as a token
         remove_stopwords: If True, filter out common stopwords
-    
+
     Returns:
         List of tokens for BM25 scoring
     """
@@ -185,31 +327,31 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
     if not t:
         return []
 
-    tokens: List[str] = []
-    
+    tokens: list[str] = []
+
     # Keep the original query for exact matching
     if keep_original and len(t) > 1:
         tokens.append(t.lower())
-    
+
     # Extract quoted phrases first
     for match in _RE_QUOTED.finditer(t):
         phrase = match.group(1).strip()
         if phrase:
             tokens.append(phrase.lower())
-    
+
     # Remove quotes for further processing
-    t_clean = _RE_QUOTED.sub(' ', t).lower()
-    
+    t_clean = _RE_QUOTED.sub(" ", t).lower()
+
     # Detect language for optimal processing
-    lang = detect_language(t_clean)
-    
+    detect_language(t_clean)
+
     # Extract Latin words (including hyphenated like Q-Flow)
     latin_words = _RE_LATIN_WORD.findall(t_clean)
     for word in latin_words:
         if remove_stopwords and word.lower() in ENGLISH_STOPWORDS:
             continue
         tokens.append(word)
-    
+
     # For CJK, include whole run + bigrams + single characters
     for run in _RE_CJK_RUN.findall(t_clean):
         # Add whole CJK phrase for exact matching
@@ -217,10 +359,10 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
             tokens.append(run)
             # Add bigrams (e.g., 智能, 知识) for better matching
             for i in range(len(run) - 1):
-                tokens.append(run[i:i + 2])
+                tokens.append(run[i : i + 2])
         # Also add individual characters
         tokens.extend(list(run))
-    
+
     # Process Arabic text
     arabic_tokens = tokenize_arabic(t_clean, remove_stopwords=remove_stopwords)
     tokens.extend(arabic_tokens)
@@ -232,7 +374,7 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
         if tok and tok not in seen:
             seen.add(tok)
             result.append(tok)
-    
+
     return result
 
 
@@ -242,7 +384,7 @@ def bm25_scores(
     *,
     k1: float = 1.2,
     b: float = 0.75,
-) -> List[float]:
+) -> list[float]:
     """Calculate BM25 scores for documents against query tokens."""
     if not documents_tokens:
         return []
@@ -251,7 +393,7 @@ def bm25_scores(
 
     N = len(documents_tokens)
     df: Counter[str] = Counter()
-    doc_lens: List[int] = []
+    doc_lens: list[int] = []
 
     for doc in documents_tokens:
         terms = [t for t in doc if t]
@@ -262,7 +404,7 @@ def bm25_scores(
     avgdl = sum(doc_lens) / max(N, 1)
     q_terms = list(Counter([t for t in query_tokens if t]).keys())
 
-    scores: List[float] = []
+    scores: list[float] = []
     for doc in documents_tokens:
         tf = Counter([t for t in doc if t])
         dl = len(doc)
@@ -285,12 +427,12 @@ def compute_text_match_score(
     *,
     exact_match_boost: float = 5.0,  # Increased from 2.0 for bigger score gaps
     term_match_weight: float = 0.3,
-) -> Tuple[float, Dict[str, Any]]:
+) -> tuple[float, dict[str, Any]]:
     """Compute a text matching score based on exact and term matches.
-    
+
     Returns:
         (score, debug_info) where score is 0.0-1.0 normalized
-        
+
     Score interpretation:
     - 1.0: Exact query match found in text
     - 0.5-0.9: High term match ratio
@@ -299,28 +441,31 @@ def compute_text_match_score(
     """
     if not query or not text:
         return 0.0, {"exact_match": False, "term_matches": 0, "term_ratio": 0.0}
-    
+
     query_lower = query.lower().strip()
     text_lower = text.lower()
-    
+
     # Check exact query match (the whole query appears in the text)
     exact_match = query_lower in text_lower
-    
+
     # Also check for partial exact match (each word matches exactly)
     query_words = query_lower.split()
     partial_exact = all(w in text_lower for w in query_words) if query_words else False
-    
+
     # Extract meaningful terms from query (>1 char)
-    query_terms = [t.strip() for t in re.split(r'[\s\"\'\-\(\)\[\]，。：；！？]+', query_lower) 
-                   if t.strip() and len(t.strip()) > 1]
-    
+    query_terms = [
+        t.strip()
+        for t in re.split(r"[\s\"\'\-\(\)\[\]，。：；！？]+", query_lower)
+        if t.strip() and len(t.strip()) > 1
+    ]
+
     if not query_terms:
         query_terms = [query_lower] if len(query_lower) > 1 else []
-    
+
     # Count term matches
     term_matches = sum(1 for t in query_terms if t in text_lower)
     term_ratio = term_matches / max(len(query_terms), 1)
-    
+
     # Calculate score with larger gaps between match types
     score = 0.0
     if exact_match:
@@ -335,7 +480,7 @@ def compute_text_match_score(
         score = term_ratio * 0.4  # Low term ratio
     else:
         score = 0.0  # No matches
-    
+
     return score, {
         "exact_match": exact_match,
         "partial_exact": partial_exact,
@@ -346,31 +491,31 @@ def compute_text_match_score(
 
 
 def reciprocal_rank_fusion(
-    ranked_lists: Dict[str, List[str]],
+    ranked_lists: dict[str, list[str]],
     *,
     k: int = 60,
-    weights: Optional[Dict[str, float]] = None,
-) -> Dict[str, float]:
+    weights: dict[str, float] | None = None,
+) -> dict[str, float]:
     """
     Reciprocal Rank Fusion (RRF) for combining ranked lists.
-    
+
     RRF is preferred over score normalization because:
     - More stable across different score distributions
     - Immune to outliers that distort min-max normalization
     - Works well when score scales differ (BM25 vs cosine similarity)
-    
+
     Formula: RRF(d) = Σ (weight_i / (k + rank_i(d)))
-    
+
     Args:
         ranked_lists: Dict mapping source name to list of document IDs (ranked)
         k: RRF constant (typically 60)
         weights: Optional weights per source
-    
+
     Returns:
         Dict mapping document ID to fused RRF score
     """
     weights = weights or {}
-    fused: Dict[str, float] = defaultdict(float)
+    fused: dict[str, float] = defaultdict(float)
     for source, ids in (ranked_lists or {}).items():
         w = float(weights.get(source, 1.0))
         for rank, item_id in enumerate(ids, start=1):
@@ -384,170 +529,154 @@ def reciprocal_rank_fusion(
 # Score Normalization Strategies (Best Practice 2025)
 # =============================================================================
 
+
 class ScoreNormalization:
     """
     Score normalization strategies for hybrid search.
-    
+
     Best practices from OpenSearch and Azure Cognitive Search:
     - Min-max: Simple but sensitive to outliers
     - L2: More robust but can compress score ranges
     - Sigmoid: Good for converting arbitrary scores to [0,1]
     - Percentile: Robust to outliers, good for diverse distributions
     """
-    
+
     @staticmethod
     def min_max(
-        scores: Dict[str, float],
-        min_val: Optional[float] = None,
-        max_val: Optional[float] = None
-    ) -> Dict[str, float]:
+        scores: dict[str, float], min_val: float | None = None, max_val: float | None = None
+    ) -> dict[str, float]:
         """
         Min-max normalization to [0, 1].
-        
+
         Formula: (score - min) / (max - min)
-        
+
         Note: Sensitive to outliers. A single very high score
         can compress all other scores to near 0.
         """
         if not scores:
             return {}
-        
+
         values = list(scores.values())
         actual_min = min_val if min_val is not None else min(values)
         actual_max = max_val if max_val is not None else max(values)
-        
+
         range_val = actual_max - actual_min
         if range_val < 1e-9:
             # All scores are the same
-            return {k: 0.5 for k in scores}
-        
-        return {
-            k: (v - actual_min) / range_val
-            for k, v in scores.items()
-        }
-    
+            return dict.fromkeys(scores, 0.5)
+
+        return {k: (v - actual_min) / range_val for k, v in scores.items()}
+
     @staticmethod
-    def l2_normalize(scores: Dict[str, float]) -> Dict[str, float]:
+    def l2_normalize(scores: dict[str, float]) -> dict[str, float]:
         """
         L2 normalization (unit vector).
-        
+
         Formula: score / sqrt(sum(score^2))
-        
+
         Good for cosine similarity scores.
         """
         if not scores:
             return {}
-        
+
         l2_norm = math.sqrt(sum(v * v for v in scores.values()))
         if l2_norm < 1e-9:
-            return {k: 0.0 for k in scores}
-        
+            return dict.fromkeys(scores, 0.0)
+
         return {k: v / l2_norm for k, v in scores.items()}
-    
+
     @staticmethod
     def sigmoid_normalize(
-        scores: Dict[str, float],
-        center: float = 0.5,
-        scale: float = 1.0
-    ) -> Dict[str, float]:
+        scores: dict[str, float], center: float = 0.5, scale: float = 1.0
+    ) -> dict[str, float]:
         """
         Sigmoid normalization for smooth mapping to [0, 1].
-        
+
         Formula: 1 / (1 + exp(-(score - center) * scale))
-        
+
         Useful for BM25 scores which can have wide ranges.
         """
         if not scores:
             return {}
-        
-        return {
-            k: 1.0 / (1.0 + math.exp(-(v - center) * scale))
-            for k, v in scores.items()
-        }
-    
+
+        return {k: 1.0 / (1.0 + math.exp(-(v - center) * scale)) for k, v in scores.items()}
+
     @staticmethod
-    def percentile_normalize(scores: Dict[str, float]) -> Dict[str, float]:
+    def percentile_normalize(scores: dict[str, float]) -> dict[str, float]:
         """
         Percentile-based normalization.
-        
+
         Maps each score to its percentile rank in the distribution.
         Very robust to outliers.
         """
         if not scores:
             return {}
-        
+
         if len(scores) == 1:
-            return {k: 0.5 for k in scores}
-        
+            return dict.fromkeys(scores, 0.5)
+
         # Sort scores to compute percentiles
         sorted_items = sorted(scores.items(), key=lambda x: x[1])
         n = len(sorted_items)
-        
-        return {
-            k: (i + 1) / n
-            for i, (k, _) in enumerate(sorted_items)
-        }
-    
+
+        return {k: (i + 1) / n for i, (k, _) in enumerate(sorted_items)}
+
     @staticmethod
     def robust_normalize(
-        scores: Dict[str, float],
-        clip_percentile: float = 0.05
-    ) -> Dict[str, float]:
+        scores: dict[str, float], clip_percentile: float = 0.05
+    ) -> dict[str, float]:
         """
         Robust min-max normalization with outlier clipping.
-        
+
         Clips extreme values at specified percentiles before normalizing.
         Default clips at 5th and 95th percentiles.
         """
         if not scores:
             return {}
-        
+
         values = sorted(scores.values())
         n = len(values)
-        
+
         if n < 2:
-            return {k: 0.5 for k in scores}
-        
+            return dict.fromkeys(scores, 0.5)
+
         # Compute percentile bounds
         low_idx = max(0, int(n * clip_percentile))
         high_idx = min(n - 1, int(n * (1 - clip_percentile)))
-        
+
         low_val = values[low_idx]
         high_val = values[high_idx]
-        
+
         range_val = high_val - low_val
         if range_val < 1e-9:
-            return {k: 0.5 for k in scores}
-        
-        return {
-            k: max(0.0, min(1.0, (v - low_val) / range_val))
-            for k, v in scores.items()
-        }
+            return dict.fromkeys(scores, 0.5)
+
+        return {k: max(0.0, min(1.0, (v - low_val) / range_val)) for k, v in scores.items()}
 
 
 def normalize_hybrid_scores(
-    dense_scores: Dict[str, float],
-    bm25_scores: Dict[str, float],
+    dense_scores: dict[str, float],
+    bm25_scores: dict[str, float],
     method: str = "robust",
     dense_weight: float = 0.7,
     bm25_weight: float = 0.3,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Normalize and combine dense and BM25 scores for hybrid search.
-    
+
     Best Practice (2025):
     - Use RRF for rank-based fusion (preferred)
     - Use robust normalization for score-based fusion
     - Dense typically weighted higher (0.6-0.8) for semantic queries
     - BM25 weighted higher (0.4-0.6) for exact keyword matches
-    
+
     Args:
         dense_scores: Dict of document_id -> dense similarity score
         bm25_scores: Dict of document_id -> BM25 score
         method: Normalization method ("minmax", "robust", "percentile", "sigmoid")
         dense_weight: Weight for dense scores [0, 1]
         bm25_weight: Weight for BM25 scores [0, 1]
-    
+
     Returns:
         Dict of document_id -> combined score
     """
@@ -557,23 +686,25 @@ def normalize_hybrid_scores(
     elif method == "percentile":
         normalize = ScoreNormalization.percentile_normalize
     elif method == "sigmoid":
-        normalize = lambda s: ScoreNormalization.sigmoid_normalize(s, center=0.5, scale=2.0)
+
+        def normalize(s):
+            return ScoreNormalization.sigmoid_normalize(s, center=0.5, scale=2.0)
     else:  # "robust" is default
         normalize = ScoreNormalization.robust_normalize
-    
+
     # Normalize each score set
     dense_norm = normalize(dense_scores) if dense_scores else {}
     bm25_norm = normalize(bm25_scores) if bm25_scores else {}
-    
+
     # Get all document IDs
     all_ids = set(dense_norm.keys()) | set(bm25_norm.keys())
-    
+
     # Combine scores
     combined = {}
     for doc_id in all_ids:
         d_score = dense_norm.get(doc_id)
         b_score = bm25_norm.get(doc_id)
-        
+
         if d_score is not None and b_score is not None:
             # Both scores available: weighted sum
             combined[doc_id] = d_score * dense_weight + b_score * bm25_weight
@@ -583,7 +714,7 @@ def normalize_hybrid_scores(
         else:
             # Only BM25 score
             combined[doc_id] = b_score * bm25_weight
-    
+
     return combined
 
 
@@ -591,20 +722,20 @@ def compute_language_weights(
     query: str,
     default_dense_weight: float = 0.7,
     default_bm25_weight: float = 0.3,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """
     Adjust fusion weights based on detected query language.
-    
+
     Rationale:
     - Arabic: Higher BM25 weight due to complex morphology benefiting from exact matches
     - English: Balanced weights, semantic search works well
     - Chinese: Higher dense weight, semantic embeddings handle well
-    
+
     Returns:
         (dense_weight, bm25_weight)
     """
     lang = detect_language(query)
-    
+
     if lang == "ar":
         # Arabic: boost BM25 for morphological matching
         return 0.55, 0.45
@@ -627,7 +758,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     dot = 0.0
     na = 0.0
     nb = 0.0
-    for x, y in zip(a, b):
+    for x, y in zip(a, b, strict=False):
         dot += float(x) * float(y)
         na += float(x) * float(x)
         nb += float(y) * float(y)
@@ -645,14 +776,14 @@ class MMRPick:
 
 
 def mmr_select(
-    candidates: List[str],
-    relevance: Dict[str, float],
-    vectors: Dict[str, Sequence[float]],
+    candidates: list[str],
+    relevance: dict[str, float],
+    vectors: dict[str, Sequence[float]],
     *,
     top_k: int,
     lambda_mult: float = 0.5,
-    similarity_threshold: Optional[float] = None,
-) -> Tuple[List[str], Dict[str, MMRPick]]:
+    similarity_threshold: float | None = None,
+) -> tuple[list[str], dict[str, MMRPick]]:
     """MMR selection (diversify while keeping relevance).
 
     Returns (selected_ids, pick_info_by_id).
@@ -665,8 +796,8 @@ def mmr_select(
     threshold = float(similarity_threshold) if similarity_threshold is not None else None
 
     remaining = [c for c in candidates if c]
-    selected: List[str] = []
-    picks: Dict[str, MMRPick] = {}
+    selected: list[str] = []
+    picks: dict[str, MMRPick] = {}
 
     def max_sim(cid: str) -> float:
         if not selected:
@@ -683,7 +814,7 @@ def mmr_select(
         return float(best)
 
     while remaining and len(selected) < int(top_k):
-        best_id: Optional[str] = None
+        best_id: str | None = None
         best_mmr = -1e30
         best_rel = 0.0
         best_sim = 0.0
@@ -714,4 +845,3 @@ def mmr_select(
         )
 
     return selected, picks
-

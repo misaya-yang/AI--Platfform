@@ -24,19 +24,19 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ....config.settings import Settings
 from ....core.auth.user_resolver import UserContext
-from .client import ConfluenceClient, ConfluenceAPIError
+from .client import ConfluenceAPIError, ConfluenceClient
 from .models import (
     ConfluenceCredentials,
     ConfluencePage,
     ConfluenceSpace,
-    SyncResult,
     ImageSegment,
+    SyncResult,
 )
-from .parser import extract_plain_text, extract_markdown
+from .parser import extract_markdown, extract_plain_text
 
 if TYPE_CHECKING:
     from ....persistence.database import DatabaseStorage
@@ -49,16 +49,19 @@ def _utc_now() -> datetime:
     """Get current UTC time as naive datetime for consistent DB storage."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+
 logger = logging.getLogger(__name__)
 
 
 class ConfluenceSyncError(Exception):
     """Confluence 同步错误"""
+
     pass
 
 
 class ConfluenceAccessDeniedError(Exception):
     """Confluence 资源访问被拒绝"""
+
     def __init__(self, resource_type: str, resource_id: str):
         self.resource_type = resource_type
         self.resource_id = resource_id
@@ -80,27 +83,27 @@ class ConfluenceSyncService:
     def __init__(
         self,
         settings: Settings,
-        database: "DatabaseStorage",
-        knowledge_service: "KnowledgeService",
-        knowledge_worker: Optional["KnowledgeWorker"] = None,
-        image_processor: Optional["ConfluenceImageProcessor"] = None,
-        image_storage_service: Optional[Any] = None,
-        vlm_service: Optional[Any] = None,
+        database: DatabaseStorage,
+        knowledge_service: KnowledgeService,
+        knowledge_worker: KnowledgeWorker | None = None,
+        image_processor: ConfluenceImageProcessor | None = None,
+        image_storage_service: Any | None = None,
+        vlm_service: Any | None = None,
     ):
         self.settings = settings
         self.db = database
         self.knowledge_service = knowledge_service
         self.worker = knowledge_worker
         self.image_processor = image_processor
-        self._clients: Dict[str, ConfluenceClient] = {}
-        self._client_created_at: Dict[str, float] = {}  # Track client creation time for TTL
-        self._client_locks: Dict[str, asyncio.Lock] = {}  # Prevent race conditions
+        self._clients: dict[str, ConfluenceClient] = {}
+        self._client_created_at: dict[str, float] = {}  # Track client creation time for TTL
+        self._client_locks: dict[str, asyncio.Lock] = {}  # Prevent race conditions
         self._client_cache_ttl = getattr(settings.confluence, "client_cache_ttl_seconds", 300)
 
         # 图片处理相关服务 (Text-First RAG: 不再需要 multimodal_embedding)
         self._image_storage_service = image_storage_service
         self._vlm_service = vlm_service
-        self._image_processors: Dict[str, "ConfluenceImageProcessor"] = {}
+        self._image_processors: dict[str, ConfluenceImageProcessor] = {}
 
         # 检查 Worker 状态，如果未提供则记录警告
         if not knowledge_worker:
@@ -154,7 +157,7 @@ class ConfluenceSyncService:
         self,
         doc_id: str,
         new_confluence_version: int,
-        change_reason: Optional[str] = None,
+        change_reason: str | None = None,
     ) -> None:
         """
         Save current document content as a version before updating.
@@ -192,7 +195,8 @@ class ConfluenceSyncService:
                 change_type="updated",
                 title=current_doc.get("title"),
                 metadata=current_doc.get("metadata"),
-                change_reason=change_reason or f"Confluence sync (version {new_confluence_version})",
+                change_reason=change_reason
+                or f"Confluence sync (version {new_confluence_version})",
                 confluence_version=current_doc.get("confluence_version"),
                 confluence_updated_at=current_doc.get("updated_at"),
             )
@@ -278,7 +282,7 @@ class ConfluenceSyncService:
 
     def _verify_confluence_access(
         self,
-        resource: Dict[str, Any],
+        resource: dict[str, Any],
         resource_type: str,
         user: UserContext,
     ) -> None:
@@ -316,7 +320,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         验证用户对 binding 的访问权限并返回 binding 数据
 
@@ -341,7 +345,7 @@ class ConfluenceSyncService:
         self,
         connection_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         验证用户对 connection 的访问权限并返回 connection 数据
 
@@ -366,7 +370,7 @@ class ConfluenceSyncService:
         self,
         page_record_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         验证用户对 page record 的访问权限并返回 page 数据
 
@@ -401,7 +405,7 @@ class ConfluenceSyncService:
         self,
         page_record_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         获取页面记录并验证访问权限
 
@@ -421,8 +425,8 @@ class ConfluenceSyncService:
         return await self._verify_page_access(page_record_id, user)
 
     async def _get_image_processor(
-        self, connection_id: str, max_image_size: Optional[int] = None
-    ) -> Optional["ConfluenceImageProcessor"]:
+        self, connection_id: str, max_image_size: int | None = None
+    ) -> ConfluenceImageProcessor | None:
         """
         获取或创建指定连接的图片处理器
 
@@ -495,8 +499,7 @@ class ConfluenceSyncService:
         """使客户端缓存失效"""
         if connection_id in self._clients:
             self._create_background_task(
-                self._clients[connection_id].close(),
-                name=f"close-client-{connection_id[:8]}"
+                self._clients[connection_id].close(), name=f"close-client-{connection_id[:8]}"
             )
             del self._clients[connection_id]
         self._client_created_at.pop(connection_id, None)
@@ -512,8 +515,8 @@ class ConfluenceSyncService:
         api_token: str,
         sync_mode: str = "manual",
         polling_interval_minutes: int = 60,
-        created_by: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
         """
         创建 Confluence 连接
 
@@ -535,7 +538,9 @@ class ConfluenceSyncService:
         async with ConfluenceClient(credentials) as client:
             test_result = await client.test_connection()
             if test_result["status"] != "success":
-                raise ConfluenceSyncError(f"Connection validation failed: {test_result.get('message')}")
+                raise ConfluenceSyncError(
+                    f"Connection validation failed: {test_result.get('message')}"
+                )
 
         connection_id = str(uuid.uuid4())
         connection = {
@@ -560,7 +565,7 @@ class ConfluenceSyncService:
         connection_id: str,
         tenant_id: str,
         **updates,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """更新连接配置"""
         connection = await self.db.get_confluence_connection(connection_id)
         if not connection:
@@ -580,7 +585,9 @@ class ConfluenceSyncService:
             async with ConfluenceClient(credentials) as client:
                 test_result = await client.test_connection()
                 if test_result["status"] != "success":
-                    raise ConfluenceSyncError(f"Connection validation failed: {test_result.get('message')}")
+                    raise ConfluenceSyncError(
+                        f"Connection validation failed: {test_result.get('message')}"
+                    )
 
             # 使缓存失效
             self._invalidate_client(connection_id)
@@ -600,7 +607,7 @@ class ConfluenceSyncService:
         self._invalidate_client(connection_id)
         return await self.db.delete_confluence_connection(connection_id)
 
-    async def test_connection(self, connection_id: str, tenant_id: str) -> Dict[str, Any]:
+    async def test_connection(self, connection_id: str, tenant_id: str) -> dict[str, Any]:
         """测试连接"""
         try:
             connection = await self.db.get_confluence_connection(connection_id)
@@ -617,10 +624,7 @@ class ConfluenceSyncService:
             if result["status"] == "success":
                 spaces = await client.list_spaces(limit=5)
                 result["spaces_count"] = len(spaces)
-                result["sample_spaces"] = [
-                    {"key": s.space_key, "name": s.name}
-                    for s in spaces[:3]
-                ]
+                result["sample_spaces"] = [{"key": s.space_key, "name": s.name} for s in spaces[:3]]
 
             return result
         except Exception as e:
@@ -629,9 +633,9 @@ class ConfluenceSyncService:
     async def list_connections(
         self,
         user: UserContext,
-        tenant_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        tenant_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         列出连接
 
@@ -651,15 +655,14 @@ class ConfluenceSyncService:
 
         # 普通用户只能看到自己创建的
         return [
-            c for c in connections
-            if (c.get("owner_id") or c.get("created_by")) == user.user_id
+            c for c in connections if (c.get("owner_id") or c.get("created_by")) == user.user_id
         ]
 
     async def get_connection(
         self,
         connection_id: str,
         user: UserContext,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         获取连接详情
 
@@ -681,8 +684,8 @@ class ConfluenceSyncService:
         self,
         connection_id: str,
         tenant_id: str,
-        type_filter: Optional[str] = None,
-    ) -> List["ConfluenceSpace"]:
+        type_filter: str | None = None,
+    ) -> list[ConfluenceSpace]:
         """发现可用的空间"""
         connection = await self.db.get_confluence_connection(connection_id)
         if not connection:
@@ -699,7 +702,7 @@ class ConfluenceSyncService:
         connection_id: str,
         space_key: str,
         limit: int = 50,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """预览空间中的页面"""
         client = await self._get_client(connection_id)
         space = await client.get_space_by_key(space_key)
@@ -707,12 +710,14 @@ class ConfluenceSyncService:
         pages = []
         count = 0
         async for page_data in client.iter_space_pages(space.space_id, batch_size=25):
-            pages.append({
-                "page_id": page_data.get("id"),
-                "title": page_data.get("title"),
-                "status": page_data.get("status"),
-                "version": page_data.get("version", {}).get("number"),
-            })
+            pages.append(
+                {
+                    "page_id": page_data.get("id"),
+                    "title": page_data.get("title"),
+                    "status": page_data.get("status"),
+                    "version": page_data.get("version", {}).get("number"),
+                }
+            )
             count += 1
             if count >= limit:
                 break
@@ -725,7 +730,7 @@ class ConfluenceSyncService:
         tenant_id: str,
         space_key: str,
         max_depth: int = 3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         发现空间中的页面层级结构
 
@@ -752,7 +757,7 @@ class ConfluenceSyncService:
         domain = connection["domain"]
 
         # 获取所有页面
-        all_pages: Dict[str, Dict[str, Any]] = {}
+        all_pages: dict[str, dict[str, Any]] = {}
         async for page_data in client.iter_space_pages(space.space_id, batch_size=50):
             page_id = str(page_data.get("id"))
             # 构建完整的 web_url（API 返回的是相对路径）
@@ -780,7 +785,7 @@ class ConfluenceSyncService:
                 root_pages.append(page)
 
         # 计算深度并裁剪
-        def set_depth_and_trim(node: Dict[str, Any], depth: int) -> None:
+        def set_depth_and_trim(node: dict[str, Any], depth: int) -> None:
             node["depth"] = depth
             if depth >= max_depth:
                 # 当裁剪子节点时，标记有更多子节点被截断
@@ -798,7 +803,7 @@ class ConfluenceSyncService:
             set_depth_and_trim(root, 0)
 
         # 按标题排序
-        def sort_children(node: Dict[str, Any]) -> None:
+        def sort_children(node: dict[str, Any]) -> None:
             node["children"].sort(key=lambda x: x.get("title", ""))
             for child in node["children"]:
                 sort_children(child)
@@ -820,13 +825,13 @@ class ConfluenceSyncService:
         self,
         url: str,
         dataset_id: str,
-        connection_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        created_by: Optional[str] = None,
+        connection_id: str | None = None,
+        tenant_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_by: str | None = None,
         include_children: bool = False,
         max_depth: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         从 Confluence URL 导入页面
 
@@ -908,7 +913,9 @@ class ConfluenceSyncService:
                     )
                     if self.worker:
                         await self.worker.enqueue(dataset_id, child_doc["document_id"])
-                    child_docs.append({"document_id": child_doc["document_id"], "title": child_doc.get("title")})
+                    child_docs.append(
+                        {"document_id": child_doc["document_id"], "title": child_doc.get("title")}
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to import child page {child.get('id')}: {e}")
 
@@ -922,13 +929,13 @@ class ConfluenceSyncService:
         dataset_id: str,
         connection_id: str,
         page: ConfluencePage,
-        binding_id: Optional[str] = None,
-        created_by: Optional[str] = None,
-        extra_metadata: Optional[Dict[str, Any]] = None,
+        binding_id: str | None = None,
+        created_by: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
         sync_images: bool = True,
-        tenant_id: Optional[str] = None,
-        image_max_size_bytes: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        tenant_id: str | None = None,
+        image_max_size_bytes: int | None = None,
+    ) -> dict[str, Any]:
         """从 Confluence 页面创建文档"""
         # 检查 body_storage 是否为空
         if not page.body_storage or not page.body_storage.strip():
@@ -1037,7 +1044,9 @@ class ConfluenceSyncService:
                             )
                             # Store image segments in database
                             for idx, segment in enumerate(image_result.segments):
-                                await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
+                                await self._save_image_segment(
+                                    segment, dataset_id, binding_id, position=idx
+                                )
                             doc["image_count"] = image_result.processed_images
 
                             # 修复：更新 confluence_pages 表的 image_count
@@ -1059,7 +1068,7 @@ class ConfluenceSyncService:
         self,
         segment: ImageSegment,
         dataset_id: str,
-        binding_id: Optional[str] = None,
+        binding_id: str | None = None,
         position: int = 0,
     ) -> None:
         """
@@ -1095,7 +1104,9 @@ class ConfluenceSyncService:
                             from ..embedding import create_embedding
 
                             embedding_provider = str(dataset.get("embedding_provider") or "gemini")
-                            embedding_model = str(dataset.get("embedding_model") or "gemini-embedding-001")
+                            embedding_model = str(
+                                dataset.get("embedding_model") or "gemini-embedding-001"
+                            )
                             embedding_config = dataset.get("embedding_config") or {}
                             if not isinstance(embedding_config, dict):
                                 embedding_config = {}
@@ -1110,12 +1121,10 @@ class ConfluenceSyncService:
                             vector = None
 
                             # Text-First RAG: Always use text embedding for VLM descriptions
-                            embedder = create_embedding(
-                                econf, dimension=collection_dim or None
-                            )
+                            embedder = create_embedding(econf, dimension=collection_dim or None)
                             try:
                                 # For Gemini, use text_type="document" for optimal retrieval
-                                if hasattr(embedder, 'embed_texts'):
+                                if hasattr(embedder, "embed_texts"):
                                     vectors = await embedder.embed_texts(
                                         [text_content], text_type="document"
                                     )
@@ -1147,11 +1156,13 @@ class ConfluenceSyncService:
                                 # Upsert to Qdrant
                                 await self.knowledge_service.vector_store.upsert(
                                     collection_name=collection,
-                                    points=[qmodels.PointStruct(
-                                        id=vector_id,
-                                        vector=vector,
-                                        payload=payload,
-                                    )],
+                                    points=[
+                                        qmodels.PointStruct(
+                                            id=vector_id,
+                                            vector=vector,
+                                            payload=payload,
+                                        )
+                                    ],
                                 )
                                 logger.info(
                                     f"Stored image vector in Qdrant: {segment.filename} "
@@ -1165,7 +1176,9 @@ class ConfluenceSyncService:
             metadata = {
                 **segment.metadata,
                 "has_vlm_description": bool(segment.vlm_description),
-                "vlm_description_length": len(segment.vlm_description) if segment.vlm_description else 0,
+                "vlm_description_length": len(segment.vlm_description)
+                if segment.vlm_description
+                else 0,
                 "vector_stored": vector_id is not None,
                 "source_position": position,
             }
@@ -1224,8 +1237,7 @@ class ConfluenceSyncService:
             # 获取 Confluence 当前附件
             client = await self._get_client(connection_id)
             current_attachments = await client.get_page_image_attachments(
-                page_id=page_id,
-                embeddable_only=True
+                page_id=page_id, embeddable_only=True
             )
 
             if not current_attachments:
@@ -1285,11 +1297,11 @@ class ConfluenceSyncService:
         self,
         document_id: str,
         connection_id: str,
-        page: "ConfluencePage",
+        page: ConfluencePage,
         dataset_id: str,
         tenant_id: str,
-        binding_id: Optional[str] = None,
-        image_max_size_bytes: Optional[int] = None,
+        binding_id: str | None = None,
+        image_max_size_bytes: int | None = None,
     ) -> int:
         """
         重新处理文档的图片（先删除旧图片）
@@ -1366,16 +1378,16 @@ class ConfluenceSyncService:
         tenant_id: str,
         dataset_id: str,
         space_key: str,
-        root_page_ids: Optional[List[str]] = None,
-        include_patterns: Optional[List[str]] = None,
-        exclude_patterns: Optional[List[str]] = None,
+        root_page_ids: list[str] | None = None,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
         max_depth: int = 10,
         include_attachments: bool = False,
         include_comments: bool = False,
         sync_images: bool = True,
         image_max_size_bytes: int = 3 * 1024 * 1024,  # 3 MB
-        created_by: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
         """
         创建空间绑定
 
@@ -1518,10 +1530,10 @@ class ConfluenceSyncService:
     async def list_bindings(
         self,
         user: UserContext,
-        connection_id: Optional[str] = None,
-        tenant_id: Optional[str] = None,
-        dataset_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        connection_id: str | None = None,
+        tenant_id: str | None = None,
+        dataset_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         列出空间绑定
 
@@ -1545,19 +1557,16 @@ class ConfluenceSyncService:
             return bindings
 
         # 普通用户只能看到自己创建的
-        return [
-            b for b in bindings
-            if (b.get("owner_id") or b.get("created_by")) == user.user_id
-        ]
+        return [b for b in bindings if (b.get("owner_id") or b.get("created_by")) == user.user_id]
 
     async def list_all_bindings(
         self,
         user: UserContext,
         tenant_id: str,
-        connection_id: Optional[str] = None,
-        dataset_id: Optional[str] = None,
-        status: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        connection_id: str | None = None,
+        dataset_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         列出租户下所有空间绑定（带过滤）
 
@@ -1580,8 +1589,7 @@ class ConfluenceSyncService:
         # Admin 可见全部，普通用户只能看到自己创建的
         if user.tier != "admin":
             bindings = [
-                b for b in bindings
-                if (b.get("owner_id") or b.get("created_by")) == user.user_id
+                b for b in bindings if (b.get("owner_id") or b.get("created_by")) == user.user_id
             ]
 
         # Filter by status if specified
@@ -1593,7 +1601,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         user: UserContext,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         获取空间绑定详情
 
@@ -1624,16 +1632,19 @@ class ConfluenceSyncService:
         total_count = len(pages)
         synced_count = sum(1 for p in pages if p.get("status") == "synced")
 
-        await self.db.update_confluence_binding(binding_id, {
-            "total_page_count": total_count,
-            "synced_page_count": synced_count,
-        })
+        await self.db.update_confluence_binding(
+            binding_id,
+            {
+                "total_page_count": total_count,
+                "synced_page_count": synced_count,
+            },
+        )
 
     async def update_binding(
         self,
         binding_id: str,
         **updates,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         更新空间绑定配置
 
@@ -1650,11 +1661,20 @@ class ConfluenceSyncService:
 
         # 过滤允许更新的字段
         allowed_fields = {
-            "root_page_id", "root_page_ids", "root_page_titles",  # 支持多选根页面
-            "include_patterns", "exclude_patterns", "max_depth",
-            "include_attachments", "include_comments", "status",
-            "sync_images", "image_max_size_bytes",  # 图片同步配置
-            "sync_mode", "polling_interval_minutes", "sync_enabled",  # 同步模式配置 (binding 级别)
+            "root_page_id",
+            "root_page_ids",
+            "root_page_titles",  # 支持多选根页面
+            "include_patterns",
+            "exclude_patterns",
+            "max_depth",
+            "include_attachments",
+            "include_comments",
+            "status",
+            "sync_images",
+            "image_max_size_bytes",  # 图片同步配置
+            "sync_mode",
+            "polling_interval_minutes",
+            "sync_enabled",  # 同步模式配置 (binding 级别)
         }
         filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
 
@@ -1662,7 +1682,7 @@ class ConfluenceSyncService:
         if "root_page_ids" in filtered_updates:
             raw_ids = filtered_updates.get("root_page_ids") or []
             root_page_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids]
-            root_page_titles: List[str] = []
+            root_page_titles: list[str] = []
             if root_page_ids:
                 connection_id = binding["connection_id"]
                 client = await self._get_client(connection_id)
@@ -1710,7 +1730,7 @@ class ConfluenceSyncService:
         client: ConfluenceClient,
         root_page_id: str,
         max_depth: int,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         递归获取页面及其所有子页面的 ID 列表
 
@@ -1781,8 +1801,7 @@ class ConfluenceSyncService:
 
         # 启动后台同步
         self._create_background_task(
-            self._sync_space_pages(binding_id, task_id),
-            name=f"sync-space-{binding_id[:8]}"
+            self._sync_space_pages(binding_id, task_id), name=f"sync-space-{binding_id[:8]}"
         )
 
         return SyncResult(
@@ -1805,7 +1824,7 @@ class ConfluenceSyncService:
 
         connection_id = binding["connection_id"]
         dataset_id = binding["dataset_id"]
-        space_id = binding["space_id"]
+        binding["space_id"]
         max_depth = binding.get("max_depth", 10)
 
         # 支持多选：优先使用 root_page_ids，向后兼容 root_page_id
@@ -1826,9 +1845,7 @@ class ConfluenceSyncService:
                 pages_to_sync = []
                 for rid in root_page_ids:
                     try:
-                        descendants = await self._get_page_descendants(
-                            client, rid, max_depth
-                        )
+                        descendants = await self._get_page_descendants(client, rid, max_depth)
                         pages_to_sync.extend(descendants)
                     except Exception as e:
                         logger.warning(f"Failed to get descendants for root page {rid}: {e}")
@@ -1843,26 +1860,35 @@ class ConfluenceSyncService:
                     # 没有已添加的页面，直接返回成功
                     logger.info(f"No pages added to binding {binding_id}, nothing to sync")
                     result.completed_at = _utc_now()
-                    await self.db.update_confluence_binding(binding_id, {
-                        "status": "completed",
-                        "last_sync_at": _utc_now(),
-                    })
-                    await self.db.update_confluence_sync_task(task_id, {
-                        "status": "completed",
-                        "progress": 100,
-                        "completed_at": _utc_now(),
-                        "result": result.to_dict(),
-                    })
+                    await self.db.update_confluence_binding(
+                        binding_id,
+                        {
+                            "status": "completed",
+                            "last_sync_at": _utc_now(),
+                        },
+                    )
+                    await self.db.update_confluence_sync_task(
+                        task_id,
+                        {
+                            "status": "completed",
+                            "progress": 100,
+                            "completed_at": _utc_now(),
+                            "result": result.to_dict(),
+                        },
+                    )
                     return result
 
             total_count = len(pages_to_sync)
             result.total_pages = total_count
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "processing",
-                "total_items": total_count,
-                "started_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "processing",
+                    "total_items": total_count,
+                    "started_at": _utc_now(),
+                },
+            )
 
             # 遍历并同步页面
             processed = 0
@@ -1912,7 +1938,9 @@ class ConfluenceSyncService:
                                                 dataset_id=dataset_id,
                                                 tenant_id=tenant_id,
                                                 binding_id=binding_id,
-                                                image_max_size_bytes=binding.get("image_max_size_bytes"),
+                                                image_max_size_bytes=binding.get(
+                                                    "image_max_size_bytes"
+                                                ),
                                             )
                                         result.synced_pages += 1
                                         continue
@@ -1927,8 +1955,9 @@ class ConfluenceSyncService:
                         if doc_id:
                             # 保存版本快照（用于回滚）
                             await self._save_version_before_update(
-                                doc_id, page.version,
-                                f"Confluence sync: {page.title} (v{page.version})"
+                                doc_id,
+                                page.version,
+                                f"Confluence sync: {page.title} (v{page.version})",
                             )
 
                             content_text = extract_plain_text(page.body_storage)
@@ -1939,7 +1968,7 @@ class ConfluenceSyncService:
                                     "confluence_version": page.version,
                                     "status": "uploaded",
                                     "progress": 0,
-                                }
+                                },
                             )
 
                             # 内容变化时也重新处理图片（修复：之前只更新文本）
@@ -1989,17 +2018,22 @@ class ConfluenceSyncService:
 
                     # 更新进度
                     progress = (processed / total_count) * 100 if total_count > 0 else 0
-                    await self.db.update_confluence_sync_task(task_id, {
-                        "processed_items": processed,
-                        "progress": progress,
-                    })
+                    await self.db.update_confluence_sync_task(
+                        task_id,
+                        {
+                            "processed_items": processed,
+                            "progress": progress,
+                        },
+                    )
 
                 except Exception as e:
                     result.failed_pages += 1
-                    result.errors.append({
-                        "page_id": page_id,
-                        "error": str(e),
-                    })
+                    result.errors.append(
+                        {
+                            "page_id": page_id,
+                            "error": str(e),
+                        }
+                    )
                     logger.error(f"Failed to sync page {page_id}: {e}")
 
             # 处理删除的页面
@@ -2024,35 +2058,47 @@ class ConfluenceSyncService:
             result.completed_at = _utc_now()
 
             # 更新绑定状态
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "completed",
-                "last_sync_at": _utc_now(),
-                "synced_page_count": result.synced_pages,
-                "total_page_count": result.total_pages,
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "completed",
+                    "last_sync_at": _utc_now(),
+                    "synced_page_count": result.synced_pages,
+                    "total_page_count": result.total_pages,
+                },
+            )
 
             # 更新任务状态
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "completed",
-                "progress": 100,
-                "completed_at": _utc_now(),
-                "result": result.to_dict(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "completed",
+                    "progress": 100,
+                    "completed_at": _utc_now(),
+                    "result": result.to_dict(),
+                },
+            )
 
         except Exception as e:
             logger.exception(f"Space sync failed: {e}")
             result.errors.append({"error": str(e)})
 
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "error",
-                "last_error": str(e),
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "error",
+                    "last_error": str(e),
+                },
+            )
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "failed",
-                "error": str(e),
-                "completed_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "completed_at": _utc_now(),
+                },
+            )
 
         return result
 
@@ -2062,7 +2108,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         获取同步状态
 
@@ -2102,7 +2148,9 @@ class ConfluenceSyncService:
                 "status": current_task["status"],
                 "progress": current_task.get("progress", 0),
                 "started_at": current_task.get("started_at"),
-            } if current_task else None,
+            }
+            if current_task
+            else None,
         }
 
     # ============ Manual Sync ============
@@ -2111,7 +2159,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         force: bool = False,
-        page_ids: Optional[List[str]] = None,
+        page_ids: list[str] | None = None,
     ) -> str:
         """
         手动触发同步
@@ -2150,12 +2198,11 @@ class ConfluenceSyncService:
         if page_ids:
             self._create_background_task(
                 self._sync_specific_pages(binding_id, task_id, page_ids),
-                name=f"sync-pages-{binding_id[:8]}"
+                name=f"sync-pages-{binding_id[:8]}",
             )
         else:
             self._create_background_task(
-                self._sync_space_pages(binding_id, task_id),
-                name=f"trigger-sync-{binding_id[:8]}"
+                self._sync_space_pages(binding_id, task_id), name=f"trigger-sync-{binding_id[:8]}"
             )
 
         return task_id
@@ -2164,7 +2211,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         task_id: str,
-        page_ids: List[str],
+        page_ids: list[str],
     ) -> SyncResult:
         """同步指定的页面"""
         result = SyncResult(started_at=_utc_now())
@@ -2181,11 +2228,14 @@ class ConfluenceSyncService:
             client = await self._get_client(connection_id)
             result.total_pages = len(page_ids)
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "processing",
-                "total_items": len(page_ids),
-                "started_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "processing",
+                    "total_items": len(page_ids),
+                    "started_at": _utc_now(),
+                },
+            )
 
             for i, page_id in enumerate(page_ids):
                 try:
@@ -2198,8 +2248,7 @@ class ConfluenceSyncService:
 
                         # 保存版本快照（用于回滚）
                         await self._save_version_before_update(
-                            doc_id, page.version,
-                            f"Confluence sync: {page.title} (v{page.version})"
+                            doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
                         )
 
                         content_text = extract_plain_text(page.body_storage)
@@ -2210,7 +2259,7 @@ class ConfluenceSyncService:
                                 "confluence_version": page.version,
                                 "status": "uploaded",
                                 "progress": 0,
-                            }
+                            },
                         )
                         if self.worker:
                             await self.worker.enqueue(dataset_id, doc_id)
@@ -2235,10 +2284,13 @@ class ConfluenceSyncService:
 
                     # 更新进度
                     progress = ((i + 1) / len(page_ids)) * 100
-                    await self.db.update_confluence_sync_task(task_id, {
-                        "processed_items": i + 1,
-                        "progress": progress,
-                    })
+                    await self.db.update_confluence_sync_task(
+                        task_id,
+                        {
+                            "processed_items": i + 1,
+                            "progress": progress,
+                        },
+                    )
 
                 except Exception as e:
                     result.failed_pages += 1
@@ -2247,32 +2299,44 @@ class ConfluenceSyncService:
 
             result.completed_at = _utc_now()
 
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "completed",
-                "last_sync_at": _utc_now(),
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "completed",
+                    "last_sync_at": _utc_now(),
+                },
+            )
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "completed",
-                "progress": 100,
-                "completed_at": _utc_now(),
-                "result": result.to_dict(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "completed",
+                    "progress": 100,
+                    "completed_at": _utc_now(),
+                    "result": result.to_dict(),
+                },
+            )
 
         except Exception as e:
             logger.exception(f"Specific pages sync failed: {e}")
             result.errors.append({"error": str(e)})
 
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "error",
-                "last_error": str(e),
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "error",
+                    "last_error": str(e),
+                },
+            )
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "failed",
-                "error": str(e),
-                "completed_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "completed_at": _utc_now(),
+                },
+            )
 
         return result
 
@@ -2281,8 +2345,8 @@ class ConfluenceSyncService:
     async def sync_page(
         self,
         page_record_id: str,
-        user: Optional[UserContext] = None,
-    ) -> Dict[str, Any]:
+        user: UserContext | None = None,
+    ) -> dict[str, Any]:
         """
         同步单个页面（通过页面记录 ID）
 
@@ -2324,8 +2388,7 @@ class ConfluenceSyncService:
             if doc_id:
                 # 保存版本快照（用于回滚）
                 await self._save_version_before_update(
-                    doc_id, page.version,
-                    f"Confluence sync: {page.title} (v{page.version})"
+                    doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
                 )
 
                 # 更新现有文档
@@ -2337,7 +2400,7 @@ class ConfluenceSyncService:
                         "confluence_version": page.version,
                         "status": "uploaded",
                         "progress": 0,
-                    }
+                    },
                 )
 
                 # 处理图片（如果启用）- 修复：更新文档时也需要处理图片
@@ -2359,9 +2422,13 @@ class ConfluenceSyncService:
                         if img_processor:
                             try:
                                 # 清理旧的图片段（避免重复）
-                                old_image_count = await self.db.delete_image_segments_by_document(doc_id)
+                                old_image_count = await self.db.delete_image_segments_by_document(
+                                    doc_id
+                                )
                                 if old_image_count > 0:
-                                    logger.info(f"Cleaned up {old_image_count} old image segments for document {doc_id}")
+                                    logger.info(
+                                        f"Cleaned up {old_image_count} old image segments for document {doc_id}"
+                                    )
                                     # 同时清理旧的图片关联
                                     await self.db.delete_image_associations_by_document(doc_id)
 
@@ -2373,14 +2440,18 @@ class ConfluenceSyncService:
                                     page_title=page.title,
                                 )
                                 if image_result.processed_images > 0:
-                                    vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
+                                    vlm_count = sum(
+                                        1 for s in image_result.segments if s.vlm_description
+                                    )
                                     logger.info(
                                         f"Processed {image_result.processed_images} images for page {page_id} "
                                         f"(vlm_descriptions={vlm_count})"
                                     )
                                     # Store image segments in database
                                     for idx, segment in enumerate(image_result.segments):
-                                        await self._save_image_segment(segment, dataset_id, binding_id, position=idx)
+                                        await self._save_image_segment(
+                                            segment, dataset_id, binding_id, position=idx
+                                        )
                                     image_count = image_result.processed_images
                                 if image_result.errors:
                                     logger.warning(
@@ -2404,7 +2475,12 @@ class ConfluenceSyncService:
                     web_url=page.web_url,
                     image_count=image_count,
                 )
-                return {"status": "success", "action": "updated", "document_id": doc_id, "image_count": image_count}
+                return {
+                    "status": "success",
+                    "action": "updated",
+                    "document_id": doc_id,
+                    "image_count": image_count,
+                }
             else:
                 # 创建新文档
                 doc = await self._create_document_from_page(
@@ -2430,7 +2506,7 @@ class ConfluenceSyncService:
         binding_id: str,
         page_id: str,
         event_type: str = "updated",
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         同步单个页面（用于 Webhook 或轮询，通过 binding_id 和 page_id）
 
@@ -2477,8 +2553,7 @@ class ConfluenceSyncService:
 
             # 保存版本快照（用于回滚）
             await self._save_version_before_update(
-                doc_id, page.version,
-                f"Confluence sync: {page.title} (v{page.version})"
+                doc_id, page.version, f"Confluence sync: {page.title} (v{page.version})"
             )
 
             content_text = extract_plain_text(page.body_storage)
@@ -2489,7 +2564,7 @@ class ConfluenceSyncService:
                     "confluence_version": page.version,
                     "status": "uploaded",
                     "progress": 0,
-                }
+                },
             )
             if self.worker:
                 await self.worker.enqueue(dataset_id, doc_id)
@@ -2528,11 +2603,11 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         user: UserContext,
-        status: Optional[str] = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
         synced_only: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         列出绑定下的页面记录
 
@@ -2565,7 +2640,7 @@ class ConfluenceSyncService:
         self,
         binding_id: str,
         user: UserContext,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         清理未同步的页面记录
 
@@ -2592,10 +2667,10 @@ class ConfluenceSyncService:
 
     async def remove_pages(
         self,
-        page_record_ids: List[str],
+        page_record_ids: list[str],
         user: UserContext,
         delete_documents: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         批量移除页面记录（从 confluence_pages 表中删除）
 
@@ -2644,9 +2719,7 @@ class ConfluenceSyncService:
                             )
                             documents_deleted += 1
                     except Exception as e:
-                        logger.warning(
-                            f"Failed to delete document {page.get('document_id')}: {e}"
-                        )
+                        logger.warning(f"Failed to delete document {page.get('document_id')}: {e}")
 
                 # 删除页面记录
                 success = await self.db.delete_confluence_page(record_id)
@@ -2670,10 +2743,10 @@ class ConfluenceSyncService:
 
     async def batch_sync_pages(
         self,
-        page_record_ids: List[str],
+        page_record_ids: list[str],
         force: bool = False,
-        user: Optional[UserContext] = None,
-    ) -> Dict[str, Any]:
+        user: UserContext | None = None,
+    ) -> dict[str, Any]:
         """
         批量同步多个页面（通过 page_record_id 列表）
 
@@ -2696,7 +2769,7 @@ class ConfluenceSyncService:
             }
 
         # 获取所有页面记录，按 binding_id 分组
-        pages_by_binding: Dict[str, List[Dict[str, Any]]] = {}
+        pages_by_binding: dict[str, list[dict[str, Any]]] = {}
         not_found = []
         access_denied_bindings = set()
 
@@ -2737,19 +2810,23 @@ class ConfluenceSyncService:
                     force=force,
                     page_ids=page_ids,
                 )
-                results.append({
-                    "binding_id": binding_id,
-                    "task_id": task_id,
-                    "page_count": len(page_ids),
-                    "status": "triggered",
-                })
+                results.append(
+                    {
+                        "binding_id": binding_id,
+                        "task_id": task_id,
+                        "page_count": len(page_ids),
+                        "status": "triggered",
+                    }
+                )
             except ConfluenceSyncError as e:
-                results.append({
-                    "binding_id": binding_id,
-                    "error": str(e),
-                    "page_count": len(page_ids),
-                    "status": "failed",
-                })
+                results.append(
+                    {
+                        "binding_id": binding_id,
+                        "error": str(e),
+                        "page_count": len(page_ids),
+                        "status": "failed",
+                    }
+                )
 
         total_pages = sum(r.get("page_count", 0) for r in results)
         triggered_count = sum(1 for r in results if r.get("status") == "triggered")
@@ -2766,10 +2843,10 @@ class ConfluenceSyncService:
     async def list_sync_tasks(
         self,
         user: UserContext,
-        binding_id: Optional[str] = None,
-        status: Optional[str] = None,
+        binding_id: str | None = None,
+        status: str | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         列出同步任务
 
@@ -2805,7 +2882,7 @@ class ConfluenceSyncService:
         self,
         task_id: str,
         user: UserContext,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         获取同步任务详情
 
@@ -2877,7 +2954,7 @@ class ConfluenceSyncService:
         # 启动后台同步
         self._create_background_task(
             self._incremental_sync_pages(binding_id, task_id),
-            name=f"incremental-sync-{binding_id[:8]}"
+            name=f"incremental-sync-{binding_id[:8]}",
         )
 
         return task_id
@@ -2908,10 +2985,13 @@ class ConfluenceSyncService:
             # 如果没有上次同步时间，执行全量同步
             if not last_sync_at:
                 logger.info(f"No last_sync_at for binding {binding_id}, performing full sync")
-                await self.db.update_confluence_sync_task(task_id, {
-                    "status": "completed",
-                    "result": {"message": "Redirected to full sync"},
-                })
+                await self.db.update_confluence_sync_task(
+                    task_id,
+                    {
+                        "status": "completed",
+                        "result": {"message": "Redirected to full sync"},
+                    },
+                )
                 # 改为全量同步
                 await self._sync_space_pages(binding_id, task_id)
                 return result
@@ -2929,11 +3009,14 @@ class ConfluenceSyncService:
 
             result.total_pages = len(modified_pages)
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "processing",
-                "total_items": len(modified_pages),
-                "started_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "processing",
+                    "total_items": len(modified_pages),
+                    "started_at": _utc_now(),
+                },
+            )
 
             # 处理修改的页面
             for i, page_stub in enumerate(modified_pages):
@@ -2941,7 +3024,9 @@ class ConfluenceSyncService:
                     # 获取完整页面内容（CQL 搜索只返回基本信息）
                     page = await client.get_page(page_stub.page_id)
 
-                    existing = await self.db.get_confluence_page_by_page_id(binding_id, page.page_id)
+                    existing = await self.db.get_confluence_page_by_page_id(
+                        binding_id, page.page_id
+                    )
 
                     if existing:
                         # 检查内容是否真的变化
@@ -2954,8 +3039,9 @@ class ConfluenceSyncService:
                         if doc_id:
                             # 保存版本快照（用于回滚）
                             await self._save_version_before_update(
-                                doc_id, page.version,
-                                f"Confluence sync: {page.title} (v{page.version})"
+                                doc_id,
+                                page.version,
+                                f"Confluence sync: {page.title} (v{page.version})",
                             )
 
                             content_text = extract_plain_text(page.body_storage)
@@ -2966,7 +3052,7 @@ class ConfluenceSyncService:
                                     "confluence_version": page.version,
                                     "status": "uploaded",
                                     "progress": 0,
-                                }
+                                },
                             )
                             if self.worker:
                                 await self.worker.enqueue(dataset_id, doc_id)
@@ -3004,17 +3090,22 @@ class ConfluenceSyncService:
 
                     # 更新进度
                     progress = ((i + 1) / len(modified_pages)) * 100 if modified_pages else 0
-                    await self.db.update_confluence_sync_task(task_id, {
-                        "processed_items": i + 1,
-                        "progress": progress,
-                    })
+                    await self.db.update_confluence_sync_task(
+                        task_id,
+                        {
+                            "processed_items": i + 1,
+                            "progress": progress,
+                        },
+                    )
 
                 except Exception as e:
                     result.failed_pages += 1
-                    result.errors.append({
-                        "page_id": page_stub.page_id,
-                        "error": str(e),
-                    })
+                    result.errors.append(
+                        {
+                            "page_id": page_stub.page_id,
+                            "error": str(e),
+                        }
+                    )
                     logger.error(f"Failed to sync page {page_stub.page_id}: {e}")
 
             # 检测并处理已删除的页面
@@ -3059,19 +3150,25 @@ class ConfluenceSyncService:
             result.completed_at = _utc_now()
 
             # 更新绑定状态
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "completed",
-                "last_sync_at": _utc_now(),
-                "last_sync_type": "incremental",
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "completed",
+                    "last_sync_at": _utc_now(),
+                    "last_sync_type": "incremental",
+                },
+            )
 
             # 更新任务状态
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "completed",
-                "progress": 100,
-                "completed_at": _utc_now(),
-                "result": result.to_dict(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "completed",
+                    "progress": 100,
+                    "completed_at": _utc_now(),
+                    "result": result.to_dict(),
+                },
+            )
 
             logger.info(
                 f"Incremental sync completed for binding {binding_id}: "
@@ -3083,20 +3180,26 @@ class ConfluenceSyncService:
             logger.exception(f"Incremental sync failed: {e}")
             result.errors.append({"error": str(e)})
 
-            await self.db.update_confluence_binding(binding_id, {
-                "status": "error",
-                "last_error": str(e),
-            })
+            await self.db.update_confluence_binding(
+                binding_id,
+                {
+                    "status": "error",
+                    "last_error": str(e),
+                },
+            )
 
-            await self.db.update_confluence_sync_task(task_id, {
-                "status": "failed",
-                "error": str(e),
-                "completed_at": _utc_now(),
-            })
+            await self.db.update_confluence_sync_task(
+                task_id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "completed_at": _utc_now(),
+                },
+            )
 
         return result
 
-    async def list_bindings_for_polling(self) -> List[Dict[str, Any]]:
+    async def list_bindings_for_polling(self) -> list[dict[str, Any]]:
         """
         获取所有需要轮询同步的绑定
 
@@ -3127,8 +3230,13 @@ class ConfluenceSyncService:
                 if not connection:
                     continue
 
-                if connection.get("sync_mode") == "polling" and connection.get("status") == "active":
-                    binding["polling_interval_minutes"] = connection.get("polling_interval_minutes", 60)
+                if (
+                    connection.get("sync_mode") == "polling"
+                    and connection.get("status") == "active"
+                ):
+                    binding["polling_interval_minutes"] = connection.get(
+                        "polling_interval_minutes", 60
+                    )
                     polling_bindings.append(binding)
             # 如果 binding_sync_mode == "manual"，则不加入轮询列表
 

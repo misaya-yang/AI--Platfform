@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..exceptions import PermissionDeniedError
 from .rbac import RBAC
@@ -16,13 +16,13 @@ class Capability(str, Enum):
     SERVICE_CONFIG_WRITE = "ServiceConfigWrite"
 
 
-_CAPABILITY_PERMISSIONS: Dict[Capability, str] = {
+_CAPABILITY_PERMISSIONS: dict[Capability, str] = {
     Capability.AGENT_INVOKE: "conversation:playground:access",
     Capability.SERVICE_LIST_READ: "console:services:view",
     Capability.SERVICE_CONFIG_WRITE: "console:services:edit",
 }
 
-_CAPABILITY_LEGACY_ALIASES: Dict[Capability, Tuple[str, ...]] = {
+_CAPABILITY_LEGACY_ALIASES: dict[Capability, tuple[str, ...]] = {
     Capability.AGENT_INVOKE: ("service:invoke",),
     Capability.SERVICE_LIST_READ: ("service:view",),
     Capability.SERVICE_CONFIG_WRITE: ("service:manage",),
@@ -33,8 +33,8 @@ _CAPABILITY_LEGACY_ALIASES: Dict[Capability, Tuple[str, ...]] = {
 class CapabilityDecision:
     capability: Capability
     required_permission: str
-    accepted_permissions: Tuple[str, ...]
-    matched_permission: Optional[str] = None
+    accepted_permissions: tuple[str, ...]
+    matched_permission: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -45,15 +45,15 @@ def canonical_permission(capability: Capability) -> str:
     return _CAPABILITY_PERMISSIONS[capability]
 
 
-def accepted_permissions(capability: Capability) -> Tuple[str, ...]:
+def accepted_permissions(capability: Capability) -> tuple[str, ...]:
     canonical = canonical_permission(capability)
     aliases = _CAPABILITY_LEGACY_ALIASES.get(capability, ())
     return (canonical, *aliases)
 
 
-def _merge_subjects(roles: Sequence[str], permissions: Optional[Sequence[str]]) -> List[str]:
-    subjects: List[str] = []
-    for raw in [*(roles or []), *((permissions or []))]:
+def _merge_subjects(roles: Sequence[str], permissions: Sequence[str] | None) -> list[str]:
+    subjects: list[str] = []
+    for raw in [*(roles or []), *(permissions or [])]:
         value = str(raw or "").strip()
         if value and value not in subjects:
             subjects.append(value)
@@ -64,7 +64,7 @@ def check_capability(
     *,
     rbac: RBAC,
     roles: Sequence[str],
-    permissions: Optional[Sequence[str]],
+    permissions: Sequence[str] | None,
     capability: Capability,
 ) -> CapabilityDecision:
     required = canonical_permission(capability)
@@ -92,7 +92,7 @@ def require_capability(
     *,
     rbac: RBAC,
     roles: Sequence[str],
-    permissions: Optional[Sequence[str]],
+    permissions: Sequence[str] | None,
     capability: Capability,
 ) -> CapabilityDecision:
     decision = check_capability(
@@ -112,8 +112,8 @@ def build_permission_denied_detail(
     *,
     capability: Capability,
     trace_id: str = "",
-    message: Optional[str] = None,
-) -> Dict[str, object]:
+    message: str | None = None,
+) -> dict[str, object]:
     required = canonical_permission(capability)
     return {
         "message": message or f"Permission denied: {required} required",

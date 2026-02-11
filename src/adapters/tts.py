@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any, Dict
-
 from ..core.exceptions import ValidationFailedError
 from ..models.enums import ContentType
 from ..models.request import ContentItem, UnifiedRequest

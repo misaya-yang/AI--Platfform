@@ -10,19 +10,12 @@ Tests cover:
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import json
-import os
 import tempfile
 import uuid
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import pytest_asyncio
 
 # ============ Test Constants ============
 
@@ -41,6 +34,7 @@ MINIMAL_PNG_BYTES = base64.b64decode(
 
 # ============ ImageStorageService Tests ============
 
+
 class TestLocalStorageBackend:
     """Tests for LocalStorageBackend"""
 
@@ -54,6 +48,7 @@ class TestLocalStorageBackend:
     def local_backend(self, temp_storage_path):
         """Create LocalStorageBackend instance"""
         from src.services.storage.image_storage import LocalStorageBackend
+
         return LocalStorageBackend(base_path=temp_storage_path)
 
     @pytest.mark.asyncio
@@ -76,9 +71,7 @@ class TestLocalStorageBackend:
         key = "test/with_meta.png"
         metadata = {"source": "confluence", "page_id": "12345"}
 
-        url = await local_backend.upload(
-            key, MINIMAL_PNG_BYTES, TEST_MEDIA_TYPE, metadata
-        )
+        url = await local_backend.upload(key, MINIMAL_PNG_BYTES, TEST_MEDIA_TYPE, metadata)
         assert url is not None
 
     @pytest.mark.asyncio
@@ -140,8 +133,10 @@ class TestLocalStorageBackend:
         key = "test/url.png"
         url = local_backend.get_url(key)
         assert "file://" in url
-        assert temp_storage_path.replace("\\", "/") in url.replace("\\", "/") or \
-               temp_storage_path in url
+        assert (
+            temp_storage_path.replace("\\", "/") in url.replace("\\", "/")
+            or temp_storage_path in url
+        )
 
 
 class TestS3StorageBackend:
@@ -214,9 +209,7 @@ class TestS3StorageBackend:
 
         result = await s3_backend.delete(key)
 
-        mock_s3_client.delete_object.assert_called_once_with(
-            Bucket="test-bucket", Key=key
-        )
+        mock_s3_client.delete_object.assert_called_once_with(Bucket="test-bucket", Key=key)
         assert result is True
 
     @pytest.mark.asyncio
@@ -230,9 +223,7 @@ class TestS3StorageBackend:
     @pytest.mark.asyncio
     async def test_exists_false(self, s3_backend, mock_s3_client):
         """Test S3 exists when file doesn't exist"""
-        mock_s3_client.head_object = AsyncMock(
-            side_effect=Exception("Not found")
-        )
+        mock_s3_client.head_object = AsyncMock(side_effect=Exception("Not found"))
 
         result = await s3_backend.exists("test/notfound.png")
         assert result is False
@@ -260,7 +251,7 @@ class TestImageStorageService:
     @pytest.fixture
     def storage_config(self, tmp_path):
         """Create storage configuration"""
-        from src.services.storage.image_storage import StorageConfig, StorageBackend
+        from src.services.storage.image_storage import StorageBackend, StorageConfig
 
         return StorageConfig(
             backend=StorageBackend.LOCAL,
@@ -421,6 +412,7 @@ class TestImageStorageService:
 
 # ============ DashScopeMultimodalEmbedding Tests ============
 
+
 class TestDashScopeMultimodalEmbedding:
     """Tests for DashScopeMultimodalEmbedding"""
 
@@ -429,11 +421,7 @@ class TestDashScopeMultimodalEmbedding:
         """Create mock MultiModalEmbedding response"""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.output = {
-            "embeddings": [
-                {"embedding": [0.1] * 1024, "type": "image"}
-            ]
-        }
+        mock_response.output = {"embeddings": [{"embedding": [0.1] * 1024, "type": "image"}]}
         return mock_response
 
     @pytest.fixture
@@ -471,9 +459,7 @@ class TestDashScopeMultimodalEmbedding:
 
     def test_image_to_base64_data_uri(self, embedding_service):
         """Test base64 data URI conversion"""
-        data_uri = embedding_service._image_to_base64_data_uri(
-            MINIMAL_PNG_BYTES, "image/png"
-        )
+        data_uri = embedding_service._image_to_base64_data_uri(MINIMAL_PNG_BYTES, "image/png")
 
         assert data_uri.startswith("data:image/png;base64,")
         # Verify it's valid base64
@@ -484,9 +470,7 @@ class TestDashScopeMultimodalEmbedding:
     @pytest.mark.asyncio
     async def test_embed_images(self, embedding_service, mock_multimodal_embedding):
         """Test image embedding"""
-        with patch.object(
-            embedding_service, "_MultiModalEmbedding"
-        ) as mock_class:
+        with patch.object(embedding_service, "_MultiModalEmbedding") as mock_class:
             mock_class.call = MagicMock(return_value=mock_multimodal_embedding)
 
             vectors = await embedding_service.embed_images([MINIMAL_PNG_BYTES])
@@ -515,13 +499,9 @@ class TestDashScopeMultimodalEmbedding:
         assert "exceeds max size" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_embed_image_and_text(
-        self, embedding_service, mock_multimodal_embedding
-    ):
+    async def test_embed_image_and_text(self, embedding_service, mock_multimodal_embedding):
         """Test combined image and text embedding"""
-        with patch.object(
-            embedding_service, "_MultiModalEmbedding"
-        ) as mock_class:
+        with patch.object(embedding_service, "_MultiModalEmbedding") as mock_class:
             mock_class.call = MagicMock(return_value=mock_multimodal_embedding)
 
             vector = await embedding_service.embed_image_and_text(
@@ -563,6 +543,7 @@ class TestDashScopeMultimodalEmbedding:
 
 # ============ ConfluenceImageProcessor Tests ============
 
+
 class TestConfluenceImageProcessor:
     """Tests for ConfluenceImageProcessor"""
 
@@ -592,9 +573,7 @@ class TestConfluenceImageProcessor:
     def mock_storage_service(self):
         """Create mock storage service"""
         storage = AsyncMock()
-        storage.upload_image = AsyncMock(
-            return_value="https://s3.example.com/test_image.png"
-        )
+        storage.upload_image = AsyncMock(return_value="https://s3.example.com/test_image.png")
         storage.delete_document_images = AsyncMock(return_value=1)
         return storage
 
@@ -607,9 +586,7 @@ class TestConfluenceImageProcessor:
         return embedding
 
     @pytest.fixture
-    def image_processor(
-        self, mock_confluence_client, mock_storage_service, mock_embedding_service
-    ):
+    def image_processor(self, mock_confluence_client, mock_storage_service, mock_embedding_service):
         """Create ConfluenceImageProcessor instance"""
         from src.services.knowledge.confluence.image_processor import (
             ConfluenceImageProcessor,
@@ -638,9 +615,7 @@ class TestConfluenceImageProcessor:
         assert result.errors == []
 
     @pytest.mark.asyncio
-    async def test_process_page_images_with_context(
-        self, image_processor, mock_confluence_client
-    ):
+    async def test_process_page_images_with_context(self, image_processor, mock_confluence_client):
         """Test processing images with page content for context"""
         page_content = """
         <ac:image>
@@ -659,13 +634,9 @@ class TestConfluenceImageProcessor:
         assert result.processed_images == 1
 
     @pytest.mark.asyncio
-    async def test_process_page_images_no_images(
-        self, image_processor, mock_confluence_client
-    ):
+    async def test_process_page_images_no_images(self, image_processor, mock_confluence_client):
         """Test processing page with no images"""
-        mock_confluence_client.get_page_image_attachments = AsyncMock(
-            return_value=[]
-        )
+        mock_confluence_client.get_page_image_attachments = AsyncMock(return_value=[])
 
         result = await image_processor.process_page_images(
             page_id="page_001",
@@ -678,9 +649,7 @@ class TestConfluenceImageProcessor:
         assert result.segments == []
 
     @pytest.mark.asyncio
-    async def test_process_page_images_skip_large(
-        self, image_processor, mock_confluence_client
-    ):
+    async def test_process_page_images_skip_large(self, image_processor, mock_confluence_client):
         """Test skipping images that exceed size limit"""
         from src.services.knowledge.confluence.models import ConfluenceAttachment
 
@@ -713,12 +682,8 @@ class TestConfluenceImageProcessor:
         self, image_processor, mock_embedding_service
     ):
         """Test handling embedding failures gracefully"""
-        mock_embedding_service.embed_images = AsyncMock(
-            side_effect=Exception("API error")
-        )
-        mock_embedding_service.embed_image_and_text = AsyncMock(
-            side_effect=Exception("API error")
-        )
+        mock_embedding_service.embed_images = AsyncMock(side_effect=Exception("API error"))
+        mock_embedding_service.embed_image_and_text = AsyncMock(side_effect=Exception("API error"))
 
         result = await image_processor.process_page_images(
             page_id="page_001",
@@ -797,6 +762,7 @@ class TestConfluenceImageProcessor:
 
 # ============ Database save_image_segment Tests ============
 
+
 class TestDatabaseSaveImageSegment:
     """Tests for DatabaseStorage.save_image_segment method"""
 
@@ -826,9 +792,7 @@ class TestDatabaseSaveImageSegment:
         storage._row_to_dict = lambda row: dict(row) if row else None
 
         # Mock get_document to return dataset_id
-        storage.get_document = AsyncMock(
-            return_value={"dataset_id": TEST_DATASET_ID}
-        )
+        storage.get_document = AsyncMock(return_value={"dataset_id": TEST_DATASET_ID})
 
         return storage, conn
 
@@ -927,15 +891,18 @@ class TestDatabaseSaveImageSegment:
         storage._pool = None
 
         # Should not raise, just return early
-        await storage.save_image_segment({
-            "segment_id": "test",
-            "document_id": "test",
-        })
+        await storage.save_image_segment(
+            {
+                "segment_id": "test",
+                "document_id": "test",
+            }
+        )
 
         conn.execute.assert_not_called()
 
 
 # ============ Integration Tests (Mocked) ============
+
 
 class TestImageSyncIntegration:
     """Integration tests for the complete image sync flow"""
@@ -943,12 +910,12 @@ class TestImageSyncIntegration:
     @pytest.fixture
     def mock_all_services(self, tmp_path):
         """Create all mocked services for integration test"""
+        from src.services.knowledge.confluence.models import ConfluenceAttachment
         from src.services.storage.image_storage import (
             ImageStorageService,
-            StorageConfig,
             StorageBackend,
+            StorageConfig,
         )
-        from src.services.knowledge.confluence.models import ConfluenceAttachment
 
         # Real storage service (local)
         storage_config = StorageConfig(
@@ -967,19 +934,13 @@ class TestImageSyncIntegration:
             file_size=len(MINIMAL_PNG_BYTES),
             download_link="/download/test.png",
         )
-        confluence_client.get_page_image_attachments = AsyncMock(
-            return_value=[attachment]
-        )
-        confluence_client.download_attachment = AsyncMock(
-            return_value=MINIMAL_PNG_BYTES
-        )
+        confluence_client.get_page_image_attachments = AsyncMock(return_value=[attachment])
+        confluence_client.download_attachment = AsyncMock(return_value=MINIMAL_PNG_BYTES)
 
         # Mock embedding service
         embedding_service = AsyncMock()
         embedding_service.embed_images = AsyncMock(return_value=[[0.1] * 1024])
-        embedding_service.embed_image_and_text = AsyncMock(
-            return_value=[0.1] * 1024
-        )
+        embedding_service.embed_image_and_text = AsyncMock(return_value=[0.1] * 1024)
 
         return {
             "storage": storage_service,
@@ -1057,6 +1018,7 @@ class TestImageSyncIntegration:
 
 
 # ============ Parser Image Extraction Tests ============
+
 
 class TestParserImageExtraction:
     """Tests for parser image extraction functions"""
@@ -1222,6 +1184,7 @@ class TestParserImageExtraction:
 
 # ============ ImageSegment Model Tests ============
 
+
 class TestImageSegmentModel:
     """Tests for ImageSegment dataclass"""
 
@@ -1291,6 +1254,7 @@ class TestImageSegmentModel:
 
 
 # ============ ConfluenceAttachment Model Tests ============
+
 
 class TestConfluenceAttachmentModel:
     """Tests for ConfluenceAttachment model"""
@@ -1385,6 +1349,7 @@ class TestConfluenceAttachmentModel:
 
 # ============ S3 Metadata Sanitization Tests ============
 
+
 class TestS3MetadataSanitization:
     """
     Tests for _sanitize_for_s3_metadata function.
@@ -1405,8 +1370,10 @@ class TestS3MetadataSanitization:
         # Simple ASCII
         assert _sanitize_for_s3_metadata("hello.png") == "hello.png"
         assert _sanitize_for_s3_metadata("test_image_123.jpg") == "test_image_123.jpg"
-        assert _sanitize_for_s3_metadata("Screenshot 2025-01-16 at 2.38.53 pm.png") == \
-               "Screenshot 2025-01-16 at 2.38.53 pm.png"
+        assert (
+            _sanitize_for_s3_metadata("Screenshot 2025-01-16 at 2.38.53 pm.png")
+            == "Screenshot 2025-01-16 at 2.38.53 pm.png"
+        )
 
     def test_unicode_narrow_no_break_space(self):
         """
@@ -1419,7 +1386,7 @@ class TestS3MetadataSanitization:
 
         # The problematic filename from the bug report
         # Contains U+202F between "2.38.53" and "pm"
-        problematic_filename = "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png"
+        problematic_filename = "Screenshot 2025-01-16 at 2.38.53\u202fpm.png"
 
         result = _sanitize_for_s3_metadata(problematic_filename)
 
@@ -1431,14 +1398,14 @@ class TestS3MetadataSanitization:
         assert result == expected, f"Expected {repr(expected)}, got {repr(result)}"
 
         # Verify it can be encoded as ASCII without errors
-        result.encode('ascii')
+        result.encode("ascii")
 
     def test_various_unicode_spaces(self):
         """Test handling of various Unicode space characters"""
         from src.services.storage.image_storage import _sanitize_for_s3_metadata
 
         # U+00A0 Non-breaking space
-        assert _sanitize_for_s3_metadata("test\u00A0file.png").isascii()
+        assert _sanitize_for_s3_metadata("test\u00a0file.png").isascii()
 
         # U+2002 En space
         assert _sanitize_for_s3_metadata("test\u2002file.png").isascii()
@@ -1450,7 +1417,7 @@ class TestS3MetadataSanitization:
         assert _sanitize_for_s3_metadata("test\u2009file.png").isascii()
 
         # U+200A Hair space
-        assert _sanitize_for_s3_metadata("test\u200Afile.png").isascii()
+        assert _sanitize_for_s3_metadata("test\u200afile.png").isascii()
 
         # U+3000 Ideographic space (CJK)
         assert _sanitize_for_s3_metadata("test\u3000file.png").isascii()
@@ -1519,7 +1486,7 @@ class TestS3MetadataSanitization:
         assert result == "test file.png"
 
         # Mixed unicode and regular spaces
-        result = _sanitize_for_s3_metadata("test\u202F  \u00A0file.png")
+        result = _sanitize_for_s3_metadata("test\u202f  \u00a0file.png")
         assert result.isascii()
         # All spaces should be collapsed to single regular space
         assert "  " not in result
@@ -1567,7 +1534,7 @@ class TestS3MetadataSanitization:
         from src.services.storage.image_storage import _sanitize_for_s3_metadata
 
         # Simulating exactly what macOS generates
-        macos_filename = "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png"
+        macos_filename = "Screenshot 2025-01-16 at 2.38.53\u202fpm.png"
 
         result = _sanitize_for_s3_metadata(macos_filename)
 
@@ -1575,7 +1542,7 @@ class TestS3MetadataSanitization:
         assert result.isascii()
 
         # Must be able to encode as ASCII
-        encoded = result.encode('ascii')
+        encoded = result.encode("ascii")
         assert encoded is not None
 
         # Should preserve the meaningful content
@@ -1594,7 +1561,7 @@ class TestS3MetadataSanitization:
         assert "2025" in result
 
         # ASCII + emoji + special space
-        result = _sanitize_for_s3_metadata("my\u202Fphoto📷2025.jpg")
+        result = _sanitize_for_s3_metadata("my\u202fphoto📷2025.jpg")
         assert result.isascii()
 
     def test_full_unicode_filename(self):
@@ -1617,10 +1584,10 @@ class TestS3MetadataSanitization:
         from src.services.storage.image_storage import _sanitize_for_s3_metadata
 
         test_cases = [
-            "Screenshot 2025-01-16 at 2.38.53\u202Fpm.png",  # The bug case
+            "Screenshot 2025-01-16 at 2.38.53\u202fpm.png",  # The bug case
             "测试文件.png",  # Chinese
             "café résumé.pdf",  # Diacritics
-            "file\u00A0name.jpg",  # NBSP
+            "file\u00a0name.jpg",  # NBSP
             "emoji📸file.png",  # Emoji
             "normal_file.png",  # Normal
         ]
@@ -1633,12 +1600,13 @@ class TestS3MetadataSanitization:
 
             # Must be encodable as ASCII
             try:
-                result.encode('ascii')
+                result.encode("ascii")
             except UnicodeEncodeError:
                 pytest.fail(f"Cannot encode as ASCII: {repr(result)}")
 
             # Must not contain control characters (except for empty strings)
             if result:
                 for char in result:
-                    assert ord(char) >= 32 or char in '\t\n\r', \
+                    assert ord(char) >= 32 or char in "\t\n\r", (
                         f"Control character found in result: {repr(result)}"
+                    )

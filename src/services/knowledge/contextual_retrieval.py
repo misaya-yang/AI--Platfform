@@ -15,7 +15,7 @@ separately so display/citation uses the original text.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .islamic_chunking import IslamicSourceType
 from .islamic_metadata import SURAH_NAMES
@@ -28,8 +28,8 @@ class ContextualRetrieval:
         self,
         chunk_text: str,
         document_text: str,
-        document_metadata: Optional[Dict[str, Any]] = None,
-        chunk_metadata: Optional[Dict[str, Any]] = None,
+        document_metadata: dict[str, Any] | None = None,
+        chunk_metadata: dict[str, Any] | None = None,
     ) -> str:
         """Generate a contextual prefix for a chunk.
 
@@ -62,8 +62,8 @@ class ContextualRetrieval:
 
     def _template_based_prefix(
         self,
-        chunk_meta: Dict[str, Any],
-        doc_meta: Dict[str, Any],
+        chunk_meta: dict[str, Any],
+        doc_meta: dict[str, Any],
     ) -> str:
         """Deterministic template prefix for Islamic content (zero LLM cost)."""
         source_type = chunk_meta.get("source_type") or chunk_meta.get("islamic_source_type", "")
@@ -73,7 +73,9 @@ class ContextualRetrieval:
         if source_type == IslamicSourceType.QURAN.value or source_type == "quran":
             surah = source_ref.get("surah")
             try:
-                surah_name = source_ref.get("surah_name") or (SURAH_NAMES.get(int(surah), "") if surah else "")
+                surah_name = source_ref.get("surah_name") or (
+                    SURAH_NAMES.get(int(surah), "") if surah else ""
+                )
             except (ValueError, TypeError):
                 surah_name = source_ref.get("surah_name", "")
             verse_start = source_ref.get("verse_start")
@@ -94,7 +96,7 @@ class ContextualRetrieval:
         elif source_type == IslamicSourceType.HADITH.value or source_type == "hadith":
             collection = source_ref.get("collection", "")
             book = source_ref.get("book")
-            hadith_num = source_ref.get("hadith_number")
+            source_ref.get("hadith_number")
             narrator = source_ref.get("narrator", "")
 
             parts = []
@@ -158,8 +160,8 @@ class ContextualRetrieval:
 
     def _document_context_prefix(
         self,
-        chunk_meta: Dict[str, Any],
-        doc_meta: Dict[str, Any],
+        chunk_meta: dict[str, Any],
+        doc_meta: dict[str, Any],
     ) -> str:
         """Fallback: use document title and section header."""
         doc_title = doc_meta.get("title") or doc_meta.get("name") or ""

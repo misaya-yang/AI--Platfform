@@ -60,4 +60,3 @@ def test_proxy_config_loader_heals_transparent_url_mismatch():
     config = loader._parse_service_row(row)
 
     assert config.upstream_url == "http://localhost:2025"
-

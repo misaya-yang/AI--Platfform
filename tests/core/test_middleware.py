@@ -10,14 +10,14 @@
 import pytest
 
 from src.core.middleware.base import (
-    MiddlewareChain,
-    InvocationMiddleware,
     InvocationContext,
+    InvocationMiddleware,
+    MiddlewareChain,
 )
-from src.models.request import UnifiedRequest, ContentItem
-from src.models.service import ServiceDefinition
-from src.models.response import UnifiedResponse
 from src.models.enums import ContentType
+from src.models.request import ContentItem, UnifiedRequest
+from src.models.response import UnifiedResponse
+from src.models.service import ServiceDefinition
 
 
 class SampleMiddleware(InvocationMiddleware):
@@ -68,8 +68,8 @@ class TestMiddlewareChain:
         result = await chain.invoke(context, final_handler)
 
         # 验证中间件被执行
-        assert context.get("marker_first") == True
-        assert context.get("marker_second") == True
+        assert context.get("marker_first")
+        assert context.get("marker_second")
         assert isinstance(result, UnifiedResponse)
 
     @pytest.mark.asyncio

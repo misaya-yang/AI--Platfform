@@ -3,25 +3,30 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from urllib.parse import unquote, urlparse
 
-from ..deps import get_knowledge_service, get_knowledge_worker, get_user_context, get_settings
-from ...core.crypto import verify_signed_url, get_unsigned_url
+from ...core.crypto import get_unsigned_url, verify_signed_url
+from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
 
 logger = logging.getLogger(__name__)
+import contextlib
+
+from ...config.settings import Settings
+from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ...services.knowledge.knowledge_service import KnowledgeService
+from ...services.knowledge.worker import KnowledgeWorker
 from ..schemas.knowledge import (
     BatchDeleteSchema,
     BatchReindexSchema,
     BatchRetrieveRequestSchema,
-    ChunkingConfigSchema,
-    DatasetConfigUpdateSchema,
     ChunkPreviewRequestSchema,
-    ChunkPreviewResponseSchema,
+    DatasetConfigUpdateSchema,
     DatasetCreateSchema,
     DatasetDeleteSchema,
     DatasetPermissionGrantSchema,
@@ -32,21 +37,13 @@ from ..schemas.knowledge import (
     DocumentCreateUrlSchema,
     DocumentEnableDisableSchema,
     DocumentUpdateSchema,
-    LLMConfigSchema,
     QABatchTestSchema,
     QAQuerySchema,
-    RetrievalConfigSchema,
     RetrieveRequestSchema,
     SegmentCreateSchema,
     SegmentEnableDisableSchema,
     SegmentUpdateSchema,
 )
-from ...config.settings import Settings
-from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
-from ...services.knowledge.knowledge_service import KnowledgeService
-from ...services.knowledge.worker import KnowledgeWorker
-
 
 router = APIRouter()
 
@@ -223,7 +220,7 @@ async def upload_document(
 ):
     """
     Upload a document to the knowledge base.
-    
+
     Args:
         dataset_id: Target dataset ID
         file: Document file (PDF, DOCX, TXT, etc.)
@@ -236,8 +233,11 @@ async def upload_document(
     try:
         content = await file.read()
         logger.info(
-            "Upload started: file=%s, size=%d, dataset=%s, mode=%s", 
-            file.filename, len(content), dataset_id, processing_mode
+            "Upload started: file=%s, size=%d, dataset=%s, mode=%s",
+            file.filename,
+            len(content),
+            dataset_id,
+            processing_mode,
         )
         doc = await svc.create_document_from_upload(
             user,
@@ -249,7 +249,11 @@ async def upload_document(
         )
         logger.info("Document created: id=%s, enqueueing for ingestion...", doc["document_id"])
         await worker.enqueue(dataset_id, doc["document_id"])
-        logger.info("Document enqueued: id=%s, worker queue size ~%d", doc["document_id"], worker.queue.qsize())
+        logger.info(
+            "Document enqueued: id=%s, worker queue size ~%d",
+            doc["document_id"],
+            worker.queue.qsize(),
+        )
         return doc
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -260,7 +264,7 @@ async def upload_document(
 @router.post("/knowledge/{dataset_id}/documents/batch-upload")
 async def batch_upload_documents(
     dataset_id: str,
-    files: List[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
@@ -268,13 +272,13 @@ async def batch_upload_documents(
 ):
     """
     批量上传文档到知识库（支持并行处理）
-    
+
     支持格式: PDF, DOCX, TXT, MD, HTML
     最大文件数: 50
     最大单文件大小: 由系统配置决定
-    
+
     使用流式写入临时文件，避免大文件占用过多内存。
-    
+
     返回:
         {
             "batch_id": "uuid",
@@ -285,63 +289,64 @@ async def batch_upload_documents(
             "errors": []
         }
     """
-    import uuid as uuid_lib
-    import tempfile
-    import aiofiles
     import os
-    
+    import tempfile
+    import uuid as uuid_lib
+
+    import aiofiles
+
     try:
         await svc.require_dataset_access(user, dataset_id, required="editor")
-        
+
         MAX_FILES = 50
         CHUNK_SIZE = 64 * 1024  # 64KB chunks for streaming
         ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
-        
+
         if len(files) > MAX_FILES:
             raise ValidationFailedError(f"Maximum {MAX_FILES} files allowed per batch")
-        
+
         if not files:
             raise ValidationFailedError("No files provided")
-        
+
         batch_id = str(uuid_lib.uuid4())
         documents = []
         errors = []
-        
+
         for file in files:
             filename = file.filename or "unknown"
             ext = Path(filename).suffix.lower()
-            
+
             # Validate extension
             if ext not in ALLOWED_EXTENSIONS:
-                errors.append({
-                    "filename": filename,
-                    "error": f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
-                })
+                errors.append(
+                    {
+                        "filename": filename,
+                        "error": f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+                    }
+                )
                 continue
-            
+
             temp_path = None
             try:
                 # Stream file to temp location to avoid memory exhaustion
                 # Use tempfile with delete=False so we control cleanup
                 with tempfile.NamedTemporaryFile(
-                    delete=False, 
-                    suffix=ext,
-                    prefix=f"batch_{batch_id[:8]}_"
+                    delete=False, suffix=ext, prefix=f"batch_{batch_id[:8]}_"
                 ) as tmp:
                     temp_path = tmp.name
-                
+
                 # Stream write using aiofiles
-                async with aiofiles.open(temp_path, 'wb') as out_file:
+                async with aiofiles.open(temp_path, "wb") as out_file:
                     while True:
                         chunk = await file.read(CHUNK_SIZE)
                         if not chunk:
                             break
                         await out_file.write(chunk)
-                
+
                 # Read back for processing (file is now on disk, not all in memory at once)
-                async with aiofiles.open(temp_path, 'rb') as in_file:
+                async with aiofiles.open(temp_path, "rb") as in_file:
                     content = await in_file.read()
-                
+
                 # Create document record
                 doc = await svc.create_document_from_upload(
                     user,
@@ -350,29 +355,24 @@ async def batch_upload_documents(
                     content_bytes=content,
                     mime_type=file.content_type,
                 )
-                
+
                 # Add batch metadata
                 doc["batch_id"] = batch_id
                 documents.append(doc)
-                
+
             except Exception as e:
-                errors.append({
-                    "filename": filename,
-                    "error": str(e)
-                })
+                errors.append({"filename": filename, "error": str(e)})
             finally:
                 # Clean up temp file
                 if temp_path and os.path.exists(temp_path):
-                    try:
+                    with contextlib.suppress(Exception):
                         os.unlink(temp_path)
-                    except Exception:
-                        pass
-        
+
         # Enqueue all documents for parallel processing
         # Worker will process them based on document_worker_concurrency setting
         for doc in documents:
             await worker.enqueue(dataset_id, doc["document_id"])
-        
+
         return {
             "batch_id": batch_id,
             "total": len(files),
@@ -381,7 +381,7 @@ async def batch_upload_documents(
             "documents": documents,
             "errors": errors,
         }
-        
+
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -415,7 +415,7 @@ async def create_document_url(
 @router.post("/knowledge/{dataset_id}/documents/images")
 async def upload_images(
     dataset_id: str,
-    files: List[UploadFile] = File(...),
+    files: list[UploadFile] = File(...),
     svc: KnowledgeService = Depends(get_knowledge_service),
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
@@ -436,12 +436,12 @@ async def upload_images(
 
         # Magic bytes for image validation (prevents content-type spoofing)
         IMAGE_MAGIC_BYTES = {
-            b'\xff\xd8\xff': "image/jpeg",      # JPEG
-            b'\x89PNG\r\n\x1a\n': "image/png",  # PNG
-            b'GIF87a': "image/gif",             # GIF87a
-            b'GIF89a': "image/gif",             # GIF89a
-            b'RIFF': "image/webp",              # WebP (starts with RIFF)
-            b'BM': "image/bmp",                 # BMP
+            b"\xff\xd8\xff": "image/jpeg",  # JPEG
+            b"\x89PNG\r\n\x1a\n": "image/png",  # PNG
+            b"GIF87a": "image/gif",  # GIF87a
+            b"GIF89a": "image/gif",  # GIF89a
+            b"RIFF": "image/webp",  # WebP (starts with RIFF)
+            b"BM": "image/bmp",  # BMP
         }
 
         def validate_image_magic(data: bytes) -> bool:
@@ -450,9 +450,7 @@ async def upload_images(
                 if data.startswith(magic):
                     return True
             # Special case for WebP: RIFF....WEBP
-            if data[:4] == b'RIFF' and len(data) >= 12 and data[8:12] == b'WEBP':
-                return True
-            return False
+            return bool(data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP")
 
         results = []
         errors = []
@@ -460,27 +458,33 @@ async def upload_images(
         for file in files:
             # Validate content type
             if file.content_type not in ALLOWED_IMAGE_TYPES:
-                errors.append({
-                    "filename": file.filename,
-                    "error": f"Unsupported image type: {file.content_type}"
-                })
+                errors.append(
+                    {
+                        "filename": file.filename,
+                        "error": f"Unsupported image type: {file.content_type}",
+                    }
+                )
                 continue
 
             # Read and validate size
             content = await file.read()
             if len(content) > MAX_IMAGE_SIZE:
-                errors.append({
-                    "filename": file.filename,
-                    "error": f"Image too large: {len(content)} bytes (max {MAX_IMAGE_SIZE})"
-                })
+                errors.append(
+                    {
+                        "filename": file.filename,
+                        "error": f"Image too large: {len(content)} bytes (max {MAX_IMAGE_SIZE})",
+                    }
+                )
                 continue
 
             # Validate magic bytes to prevent content-type spoofing
             if not validate_image_magic(content):
-                errors.append({
-                    "filename": file.filename,
-                    "error": "Invalid image file: magic bytes validation failed"
-                })
+                errors.append(
+                    {
+                        "filename": file.filename,
+                        "error": "Invalid image file: magic bytes validation failed",
+                    }
+                )
                 continue
 
             # Create document
@@ -495,11 +499,13 @@ async def upload_images(
             # Enqueue for processing (VLM description + multimodal embedding)
             await worker.enqueue(dataset_id, doc["document_id"])
 
-            results.append({
-                "document_id": doc["document_id"],
-                "filename": file.filename,
-                "size_bytes": len(content),
-            })
+            results.append(
+                {
+                    "document_id": doc["document_id"],
+                    "filename": file.filename,
+                    "size_bytes": len(content),
+                }
+            )
 
         return {
             "uploaded": results,
@@ -546,7 +552,9 @@ async def get_image_segment(
 
         if image_url.startswith("file://"):
             if not svc.image_storage_service:
-                raise HTTPException(status_code=503, detail="Image storage service is not initialized.")
+                raise HTTPException(
+                    status_code=503, detail="Image storage service is not initialized."
+                )
 
             # Verify URL signature for local files (security fix)
             signing_key = getattr(settings.confluence, "encryption_key", "") or ""
@@ -560,15 +568,15 @@ async def get_image_segment(
 
             # Get the unsigned URL path for file access
             unsigned_url = get_unsigned_url(image_url)
-            base_path = Path(svc.image_storage_service.config.local_base_path).expanduser().resolve()
+            base_path = (
+                Path(svc.image_storage_service.config.local_base_path).expanduser().resolve()
+            )
             parsed = urlparse(unsigned_url)
             file_path = Path(unquote(parsed.path)).expanduser().resolve()
 
             # Path traversal protection
             if base_path not in file_path.parents and file_path != base_path:
-                logger.warning(
-                    f"Path traversal attempt for segment {segment_id}: {file_path}"
-                )
+                logger.warning(f"Path traversal attempt for segment {segment_id}: {file_path}")
                 raise HTTPException(status_code=403, detail="Access denied")
             if not file_path.exists():
                 raise HTTPException(status_code=404, detail="Image not found")
@@ -639,8 +647,8 @@ async def delete_document(
 @router.get("/knowledge/{dataset_id}/segments")
 async def list_segments(
     dataset_id: str,
-    document_id: Optional[str] = Query(default=None),
-    q: Optional[str] = Query(default=None),
+    document_id: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -693,7 +701,7 @@ async def retrieve(
         # Use hierarchical retrieval if enabled
         if payload.hierarchical:
             from ...services.knowledge.hierarchical_retriever import hierarchical_retrieve
-            
+
             results, meta = await hierarchical_retrieve(
                 query=payload.query,
                 dataset_id=dataset_id,
@@ -707,7 +715,7 @@ async def retrieve(
                 include_context=payload.include_context,
                 score_threshold=payload.score_threshold,
             )
-            
+
             # Build hierarchical response
             return {
                 "results": [
@@ -732,7 +740,7 @@ async def retrieve(
                     "filtered_documents": meta.filtered_documents,
                 },
             }
-        
+
         # Use multimodal retrieval if include_associated_images is requested
         if payload.include_associated_images:
             results, meta = await svc.retrieve_with_images(
@@ -860,7 +868,9 @@ async def retrieve_batch(
             queries = [q.strip() for q in payload.query.split(",") if q.strip()]
 
         if not queries:
-            raise ValidationFailedError("No queries provided. Use 'queries' list or comma-separated 'query' string.")
+            raise ValidationFailedError(
+                "No queries provided. Use 'queries' list or comma-separated 'query' string."
+            )
 
         batch_results, meta = await svc.retrieve_batch(
             user=user,
@@ -961,13 +971,16 @@ async def hit_test(
     except Exception as exc:
         # Catch any unexpected errors and return a meaningful response
         import traceback
+
         error_detail = str(exc)
         traceback_str = traceback.format_exc()
         return {
             "results": [],
             "metadata": {
                 "error": error_detail,
-                "traceback": traceback_str if "DEBUG" in str(svc.settings.log_level).upper() else None,
+                "traceback": traceback_str
+                if "DEBUG" in str(svc.settings.log_level).upper()
+                else None,
                 "mode": payload.mode,
                 "top_k": payload.top_k,
             },
@@ -977,6 +990,7 @@ async def hit_test(
 # ============================================================
 # Document Enable/Disable/Archive Endpoints (Dify-style)
 # ============================================================
+
 
 @router.patch("/knowledge/{dataset_id}/documents/{document_id}/status")
 async def update_document_status(
@@ -1026,13 +1040,14 @@ async def update_document(
 ):
     """Update document metadata."""
     try:
-        doc = await svc.update_document(user, dataset_id, document_id, payload.model_dump(exclude_none=True))
+        doc = await svc.update_document(
+            user, dataset_id, document_id, payload.model_dump(exclude_none=True)
+        )
         return doc
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
 
 
 @router.post("/knowledge/preview")
@@ -1047,10 +1062,10 @@ async def preview_chunking_generic(
     try:
         # Use a dummy dataset ID since we don't have one yet
         chunks = await svc.preview_chunking(
-            user, 
-            "temp_preview", 
+            user,
+            "temp_preview",
             text=payload.text,
-            config=payload.config.model_dump() if payload.config else None
+            config=payload.config.model_dump() if payload.config else None,
         )
         return {"chunks": chunks, "total_chunks": len(chunks)}
     except PermissionDeniedError as exc:
@@ -1072,10 +1087,10 @@ async def preview_chunking(
     """
     try:
         chunks = await svc.preview_chunking(
-            user, 
-            dataset_id, 
+            user,
+            dataset_id,
             text=payload.text,
-            config=payload.config.model_dump() if payload.config else None
+            config=payload.config.model_dump() if payload.config else None,
         )
         return {"chunks": chunks, "total_chunks": len(chunks)}
     except PermissionDeniedError as exc:
@@ -1083,9 +1098,11 @@ async def preview_chunking(
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+
 # ============================================================
 # Batch Operations (Dify-style)
 # ============================================================
+
 
 @router.post("/knowledge/{dataset_id}/documents/batch")
 async def batch_create_documents(
@@ -1125,16 +1142,16 @@ async def batch_reindex_documents(
     """Batch reindex documents."""
     try:
         await svc.require_dataset_access(user, dataset_id, required="editor")
-        
+
         if payload.all_documents:
             docs = await svc.list_documents(user, dataset_id)
             doc_ids = [d["document_id"] for d in docs]
         else:
             doc_ids = payload.document_ids
-        
+
         for doc_id in doc_ids:
             await worker.enqueue(dataset_id, doc_id)
-        
+
         return {"status": "queued", "document_count": len(doc_ids)}
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -1162,6 +1179,7 @@ async def batch_delete_documents(
 # ============================================================
 # Segment Enable/Disable Endpoints
 # ============================================================
+
 
 @router.patch("/knowledge/{dataset_id}/segments/{segment_id}/status")
 async def update_segment_status(
@@ -1210,6 +1228,7 @@ async def create_segment(
 # Statistics Endpoints
 # ============================================================
 
+
 @router.get("/knowledge/{dataset_id}/statistics")
 async def get_dataset_statistics(
     dataset_id: str,
@@ -1236,10 +1255,10 @@ async def debug_dataset(
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
         stats = await svc.get_dataset_statistics(user, dataset_id)
-        
+
         # Sample a few segments to verify
         sample_segments = await svc.db.list_segments(dataset_id=dataset_id, limit=3, offset=0)
-        
+
         return {
             "dataset": {
                 "id": dataset_id,
@@ -1290,6 +1309,7 @@ async def get_document_statistics(
 # QA Testing Endpoints
 # ============================================================
 
+
 @router.post("/knowledge/{dataset_id}/qa")
 async def qa_query(
     request: Request,
@@ -1300,20 +1320,20 @@ async def qa_query(
 ):
     """
     Execute a QA query: retrieve → context → LLM answer.
-    
+
     This endpoint provides a complete RAG flow for testing retrieval quality.
     """
     try:
-        from ...services.knowledge.qa_service import QAService, LLMConfig, LLMProvider
-        
+        from ...services.knowledge.qa_service import LLMConfig, QAService
+
         # Build LLM config
         llm_config = None
         if payload.llm_config:
             llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
-        
+
         # Create QA service
         qa_service = QAService(svc, llm_config)
-        
+
         try:
             result = await qa_service.query(
                 user_context=user,
@@ -1332,7 +1352,7 @@ async def qa_query(
                 score_threshold=payload.score_threshold,
                 include_raw_results=payload.include_raw_results,
             )
-            
+
             return {
                 "query": result.query,
                 "answer": result.answer,
@@ -1348,7 +1368,7 @@ async def qa_query(
             }
         finally:
             await qa_service.close()
-            
+
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1368,7 +1388,7 @@ async def qa_query_stream(
     """
     Stream QA query: retrieve → stream LLM answer.
     """
-    from ...services.knowledge.qa_service import QAService, LLMConfig
+    from ...services.knowledge.qa_service import LLMConfig, QAService
 
     llm_config = None
     if payload.llm_config:
@@ -1398,13 +1418,19 @@ async def qa_query_stream(
                 payload_json = json.dumps(event, ensure_ascii=False)
                 yield f"data: {payload_json}\n\n"
         except PermissionDeniedError as exc:
-            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            payload_json = json.dumps(
+                {"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False
+            )
             yield f"data: {payload_json}\n\n"
         except ValidationFailedError as exc:
-            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            payload_json = json.dumps(
+                {"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False
+            )
             yield f"data: {payload_json}\n\n"
         except Exception as exc:
-            payload_json = json.dumps({"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False)
+            payload_json = json.dumps(
+                {"event": "error", "data": {"message": str(exc)}}, ensure_ascii=False
+            )
             yield f"data: {payload_json}\n\n"
         finally:
             await qa_service.close()
@@ -1430,24 +1456,24 @@ async def qa_batch_test(
 ):
     """
     Run batch QA tests for evaluation.
-    
+
     Executes multiple test cases and returns aggregated results.
     """
     try:
         from ...services.knowledge.qa_service import (
-            QAService, 
-            LLMConfig, 
+            LLMConfig,
+            QAService,
             QATestCase,
         )
-        
+
         # Build LLM config
         llm_config = None
         if payload.llm_config:
             llm_config = LLMConfig.from_dict(payload.llm_config.model_dump())
-        
+
         # Create QA service
         qa_service = QAService(svc, llm_config)
-        
+
         try:
             # Convert test cases
             test_cases = [
@@ -1458,7 +1484,7 @@ async def qa_batch_test(
                 )
                 for tc in payload.test_cases
             ]
-            
+
             # Run batch test
             results = await qa_service.run_test_batch(
                 user_context=user,
@@ -1469,17 +1495,17 @@ async def qa_batch_test(
                 rerank=payload.rerank,
                 mmr=payload.mmr,
             )
-            
+
             # Aggregate results
             summary = qa_service.aggregate_test_results(results)
-            
+
             return {
                 "results": [r.to_dict() for r in results],
                 "summary": summary,
             }
         finally:
             await qa_service.close()
-            
+
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
@@ -1492,6 +1518,7 @@ async def qa_batch_test(
 # Configuration Endpoints
 # ============================================================
 
+
 @router.get("/knowledge/{dataset_id}/config")
 async def get_dataset_config(
     dataset_id: str,
@@ -1501,29 +1528,35 @@ async def get_dataset_config(
     """Get dataset chunking and retrieval configuration."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
-        
+
         # Extract configurations from index_config
         index_config = dataset.get("index_config", {}) or {}
-        
+
         # Also get statistics
         try:
             stats = await svc.get_dataset_statistics(user, dataset_id)
         except Exception:
             stats = {}
-        
+
         return {
             "dataset_id": dataset_id,
-            "chunking": index_config.get("chunking", {
-                "mode": "automatic",
-                "chunk_size": 500,
-                "chunk_overlap": 50,
-            }),
-            "retrieval": index_config.get("retrieval", {
-                "mode": "hybrid",
-                "top_k": 5,
-                "rerank": {"enabled": False},
-                "mmr": {"enabled": False},
-            }),
+            "chunking": index_config.get(
+                "chunking",
+                {
+                    "mode": "automatic",
+                    "chunk_size": 500,
+                    "chunk_overlap": 50,
+                },
+            ),
+            "retrieval": index_config.get(
+                "retrieval",
+                {
+                    "mode": "hybrid",
+                    "top_k": 5,
+                    "rerank": {"enabled": False},
+                    "mmr": {"enabled": False},
+                },
+            ),
             "embedding": {
                 "provider": dataset.get("embedding_provider"),
                 "model": dataset.get("embedding_model"),
@@ -1548,14 +1581,14 @@ async def update_dataset_config(
     """Update dataset chunking and retrieval configuration."""
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="owner")
-        
+
         # Get current config
         index_config = dict(dataset.get("index_config", {}) or {})
-        
+
         # Update chunking config
         if payload.chunking_config:
             index_config["chunking"] = payload.chunking_config.model_dump(exclude_none=True)
-        
+
         # Update retrieval config
         if payload.retrieval_config:
             retrieval = payload.retrieval_config.model_dump(exclude_none=True)
@@ -1586,16 +1619,16 @@ async def update_dataset_config(
                     "lambda": mmr_cfg.get("lambda", 0.5),
                 },
             }
-        
+
         # Build dataset updates
-        dataset_updates: Dict[str, Any] = {"index_config": index_config}
-        
+        dataset_updates: dict[str, Any] = {"index_config": index_config}
+
         # Handle embedding config updates if provided
         # Note: embedding changes require dimension check to avoid breaking existing vectors
-        embedding_provider = getattr(payload, 'embedding_provider', None)
-        embedding_model = getattr(payload, 'embedding_model', None)
-        embedding_dimension = getattr(payload, 'embedding_dimension', None)
-        
+        embedding_provider = getattr(payload, "embedding_provider", None)
+        embedding_model = getattr(payload, "embedding_model", None)
+        embedding_dimension = getattr(payload, "embedding_dimension", None)
+
         # Validate embedding dimension changes don't break existing vectors
         current_dimension = dataset.get("embedding_dimension")
         if embedding_dimension is not None and embedding_dimension != current_dimension:
@@ -1606,19 +1639,19 @@ async def update_dataset_config(
                 raise HTTPException(
                     status_code=400,
                     detail=f"Cannot change embedding dimension when {segment_count} segments exist. "
-                           "Please create a new dataset or delete all existing documents first."
+                    "Please create a new dataset or delete all existing documents first.",
                 )
-        
+
         if embedding_provider is not None:
             dataset_updates["embedding_provider"] = embedding_provider
         if embedding_model is not None:
             dataset_updates["embedding_model"] = embedding_model
         if embedding_dimension is not None:
             dataset_updates["embedding_dimension"] = embedding_dimension
-        
+
         # Save updated config
         updated = await svc.update_dataset(user, dataset_id, dataset_updates)
-        
+
         return {
             "status": "success",
             "dataset_id": dataset_id,
@@ -1639,27 +1672,32 @@ async def update_dataset_config(
 # Chunk Preview Endpoint
 # ============================================================
 
+
 class ChunkPreviewRequest(BaseModel):
     """Request for chunk preview."""
+
     text: str = Field(..., description="Text to chunk")
-    chunking_config: Optional[Dict[str, Any]] = Field(
-        default=None, 
-        description="Chunking configuration. Uses dataset defaults if not provided."
+    chunking_config: dict[str, Any] | None = Field(
+        default=None, description="Chunking configuration. Uses dataset defaults if not provided."
     )
+
 
 class ChunkPreviewItem(BaseModel):
     """Single chunk preview item."""
+
     index: int
     text: str
     char_count: int
     token_count: int
     word_count: int
 
+
 class ChunkPreviewResponse(BaseModel):
     """Response for chunk preview."""
+
     total_chunks: int
-    chunks: List[ChunkPreviewItem]
-    config_used: Dict[str, Any]
+    chunks: list[ChunkPreviewItem]
+    config_used: dict[str, Any]
 
 
 @router.post("/knowledge/{dataset_id}/preview-chunks")
@@ -1680,9 +1718,9 @@ async def preview_chunks(
         # Import chunking module
         from src.services.knowledge.chunking import (
             ChunkingConfig,
-            process_document,
             flatten_chunks,
             merge_small_chunks,
+            process_document,
         )
 
         # Get chunking config - use provided or fall back to dataset defaults
@@ -1749,7 +1787,7 @@ async def get_dataset_sources(
 
         # Get document statistics by source_type using database
         docs = await svc.list_documents(user, dataset_id)
-        source_counts: Dict[str, int] = {}
+        source_counts: dict[str, int] = {}
         for doc in docs:
             source_type = doc.get("source_type") or "upload"
             source_counts[source_type] = source_counts.get(source_type, 0) + 1
@@ -1792,11 +1830,14 @@ async def get_dataset_sources(
 # Maintenance Endpoints (Internal Use Only)
 # =============================================================================
 
+
 @router.post("/knowledge/{dataset_id}/maintenance/dedupe")
 async def dedupe_segments(
     dataset_id: str,
     request: Request,
-    dry_run: bool = Query(default=True, description="If true, only report duplicates without deleting"),
+    dry_run: bool = Query(
+        default=True, description="If true, only report duplicates without deleting"
+    ),
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
     settings: Settings = Depends(get_settings),
@@ -1867,10 +1908,8 @@ async def dedupe_segments(
                 # Delete from vector store
                 if collection_name:
                     vector_id = seg.get("vector_id") or seg_id
-                    try:
+                    with contextlib.suppress(Exception):
                         await svc.vector_store.delete_points(collection_name, [vector_id])
-                    except Exception:
-                        pass
 
                 # Delete from database
                 ok = await svc.db.delete_segment(seg_id)
@@ -1895,24 +1934,28 @@ async def dedupe_segments(
 # Document Version Control APIs
 # ============================================================
 
+
 class VersionListResponse(BaseModel):
     """Version list response schema"""
-    versions: List[Dict[str, Any]]
+
+    versions: list[dict[str, Any]]
     total: int
-    current_version: Optional[int] = None
+    current_version: int | None = None
 
 
 class VersionCompareResponse(BaseModel):
     """Version compare response schema"""
+
     from_version: int
     to_version: int
-    diff: List[Dict[str, Any]]
-    stats: Dict[str, int]
+    diff: list[dict[str, Any]]
+    stats: dict[str, int]
 
 
 class VersionRestoreRequest(BaseModel):
     """Version restore request schema"""
-    reason: Optional[str] = Field(None, description="Reason for restoring this version")
+
+    reason: str | None = Field(None, description="Reason for restoring this version")
 
 
 @router.get("/knowledge/{dataset_id}/documents/{document_id}/versions")
@@ -2027,13 +2070,15 @@ async def compare_document_versions(
         content_to = (version_to.get("content") or "").splitlines(keepends=True)
 
         # Generate unified diff
-        diff_lines = list(difflib.unified_diff(
-            content_from,
-            content_to,
-            fromfile=f"Version {from_version}",
-            tofile=f"Version {to_version}",
-            lineterm=""
-        ))
+        diff_lines = list(
+            difflib.unified_diff(
+                content_from,
+                content_to,
+                fromfile=f"Version {from_version}",
+                tofile=f"Version {to_version}",
+                lineterm="",
+            )
+        )
 
         # Parse diff into structured format
         diff_items = []
@@ -2060,7 +2105,7 @@ async def compare_document_versions(
                 "additions": additions,
                 "deletions": deletions,
                 "changes": additions + deletions,
-            }
+            },
         )
 
     except PermissionDeniedError as exc:
@@ -2125,7 +2170,7 @@ async def restore_document_version(
                 "content": restored_content,
                 "status": "uploaded",
                 "progress": 0,
-            }
+            },
         )
 
         # Create a new version marking the restore

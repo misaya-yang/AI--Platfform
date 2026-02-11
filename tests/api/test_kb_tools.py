@@ -12,36 +12,31 @@ Endpoints tested:
 - GET /kb/multi-tool-definition - Get multi-search tool definition
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-from typing import Any, Dict, List
-
 from fastapi import HTTPException
-from fastapi.testclient import TestClient
 
-from src.api.v1.kb_tools import (
-    _format_context_for_llm,
-    _convert_retrieve_result_to_search_result,
-    _resolve_mode,
-)
 from src.api.schemas.kb_tools import (
+    KBMultiSearchRequest,
+    KBMultiSearchResponse,
     KBSearchRequest,
     KBSearchResponse,
     KBSearchResult,
-    KBMultiSearchRequest,
-    KBMultiSearchResponse,
-    KBDatasetInfo,
-    KBToolDefinition,
     get_kb_search_tool_definition,
     get_multi_kb_search_tool_definition,
 )
+from src.api.v1.kb_tools import (
+    _convert_retrieve_result_to_search_result,
+    _format_context_for_llm,
+    _resolve_mode,
+)
 from src.core.auth.user_resolver import UserContext
-
 
 # ============================================================
 # Test Fixtures
 # ============================================================
+
 
 @pytest.fixture
 def authenticated_user():
@@ -68,8 +63,11 @@ def admin_user():
 @pytest.fixture
 def mock_retrieve_result():
     """Create a mock RetrieveResult."""
+
     class MockResult:
-        def __init__(self, text, score, segment_id, document_id, content_type="text", metadata=None):
+        def __init__(
+            self, text, score, segment_id, document_id, content_type="text", metadata=None
+        ):
             self.text = text
             self.score = score
             self.segment_id = segment_id
@@ -114,42 +112,50 @@ def mock_knowledge_service(sample_retrieve_results):
     service = AsyncMock()
 
     # Mock require_dataset_access
-    service.require_dataset_access = AsyncMock(return_value={
-        "dataset_id": "test_dataset",
-        "name": "Test Dataset",
-        "description": "A test dataset",
-        "tenant_id": "tenant_001",
-    })
+    service.require_dataset_access = AsyncMock(
+        return_value={
+            "dataset_id": "test_dataset",
+            "name": "Test Dataset",
+            "description": "A test dataset",
+            "tenant_id": "tenant_001",
+        }
+    )
 
     # Mock retrieve
     service.retrieve = AsyncMock(return_value=(sample_retrieve_results, {"took_ms": 50}))
 
     # Mock retrieve_with_images (for multimodal queries)
-    service.retrieve_with_images = AsyncMock(return_value=(sample_retrieve_results, {"took_ms": 50, "multimodal": True}))
+    service.retrieve_with_images = AsyncMock(
+        return_value=(sample_retrieve_results, {"took_ms": 50, "multimodal": True})
+    )
 
     # Mock list_datasets
-    service.list_datasets = AsyncMock(return_value=[
-        {
-            "dataset_id": "docs",
-            "name": "Documentation",
-            "description": "Product documentation",
-            "embedding_provider": "dashscope",
-            "embedding_model": "text-embedding-v3",
-        },
-        {
-            "dataset_id": "faq",
-            "name": "FAQ",
-            "description": "Frequently asked questions",
-            "embedding_provider": "dashscope",
-            "embedding_model": "text-embedding-v3",
-        },
-    ])
+    service.list_datasets = AsyncMock(
+        return_value=[
+            {
+                "dataset_id": "docs",
+                "name": "Documentation",
+                "description": "Product documentation",
+                "embedding_provider": "dashscope",
+                "embedding_model": "text-embedding-v3",
+            },
+            {
+                "dataset_id": "faq",
+                "name": "FAQ",
+                "description": "Frequently asked questions",
+                "embedding_provider": "dashscope",
+                "embedding_model": "text-embedding-v3",
+            },
+        ]
+    )
 
     # Mock get_dataset_statistics
-    service.get_dataset_statistics = AsyncMock(return_value={
-        "document_count": 10,
-        "segment_count": 150,
-    })
+    service.get_dataset_statistics = AsyncMock(
+        return_value={
+            "document_count": 10,
+            "segment_count": 150,
+        }
+    )
 
     return service
 
@@ -157,6 +163,7 @@ def mock_knowledge_service(sample_retrieve_results):
 # ============================================================
 # Helper Function Tests
 # ============================================================
+
 
 class TestResolveMode:
     """Tests for _resolve_mode helper."""
@@ -287,6 +294,7 @@ class TestConvertRetrieveResult:
 
     def test_handles_associated_images(self, mock_retrieve_result):
         """Should convert associated images correctly."""
+
         class MockAssociatedImage:
             def __init__(self):
                 self.image_segment_id = "img_001"
@@ -314,6 +322,7 @@ class TestConvertRetrieveResult:
 # ============================================================
 # Schema Tests
 # ============================================================
+
 
 class TestKBSearchRequest:
     """Tests for KBSearchRequest schema."""
@@ -375,6 +384,7 @@ class TestKBToolDefinition:
 # API Endpoint Tests (Unit)
 # ============================================================
 
+
 class TestKBSearchEndpoint:
     """Tests for POST /kb/search endpoint."""
 
@@ -394,7 +404,9 @@ class TestKBSearchEndpoint:
         )
 
         # Patch dependencies
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await kb_search(request, mock_knowledge_service, authenticated_user)
 
         assert isinstance(response, KBSearchResponse)
@@ -419,7 +431,9 @@ class TestKBSearchEndpoint:
             top_k=10,
         )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             await kb_search(request, mock_knowledge_service, authenticated_user)
 
         # Verify top_k was passed (uses retrieve_with_images by default due to include_images=True)
@@ -489,7 +503,9 @@ class TestKBMultiSearchEndpoint:
             top_k=5,
         )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await kb_multi_search(request, mock_knowledge_service, authenticated_user)
 
         assert isinstance(response, KBMultiSearchResponse)
@@ -511,7 +527,9 @@ class TestKBMultiSearchEndpoint:
             merge_strategy="score",
         )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await kb_multi_search(request, mock_knowledge_service, authenticated_user)
 
         # Results should be sorted by score (descending)
@@ -545,7 +563,9 @@ class TestKBMultiSearchEndpoint:
             dataset_ids=["docs", "private"],
         )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await kb_multi_search(request, mock_knowledge_service, authenticated_user)
 
         # Should only include accessible dataset
@@ -565,7 +585,9 @@ class TestListDatasetsEndpoint:
         """Should return list of datasets available to user."""
         from src.api.v1.kb_tools import list_datasets
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await list_datasets(
                 include_stats=False,
                 svc=mock_knowledge_service,
@@ -586,7 +608,9 @@ class TestListDatasetsEndpoint:
         """Should include stats when requested."""
         from src.api.v1.kb_tools import list_datasets
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await list_datasets(
                 include_stats=True,
                 svc=mock_knowledge_service,
@@ -610,12 +634,16 @@ class TestToolDefinitionEndpoint:
         """Should return valid OpenAI function definition."""
         from src.api.v1.kb_tools import get_tool_definition
 
-        mock_knowledge_service.require_dataset_access = AsyncMock(return_value={
-            "dataset_id": "docs",
-            "name": "Documentation",
-        })
+        mock_knowledge_service.require_dataset_access = AsyncMock(
+            return_value={
+                "dataset_id": "docs",
+                "name": "Documentation",
+            }
+        )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await get_tool_definition(
                 dataset_id="docs",
                 svc=mock_knowledge_service,
@@ -623,7 +651,7 @@ class TestToolDefinitionEndpoint:
             )
 
         assert response.type == "function"
-        assert "search_docs" == response.function["name"]
+        assert response.function["name"] == "search_docs"
 
     @pytest.mark.asyncio
     async def test_get_tool_definition_permission_denied(
@@ -661,7 +689,9 @@ class TestGetAllToolDefinitions:
         """Should return tool definitions for all accessible datasets."""
         from src.api.v1.kb_tools import get_all_tool_definitions
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await get_all_tool_definitions(
                 svc=mock_knowledge_service,
                 user=authenticated_user,
@@ -683,12 +713,16 @@ class TestMultiToolDefinition:
         """Should return a combined tool definition for multiple datasets."""
         from src.api.v1.kb_tools import get_multi_search_tool_definition
 
-        mock_knowledge_service.require_dataset_access = AsyncMock(return_value={
-            "dataset_id": "docs",
-            "name": "Documentation",
-        })
+        mock_knowledge_service.require_dataset_access = AsyncMock(
+            return_value={
+                "dataset_id": "docs",
+                "name": "Documentation",
+            }
+        )
 
-        with patch("src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service):
+        with patch(
+            "src.api.v1.kb_tools.get_knowledge_service", return_value=mock_knowledge_service
+        ):
             response = await get_multi_search_tool_definition(
                 dataset_ids="docs,faq",
                 svc=mock_knowledge_service,
@@ -702,6 +736,7 @@ class TestMultiToolDefinition:
 # ============================================================
 # Integration Simulation Tests
 # ============================================================
+
 
 class TestLangGraphAgentSimulation:
     """Simulated tests for LangGraph agent integration patterns."""

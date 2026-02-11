@@ -13,14 +13,14 @@ TODO: Implement LLM-based preference extraction for:
 
 from __future__ import annotations
 
-import re
 import logging
-from typing import Dict, Any, Optional
+import re
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def extract_preferences(text: str) -> Dict[str, Any]:
+def extract_preferences(text: str) -> dict[str, Any]:
     """
     Extract user preferences from message text using rule-based patterns.
 
@@ -41,7 +41,7 @@ def extract_preferences(text: str) -> Dict[str, Any]:
         >>> extract_preferences("请用中文回复，要详细一点")
         {"language": "zh", "verbosity": "detailed"}
     """
-    prefs: Dict[str, Any] = {}
+    prefs: dict[str, Any] = {}
 
     if not text or not isinstance(text, str):
         return prefs
@@ -65,9 +65,14 @@ def extract_preferences(text: str) -> Dict[str, Any]:
             break
 
     # Verbosity patterns
-    if any(kw in text for kw in ["详细", "详尽", "完整", "详细一点", "more detail", "comprehensive", "in detail"]):
+    if any(
+        kw in text
+        for kw in ["详细", "详尽", "完整", "详细一点", "more detail", "comprehensive", "in detail"]
+    ):
         prefs["verbosity"] = "detailed"
-    elif any(kw in text for kw in ["简短", "简洁", "简单", "简要", "brief", "short", "concise", "quick"]):
+    elif any(
+        kw in text for kw in ["简短", "简洁", "简单", "简要", "brief", "short", "concise", "quick"]
+    ):
         prefs["verbosity"] = "brief"
 
     # Format patterns
@@ -88,9 +93,9 @@ def extract_preferences(text: str) -> Dict[str, Any]:
 
 
 def merge_preferences(
-    existing: Optional[Dict[str, Any]],
-    new: Dict[str, Any],
-) -> Dict[str, Any]:
+    existing: dict[str, Any] | None,
+    new: dict[str, Any],
+) -> dict[str, Any]:
     """
     Merge new preferences with existing ones.
 

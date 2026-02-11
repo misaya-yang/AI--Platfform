@@ -4,10 +4,11 @@ import json
 import logging
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 try:
     import redis.asyncio as aioredis
+
     HAS_REDIS = True
 except ImportError:
     HAS_REDIS = False
@@ -20,10 +21,10 @@ _warned_degraded = False
 class RedisStorage:
     """Redis 缓存存储（可选启用）"""
 
-    def __init__(self, url: Optional[str] = None, enabled: bool = False):
+    def __init__(self, url: str | None = None, enabled: bool = False):
         self.url = url
         self.enabled = enabled and HAS_REDIS and url
-        self._client: Optional[Any] = None
+        self._client: Any | None = None
 
     async def connect(self) -> None:
         if not self.enabled:
@@ -36,13 +37,13 @@ class RedisStorage:
             decode_responses=True,
         )
 
-    def get_native_client(self) -> Optional[Any]:
+    def get_native_client(self) -> Any | None:
         """
         Return the underlying native redis client for advanced use cases.
-        
+
         This is needed by components like MultiDimensionRateLimiter that
         require direct access to the redis client rather than the wrapper.
-        
+
         Returns:
             The native redis.asyncio client, or None if not connected/enabled.
         """
@@ -72,7 +73,7 @@ class RedisStorage:
             return obj.value
         return str(obj)
 
-    async def save(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+    async def save(self, key: str, value: Any, ttl: int | None = None) -> None:
         """保存键值对"""
         if not self._client:
             return
@@ -83,7 +84,7 @@ class RedisStorage:
         else:
             await self._client.set(key, value)
 
-    async def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Any | None:
         """获取值"""
         if not self._client:
             return None
@@ -163,12 +164,12 @@ class RedisStorage:
 
     # ===== 会话存储 =====
 
-    async def save_session(self, session_id: str, data: Dict[str, Any], ttl: int = 3600) -> None:
+    async def save_session(self, session_id: str, data: dict[str, Any], ttl: int = 3600) -> None:
         """保存会话数据"""
         key = f"session:{session_id}"
         await self.save(key, data, ttl)
 
-    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """获取会话数据"""
         key = f"session:{session_id}"
         return await self.get(key)
@@ -191,7 +192,7 @@ class RedisStorage:
         key = f"cache:{service_id}:{input_hash}"
         await self.save(key, {"response": response}, ttl)
 
-    async def get_cached_response(self, service_id: str, input_hash: str) -> Optional[str]:
+    async def get_cached_response(self, service_id: str, input_hash: str) -> str | None:
         """获取缓存的响应"""
         key = f"cache:{service_id}:{input_hash}"
         data = await self.get(key)
@@ -201,24 +202,26 @@ class RedisStorage:
 
     # ===== 服务健康状态缓存 =====
 
-    async def set_service_health(self, service_id: str, status: Dict[str, Any], ttl: int = 60) -> None:
+    async def set_service_health(
+        self, service_id: str, status: dict[str, Any], ttl: int = 60
+    ) -> None:
         """缓存服务健康状态"""
         key = f"health:{service_id}"
         await self.save(key, status, ttl)
 
-    async def get_service_health(self, service_id: str) -> Optional[Dict[str, Any]]:
+    async def get_service_health(self, service_id: str) -> dict[str, Any] | None:
         """获取服务健康状态"""
         key = f"health:{service_id}"
         return await self.get(key)
 
     # ===== 配置缓存 =====
 
-    async def cache_config(self, config_type: str, config: Dict[str, Any], ttl: int = 300) -> None:
+    async def cache_config(self, config_type: str, config: dict[str, Any], ttl: int = 300) -> None:
         """缓存配置"""
         key = f"config:{config_type}"
         await self.save(key, config, ttl)
 
-    async def get_cached_config(self, config_type: str) -> Optional[Dict[str, Any]]:
+    async def get_cached_config(self, config_type: str) -> dict[str, Any] | None:
         """获取缓存的配置"""
         key = f"config:{config_type}"
         return await self.get(key)
@@ -230,7 +233,7 @@ class RedisStorage:
 
     # ===== LangGraph 专用缓存 =====
 
-    async def get_thread_mapping(self, session_id: str) -> Optional[str]:
+    async def get_thread_mapping(self, session_id: str) -> str | None:
         """
         获取 session_id -> thread_id 映射
 
@@ -240,9 +243,7 @@ class RedisStorage:
         result = await self.get(key)
         return str(result) if result else None
 
-    async def set_thread_mapping(
-        self, session_id: str, thread_id: str, ttl: int = 604800
-    ) -> None:
+    async def set_thread_mapping(self, session_id: str, thread_id: str, ttl: int = 604800) -> None:
         """
         设置 session_id -> thread_id 映射
 
@@ -254,9 +255,7 @@ class RedisStorage:
         key = f"lg:thread_map:{session_id}"
         await self.save(key, thread_id, ttl)
 
-    async def cache_thread(
-        self, thread_id: str, data: Dict[str, Any], ttl: int = 60
-    ) -> None:
+    async def cache_thread(self, thread_id: str, data: dict[str, Any], ttl: int = 60) -> None:
         """
         缓存 Thread 元数据
 
@@ -268,7 +267,7 @@ class RedisStorage:
         key = f"lg:thread:{thread_id}"
         await self.save(key, data, ttl)
 
-    async def get_cached_thread(self, thread_id: str) -> Optional[Dict[str, Any]]:
+    async def get_cached_thread(self, thread_id: str) -> dict[str, Any] | None:
         """获取缓存的 Thread 元数据"""
         key = f"lg:thread:{thread_id}"
         return await self.get(key)
@@ -279,7 +278,7 @@ class RedisStorage:
         await self.delete(key)
 
     async def cache_assistant(
-        self, assistant_id: str, data: Dict[str, Any], ttl: int = 300
+        self, assistant_id: str, data: dict[str, Any], ttl: int = 300
     ) -> None:
         """
         缓存 Assistant 信息
@@ -292,13 +291,13 @@ class RedisStorage:
         key = f"lg:assistant:{assistant_id}"
         await self.save(key, data, ttl)
 
-    async def get_cached_assistant(self, assistant_id: str) -> Optional[Dict[str, Any]]:
+    async def get_cached_assistant(self, assistant_id: str) -> dict[str, Any] | None:
         """获取缓存的 Assistant 信息"""
         key = f"lg:assistant:{assistant_id}"
         return await self.get(key)
 
     async def cache_assistants_list(
-        self, user_id: str, data: List[Dict[str, Any]], ttl: int = 60
+        self, user_id: str, data: list[dict[str, Any]], ttl: int = 60
     ) -> None:
         """
         缓存用户的 Assistants 列表
@@ -311,7 +310,7 @@ class RedisStorage:
         key = f"lg:assistants_list:{user_id}"
         await self.save(key, data, ttl)
 
-    async def get_cached_assistants_list(self, user_id: str) -> Optional[List[Dict[str, Any]]]:
+    async def get_cached_assistants_list(self, user_id: str) -> list[dict[str, Any]] | None:
         """获取缓存的 Assistants 列表"""
         key = f"lg:assistants_list:{user_id}"
         result = await self.get(key)
@@ -363,7 +362,7 @@ class RedisStorage:
         self,
         token_id: str,
         user_id: str,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         ttl: int = 10800,  # 默认 3 小时
     ) -> None:
         """
@@ -385,7 +384,7 @@ class RedisStorage:
             await self._client.sadd(user_tokens_key, token_id)
             await self._client.expire(user_tokens_key, ttl)
 
-    async def get_token(self, token_id: str) -> Optional[Dict[str, Any]]:
+    async def get_token(self, token_id: str) -> dict[str, Any] | None:
         """
         获取 Token 数据
 

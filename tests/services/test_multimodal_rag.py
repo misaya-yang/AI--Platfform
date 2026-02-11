@@ -11,10 +11,7 @@ Tests include:
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -33,8 +30,8 @@ from src.services.knowledge.retrieval_v2 import (
     RetrievalCandidate,
 )
 
-
 # ============ Test AssociatedImage ============
+
 
 class TestAssociatedImage:
     """Tests for AssociatedImage dataclass"""
@@ -138,6 +135,7 @@ class TestAssociatedImage:
 
 # ============ Test Chunk Multimodal Fields ============
 
+
 class TestChunkMultimodal:
     """Tests for Chunk multimodal extensions"""
 
@@ -200,21 +198,27 @@ class TestChunkMultimodal:
         """Test images are sorted by proximity score"""
         chunk = Chunk(text="Paragraph")
 
-        chunk.add_associated_image(AssociatedImage(
-            image_segment_id="low",
-            storage_url="s3://bucket/low.png",
-            proximity_score=0.3,
-        ))
-        chunk.add_associated_image(AssociatedImage(
-            image_segment_id="high",
-            storage_url="s3://bucket/high.png",
-            proximity_score=0.9,
-        ))
-        chunk.add_associated_image(AssociatedImage(
-            image_segment_id="mid",
-            storage_url="s3://bucket/mid.png",
-            proximity_score=0.6,
-        ))
+        chunk.add_associated_image(
+            AssociatedImage(
+                image_segment_id="low",
+                storage_url="s3://bucket/low.png",
+                proximity_score=0.3,
+            )
+        )
+        chunk.add_associated_image(
+            AssociatedImage(
+                image_segment_id="high",
+                storage_url="s3://bucket/high.png",
+                proximity_score=0.9,
+            )
+        )
+        chunk.add_associated_image(
+            AssociatedImage(
+                image_segment_id="mid",
+                storage_url="s3://bucket/mid.png",
+                proximity_score=0.6,
+            )
+        )
 
         sorted_imgs = chunk.get_images_sorted_by_proximity()
 
@@ -241,12 +245,14 @@ class TestChunkMultimodal:
     def test_chunk_to_multimodal_dict(self):
         """Test chunk serialization with multimodal fields"""
         chunk = Chunk(text="Test paragraph")
-        chunk.add_associated_image(AssociatedImage(
-            image_segment_id="img_001",
-            storage_url="s3://bucket/img.png",
-            vlm_description="Test image",
-            proximity_score=0.8,
-        ))
+        chunk.add_associated_image(
+            AssociatedImage(
+                image_segment_id="img_001",
+                storage_url="s3://bucket/img.png",
+                vlm_description="Test image",
+                proximity_score=0.8,
+            )
+        )
 
         d = chunk.to_multimodal_dict()
 
@@ -259,6 +265,7 @@ class TestChunkMultimodal:
 
 
 # ============ Test MultimodalReranker ============
+
 
 class TestMultimodalReranker:
     """Tests for MultimodalReranker"""
@@ -363,9 +370,7 @@ class TestMultimodalReranker:
         """Test reranking with mocked VLM service"""
         # Create mock VLM service
         mock_vlm = AsyncMock()
-        mock_vlm.describe_image = AsyncMock(
-            return_value=MagicMock(description="0.9")
-        )
+        mock_vlm.describe_image = AsyncMock(return_value=MagicMock(description="0.9"))
 
         reranker = MultimodalReranker(
             vlm_service=mock_vlm,
@@ -423,6 +428,7 @@ class TestMultimodalReranker:
 
 
 # ============ Test RetrievalCandidate Multimodal Fields ============
+
 
 class TestRetrievalCandidateMultimodal:
     """Tests for RetrievalCandidate multimodal extensions"""
@@ -485,6 +491,7 @@ class TestRetrievalCandidateMultimodal:
 
 # ============ Test AssociatedImageInfo ============
 
+
 class TestAssociatedImageInfo:
     """Tests for AssociatedImageInfo (retrieval response model)"""
 
@@ -518,6 +525,7 @@ class TestAssociatedImageInfo:
 
 # ============ Test ContentType Enum ============
 
+
 class TestContentType:
     """Tests for ContentType enum"""
 
@@ -535,6 +543,7 @@ class TestContentType:
 
 
 # ============ Integration-style Tests ============
+
 
 class TestMultimodalRAGIntegration:
     """Integration-style tests for multimodal RAG pipeline"""

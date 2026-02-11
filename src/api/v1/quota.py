@@ -11,12 +11,12 @@ Provides:
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Request, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ...api.deps import get_auth_context, AuthContext
+from ...api.deps import AuthContext, get_auth_context
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy
 
@@ -31,11 +31,11 @@ router = APIRouter(prefix="/quota", tags=["quota"])
 class QuotaLimits(BaseModel):
     """Quota limit configuration."""
 
-    daily_tokens: Optional[int] = Field(None, description="Daily token limit")
-    monthly_tokens: Optional[int] = Field(None, description="Monthly token limit")
-    monthly_cost_cents: Optional[int] = Field(None, description="Monthly cost limit in cents")
-    requests_per_minute: Optional[int] = Field(None, description="Requests per minute limit")
-    requests_per_day: Optional[int] = Field(None, description="Requests per day limit")
+    daily_tokens: int | None = Field(None, description="Daily token limit")
+    monthly_tokens: int | None = Field(None, description="Monthly token limit")
+    monthly_cost_cents: int | None = Field(None, description="Monthly cost limit in cents")
+    requests_per_minute: int | None = Field(None, description="Requests per minute limit")
+    requests_per_day: int | None = Field(None, description="Requests per day limit")
 
 
 class QuotaUsage(BaseModel):
@@ -51,14 +51,14 @@ class QuotaStatus(BaseModel):
     """Quota status information."""
 
     is_blocked: bool = False
-    blocked_reason: Optional[str] = None
+    blocked_reason: str | None = None
 
 
 class QuotaResets(BaseModel):
     """Quota reset times."""
 
-    daily_reset_at: Optional[str] = None
-    monthly_reset_at: Optional[str] = None
+    daily_reset_at: str | None = None
+    monthly_reset_at: str | None = None
 
 
 class QuotaPolicy(BaseModel):
@@ -67,7 +67,7 @@ class QuotaPolicy(BaseModel):
     overage_strategy: Literal["hard_block", "rate_limit", "downgrade_model", "allow_but_alert"] = (
         "allow_but_alert"
     )
-    downgraded_model: Optional[str] = None
+    downgraded_model: str | None = None
 
 
 class TemporaryBoost(BaseModel):
@@ -75,7 +75,7 @@ class TemporaryBoost(BaseModel):
 
     extra_tokens: int = 0
     extra_cost_cents: int = 0
-    expires_at: Optional[str] = None
+    expires_at: str | None = None
 
 
 class QuotaResponse(BaseModel):
@@ -98,10 +98,10 @@ class QuotaCheckResponse(BaseModel):
     status: str  # ok, warning, exceeded, blocked
     message: str
     can_proceed: bool
-    daily_tokens: Dict[str, Any]
-    monthly_cost: Dict[str, Any]
-    daily_requests: Dict[str, Any]
-    policy: Dict[str, Any] = Field(default_factory=dict)
+    daily_tokens: dict[str, Any]
+    monthly_cost: dict[str, Any]
+    daily_requests: dict[str, Any]
+    policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class QuotaForecastWindow(BaseModel):
@@ -120,9 +120,9 @@ class QuotaForecastTokens(BaseModel):
     current: int
     avg_daily: float
     projected_month_end: int
-    limit: Optional[int] = None
-    projected_usage_pct: Optional[float] = None
-    predicted_breach_date: Optional[str] = None
+    limit: int | None = None
+    projected_usage_pct: float | None = None
+    predicted_breach_date: str | None = None
 
 
 class QuotaForecastCost(BaseModel):
@@ -133,10 +133,10 @@ class QuotaForecastCost(BaseModel):
     avg_daily_cents: float
     projected_month_end_cents: int
     projected_month_end_usd: float
-    limit_cents: Optional[int] = None
-    limit_usd: Optional[float] = None
-    projected_usage_pct: Optional[float] = None
-    predicted_breach_date: Optional[str] = None
+    limit_cents: int | None = None
+    limit_usd: float | None = None
+    projected_usage_pct: float | None = None
+    predicted_breach_date: str | None = None
 
 
 class QuotaForecastResponse(BaseModel):
@@ -152,15 +152,15 @@ class QuotaForecastResponse(BaseModel):
 class SetQuotaRequest(BaseModel):
     """Request to set user quota."""
 
-    daily_token_limit: Optional[int] = Field(
+    daily_token_limit: int | None = Field(
         None, ge=0, description="Daily token limit (0 for unlimited)"
     )
-    monthly_token_limit: Optional[int] = Field(None, ge=0, description="Monthly token limit")
-    monthly_cost_limit_cents: Optional[int] = Field(
+    monthly_token_limit: int | None = Field(None, ge=0, description="Monthly token limit")
+    monthly_cost_limit_cents: int | None = Field(
         None, ge=0, description="Monthly cost limit in cents"
     )
-    requests_per_minute: Optional[int] = Field(None, ge=0, description="RPM limit")
-    requests_per_day: Optional[int] = Field(None, ge=0, description="Daily request limit")
+    requests_per_minute: int | None = Field(None, ge=0, description="RPM limit")
+    requests_per_day: int | None = Field(None, ge=0, description="Daily request limit")
     warning_threshold: int = Field(80, ge=0, le=100, description="Warning threshold percentage")
     overage_strategy: Literal["hard_block", "rate_limit", "downgrade_model", "allow_but_alert"] = (
         Field(
@@ -168,22 +168,22 @@ class SetQuotaRequest(BaseModel):
             description="Policy when quota is exceeded",
         )
     )
-    downgraded_model: Optional[str] = Field(
+    downgraded_model: str | None = Field(
         None,
         max_length=128,
         description="Model to use when overage_strategy=downgrade_model",
     )
-    temporary_extra_tokens: Optional[int] = Field(
+    temporary_extra_tokens: int | None = Field(
         None,
         ge=0,
         description="Temporary extra daily tokens (optional)",
     )
-    temporary_extra_cost_cents: Optional[int] = Field(
+    temporary_extra_cost_cents: int | None = Field(
         None,
         ge=0,
         description="Temporary extra monthly cost in cents (optional)",
     )
-    temporary_expires_at: Optional[str] = Field(
+    temporary_expires_at: str | None = Field(
         None,
         description="ISO8601 timestamp for temporary boost expiry",
     )
@@ -195,18 +195,18 @@ class AlertResponse(BaseModel):
     id: str
     user_id: str
     alert_type: str
-    threshold_value: Optional[int]
-    current_value: Optional[int]
-    limit_value: Optional[int]
-    message: Optional[str]
+    threshold_value: int | None
+    current_value: int | None
+    limit_value: int | None
+    message: str | None
     is_acknowledged: bool
-    created_at: Optional[str]
+    created_at: str | None
 
 
 class AlertsListResponse(BaseModel):
     """List of alerts response."""
 
-    alerts: List[AlertResponse]
+    alerts: list[AlertResponse]
     total: int
 
 
@@ -221,24 +221,26 @@ class BlockUserRequest(BaseModel):
 
 class QuotaUserOverviewItem(BaseModel):
     """Individual user quota overview item."""
+
     user_id: str
     daily_tokens_used: int = 0
-    daily_tokens_limit: Optional[int] = None
+    daily_tokens_limit: int | None = None
     monthly_cost_used_cents: int = 0
-    monthly_cost_limit_cents: Optional[int] = None
+    monthly_cost_limit_cents: int | None = None
     monthly_tokens_used: int = 0
-    monthly_tokens_limit: Optional[int] = None
+    monthly_tokens_limit: int | None = None
     is_blocked: bool = False
-    blocked_reason: Optional[str] = None
+    blocked_reason: str | None = None
     overage_strategy: str = "allow_but_alert"
-    downgraded_model: Optional[str] = None
+    downgraded_model: str | None = None
     status: str = "ok"  # ok / warning / exceeded / blocked
 
 
 class QuotaUsersOverviewResponse(BaseModel):
     """Batch quota overview for dashboard panel."""
-    users: List[QuotaUserOverviewItem]
-    summary: Dict[str, int]
+
+    users: list[QuotaUserOverviewItem]
+    summary: dict[str, int]
 
 
 # ============ API Endpoints ============
@@ -250,7 +252,7 @@ class QuotaUsersOverviewResponse(BaseModel):
 async def get_quota_summary(
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get summary of quota status across all users.
 
@@ -324,7 +326,7 @@ async def get_quota_users_overview(
     Returns real quota limits, current usage, and computed status for each user.
     """
     quota_service = get_quota_service()
-    users: List[QuotaUserOverviewItem] = []
+    users: list[QuotaUserOverviewItem] = []
     summary_counts = {"total": 0, "blocked": 0, "exceeded": 0, "warning": 0, "ok": 0}
 
     pool = quota_service._get_pool()
@@ -377,13 +379,20 @@ async def get_quota_users_overview(
                 # Compute status
                 if is_blocked:
                     status = "blocked"
-                elif (daily_limit and daily_used >= daily_limit) or \
-                     (monthly_cost_limit and monthly_cost_used >= monthly_cost_limit) or \
-                     (monthly_tokens_limit and monthly_tokens_used >= monthly_tokens_limit):
+                elif (
+                    (daily_limit and daily_used >= daily_limit)
+                    or (monthly_cost_limit and monthly_cost_used >= monthly_cost_limit)
+                    or (monthly_tokens_limit and monthly_tokens_used >= monthly_tokens_limit)
+                ):
                     status = "exceeded"
-                elif daily_limit and daily_limit > 0 and (daily_used / daily_limit * 100) >= warning_threshold:
-                    status = "warning"
-                elif monthly_cost_limit and monthly_cost_limit > 0 and (monthly_cost_used / monthly_cost_limit * 100) >= warning_threshold:
+                elif (
+                    daily_limit
+                    and daily_limit > 0
+                    and (daily_used / daily_limit * 100) >= warning_threshold
+                    or monthly_cost_limit
+                    and monthly_cost_limit > 0
+                    and (monthly_cost_used / monthly_cost_limit * 100) >= warning_threshold
+                ):
                     status = "warning"
                 else:
                     status = "ok"
@@ -391,20 +400,22 @@ async def get_quota_users_overview(
                 summary_counts[status] = summary_counts.get(status, 0) + 1
                 summary_counts["total"] += 1
 
-                users.append(QuotaUserOverviewItem(
-                    user_id=row["user_id"],
-                    daily_tokens_used=daily_used,
-                    daily_tokens_limit=daily_limit,
-                    monthly_cost_used_cents=monthly_cost_used,
-                    monthly_cost_limit_cents=monthly_cost_limit,
-                    monthly_tokens_used=monthly_tokens_used,
-                    monthly_tokens_limit=monthly_tokens_limit,
-                    is_blocked=is_blocked,
-                    blocked_reason=row["blocked_reason"],
-                    overage_strategy=row["overage_strategy"] or "allow_but_alert",
-                    downgraded_model=row["downgraded_model"],
-                    status=status,
-                ))
+                users.append(
+                    QuotaUserOverviewItem(
+                        user_id=row["user_id"],
+                        daily_tokens_used=daily_used,
+                        daily_tokens_limit=daily_limit,
+                        monthly_cost_used_cents=monthly_cost_used,
+                        monthly_cost_limit_cents=monthly_cost_limit,
+                        monthly_tokens_used=monthly_tokens_used,
+                        monthly_tokens_limit=monthly_tokens_limit,
+                        is_blocked=is_blocked,
+                        blocked_reason=row["blocked_reason"],
+                        overage_strategy=row["overage_strategy"] or "allow_but_alert",
+                        downgraded_model=row["downgraded_model"],
+                        status=status,
+                    )
+                )
 
     except Exception as e:
         logger.error(f"Failed to get quota users overview: {e}")
@@ -443,7 +454,7 @@ async def acknowledge_alert(
     alert_id: str,
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Acknowledge a quota alert.
 
@@ -698,7 +709,7 @@ async def block_user(
     block_request: BlockUserRequest,
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Block a user from making requests.
 
@@ -728,7 +739,7 @@ async def unblock_user(
     user_id: str,
     request: Request,
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Unblock a user.
 
@@ -749,5 +760,3 @@ async def unblock_user(
         "user_id": user_id,
         "is_blocked": False,
     }
-
-

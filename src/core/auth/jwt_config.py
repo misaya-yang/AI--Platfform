@@ -4,8 +4,8 @@ Unified JWT configuration module.
 This module provides centralized JWT configuration to ensure consistency
 between token signing (auth.py) and verification (deps.py).
 """
+
 import logging
-from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def get_jwt_secret(configured_secret: str | None) -> str:
     return secret
 
 
-def get_jwt_algorithms(configured_algorithms: List[str] | None) -> List[str]:
+def get_jwt_algorithms(configured_algorithms: list[str] | None) -> list[str]:
     """
     Get JWT algorithms with fallback.
 

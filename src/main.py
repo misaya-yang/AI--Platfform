@@ -10,6 +10,7 @@ from __future__ import annotations
 # Load environment variables from .env file BEFORE importing other modules
 # This ensures env vars are available for module-level configurations
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load .env from project root (one level up from src/)
@@ -20,31 +21,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from .adapters.registry import auto_register_builtin_adapters
 from .api.router import api_router
 from .config.settings import Settings
 from .container import Container, create_container, get_container
 from .core.errors import (
-    GatewayException,
     setup_exception_handlers,
-)
-from .core.observability.logging import configure_structured_logging, get_logger
-from .core.observability.metrics import get_metrics
-from .services.metrics.metrics_recorder import init_metrics_recorder
-from .services.metrics.realtime_metrics import init_realtime_metrics
-from .adapters.registry import auto_register_builtin_adapters
-from .core.file_cleanup import get_cleanup_service
-# 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
-from .core.middleware.streaming import (
-    StreamingAnonymousMiddleware,
-    StreamingAnonymousConfig,
-    StreamingAuthMiddleware,
-    StreamingAuthConfig,
-    StreamingRateLimitMiddleware,
-    StreamingRateLimitConfig,
-    StreamingLoggingMiddleware,
-    StreamingLogConfig,
-    StreamingTracingMiddleware,
-    StreamingTracingConfig,
 )
 
 # 兼容旧的异常导入（向后兼容）
@@ -56,6 +38,25 @@ from .core.exceptions import (
     RateLimitExceededError,
     ServiceNotFoundError,
 )
+from .core.file_cleanup import get_cleanup_service
+
+# 使用流式友好的纯 ASGI 中间件（替换 BaseHTTPMiddleware）
+from .core.middleware.streaming import (
+    StreamingAnonymousConfig,
+    StreamingAnonymousMiddleware,
+    StreamingAuthConfig,
+    StreamingAuthMiddleware,
+    StreamingLogConfig,
+    StreamingLoggingMiddleware,
+    StreamingRateLimitConfig,
+    StreamingRateLimitMiddleware,
+    StreamingTracingConfig,
+    StreamingTracingMiddleware,
+)
+from .core.observability.logging import configure_structured_logging, get_logger
+from .core.observability.metrics import get_metrics
+from .services.metrics.metrics_recorder import init_metrics_recorder
+from .services.metrics.realtime_metrics import init_realtime_metrics
 
 logger = get_logger(__name__)
 
@@ -63,31 +64,31 @@ logger = get_logger(__name__)
 def create_app() -> FastAPI:
     """
     创建 FastAPI 应用
-    
+
     使用依赖注入容器管理所有组件。
     """
     # 加载配置
     settings = Settings()
-    
+
     # 配置结构化日志
     configure_structured_logging(
         level="INFO",
         format_type="simple",  # 开发环境使用简单格式，生产可改为 "json"
     )
-    
+
     # 创建依赖注入容器
     container = create_container(settings)
-    
+
     # 自动注册内置适配器
     auto_register_builtin_adapters()
-    
+
     # 创建 FastAPI 应用
     app = FastAPI(
         title="AI Service Gateway",
         version="2.0.0",
         description="统一 AI 服务网关，支持多协议适配、限流、熔断、会话管理等功能",
     )
-    
+
     # ========== 中间件配置 ==========
     # 注意：中间件执行顺序与添加顺序相反（后添加的先执行）
     # 执行顺序：Tracing -> CORS -> RequestLogging -> Auth -> RateLimit -> AnonymousIdentity
@@ -97,11 +98,11 @@ def create_app() -> FastAPI:
 
     # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
     anon_config = StreamingAnonymousConfig(
-        enabled=getattr(settings.anonymous, 'enabled', True),
-        header_name=getattr(settings.anonymous, 'header_name', 'X-AG-Anonymous-Id'),
-        cookie_name=getattr(settings.anonymous, 'cookie_name', 'ag_anon_id'),
-        ttl_days=getattr(settings.anonymous, 'ttl_days', 365),
-        same_site=getattr(settings.anonymous, 'same_site', 'lax'),
+        enabled=getattr(settings.anonymous, "enabled", True),
+        header_name=getattr(settings.anonymous, "header_name", "X-AG-Anonymous-Id"),
+        cookie_name=getattr(settings.anonymous, "cookie_name", "ag_anon_id"),
+        ttl_days=getattr(settings.anonymous, "ttl_days", 365),
+        same_site=getattr(settings.anonymous, "same_site", "lax"),
     )
     app.add_middleware(StreamingAnonymousMiddleware, config=anon_config)
 
@@ -110,17 +111,21 @@ def create_app() -> FastAPI:
     # (multiple concurrent API calls on page load)
     rate_limit_config = StreamingRateLimitConfig(
         enabled=True,
-        global_limit=5000,       # High global limit for overall traffic
+        global_limit=5000,  # High global limit for overall traffic
         global_window=60,
-        user_limit=300,          # Authenticated users: 300/min
+        user_limit=300,  # Authenticated users: 300/min
         user_window=60,
-        guest_limit=200,         # Guests: 200/min (frontend makes many calls)
+        guest_limit=200,  # Guests: 200/min (frontend makes many calls)
         guest_window=60,
-        ip_limit=500,            # Per-IP: 500/min (shared IPs, proxies)
+        ip_limit=500,  # Per-IP: 500/min (shared IPs, proxies)
         ip_window=60,
         whitelist_paths=[
-            "/health", "/health/live", "/health/ready", "/metrics",
-            "/docs", "/openapi.json",
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
             # Frontend metadata endpoints (high frequency, low cost)
             "/api/v1/services",
             "/api/v1/assistant/config",
@@ -132,13 +137,28 @@ def create_app() -> FastAPI:
 
     # 统一鉴权中间件（支持 JWT、API Key、游客会话）- 纯 ASGI
     auth_config = StreamingAuthConfig(
-        jwt_enabled=settings.authentication.jwt.enabled if hasattr(settings, 'authentication') else False,
-        jwt_secret=settings.authentication.jwt.secret if hasattr(settings, 'authentication') else "",
-        jwt_algorithms=settings.authentication.jwt.algorithms if hasattr(settings, 'authentication') else ["HS256"],
-        api_key_enabled=settings.authentication.api_key.enabled if hasattr(settings, 'authentication') else False,
+        jwt_enabled=settings.authentication.jwt.enabled
+        if hasattr(settings, "authentication")
+        else False,
+        jwt_secret=settings.authentication.jwt.secret
+        if hasattr(settings, "authentication")
+        else "",
+        jwt_algorithms=settings.authentication.jwt.algorithms
+        if hasattr(settings, "authentication")
+        else ["HS256"],
+        api_key_enabled=settings.authentication.api_key.enabled
+        if hasattr(settings, "authentication")
+        else False,
         guest_session_enabled=True,
         anonymous_enabled=True,
-        whitelist_paths=["/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json"],
+        whitelist_paths=[
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
+        ],
     )
     app.add_middleware(StreamingAuthMiddleware, config=auth_config)
 
@@ -180,40 +200,41 @@ def create_app() -> FastAPI:
         exclude_paths={"/health", "/health/live", "/health/ready", "/metrics"},
     )
     app.add_middleware(StreamingTracingMiddleware, config=tracing_config)
-    
+
     # ========== 存储组件引用到 app.state（向后兼容）==========
-    
+
     # 注意：这些属性会在 startup 事件中设置，因为需要先初始化容器
     app.state.settings = settings
     app.state.container = container
-    
+
     # ========== 路由 ==========
-    
+
     app.include_router(api_router, prefix="/api/v1")
     # Compatibility alias for agents expecting `/v1/...`
     from .api.v1.knowledge import router as knowledge_router
+
     app.include_router(knowledge_router, prefix="/v1")
-    
+
     # ========== 健康检查和指标端点 ==========
-    
+
     @app.get("/health", tags=["Health"])
     async def health_check():
         """健康检查端点"""
         return {"status": "healthy", "version": "2.0.0"}
-    
+
     @app.get("/health/live", tags=["Health"])
     async def liveness_check():
         """存活检查端点（K8s liveness probe）"""
         return {"status": "alive"}
-    
+
     @app.get("/health/ready", tags=["Health"])
     async def readiness_check():
         """就绪检查端点（K8s readiness probe）"""
         container = get_container()
-        
+
         checks = {"database": "unknown", "redis": "unknown"}
         healthy = True
-        
+
         # 检查数据库
         if settings.database.enabled:
             try:
@@ -228,7 +249,7 @@ def create_app() -> FastAPI:
                 healthy = False
         else:
             checks["database"] = "disabled"
-        
+
         # 检查 Redis
         if settings.redis.enabled:
             try:
@@ -243,13 +264,13 @@ def create_app() -> FastAPI:
                 healthy = False
         else:
             checks["redis"] = "disabled"
-        
+
         status_code = 200 if healthy else 503
         return JSONResponse(
             status_code=status_code,
             content={"status": "ready" if healthy else "not_ready", "checks": checks},
         )
-    
+
     @app.get("/metrics", tags=["Observability"])
     async def metrics():
         """Prometheus 指标端点"""
@@ -258,23 +279,23 @@ def create_app() -> FastAPI:
             content=metrics_collector.to_prometheus(),
             media_type="text/plain",
         )
-    
+
     # ========== 生命周期事件 ==========
-    
+
     @app.on_event("startup")
     async def startup():
         """应用启动"""
         logger.info("正在启动 AI Gateway...")
-        
+
         # 初始化容器（连接数据库、Redis 等）
         await container.initialize()
-        
+
         # 设置 app.state 属性（向后兼容）
         _setup_app_state(app, container)
-        
+
         # 从数据库加载服务
         await _load_services_from_database(container, settings)
-        
+
         # 启动后台任务
         await container.health_monitor.start()
         await container.task_worker.start(settings.task_worker_concurrency)
@@ -282,6 +303,7 @@ def create_app() -> FastAPI:
         # 初始化 Redis 任务队列
         if settings.redis.enabled:
             from .core.tasks.queue import TaskQueue
+
             # Use native client for TaskQueue as it requires raw commands like brpop/lpush
             task_queue = TaskQueue(container.redis.get_native_client())
 
@@ -313,9 +335,10 @@ def create_app() -> FastAPI:
         try:
             from .services.storage.image_storage import (
                 ImageStorageService,
-                StorageConfig,
                 StorageBackend,
+                StorageConfig,
             )
+
             # 确定存储后端：优先使用配置的，否则使用本地存储
             storage_backend = StorageBackend.LOCAL
             if hasattr(settings, "storage"):
@@ -327,33 +350,59 @@ def create_app() -> FastAPI:
 
             storage_config = StorageConfig(
                 backend=storage_backend,
-                s3_bucket=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "bucket", "") or "",
-                s3_region=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "region", "") or "us-east-1",
-                s3_access_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "access_key", "") or "",
-                s3_secret_key=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "secret_key", "") or "",
-                s3_endpoint_url=getattr(getattr(settings, "storage", None), "s3", None) and getattr(settings.storage.s3, "endpoint_url", None) or None,
-                oss_bucket=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "bucket", "") or "",
-                oss_endpoint=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "endpoint", "") or "",
-                oss_access_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "access_key", "") or "",
-                oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None) and getattr(settings.storage.oss, "secret_key", "") or "",
-                local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None) or "./data/artifacts",
-                url_expiry_seconds=getattr(getattr(settings, "storage", None), "url_expiry_seconds", None) or 3600,
+                s3_bucket=getattr(getattr(settings, "storage", None), "s3", None)
+                and getattr(settings.storage.s3, "bucket", "")
+                or "",
+                s3_region=getattr(getattr(settings, "storage", None), "s3", None)
+                and getattr(settings.storage.s3, "region", "")
+                or "us-east-1",
+                s3_access_key=getattr(getattr(settings, "storage", None), "s3", None)
+                and getattr(settings.storage.s3, "access_key", "")
+                or "",
+                s3_secret_key=getattr(getattr(settings, "storage", None), "s3", None)
+                and getattr(settings.storage.s3, "secret_key", "")
+                or "",
+                s3_endpoint_url=getattr(getattr(settings, "storage", None), "s3", None)
+                and getattr(settings.storage.s3, "endpoint_url", None)
+                or None,
+                oss_bucket=getattr(getattr(settings, "storage", None), "oss", None)
+                and getattr(settings.storage.oss, "bucket", "")
+                or "",
+                oss_endpoint=getattr(getattr(settings, "storage", None), "oss", None)
+                and getattr(settings.storage.oss, "endpoint", "")
+                or "",
+                oss_access_key=getattr(getattr(settings, "storage", None), "oss", None)
+                and getattr(settings.storage.oss, "access_key", "")
+                or "",
+                oss_secret_key=getattr(getattr(settings, "storage", None), "oss", None)
+                and getattr(settings.storage.oss, "secret_key", "")
+                or "",
+                local_base_path=getattr(getattr(settings, "storage", None), "local_base_path", None)
+                or "./data/artifacts",
+                url_expiry_seconds=getattr(
+                    getattr(settings, "storage", None), "url_expiry_seconds", None
+                )
+                or 3600,
                 key_prefix=getattr(getattr(settings, "storage", None), "key_prefix", None) or "",
             )
             # Get signing key for local file URLs (security)
             signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
             image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
             app.state.image_storage_service = image_storage_service
-            logger.info(f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})")
+            logger.info(
+                f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})"
+            )
 
             # Initialize artifact storage service (for document/image generation, code execution)
             from .services.storage import init_artifact_storage
+
             artifact_storage = init_artifact_storage(storage_config, container.database)
             app.state.artifact_storage = artifact_storage
             logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
 
             # Initialize file storage service for user uploads
             from .services.storage import init_file_storage
+
             file_storage = init_file_storage(storage_config)
             app.state.file_storage = file_storage
             logger.info(f"文件存储服务已初始化 (backend={storage_backend.value})")
@@ -368,28 +417,35 @@ def create_app() -> FastAPI:
             # 初始化多模态嵌入服务（如果配置了 DashScope API Key）
             multimodal_embedding = None
 
-            dashscope_key = getattr(
-                getattr(settings, "knowledge", None), "dashscope", None
-            )
+            dashscope_key = getattr(getattr(settings, "knowledge", None), "dashscope", None)
             if dashscope_key and dashscope_key.api_key:
                 try:
                     # Use UnifiedMultimodalEmbedding for consistent text-image vector space
                     # This ensures cross-modal retrieval works correctly
                     from .services.knowledge.embedding import UnifiedMultimodalEmbedding
+
                     multimodal_embedding = UnifiedMultimodalEmbedding(
                         model="tongyi-embedding-vision-plus",  # Best for unified cross-modal search
                         api_key=dashscope_key.api_key,
                     )
-                    logger.info("多模态嵌入服务已初始化 (UnifiedMultimodalEmbedding tongyi-embedding-vision-plus)")
+                    logger.info(
+                        "多模态嵌入服务已初始化 (UnifiedMultimodalEmbedding tongyi-embedding-vision-plus)"
+                    )
                 except Exception as e:
                     logger.warning(f"多模态嵌入服务初始化失败: {e}")
 
             # Initialize VLM service for image description generation in knowledge service
             knowledge_vlm_service = None
             dashscope_config = getattr(settings.knowledge, "dashscope", None)
-            if dashscope_config and dashscope_config.api_key and multimodal_embedding and image_storage_service:
+            if (
+                dashscope_config
+                and dashscope_config.api_key
+                and multimodal_embedding
+                and image_storage_service
+            ):
                 try:
                     from .services.knowledge.vlm_service import DashScopeVLMService
+
                     knowledge_vlm_service = DashScopeVLMService(
                         api_key=dashscope_config.api_key,
                         model="qwen-vl-max",
@@ -405,38 +461,42 @@ def create_app() -> FastAPI:
                 image_storage_service=image_storage_service,
                 vlm_service=knowledge_vlm_service,
             )
-            
+
             # Initialize VisionPDFProcessor for scanned document processing
             vision_processor = None
             if multimodal_embedding:
                 try:
                     from .services.knowledge.vision_pdf_processor import VisionPDFProcessor
+
                     vision_processor = VisionPDFProcessor(
                         embedder=multimodal_embedding,
                         vector_store=app.state.knowledge_service.vector_store,
                         database=container.database,
-                        position_offset=int(getattr(settings.knowledge, "image_position_offset", 1_000_000)),
+                        position_offset=int(
+                            getattr(settings.knowledge, "image_position_offset", 1_000_000)
+                        ),
                     )
                     logger.info("VisionPDFProcessor initialized for scanned document support")
                 except Exception as e:
                     logger.warning(f"Failed to initialize VisionPDFProcessor: {e}")
-            
+
             # Initialize Document Type Detector for auto processing mode
             detector = None
             try:
                 from .services.knowledge.document_detector import DocumentTypeDetector
+
                 detector = DocumentTypeDetector(settings.knowledge)
                 logger.info("DocumentTypeDetector initialized for auto processing mode")
             except Exception as e:
                 logger.warning(f"Failed to initialize DocumentTypeDetector: {e}")
-            
+
             # Initialize Hierarchical Indexer for large document processing
             hierarchical_indexer = None
             summary_generator = None
             try:
-                from .services.knowledge.summary_generator import SummaryGenerator
                 from .services.knowledge.hierarchical_indexer import HierarchicalIndexer
-                
+                from .services.knowledge.summary_generator import SummaryGenerator
+
                 summary_generator = SummaryGenerator(llm_service=container.llm_service)
                 hierarchical_indexer = HierarchicalIndexer(
                     vector_store=app.state.knowledge_service.vector_store,
@@ -448,7 +508,7 @@ def create_app() -> FastAPI:
                 logger.info("HierarchicalIndexer initialized for large document processing")
             except Exception as e:
                 logger.warning(f"Failed to initialize HierarchicalIndexer: {e}")
-            
+
             app.state.knowledge_worker = KnowledgeWorker(
                 app.state.knowledge_service,
                 vision_processor=vision_processor,
@@ -460,8 +520,7 @@ def create_app() -> FastAPI:
             # 恢复服务重启前未完成的任务（使用 0 分钟阈值，立即恢复所有处理中的任务）
             try:
                 recovery_result = await app.state.knowledge_service.recover_stuck_documents(
-                    stuck_threshold_minutes=0,
-                    worker=app.state.knowledge_worker
+                    stuck_threshold_minutes=0, worker=app.state.knowledge_worker
                 )
                 if recovery_result["recovered_count"] > 0:
                     logger.info(
@@ -473,9 +532,13 @@ def create_app() -> FastAPI:
 
             if multimodal_embedding:
                 vlm_status = "with VLM" if knowledge_vlm_service else "no VLM"
-                logger.info(f"知识库服务已启动 (支持图片嵌入, {vlm_status}, worker_concurrency={settings.knowledge.worker_concurrency})")
+                logger.info(
+                    f"知识库服务已启动 (支持图片嵌入, {vlm_status}, worker_concurrency={settings.knowledge.worker_concurrency})"
+                )
             else:
-                logger.info(f"知识库服务已启动 (仅文本, worker_concurrency={settings.knowledge.worker_concurrency})")
+                logger.info(
+                    f"知识库服务已启动 (仅文本, worker_concurrency={settings.knowledge.worker_concurrency})"
+                )
         else:
             logger.warning(
                 f"知识库服务未启动: knowledge={getattr(settings, 'knowledge', None)}, "
@@ -484,37 +547,32 @@ def create_app() -> FastAPI:
 
         # 启动 Confluence 集成服务（如果启用）
         if getattr(settings, "confluence", None) and settings.confluence.enabled:
-            from .services.knowledge.confluence.sync_service import ConfluenceSyncService
             from .services.knowledge.confluence.scheduler import ConfluenceScheduler
+            from .services.knowledge.confluence.sync_service import ConfluenceSyncService
 
             # 复用 Knowledge Service 的图片处理服务和 VLM 服务
             confluence_image_storage = getattr(app.state, "image_storage_service", None)
-            confluence_multimodal = None
             confluence_vlm_service = None
 
             # 如果 Knowledge Service 已初始化，复用其服务
             if hasattr(app.state, "knowledge_service") and app.state.knowledge_service:
-                confluence_multimodal = getattr(
-                    app.state.knowledge_service, "multimodal_embedding", None
+                getattr(app.state.knowledge_service, "multimodal_embedding", None)
+                confluence_image_storage = (
+                    getattr(app.state.knowledge_service, "image_storage_service", None)
+                    or confluence_image_storage
                 )
-                confluence_image_storage = getattr(
-                    app.state.knowledge_service, "image_storage_service", None
-                ) or confluence_image_storage
                 # 复用 VLM 服务以避免重复初始化
-                confluence_vlm_service = getattr(
-                    app.state.knowledge_service, "vlm_service", None
-                )
+                confluence_vlm_service = getattr(app.state.knowledge_service, "vlm_service", None)
                 if confluence_vlm_service:
                     logger.info("Confluence 复用 Knowledge Service 的 VLM 服务")
 
             # 如果没有从 Knowledge Service 获取到 VLM 服务，则单独初始化
             if not confluence_vlm_service and confluence_image_storage:
-                dashscope_key = getattr(
-                    getattr(settings, "knowledge", None), "dashscope", None
-                )
+                dashscope_key = getattr(getattr(settings, "knowledge", None), "dashscope", None)
                 if dashscope_key and dashscope_key.api_key:
                     try:
                         from .services.knowledge.vlm_service import DashScopeVLMService
+
                         confluence_vlm_service = DashScopeVLMService(
                             api_key=dashscope_key.api_key,
                             model="qwen-vl-max",
@@ -566,6 +624,7 @@ def create_app() -> FastAPI:
         # 启动使用量调度器（聚合任务、配额重置）
         if settings.database.enabled:
             from .services.billing import init_usage_scheduler
+
             usage_scheduler = init_usage_scheduler(
                 container.database,
                 retention_days=30,  # 详细记录保留30天
@@ -581,6 +640,7 @@ def create_app() -> FastAPI:
 
             # 启动使用量记录器后台任务
             from .services.metrics import get_usage_recorder
+
             usage_recorder = get_usage_recorder()
             if usage_recorder:
                 await usage_recorder.start()
@@ -592,7 +652,7 @@ def create_app() -> FastAPI:
 
         # 打印启动信息
         _print_startup_info(settings)
-    
+
     @app.on_event("shutdown")
     async def shutdown():
         """应用关闭"""
@@ -643,12 +703,12 @@ def create_app() -> FastAPI:
 
         await container.shutdown()
         logger.info("AI Gateway 已关闭")
-    
+
     # ========== 异常处理 ==========
-    
+
     # 设置新的异常处理器
     setup_exception_handlers(app, debug=False, include_trace_id=True)
-    
+
     # 向后兼容：处理旧的 GatewayError 异常
     @app.exception_handler(GatewayError)
     async def handle_legacy_gateway_error(request: Request, exc: GatewayError):
@@ -664,12 +724,12 @@ def create_app() -> FastAPI:
             status = 404
         elif isinstance(exc, CircuitBreakerOpenError):
             status = 503
-        
+
         return JSONResponse(
             status_code=status,
             content={"error": str(exc)},
         )
-    
+
     return app
 
 
@@ -677,6 +737,7 @@ def _make_process_file_handler(app: FastAPI, process_file_task=None):
     """Create a task handler that resolves assistant_service from app.state at runtime."""
     if process_file_task is None:
         from .services.assistant.tasks import process_file_task as _process_file_task
+
         process_file_task = _process_file_task
 
     async def _process_file_wrapper(payload):
@@ -727,7 +788,8 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.confluence_scheduler = None
 
     # 游客会话管理器
-    from .services.session.guest_session_manager import GuestSessionManager, GuestSessionConfig
+    from .services.session.guest_session_manager import GuestSessionConfig, GuestSessionManager
+
     app.state.guest_session_manager = GuestSessionManager(
         config=GuestSessionConfig(),
         redis_client=container.redis,
@@ -741,20 +803,25 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
 
     # Initialize usage recorder for persistent usage metrics
     from .services.metrics import init_usage_recorder
+
     init_usage_recorder(container.database)
 
     # Initialize security event recorder for auth/rate limit aggregates
     from .services.metrics import init_security_event_recorder
+
     init_security_event_recorder(container.database)
 
     # Initialize billing services
-    from .services.billing import init_quota_service, init_pricing_service
+    from .services.billing import init_pricing_service, init_quota_service
+
     init_quota_service(container.database)
     init_pricing_service(container.database)
 
     # Initialize LLM provider and model services
-    from .services.llm import ProviderService, ModelService
     import os
+
+    from .services.llm import ModelService, ProviderService
+
     encryption_key = os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
     app.state.provider_service = ProviderService(container.database, encryption_key)
     app.state.model_service = ModelService(container.database)
@@ -764,18 +831,18 @@ async def _load_services_from_database(container: Container, settings: Settings)
     """从数据库加载服务"""
     if not settings.database.enabled:
         return
-    
+
     database = container.database
     if not database._pool:
         return
-    
+
     try:
         from .services.registry.database_storage import DatabaseRegistryStorage
-        
+
         db_services = await database.list_services()
         registry = container.service_registry
         registry_storage = registry.storage
-        
+
         loaded_count = 0
         for svc in db_services:
             try:
@@ -785,7 +852,7 @@ async def _load_services_from_database(container: Container, settings: Settings)
                     loaded_count += 1
             except Exception as e:
                 logger.warning(f"加载服务 {svc.get('service_id')} 失败: {e}")
-        
+
         if loaded_count > 0:
             logger.info(f"从数据库加载了 {loaded_count} 个服务")
     except Exception as e:
@@ -806,7 +873,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     同时将配置同步到数据库，确保前端可以管理。
     """
     import os
-    from .services.assistant import AssistantService, ModelRegistry, ModelProvider
+
+    from .services.assistant import AssistantService, ModelProvider, ModelRegistry
 
     model_registry = ModelRegistry()
     configured_providers = []
@@ -948,6 +1016,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Get KB service if available
     kb_service = getattr(app.state, "knowledge_service", None)
 
+    # Get VLM service from KB service for assistant (if KB is enabled)
+    knowledge_vlm_service = getattr(kb_service, "vlm_service", None) if kb_service else None
+
     # Get session manager for conversation persistence
     session_manager = getattr(app.state, "session_manager", None)
 
@@ -956,10 +1027,12 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     # Create Tavily tool instance
     from .services.assistant.tools import TavilySearchTool
+
     tavily_tool = TavilySearchTool(api_key=tavily_api_key or None)
 
     # Initialize code executor if Docker is available
-    from .services.assistant.code_executor import CodeExecutorService, CodeExecutionConfig
+    from .services.assistant.code_executor import CodeExecutionConfig, CodeExecutorService
+
     code_executor = None
     try:
         code_executor = CodeExecutorService(
@@ -976,14 +1049,15 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         logger.warning(f"Failed to initialize code executor: {e}")
 
     # Create assistant service with session persistence
-    assistant_vlm_service = getattr(kb_service, "vlm_service", None) if kb_service else knowledge_vlm_service
-    
+    assistant_vlm_service = knowledge_vlm_service
+
     # If no VLM service but DashScope is configured for assistant, try to initialize it
     if not assistant_vlm_service:
         dashscope_config = model_registry._configs.get(ModelProvider.DASHSCOPE)
         if dashscope_config and dashscope_config.api_key:
             try:
                 from .services.knowledge.vlm_service import DashScopeVLMService
+
                 assistant_vlm_service = DashScopeVLMService(
                     api_key=dashscope_config.api_key,
                     model="qwen-vl-max",
@@ -1007,10 +1081,19 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     )
 
     # Initialize Tool Registry (Phase 2)
-    from .services.assistant.tools import get_tool_registry, register_builtin_tools, register_code_executor_tool, register_document_generation_tool, register_pptx_generation_tool
+    from .services.assistant.tools import (
+        get_tool_registry,
+        register_builtin_tools,
+        register_code_executor_tool,
+        register_document_generation_tool,
+        register_pptx_generation_tool,
+    )
     from .services.assistant.tools.image_generator_tool import register_image_generation_tool
+
     tool_registry = get_tool_registry()
-    register_builtin_tools(kb_service=kb_service, tavily_tool=tavily_tool, memory_service=memory_service)
+    register_builtin_tools(
+        kb_service=kb_service, tavily_tool=tavily_tool, memory_service=memory_service
+    )
 
     # Register code executor tool if available
     if code_executor:
@@ -1023,7 +1106,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     doc_gen_registered = register_document_generation_tool()
 
     # Register PowerPoint generation tool (requires python-pptx)
-    pptx_gen_registered = register_pptx_generation_tool()
+    register_pptx_generation_tool()
 
     # Store in app.state
     app.state.model_registry = model_registry
@@ -1071,7 +1154,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     dashscope_key_present = bool(os.environ.get("DASHSCOPE_API_KEY"))
     if not dashscope_key_present:
         knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
-        dashscope_key_present = bool(getattr(knowledge_dashscope, "api_key", "")) if knowledge_dashscope else False
+        dashscope_key_present = (
+            bool(getattr(knowledge_dashscope, "api_key", "")) if knowledge_dashscope else False
+        )
 
     google_key_present = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 

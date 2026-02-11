@@ -10,24 +10,23 @@ Phase 2: Provides standard tools for the assistant:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from ....core.observability.logging import get_logger
 from .tool_registry import (
-    ToolDefinition,
-    ToolParameter,
-    ToolExample,
-    ToolCategory,
-    ToolRiskLevel,
-    ToolExecutor,
     ToolCallRequest,
     ToolCallResult,
+    ToolCategory,
+    ToolDefinition,
+    ToolExample,
+    ToolExecutor,
+    ToolParameter,
+    ToolRiskLevel,
     register_tool,
 )
-from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from ....services.knowledge.knowledge_service import KnowledgeService
-    from ....core.auth.user_resolver import UserContext
     from ...memory_service import MemoryService
 
 logger = get_logger(__name__)
@@ -40,7 +39,7 @@ logger = get_logger(__name__)
 KB_SEARCH_DEFINITION = ToolDefinition(
     name="search_knowledge_base",
     description="Search the internal knowledge base for relevant documents and information. "
-                "Supports text and image retrieval. Returns the most relevant chunks from the specified datasets.",
+    "Supports text and image retrieval. Returns the most relevant chunks from the specified datasets.",
     parameters=[
         ToolParameter(
             name="query",
@@ -52,7 +51,7 @@ KB_SEARCH_DEFINITION = ToolDefinition(
             name="intent",
             type="string",
             description="Retrieval intent: general=balanced text and image retrieval, "
-                        "find_image=prioritize images, find_document=text only. Default is general.",
+            "find_image=prioritize images, find_document=text only. Default is general.",
             required=False,
             default="general",
             enum=["general", "find_image", "find_document"],
@@ -82,11 +81,11 @@ KB_SEARCH_DEFINITION = ToolDefinition(
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="Use this tool when the user asks questions that might be answered by "
-                "internal documentation, policies, product information, or other company knowledge. "
-                "Use find_image intent when looking for diagrams, screenshots, or visual content. "
-                "Use find_document intent when looking for specific text-based documents.",
+    "internal documentation, policies, product information, or other company knowledge. "
+    "Use find_image intent when looking for diagrams, screenshots, or visual content. "
+    "Use find_document intent when looking for specific text-based documents.",
     when_not_to_use="Do not use for questions about current events, external companies, "
-                    "or information that wouldn't be in internal documents.",
+    "or information that wouldn't be in internal documents.",
     examples=[
         ToolExample(
             description="Search for refund policy",
@@ -111,7 +110,7 @@ KB_SEARCH_DEFINITION = ToolDefinition(
 class KBSearchExecutor(ToolExecutor):
     """Executor for Knowledge Base search tool."""
 
-    def __init__(self, kb_service: "KnowledgeService"):
+    def __init__(self, kb_service: KnowledgeService):
         self.kb_service = kb_service
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
@@ -139,9 +138,9 @@ class KBSearchExecutor(ToolExecutor):
 
         try:
             all_results = []
-            contexts: List[Dict[str, Any]] = []
-            datasets_needing_reindex: List[str] = []
-            dataset_errors: Dict[str, str] = {}
+            contexts: list[dict[str, Any]] = []
+            datasets_needing_reindex: list[str] = []
+            dataset_errors: dict[str, str] = {}
 
             # If no datasets specified, return early with clear guidance for the LLM
             # This prevents expensive list_datasets() + multi-dataset search operations
@@ -187,7 +186,7 @@ class KBSearchExecutor(ToolExecutor):
 
                     took_ms = (time.time() - ds_start) * 1000
                     dataset_name = meta.get("dataset_name", dataset_id)
-                    dataset_chunks: List[Dict[str, Any]] = []
+                    dataset_chunks: list[dict[str, Any]] = []
                     for r in results:
                         r_meta = r.metadata or {}
                         source_url = (
@@ -197,7 +196,9 @@ class KBSearchExecutor(ToolExecutor):
                             or r_meta.get("document_url")
                             or r_meta.get("file_url")
                         )
-                        citation_text = r_meta.get("citation_text") or (r.text[:200] if r.text else "")
+                        citation_text = r_meta.get("citation_text") or (
+                            r.text[:200] if r.text else ""
+                        )
                         item = {
                             "content": r.text,  # RetrieveResult uses 'text' not 'content'
                             "score": r.score,
@@ -228,7 +229,11 @@ class KBSearchExecutor(ToolExecutor):
                     msg = str(e)
                     dataset_errors[dataset_id] = msg[:500]
                     # Propagate dataset "needs reindex" failures explicitly.
-                    if "require re-indexing" in msg or "require reindex" in msg or "re-index" in msg:
+                    if (
+                        "require re-indexing" in msg
+                        or "require reindex" in msg
+                        or "re-index" in msg
+                    ):
                         datasets_needing_reindex.append(dataset_id)
                     # Emit an empty context entry even on errors so the UI can stop "searching..."
                     # and show diagnostics via tool card/result.
@@ -304,9 +309,7 @@ class KBSearchExecutor(ToolExecutor):
 
             # If partial results exist but some datasets need reindex, add a brief warning.
             if datasets_needing_reindex:
-                formatted_result += (
-                    f"\n\n[Warning] Some datasets require reindex before vector retrieval: {datasets_needing_reindex}"
-                )
+                formatted_result += f"\n\n[Warning] Some datasets require reindex before vector retrieval: {datasets_needing_reindex}"
             if dataset_errors:
                 formatted_result += f"\n\n[Warning] Some datasets failed during retrieval: {list(dataset_errors.keys())}"
 
@@ -338,7 +341,7 @@ class KBSearchExecutor(ToolExecutor):
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
-    def _format_results(self, results: List[Dict[str, Any]], query: str) -> str:
+    def _format_results(self, results: list[dict[str, Any]], query: str) -> str:
         """Format search results for LLM consumption."""
         if not results:
             return f"No relevant results found for query: {query}"
@@ -362,7 +365,7 @@ class KBSearchExecutor(ToolExecutor):
 WEB_SEARCH_DEFINITION = ToolDefinition(
     name="search_web",
     description="Search the web for current information using Tavily. "
-                "Returns relevant web pages with summaries.",
+    "Returns relevant web pages with summaries.",
     parameters=[
         ToolParameter(
             name="query",
@@ -389,9 +392,9 @@ WEB_SEARCH_DEFINITION = ToolDefinition(
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
     when_to_use="Use for questions about current events, real-time information, "
-                "external companies, public knowledge, or anything not in internal documents.",
+    "external companies, public knowledge, or anything not in internal documents.",
     when_not_to_use="Do not use for internal company information, private data, "
-                    "or questions that should be answered from the knowledge base.",
+    "or questions that should be answered from the knowledge base.",
     examples=[
         ToolExample(
             description="Search for recent news",
@@ -471,7 +474,9 @@ class WebSearchExecutor(ToolExecutor):
                 result=formatted_result,
                 duration_ms=(time.time() - start_time) * 1000,
                 metadata={
-                    "total_results": len(results.results),  # TavilySearchResponse uses attribute access
+                    "total_results": len(
+                        results.results
+                    ),  # TavilySearchResponse uses attribute access
                     "query": query,
                     "answer": results.answer,
                     "display": display,
@@ -494,10 +499,11 @@ class WebSearchExecutor(ToolExecutor):
 # Tool Registration Helper
 # =============================================================================
 
+
 def register_builtin_tools(
-    kb_service: Optional["KnowledgeService"] = None,
+    kb_service: KnowledgeService | None = None,
     tavily_tool=None,
-    memory_service: Optional["MemoryService"] = None,
+    memory_service: MemoryService | None = None,
 ) -> None:
     """Register all built-in tools with the global registry."""
 
@@ -520,5 +526,6 @@ def register_builtin_tools(
     # Register memory tool if service available
     if memory_service:
         from .memory_tool import UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor
+
         register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
         logger.info("Registered memory tool")

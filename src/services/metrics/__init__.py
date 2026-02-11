@@ -6,6 +6,7 @@ Provides:
 - RealtimeMetricsService: Real-time sliding window metrics
 """
 
+from .data_status import compute_data_status
 from .metrics_recorder import MetricsRecorder, get_metrics_recorder, init_metrics_recorder
 from .realtime_metrics import (
     RealtimeMetricsService,
@@ -13,13 +14,12 @@ from .realtime_metrics import (
     get_realtime_metrics,
     init_realtime_metrics,
 )
-from .data_status import compute_data_status
-from .usage_recorder import UsageRecorder, get_usage_recorder, init_usage_recorder
 from .security_event_recorder import (
     SecurityEventRecorder,
     get_security_event_recorder,
     init_security_event_recorder,
 )
+from .usage_recorder import UsageRecorder, get_usage_recorder, init_usage_recorder
 
 __all__ = [
     "MetricsRecorder",

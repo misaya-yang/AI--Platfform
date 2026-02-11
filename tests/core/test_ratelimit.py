@@ -9,15 +9,15 @@
 
 import pytest
 
-from src.core.ratelimit.strategy import SlidingWindowStrategy, TokenBucketStrategy
-from src.core.ratelimit.storage import MemoryRateLimitStorage
-from src.core.ratelimit.limiter import (
-    UnifiedRateLimiter,
-    RateLimitConfig,
-    RateLimitRule,
-    RateLimitDimension,
-)
 from src.core.errors import RateLimitError
+from src.core.ratelimit.limiter import (
+    RateLimitConfig,
+    RateLimitDimension,
+    RateLimitRule,
+    UnifiedRateLimiter,
+)
+from src.core.ratelimit.storage import MemoryRateLimitStorage
+from src.core.ratelimit.strategy import SlidingWindowStrategy, TokenBucketStrategy
 
 
 class TestSlidingWindowStrategy:
@@ -36,7 +36,7 @@ class TestSlidingWindowStrategy:
         # 前 3 次应该通过
         for i in range(3):
             result = await strategy.check(key, limit, window, storage)
-            assert result.allowed == True
+            assert result.allowed
             assert result.remaining == 2 - i
 
     @pytest.mark.asyncio
@@ -55,7 +55,7 @@ class TestSlidingWindowStrategy:
 
         # 第 4 次应该被拒绝
         result = await strategy.check(key, limit, window, storage)
-        assert result.allowed == False
+        assert not result.allowed
         assert result.retry_after > 0
 
 
@@ -74,9 +74,9 @@ class TestTokenBucketStrategy:
         burst = 5  # 突发 5 个
 
         # 应该能连续处理 15 个请求（10 + 5 burst）
-        for i in range(15):
+        for _i in range(15):
             result = await strategy.check(key, limit, window, storage, burst)
-            assert result.allowed == True
+            assert result.allowed
 
     @pytest.mark.asyncio
     async def test_token_bucket_rejects_after_exhausted(self):
@@ -95,7 +95,7 @@ class TestTokenBucketStrategy:
 
         # 下一个应该被拒绝
         result = await strategy.check(key, limit, window, storage, burst)
-        assert result.allowed == False
+        assert not result.allowed
 
 
 class TestUnifiedRateLimiter:
@@ -120,7 +120,7 @@ class TestUnifiedRateLimiter:
         # 前两次应该通过
         for _ in range(2):
             result = await limiter.check(user_id="user1")
-            assert result.allowed == True
+            assert result.allowed
 
     @pytest.mark.asyncio
     async def test_limiter_rejects_over_limit(self):
@@ -144,7 +144,7 @@ class TestUnifiedRateLimiter:
 
         # 第三次应该被拒绝
         result = await limiter.check(user_id="user1")
-        assert result.allowed == False
+        assert not result.allowed
         assert result.dimension == "user"
 
     @pytest.mark.asyncio

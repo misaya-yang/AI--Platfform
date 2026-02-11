@@ -14,15 +14,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import shutil
+import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import quote
-import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +38,16 @@ def _sanitize_for_s3_metadata(value: str) -> str:
     if not value:
         return value
     # Normalize unicode (e.g., convert special spaces to regular spaces)
-    normalized = unicodedata.normalize('NFKD', value)
+    normalized = unicodedata.normalize("NFKD", value)
     # Keep only ASCII characters
-    ascii_str = normalized.encode('ascii', 'ignore').decode('ascii')
+    ascii_str = normalized.encode("ascii", "ignore").decode("ascii")
     # Clean up multiple spaces
-    return ' '.join(ascii_str.split())
+    return " ".join(ascii_str.split())
 
 
 class StorageBackend(str, Enum):
     """Supported storage backends"""
+
     S3 = "s3"
     OSS = "oss"
     LOCAL = "local"
@@ -56,18 +56,20 @@ class StorageBackend(str, Enum):
 @dataclass
 class ImageUploadParams:
     """Parameters for batch image upload"""
+
     tenant_id: str
     document_id: str
     attachment_id: str
     filename: str
     content: bytes
     content_type: str
-    metadata: Optional[Dict[str, str]] = None
+    metadata: dict[str, str] | None = None
 
 
 @dataclass
 class StorageConfig:
     """Storage configuration"""
+
     backend: StorageBackend = StorageBackend.LOCAL
 
     # S3 configuration
@@ -75,7 +77,7 @@ class StorageConfig:
     s3_region: str = "us-east-1"
     s3_access_key: str = ""
     s3_secret_key: str = ""
-    s3_endpoint_url: Optional[str] = None  # For S3-compatible services
+    s3_endpoint_url: str | None = None  # For S3-compatible services
 
     # OSS configuration
     oss_bucket: str = ""
@@ -104,13 +106,13 @@ class BaseStorageBackend(ABC):
         """Prepend environment prefix to storage key with path traversal protection."""
         # Sanitize key to prevent path traversal
         # Remove leading slashes and parent directory references
-        sanitized = key.lstrip('/')
+        sanitized = key.lstrip("/")
         # Replace any '..' sequences to prevent directory traversal
-        while '..' in sanitized:
-            sanitized = sanitized.replace('..', '_')
+        while ".." in sanitized:
+            sanitized = sanitized.replace("..", "_")
         # Prevent null byte injection
-        sanitized = sanitized.replace('\x00', '')
-        
+        sanitized = sanitized.replace("\x00", "")
+
         if self._key_prefix:
             return f"{self._key_prefix}/{sanitized}"
         return sanitized
@@ -121,7 +123,7 @@ class BaseStorageBackend(ABC):
         key: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         """
         Upload content to storage.
@@ -158,6 +160,7 @@ class BaseStorageBackend(ABC):
         """
         try:
             import aiofiles
+
             data = await self.download(key)
             path = Path(target_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,8 +233,8 @@ class BaseStorageBackend(ABC):
         key: str,
         content_type: str,
         expiry_seconds: int = 900,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, str]]:
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
         """
         Generate a presigned URL for direct upload (client-side upload).
 
@@ -279,7 +282,7 @@ class LocalStorageBackend(BaseStorageBackend):
         key: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         pkey = self._prefixed_key(key)
         full_path = self._get_full_path(pkey)
@@ -291,10 +294,10 @@ class LocalStorageBackend(BaseStorageBackend):
         # Store metadata in a sidecar file
         if metadata:
             import json
+
             meta_path = full_path.with_suffix(full_path.suffix + ".meta")
             await asyncio.to_thread(
-                meta_path.write_text,
-                json.dumps({"content_type": content_type, **metadata})
+                meta_path.write_text, json.dumps({"content_type": content_type, **metadata})
             )
 
         logger.debug(f"Uploaded {len(content)} bytes to local: {pkey}")
@@ -376,7 +379,7 @@ class S3StorageBackend(BaseStorageBackend):
         region: str,
         access_key: str,
         secret_key: str,
-        endpoint_url: Optional[str] = None,
+        endpoint_url: str | None = None,
         key_prefix: str = "",
     ):
         super().__init__(key_prefix)
@@ -394,7 +397,9 @@ class S3StorageBackend(BaseStorageBackend):
             try:
                 import aioboto3
             except ImportError:
-                raise ImportError("aioboto3 is required for S3 storage. Install with: pip install aioboto3")
+                raise ImportError(
+                    "aioboto3 is required for S3 storage. Install with: pip install aioboto3"
+                )
 
             session = aioboto3.Session()
             self._client_context = session.client(
@@ -423,7 +428,7 @@ class S3StorageBackend(BaseStorageBackend):
         key: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         pkey = self._prefixed_key(key)
         client = await self._get_client()
@@ -478,10 +483,11 @@ class S3StorageBackend(BaseStorageBackend):
                     return await stream.read(size)
                 except TypeError:
                     return await stream.read()
-            
+
             # Use aiofiles for non-blocking file I/O
             try:
                 import aiofiles
+
                 async with response["Body"] as stream:
                     async with aiofiles.open(target, "wb") as handle:
                         while True:
@@ -503,7 +509,9 @@ class S3StorageBackend(BaseStorageBackend):
             logger.error(f"[S3] Key not found: bucket={self.bucket}, key={pkey}")
             raise FileNotFoundError(f"S3 object not found: {pkey}")
         except Exception as e:
-            logger.error(f"[S3] Streaming download failed: bucket={self.bucket}, key={pkey}, error={e}")
+            logger.error(
+                f"[S3] Streaming download failed: bucket={self.bucket}, key={pkey}, error={e}"
+            )
             raise
 
     async def delete(self, key: str) -> bool:
@@ -557,8 +565,8 @@ class S3StorageBackend(BaseStorageBackend):
         key: str,
         content_type: str,
         expiry_seconds: int = 900,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, str]]:
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
         """
         Generate a presigned URL for direct upload to S3.
 
@@ -618,8 +626,8 @@ class S3StorageBackend(BaseStorageBackend):
         self,
         key: str,
         expiry_seconds: int = 3600,
-        filename: Optional[str] = None,
-    ) -> Optional[str]:
+        filename: str | None = None,
+    ) -> str | None:
         """
         Generate a presigned URL for downloading from S3.
 
@@ -646,15 +654,17 @@ class S3StorageBackend(BaseStorageBackend):
             # Format: filename="ascii_fallback"; filename*=UTF-8''url_encoded_name
             try:
                 # Check if filename contains non-ASCII characters
-                filename.encode('ascii')
+                filename.encode("ascii")
                 # Pure ASCII filename - use simple format
                 params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
             except UnicodeEncodeError:
                 # Non-ASCII filename - use RFC 5987 format with UTF-8 encoding
                 # Create ASCII fallback (replace non-ASCII with underscore)
-                ascii_fallback = filename.encode('ascii', 'replace').decode('ascii').replace('?', '_')
+                ascii_fallback = (
+                    filename.encode("ascii", "replace").decode("ascii").replace("?", "_")
+                )
                 # URL-encode the UTF-8 filename
-                encoded_filename = urllib.parse.quote(filename, safe='')
+                encoded_filename = urllib.parse.quote(filename, safe="")
                 params["ResponseContentDisposition"] = (
                     f'attachment; filename="{ascii_fallback}"; '
                     f"filename*=UTF-8''{encoded_filename}"
@@ -696,7 +706,9 @@ class OSSStorageBackend(BaseStorageBackend):
             try:
                 import oss2
             except ImportError:
-                raise ImportError("oss2 is required for OSS storage. Install with: pip install oss2")
+                raise ImportError(
+                    "oss2 is required for OSS storage. Install with: pip install oss2"
+                )
 
             auth = oss2.Auth(self.access_key, self.secret_key)
             self._bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name)
@@ -707,7 +719,7 @@ class OSSStorageBackend(BaseStorageBackend):
         key: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         pkey = self._prefixed_key(key)
         bucket = self._get_bucket()
@@ -753,7 +765,9 @@ class OSSStorageBackend(BaseStorageBackend):
             if "NoSuchKey" in error_str or "404" in error_str:
                 logger.error(f"[OSS] Key not found: bucket={self.bucket_name}, key={pkey}")
                 raise FileNotFoundError(f"OSS object not found: {pkey}")
-            logger.error(f"[OSS] Streaming download failed: bucket={self.bucket_name}, key={pkey}, error={e}")
+            logger.error(
+                f"[OSS] Streaming download failed: bucket={self.bucket_name}, key={pkey}, error={e}"
+            )
             raise
 
     async def delete(self, key: str) -> bool:
@@ -834,7 +848,10 @@ class ImageStorageService:
         if url.startswith("file://"):
             try:
                 from ...core.crypto import sign_url
-                return sign_url(url, self._signing_key, expiry_seconds=self.config.url_expiry_seconds)
+
+                return sign_url(
+                    url, self._signing_key, expiry_seconds=self.config.url_expiry_seconds
+                )
             except Exception as e:
                 logger.warning(f"Failed to sign URL: {e}")
                 return url
@@ -878,7 +895,9 @@ class ImageStorageService:
         """
         # Sanitize filename
         safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
-        return f"knowledge/confluence/{tenant_id}/{document_id}/images/{attachment_id}_{safe_filename}"
+        return (
+            f"knowledge/confluence/{tenant_id}/{document_id}/images/{attachment_id}_{safe_filename}"
+        )
 
     async def upload_image(
         self,
@@ -888,7 +907,7 @@ class ImageStorageService:
         filename: str,
         content: bytes,
         content_type: str,
-        metadata: Optional[Dict[str, str]] = None,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         """
         Upload an image to storage.
@@ -954,6 +973,7 @@ class ImageStorageService:
             through download_original_file() which applies the prefix internally.
         """
         import urllib.parse
+
         safe_filename = urllib.parse.quote(filename, safe="._-")
         if not safe_filename or safe_filename == ".":
             safe_filename = "document"
@@ -967,9 +987,7 @@ class ImageStorageService:
         }
 
         await self._backend.upload(storage_key, content, content_type, file_metadata)
-        logger.info(
-            f"Uploaded original file {filename} ({len(content)} bytes) -> {storage_key}"
-        )
+        logger.info(f"Uploaded original file {filename} ({len(content)} bytes) -> {storage_key}")
         return storage_key
 
     async def download_original_file(self, storage_key: str) -> bytes:
@@ -999,9 +1017,9 @@ class ImageStorageService:
 
     async def upload_images_batch(
         self,
-        images: List[ImageUploadParams],
+        images: list[ImageUploadParams],
         max_concurrent: int = 10,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Upload multiple images concurrently with rate limiting.
 
@@ -1045,8 +1063,8 @@ class ImageStorageService:
         filename: str,
         content_type: str,
         expiry_seconds: int = 900,
-        metadata: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        metadata: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
         """
         Generate a presigned URL for direct upload to storage.
 
@@ -1248,8 +1266,8 @@ class ImageStorageService:
         self,
         storage_url: str,
         expiry_seconds: int = 3600,
-        segment_id: Optional[str] = None,
-    ) -> Optional[str]:
+        segment_id: str | None = None,
+    ) -> str | None:
         """
         Generate a presigned URL for accessing an image.
 
@@ -1298,7 +1316,7 @@ class ImageStorageService:
         # Default: return the original URL
         return storage_url
 
-    def _extract_key_from_url(self, url: str) -> Optional[str]:
+    def _extract_key_from_url(self, url: str) -> str | None:
         """
         Extract storage key from a URL.
 
@@ -1320,6 +1338,7 @@ class ImageStorageService:
         # or: {endpoint}/{bucket}/{key}
         try:
             from urllib.parse import urlparse
+
             parsed = urlparse(url)
 
             if parsed.scheme in ("http", "https"):
@@ -1329,7 +1348,7 @@ class ImageStorageService:
                     return path
                 # If using endpoint URL, first segment might be bucket
                 if self.config.s3_endpoint_url and path.startswith(f"{self.config.s3_bucket}/"):
-                    return path[len(self.config.s3_bucket) + 1:]
+                    return path[len(self.config.s3_bucket) + 1 :]
                 # Otherwise, assume path is the key
                 return path
 
@@ -1343,7 +1362,7 @@ class ImageStorageService:
         if self._backend is not None:
             await self._backend.close()
 
-    async def __aenter__(self) -> "ImageStorageService":
+    async def __aenter__(self) -> ImageStorageService:
         """Async context manager entry"""
         return self
 

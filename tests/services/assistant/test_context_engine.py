@@ -9,14 +9,11 @@ Tests for ContextStructure dataclass and ContextEngine class:
 - Edge cases and empty values handling
 """
 
-import pytest
-
 from src.services.assistant.context_engine import (
-    ContextStructure,
     ContextEngine,
+    ContextStructure,
     create_context_engine,
 )
-
 
 # =============================================================================
 # ContextStructure Tests
@@ -270,7 +267,9 @@ class TestContextEngineBuildSystemContent:
 
         content = engine._build_system_content(context)
 
-        expected = "You are a helpful assistant.\n\n## Background Knowledge\nUser is a software engineer."
+        expected = (
+            "You are a helpful assistant.\n\n## Background Knowledge\nUser is a software engineer."
+        )
         assert content == expected
 
     def test_with_task_state(self):
@@ -283,7 +282,9 @@ class TestContextEngineBuildSystemContent:
 
         content = engine._build_system_content(context)
 
-        expected = "You are a helpful assistant.\n\n## Current Task State\nWorking on API implementation."
+        expected = (
+            "You are a helpful assistant.\n\n## Current Task State\nWorking on API implementation."
+        )
         assert content == expected
 
     def test_with_all_layers(self):

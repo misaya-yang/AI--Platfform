@@ -12,17 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import jwt
-import time
+from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
+import jwt
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 # ============ 测试常量 ============
 
@@ -34,13 +33,14 @@ TEST_REDIS_URL = "redis://localhost:6379/15"  # 使用 DB 15 作为测试数据�
 
 # ============ JWT Token Fixtures ============
 
+
 def create_test_token(
     user_id: str,
     tier: str = "normal",
     tenant_id: str = "test_tenant",
-    roles: List[str] = None,
-    expires_delta: Optional[timedelta] = None,
-    extra_claims: Dict[str, Any] = None,
+    roles: list[str] = None,
+    expires_delta: timedelta | None = None,
+    extra_claims: dict[str, Any] = None,
 ) -> str:
     """创建测试用 JWT Token"""
     if expires_delta is None:
@@ -116,6 +116,7 @@ def invalid_jwt_token() -> str:
 
 # ============ Mock Services ============
 
+
 @pytest.fixture
 def mock_redis():
     """Mock Redis 客户端"""
@@ -149,11 +150,13 @@ def mock_langgraph_response():
     return {
         "status_code": 200,
         "headers": {"content-type": "application/json"},
-        "body": json.dumps({
-            "thread_id": "test_thread_001",
-            "status": "completed",
-            "output": {"messages": [{"role": "assistant", "content": "Hello!"}]},
-        }).encode(),
+        "body": json.dumps(
+            {
+                "thread_id": "test_thread_001",
+                "status": "completed",
+                "output": {"messages": [{"role": "assistant", "content": "Hello!"}]},
+            }
+        ).encode(),
     }
 
 
@@ -166,7 +169,7 @@ def mock_langgraph_stream_response():
         b'event: messages/partial\ndata: [{"role": "assistant", "content": "Hello, how"}]\n\n',
         b'event: messages/partial\ndata: [{"role": "assistant", "content": "Hello, how can I help?"}]\n\n',
         b'event: metadata\ndata: {"usage": {"input_tokens": 10, "output_tokens": 20}}\n\n',
-        b'event: end\ndata: null\n\n',
+        b"event: end\ndata: null\n\n",
     ]
 
     async def stream_generator():
@@ -178,6 +181,7 @@ def mock_langgraph_stream_response():
 
 
 # ============ Proxy Config Fixtures ============
+
 
 @pytest.fixture
 def mock_proxy_config():
@@ -209,16 +213,17 @@ def mock_config_loader(mock_proxy_config):
 
 # ============ Settings Fixtures ============
 
+
 @pytest.fixture
 def test_settings():
     """测试用配置"""
     from src.config.settings import (
-        Settings,
         AuthenticationSettings,
         AuthJWTSettings,
         DatabaseSettings,
-        RedisSettings,
         ProxySettings,
+        RedisSettings,
+        Settings,
     )
 
     return Settings(
@@ -238,6 +243,7 @@ def test_settings():
 
 
 # ============ Application Fixtures ============
+
 
 @pytest_asyncio.fixture
 async def test_app(test_settings, mock_config_loader, mock_redis):
@@ -271,6 +277,7 @@ def sync_client(test_app) -> TestClient:
 
 # ============ Async Event Loop ============
 
+
 @pytest.fixture(scope="session")
 def event_loop():
     """创建事件循环（用于 session 范围的异步测试）"""
@@ -280,6 +287,7 @@ def event_loop():
 
 
 # ============ Utility Fixtures ============
+
 
 @pytest.fixture
 def auth_headers(valid_jwt_user_a):
@@ -301,16 +309,17 @@ def user_b_headers(valid_jwt_user_b):
 
 # ============ HTTP Response Helpers ============
 
+
 class MockHttpxResponse:
     """Mock httpx Response"""
 
     def __init__(
         self,
         status_code: int = 200,
-        headers: Dict[str, str] = None,
+        headers: dict[str, str] = None,
         content: bytes = b"",
         is_stream: bool = False,
-        stream_data: List[bytes] = None,
+        stream_data: list[bytes] = None,
     ):
         self.status_code = status_code
         self.headers = headers or {"content-type": "application/json"}
@@ -333,12 +342,13 @@ class MockHttpxResponse:
 @pytest.fixture
 def mock_httpx_response():
     """创建 Mock HTTP 响应的工厂"""
+
     def _create(
         status_code: int = 200,
-        headers: Dict[str, str] = None,
+        headers: dict[str, str] = None,
         content: bytes = b"",
         is_stream: bool = False,
-        stream_data: List[bytes] = None,
+        stream_data: list[bytes] = None,
     ):
         return MockHttpxResponse(
             status_code=status_code,
@@ -347,20 +357,18 @@ def mock_httpx_response():
             is_stream=is_stream,
             stream_data=stream_data,
         )
+
     return _create
 
 
 # ============ Test Data Generators ============
 
+
 @pytest.fixture
 def langgraph_run_payload():
     """LangGraph /runs 请求 payload"""
     return {
-        "input": {
-            "messages": [
-                {"role": "user", "content": "Hello, how are you?"}
-            ]
-        },
+        "input": {"messages": [{"role": "user", "content": "Hello, how are you?"}]},
     }
 
 
@@ -368,10 +376,6 @@ def langgraph_run_payload():
 def langgraph_stream_payload():
     """LangGraph /runs/stream 请求 payload"""
     return {
-        "input": {
-            "messages": [
-                {"role": "user", "content": "Tell me a story"}
-            ]
-        },
+        "input": {"messages": [{"role": "user", "content": "Tell me a story"}]},
         "stream_mode": ["messages", "updates"],
     }

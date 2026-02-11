@@ -8,7 +8,7 @@ Defines the three processing modes for document ingestion:
 """
 
 from enum import Enum
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 
 class ProcessingMode(str, Enum):
@@ -16,20 +16,20 @@ class ProcessingMode(str, Enum):
 
     AUTO = "auto"
     """Automatic detection: choose the best processing mode based on document analysis."""
-    
+
     TEXT_ONLY = "text_only"
     """Traditional text processing: OCR extraction -> chunking -> text embedding.
     Best for: Digital PDFs, Word documents, plain text files.
     Embedding: Gemini/DashScope text models.
     """
-    
+
     SCANNED = "scanned"
     """Vision-first processing: Each page as image -> vision embedding.
     Best for: Scanned PDFs, documents with complex layouts.
     Embedding: tongyi-embedding-vision-plus (1024 dim).
     Based on ColPali approach - 18x faster, 23% more accurate than OCR.
     """
-    
+
     MULTIMODAL = "multimodal"
     """Combined processing: Extract text + images separately -> dual embedding.
     Best for: Mixed content documents with both text and images.
@@ -39,7 +39,7 @@ class ProcessingMode(str, Enum):
 
 class ProcessingModeConfig(NamedTuple):
     """Configuration for each processing mode."""
-    
+
     mode: ProcessingMode
     display_name: str
     description: str
@@ -100,11 +100,11 @@ def get_mode_config(mode: ProcessingMode) -> ProcessingModeConfig:
     return MODE_CONFIGS.get(mode, MODE_CONFIGS[ProcessingMode.TEXT_ONLY])
 
 
-def parse_processing_mode(mode_str: Optional[str]) -> ProcessingMode:
+def parse_processing_mode(mode_str: str | None) -> ProcessingMode:
     """Parse string to ProcessingMode enum, defaulting to TEXT_ONLY."""
     if not mode_str:
         return ProcessingMode.TEXT_ONLY
-    
+
     try:
         return ProcessingMode(mode_str.lower())
     except ValueError:

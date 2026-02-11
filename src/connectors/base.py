@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 from ..models.enums import ConnectorType
 from ..models.service import ServiceDefinition
@@ -25,7 +25,7 @@ class BaseConnector(ABC):
     async def health_check(self, headers: dict = None) -> bool:
         """
         健康检查。
-        
+
         Args:
             headers: 可选的认证头部，用于需要认证的服务
         """
@@ -41,7 +41,7 @@ class InProcessConnector(BaseConnector):
         config = service.connector_config or {}
         self.module_path = config.get("module") or config.get("graph_module")
         self.object_name = config.get("callable") or config.get("graph_name")
-        self._callable: Optional[Any] = None
+        self._callable: Any | None = None
         if self.module_path and self.object_name:
             module = importlib.import_module(self.module_path)
             self._callable = getattr(module, self.object_name, None)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -16,16 +16,16 @@ class TaskSchema(BaseModel):
     service_id: str
     status: TaskStatus
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime | None = None
     user_id: str = ""
     tenant_id: str = ""
-    callback_url: Optional[str] = None
-    result: Optional[Any] = None
-    error: Optional[str] = None
+    callback_url: str | None = None
+    result: Any | None = None
+    error: str | None = None
     progress: float = 0.0
 
     @classmethod
-    def from_domain(cls, task: Task) -> "TaskSchema":
+    def from_domain(cls, task: Task) -> TaskSchema:
         return cls(
             task_id=task.task_id,
             request_id=task.request_id,

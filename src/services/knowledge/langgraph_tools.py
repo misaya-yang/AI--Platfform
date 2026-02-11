@@ -37,14 +37,14 @@ Usage Examples:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import AuthenticationRequiredError
-from .knowledge_service import KnowledgeService, RetrieveResult
+from .knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +52,13 @@ logger = logging.getLogger(__name__)
 @dataclass
 class KBRetrievalInput:
     """Input schema for knowledge base retrieval."""
+
     query: str
     dataset_id: str
     top_k: int = 5
     mode: str = "hybrid"  # hybrid | vector | keyword
     intent: str = "general"  # general | find_image | find_document
-    document_id: Optional[str] = None
+    document_id: str | None = None
     rerank: bool = False
     mmr: bool = False
 
@@ -65,8 +66,9 @@ class KBRetrievalInput:
 @dataclass
 class KBRetrievalOutput:
     """Output schema for knowledge base retrieval."""
-    segments: List[Dict[str, Any]]
-    metadata: Dict[str, Any]
+
+    segments: list[dict[str, Any]]
+    metadata: dict[str, Any]
     query: str
     dataset_id: str
 
@@ -74,13 +76,14 @@ class KBRetrievalOutput:
 @dataclass
 class KBSearchResult:
     """A single search result for LangGraph consumption."""
+
     content: str
     score: float
     segment_id: str
     document_id: str
-    metadata: Dict[str, Any]
-    
-    def to_dict(self) -> Dict[str, Any]:
+    metadata: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "content": self.content,
             "score": self.score,
@@ -93,26 +96,26 @@ class KBSearchResult:
 class KnowledgeRetriever:
     """
     Knowledge base retriever for LangGraph agents.
-    
+
     This class provides multiple interfaces for knowledge retrieval:
     - Direct async method calls
     - LangChain tool-compatible interface
     - Structured input/output for type safety
-    
+
     Example usage in LangGraph:
-    
+
     ```python
     # Create retriever
     retriever = KnowledgeRetriever(kb_service, dataset_id="my_dataset")
-    
+
     # Use as a tool in LangGraph
     tools = [retriever.as_tool()]
-    
+
     # Or call directly
     results = await retriever.retrieve("What is X?")
     ```
     """
-    
+
     def __init__(
         self,
         knowledge_service: KnowledgeService,
@@ -141,7 +144,9 @@ class KnowledgeRetriever:
         if user_context is None:
             raise AuthenticationRequiredError("User context is required for knowledge retrieval")
         if not user_context.is_authenticated:
-            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+            raise AuthenticationRequiredError(
+                "Authenticated user context is required for knowledge retrieval"
+            )
 
         self.kb = knowledge_service
         self.dataset_id = dataset_id
@@ -167,19 +172,19 @@ class KnowledgeRetriever:
             tier="admin",
             roles=["admin"],
         )
-    
+
     async def retrieve(
         self,
         query: str,
-        top_k: Optional[int] = None,
-        mode: Optional[str] = None,
-        document_id: Optional[str] = None,
-        rerank: Optional[bool] = None,
-        mmr: Optional[bool] = None,
-        dataset_id: Optional[str] = None,
-        intent: Optional[str] = None,
+        top_k: int | None = None,
+        mode: str | None = None,
+        document_id: str | None = None,
+        rerank: bool | None = None,
+        mmr: bool | None = None,
+        dataset_id: str | None = None,
+        intent: str | None = None,
         **kwargs,
-    ) -> List[KBSearchResult]:
+    ) -> list[KBSearchResult]:
         """
         Retrieve relevant segments from the knowledge base.
 
@@ -216,7 +221,7 @@ class KnowledgeRetriever:
         retrieve_kwargs.update(kwargs)
 
         # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-        if hasattr(self.kb, 'retrieve_with_images_v2'):
+        if hasattr(self.kb, "retrieve_with_images_v2"):
             results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
         else:
             # Fallback to regular retrieve, remove intent param if present
@@ -233,25 +238,25 @@ class KnowledgeRetriever:
             )
             for r in results
         ]
-    
+
     async def retrieve_texts(
         self,
         query: str,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
         **kwargs,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Retrieve relevant text segments as a simple list of strings.
-        
+
         This is a convenience method for simple RAG pipelines.
         """
         results = await self.retrieve(query, top_k=top_k, **kwargs)
         return [r.content for r in results]
-    
+
     async def retrieve_with_metadata(
         self,
         query: str,
-        top_k: Optional[int] = None,
+        top_k: int | None = None,
         **kwargs,
     ) -> KBRetrievalOutput:
         """
@@ -267,7 +272,7 @@ class KnowledgeRetriever:
             mmr=self.default_mmr,
             **kwargs,
         )
-        
+
         return KBRetrievalOutput(
             segments=[
                 {
@@ -283,8 +288,8 @@ class KnowledgeRetriever:
             query=query,
             dataset_id=self.dataset_id,
         )
-    
-    def as_langchain_tool(self) -> Dict[str, Any]:
+
+    def as_langchain_tool(self) -> dict[str, Any]:
         """
         Return a LangChain-compatible tool definition.
 
@@ -292,7 +297,6 @@ class KnowledgeRetriever:
 
         Note: This returns a sync wrapper that should be used in async context.
         """
-        import asyncio
 
         async def _retrieve(query: str, intent: str = "general", top_k: int = 5) -> str:
             """Retrieve relevant information from the knowledge base."""
@@ -319,25 +323,25 @@ class KnowledgeRetriever:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to find relevant information"
+                        "description": "The search query to find relevant information",
                     },
                     "intent": {
                         "type": "string",
                         "enum": ["general", "find_image", "find_document"],
                         "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
-                        "default": "general"
+                        "default": "general",
                     },
                     "top_k": {
                         "type": "integer",
                         "description": "Number of results to return",
-                        "default": 5
-                    }
+                        "default": 5,
+                    },
                 },
-                "required": ["query"]
-            }
+                "required": ["query"],
+            },
         }
-    
-    def as_openai_function(self) -> Dict[str, Any]:
+
+    def as_openai_function(self) -> dict[str, Any]:
         """
         Return an OpenAI function calling compatible definition.
         """
@@ -351,36 +355,36 @@ class KnowledgeRetriever:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query describing what information you're looking for"
+                            "description": "The search query describing what information you're looking for",
                         },
                         "intent": {
                             "type": "string",
                             "enum": ["general", "find_image", "find_document"],
-                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only"
+                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
                         },
                         "top_k": {
                             "type": "integer",
                             "description": "Number of results to return",
-                            "default": 5
-                        }
+                            "default": 5,
+                        },
                     },
-                    "required": ["query"]
-                }
-            }
+                    "required": ["query"],
+                },
+            },
         }
 
 
 class MultiDatasetRetriever:
     """
     Retriever that can search across multiple datasets.
-    
+
     Useful for LangGraph agents that need to access multiple knowledge bases.
     """
-    
+
     def __init__(
         self,
         knowledge_service: KnowledgeService,
-        dataset_ids: List[str],
+        dataset_ids: list[str],
         user_context: UserContext,
         default_top_k: int = 5,
         default_mode: str = "hybrid",
@@ -401,7 +405,9 @@ class MultiDatasetRetriever:
         if user_context is None:
             raise AuthenticationRequiredError("User context is required for knowledge retrieval")
         if not user_context.is_authenticated:
-            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+            raise AuthenticationRequiredError(
+                "Authenticated user context is required for knowledge retrieval"
+            )
 
         self.kb = knowledge_service
         self.dataset_ids = dataset_ids
@@ -420,16 +426,16 @@ class MultiDatasetRetriever:
             )
             for ds_id in dataset_ids
         }
-    
+
     async def retrieve(
         self,
         query: str,
-        top_k: Optional[int] = None,
-        dataset_id: Optional[str] = None,
+        top_k: int | None = None,
+        dataset_id: str | None = None,
         merge_results: bool = True,
-        intent: Optional[str] = None,
+        intent: str | None = None,
         **kwargs,
-    ) -> List[KBSearchResult]:
+    ) -> list[KBSearchResult]:
         """
         Retrieve from one or all datasets.
 
@@ -450,7 +456,9 @@ class MultiDatasetRetriever:
             # Search single dataset
             if dataset_id not in self.retrievers:
                 raise ValueError(f"Dataset {dataset_id} not configured")
-            return await self.retrievers[dataset_id].retrieve(query, top_k=top_k, intent=intent, **kwargs)
+            return await self.retrievers[dataset_id].retrieve(
+                query, top_k=top_k, intent=intent, **kwargs
+            )
 
         # Search all datasets
         import asyncio
@@ -463,7 +471,7 @@ class MultiDatasetRetriever:
         all_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Flatten results
-        merged: List[KBSearchResult] = []
+        merged: list[KBSearchResult] = []
         for result_list in all_results:
             if isinstance(result_list, list):
                 merged.extend(result_list)
@@ -474,8 +482,8 @@ class MultiDatasetRetriever:
             merged = merged[:top_k]
 
         return merged
-    
-    def as_openai_function(self) -> Dict[str, Any]:
+
+    def as_openai_function(self) -> dict[str, Any]:
         """Return OpenAI function calling definition."""
         dataset_desc = ", ".join(self.dataset_ids)
 
@@ -489,27 +497,27 @@ class MultiDatasetRetriever:
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "The search query describing what information you're looking for"
+                            "description": "The search query describing what information you're looking for",
                         },
                         "intent": {
                             "type": "string",
                             "enum": ["general", "find_image", "find_document"],
-                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only"
+                            "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
                         },
                         "dataset_id": {
                             "type": "string",
                             "description": f"Optional: specific dataset to search. Options: {dataset_desc}. If not provided, searches all datasets.",
-                            "enum": self.dataset_ids
+                            "enum": self.dataset_ids,
                         },
                         "top_k": {
                             "type": "integer",
                             "description": "Number of results to return",
-                            "default": 5
-                        }
+                            "default": 5,
+                        },
                     },
-                    "required": ["query"]
-                }
-            }
+                    "required": ["query"],
+                },
+            },
         }
 
 
@@ -549,33 +557,35 @@ def create_retrieval_tool(
         user_context=user_context,
         **kwargs,
     )
-    
+
     async def search(query: str, top_k: int = 5) -> str:
         """Search the knowledge base for relevant information."""
         results = await retriever.retrieve(query, top_k=top_k)
-        
+
         if not results:
             return "No relevant information found in the knowledge base."
-        
+
         # Format as numbered list
         formatted = []
         for i, r in enumerate(results, 1):
             formatted.append(f"[{i}] (score: {r.score:.3f})\n{r.content}")
-        
+
         return "\n\n---\n\n".join(formatted)
-    
+
     return search
 
 
 # Dify-compatible external knowledge base interface
 
+
 @dataclass
 class DifyExternalDatasetConfig:
     """Configuration for Dify external dataset API."""
+
     dataset_id: str
-    retrieval_model: Dict[str, Any]
-    
-    def to_dict(self) -> Dict[str, Any]:
+    retrieval_model: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "dataset_id": self.dataset_id,
             "retrieval_model": self.retrieval_model,
@@ -585,10 +595,10 @@ class DifyExternalDatasetConfig:
 class DifyCompatibleKBAPI:
     """
     Provides a Dify-compatible API interface for the knowledge base.
-    
+
     This allows the KB to be used as an external knowledge base in Dify applications.
     """
-    
+
     def __init__(
         self,
         knowledge_service: KnowledgeService,
@@ -607,29 +617,31 @@ class DifyCompatibleKBAPI:
         if user_context is None:
             raise AuthenticationRequiredError("User context is required for knowledge retrieval")
         if not user_context.is_authenticated:
-            raise AuthenticationRequiredError("Authenticated user context is required for knowledge retrieval")
+            raise AuthenticationRequiredError(
+                "Authenticated user context is required for knowledge retrieval"
+            )
 
         self.kb = knowledge_service
         self.user_context = user_context
-    
+
     async def retrieve(
         self,
         dataset_id: str,
         query: str,
-        retrieval_model: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        retrieval_model: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """
         Dify-compatible retrieval endpoint.
-        
+
         Returns results in Dify's expected format.
         """
         # Parse retrieval model config
         model = retrieval_model or {}
-        
+
         top_k = int(model.get("top_k", 5))
         score_threshold = model.get("score_threshold")
         rerank = model.get("reranking_enable", False)
-        
+
         # Map Dify search method to our mode
         search_method = str(model.get("search_method", "hybrid_search")).lower()
         mode_mapping = {
@@ -638,7 +650,7 @@ class DifyCompatibleKBAPI:
             "hybrid_search": "hybrid",
         }
         mode = mode_mapping.get(search_method, "hybrid")
-        
+
         # Execute retrieval
         results, meta = await self.kb.retrieve(
             user=self.user_context,
@@ -648,11 +660,11 @@ class DifyCompatibleKBAPI:
             mode=mode,
             rerank=rerank,
         )
-        
+
         # Filter by score threshold
         if score_threshold is not None:
             results = [r for r in results if r.score >= score_threshold]
-        
+
         # Format as Dify response
         return {
             "records": [
@@ -687,9 +699,11 @@ class DifyCompatibleKBAPI:
 # Try to import LangChain types for better integration
 # These are optional - tools work without LangChain installed
 try:
+    from langchain_core.callbacks import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
     from langchain_core.tools import BaseTool, StructuredTool
-    from langchain_core.callbacks import CallbackManagerForToolRun, AsyncCallbackManagerForToolRun
-    from pydantic import BaseModel as PydanticBaseModel, Field as PydanticField
+    from pydantic import BaseModel as PydanticBaseModel
+    from pydantic import Field as PydanticField
+
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
@@ -704,6 +718,7 @@ except ImportError:
 @dataclass
 class KBToolConfig:
     """Configuration for KB tool creation."""
+
     top_k: int = 5
     mode: str = "hybrid"
     rerank: bool = False
@@ -713,7 +728,7 @@ class KBToolConfig:
 
 
 def _format_results_for_llm(
-    results: List[KBSearchResult],
+    results: list[KBSearchResult],
     include_scores: bool = True,
     max_content_length: int = 2000,
 ) -> str:
@@ -753,9 +768,9 @@ class KnowledgeBaseTool:
         knowledge_service: KnowledgeService,
         dataset_id: str,
         user_context: UserContext,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        config: Optional[KBToolConfig] = None,
+        name: str | None = None,
+        description: str | None = None,
+        config: KBToolConfig | None = None,
     ):
         """
         Initialize the KB tool.
@@ -791,27 +806,27 @@ class KnowledgeBaseTool:
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query describing what information you're looking for"
+                    "description": "The search query describing what information you're looking for",
                 },
                 "intent": {
                     "type": "string",
                     "enum": ["general", "find_image", "find_document"],
-                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only"
+                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
                 },
                 "top_k": {
                     "type": "integer",
                     "description": "Number of results to return (default: 5)",
-                    "default": self.config.top_k
-                }
+                    "default": self.config.top_k,
+                },
             },
-            "required": ["query"]
+            "required": ["query"],
         }
 
     async def _arun(
         self,
         query: str,
-        intent: Optional[str] = None,
-        top_k: Optional[int] = None,
+        intent: str | None = None,
+        top_k: int | None = None,
         **kwargs,
     ) -> str:
         """Async execution (primary method for LangGraph)."""
@@ -832,7 +847,7 @@ class KnowledgeBaseTool:
                 retrieve_kwargs["intent"] = intent
 
             # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-            if hasattr(self.kb, 'retrieve_with_images_v2'):
+            if hasattr(self.kb, "retrieve_with_images_v2"):
                 results, meta = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
             else:
                 # Fallback to regular retrieve, remove intent param if present
@@ -863,8 +878,8 @@ class KnowledgeBaseTool:
     def _run(
         self,
         query: str,
-        intent: Optional[str] = None,
-        top_k: Optional[int] = None,
+        intent: str | None = None,
+        top_k: int | None = None,
         **kwargs,
     ) -> str:
         """Sync execution (runs async in new event loop)."""
@@ -873,25 +888,27 @@ class KnowledgeBaseTool:
             if loop.is_running():
                 # If there's already a running loop, create a new one in a thread
                 import concurrent.futures
+
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     future = pool.submit(
-                        asyncio.run,
-                        self._arun(query, intent=intent, top_k=top_k, **kwargs)
+                        asyncio.run, self._arun(query, intent=intent, top_k=top_k, **kwargs)
                     )
                     return future.result()
             else:
-                return loop.run_until_complete(self._arun(query, intent=intent, top_k=top_k, **kwargs))
+                return loop.run_until_complete(
+                    self._arun(query, intent=intent, top_k=top_k, **kwargs)
+                )
         except RuntimeError:
             # No event loop, create one
             return asyncio.run(self._arun(query, intent=intent, top_k=top_k, **kwargs))
 
-    async def ainvoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+    async def ainvoke(self, input: str | dict[str, Any], **kwargs) -> str:
         """LangChain ainvoke interface."""
         if isinstance(input, str):
             return await self._arun(input, **kwargs)
         return await self._arun(**input, **kwargs)
 
-    def invoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+    def invoke(self, input: str | dict[str, Any], **kwargs) -> str:
         """LangChain invoke interface."""
         if isinstance(input, str):
             return self._run(input, **kwargs)
@@ -901,18 +918,18 @@ class KnowledgeBaseTool:
         """Direct call interface."""
         return self._run(query, **kwargs)
 
-    def to_openai_function(self) -> Dict[str, Any]:
+    def to_openai_function(self) -> dict[str, Any]:
         """Convert to OpenAI function calling format."""
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.args_schema
-            }
+                "parameters": self.args_schema,
+            },
         }
 
-    def to_langchain_tool(self) -> Dict[str, Any]:
+    def to_langchain_tool(self) -> dict[str, Any]:
         """Convert to LangChain tool dict format."""
         return {
             "name": self.name,
@@ -931,11 +948,11 @@ class MultiKnowledgeBaseTool:
     def __init__(
         self,
         knowledge_service: KnowledgeService,
-        dataset_ids: List[str],
+        dataset_ids: list[str],
         user_context: UserContext,
         name: str = "search_knowledge_bases",
-        description: Optional[str] = None,
-        config: Optional[KBToolConfig] = None,
+        description: str | None = None,
+        config: KBToolConfig | None = None,
     ):
         if user_context is None:
             raise AuthenticationRequiredError("User context is required")
@@ -960,40 +977,40 @@ class MultiKnowledgeBaseTool:
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query describing what information you're looking for"
+                    "description": "The search query describing what information you're looking for",
                 },
                 "intent": {
                     "type": "string",
                     "enum": ["general", "find_image", "find_document"],
-                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only"
+                    "description": "Retrieval intent: general=balanced, find_image=prioritize images, find_document=text only",
                 },
                 "dataset_id": {
                     "type": "string",
                     "description": f"Optional: specific dataset to search ({', '.join(dataset_ids)})",
-                    "enum": dataset_ids
+                    "enum": dataset_ids,
                 },
                 "top_k": {
                     "type": "integer",
                     "description": "Number of results (default: 5)",
-                    "default": self.config.top_k
-                }
+                    "default": self.config.top_k,
+                },
             },
-            "required": ["query"]
+            "required": ["query"],
         }
 
     async def _arun(
         self,
         query: str,
-        intent: Optional[str] = None,
-        dataset_id: Optional[str] = None,
-        top_k: Optional[int] = None,
+        intent: str | None = None,
+        dataset_id: str | None = None,
+        top_k: int | None = None,
         **kwargs,
     ) -> str:
         """Async execution."""
         top_k = top_k or self.config.top_k
         datasets_to_search = [dataset_id] if dataset_id else self.dataset_ids
 
-        all_results: List[KBSearchResult] = []
+        all_results: list[KBSearchResult] = []
 
         async def search_dataset(ds_id: str):
             try:
@@ -1013,7 +1030,7 @@ class MultiKnowledgeBaseTool:
                     retrieve_kwargs["intent"] = intent
 
                 # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-                if hasattr(self.kb, 'retrieve_with_images_v2'):
+                if hasattr(self.kb, "retrieve_with_images_v2"):
                     results, _ = await self.kb.retrieve_with_images_v2(**retrieve_kwargs)
                 else:
                     # Fallback to regular retrieve, remove intent param if present
@@ -1056,6 +1073,7 @@ class MultiKnowledgeBaseTool:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import concurrent.futures
+
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     future = pool.submit(asyncio.run, self._arun(query, **kwargs))
                     return future.result()
@@ -1064,12 +1082,12 @@ class MultiKnowledgeBaseTool:
         except RuntimeError:
             return asyncio.run(self._arun(query, **kwargs))
 
-    async def ainvoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+    async def ainvoke(self, input: str | dict[str, Any], **kwargs) -> str:
         if isinstance(input, str):
             return await self._arun(input, **kwargs)
         return await self._arun(**input, **kwargs)
 
-    def invoke(self, input: Union[str, Dict[str, Any]], **kwargs) -> str:
+    def invoke(self, input: str | dict[str, Any], **kwargs) -> str:
         if isinstance(input, str):
             return self._run(input, **kwargs)
         return self._run(**input, **kwargs)
@@ -1077,14 +1095,14 @@ class MultiKnowledgeBaseTool:
     def __call__(self, query: str, **kwargs) -> str:
         return self._run(query, **kwargs)
 
-    def to_openai_function(self) -> Dict[str, Any]:
+    def to_openai_function(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.args_schema
-            }
+                "parameters": self.args_schema,
+            },
         }
 
 
@@ -1092,12 +1110,13 @@ class MultiKnowledgeBaseTool:
 # Factory Functions (Recommended API)
 # ============================================================
 
+
 def create_kb_tool(
     knowledge_service: KnowledgeService,
     dataset_id: str,
     user_context: UserContext,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
+    name: str | None = None,
+    description: str | None = None,
     top_k: int = 5,
     mode: str = "hybrid",
     rerank: bool = False,
@@ -1159,10 +1178,10 @@ def create_kb_tool(
 
 def create_multi_kb_tool(
     knowledge_service: KnowledgeService,
-    dataset_ids: List[str],
+    dataset_ids: list[str],
     user_context: UserContext,
     name: str = "search_knowledge_bases",
-    description: Optional[str] = None,
+    description: str | None = None,
     top_k: int = 5,
     mode: str = "hybrid",
     rerank: bool = False,
@@ -1263,4 +1282,3 @@ __all__ = [
     "create_langchain_kb_tool",
     "create_retrieval_tool",
 ]
-

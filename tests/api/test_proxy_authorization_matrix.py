@@ -18,9 +18,7 @@ def _make_request() -> SimpleNamespace:
     request = SimpleNamespace()
     request.app = SimpleNamespace()
     request.app.state = SimpleNamespace()
-    request.app.state.dispatcher = SimpleNamespace(
-        rbac=RBAC(role_permissions=settings.rbac.roles)
-    )
+    request.app.state.dispatcher = SimpleNamespace(rbac=RBAC(role_permissions=settings.rbac.roles))
     request.app.state.registry = SimpleNamespace(
         get=AsyncMock(return_value=None),
         list=AsyncMock(return_value=[]),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from jsonpath_ng import parse as jsonpath_parse
 
@@ -34,9 +34,7 @@ class GenericRESTAdapter(ProtocolAdapter):
 
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         service_request, method, endpoint = self._build_service_request(request)
-        response = await self.connector.request(
-            method=method, url=endpoint, json=service_request
-        )
+        response = await self.connector.request(method=method, url=endpoint, json=service_request)
         outputs = self._build_outputs(response)
         return UnifiedResponse(
             request_id=request.request_id,
@@ -44,9 +42,7 @@ class GenericRESTAdapter(ProtocolAdapter):
             outputs=outputs,
         )
 
-    def _build_service_request(
-        self, request: UnifiedRequest
-    ) -> tuple[Dict[str, Any], str, str]:
+    def _build_service_request(self, request: UnifiedRequest) -> tuple[dict[str, Any], str, str]:
         mapping = self.request_mapping or {}
         endpoint = mapping.get("endpoint") or self.config.get("endpoint") or "/"
         method = mapping.get("method") or self.config.get("method") or "POST"
@@ -55,12 +51,12 @@ class GenericRESTAdapter(ProtocolAdapter):
         body_map = mapping.get("body") or {}
         if not isinstance(body_map, dict):
             raise ValidationFailedError("request_mapping.body must be a dict")
-        body: Dict[str, Any] = {}
+        body: dict[str, Any] = {}
         for key, expr in body_map.items():
             body[key] = self._eval_expr(expr, req_data)
         return body, method, endpoint
 
-    def _build_outputs(self, response: Any) -> List[ContentItem]:
+    def _build_outputs(self, response: Any) -> list[ContentItem]:
         mapping = self.response_mapping or {}
         outputs_spec = mapping.get("outputs")
         resp_data = response
@@ -73,7 +69,7 @@ class GenericRESTAdapter(ProtocolAdapter):
         if not outputs_spec:
             return [ContentItem(type=ContentType.JSON, data=resp_data)]
 
-        outputs: List[ContentItem] = []
+        outputs: list[ContentItem] = []
         for spec in outputs_spec:
             ctype = ContentType(spec.get("type", "text"))
             data_expr = spec.get("data")

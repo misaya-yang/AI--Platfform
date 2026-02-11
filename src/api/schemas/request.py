@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from ...models.enums import ContentType
 from ...models.request import ContentItem, UnifiedRequest
@@ -14,10 +14,10 @@ class ContentItemSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: ContentType
-    data: Optional[Union[str, bytes]] = None
-    url: Optional[str] = None
-    mime_type: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    data: str | bytes | None = None
+    url: str | None = None
+    mime_type: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_domain(self) -> ContentItem:
         return ContentItem(
@@ -32,21 +32,19 @@ class ContentItemSchema(BaseModel):
 class UnifiedRequestSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    request_id: Optional[str] = None
+    request_id: str | None = None
     service_id: str
-    inputs: List[ContentItemSchema]
-    session_id: Optional[str] = None
-    context: Optional[Dict[str, Any]] = None
-    parameters: Optional[Dict[str, Any]] = None
-    callback_url: Optional[str] = None
+    inputs: list[ContentItemSchema]
+    session_id: str | None = None
+    context: dict[str, Any] | None = None
+    parameters: dict[str, Any] | None = None
+    callback_url: str | None = None
     priority: int = 0
-    user_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    timestamp: Optional[datetime] = None
+    user_id: str | None = None
+    tenant_id: str | None = None
+    timestamp: datetime | None = None
 
-    def to_domain(
-        self, default_user_id: str = "", default_tenant_id: str = ""
-    ) -> UnifiedRequest:
+    def to_domain(self, default_user_id: str = "", default_tenant_id: str = "") -> UnifiedRequest:
         rid = self.request_id or f"req_{uuid.uuid4().hex}"
         return UnifiedRequest(
             request_id=rid,

@@ -11,17 +11,17 @@ Provides:
 
 import hashlib
 import logging
-from datetime import datetime, date, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta
+from typing import Any
 
-from fastapi import APIRouter, Request, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from ...api.deps import get_auth_context, AuthContext
+from ...api.deps import AuthContext, get_auth_context
 from ...core.auth.jwt import decode_jwt_token
-from ...core.auth.jwt_config import get_jwt_secret, get_jwt_algorithms
+from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ...services.metrics import get_metrics_recorder
-from ...services.metrics.realtime_metrics import get_realtime_metrics, RealtimeSnapshot
+from ...services.metrics.realtime_metrics import RealtimeSnapshot, get_realtime_metrics
 from ...services.metrics.usage_recorder import get_usage_recorder
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,7 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 class LatencyMetrics(BaseModel):
     """Latency metrics with percentiles"""
+
     p50: int
     p95: int
     p99: int
@@ -42,6 +43,7 @@ class LatencyMetrics(BaseModel):
 
 class ErrorMetrics(BaseModel):
     """Error rate metrics"""
+
     rate: float
     rate_4xx: float
     rate_5xx: float
@@ -49,13 +51,15 @@ class ErrorMetrics(BaseModel):
 
 class UserMetrics(BaseModel):
     """Active user metrics"""
+
     active: int
     threads_total: int
-    threads_by_user: Dict[str, int]
+    threads_by_user: dict[str, int]
 
 
 class CapacityMetrics(BaseModel):
     """System capacity metrics"""
+
     queue_depth: int
     concurrent: int
     max_concurrent: int
@@ -64,6 +68,7 @@ class CapacityMetrics(BaseModel):
 
 class TokenMetrics(BaseModel):
     """Token consumption metrics"""
+
     total: int
     input_tokens: int
     output_tokens: int
@@ -73,6 +78,7 @@ class TokenMetrics(BaseModel):
 
 class RunMetrics(BaseModel):
     """LangGraph run metrics"""
+
     total: int
     success_rate: float
     avg_duration_ms: int
@@ -80,6 +86,7 @@ class RunMetrics(BaseModel):
 
 class RealtimeDashboard(BaseModel):
     """Real-time dashboard response"""
+
     # Throughput
     rps: float
     rps_1m: float
@@ -100,38 +107,43 @@ class RealtimeDashboard(BaseModel):
 
 class TimeSeriesDataPoint(BaseModel):
     """Single data point in time series"""
+
     timestamp: str
     value: float
-    label: Optional[str] = None
+    label: str | None = None
 
 
 class TimeSeriesResponse(BaseModel):
     """Time series data response"""
+
     metric: str
     granularity: str
     start: str
     end: str
-    data: List[TimeSeriesDataPoint]
+    data: list[TimeSeriesDataPoint]
 
 
 class AlertStatus(BaseModel):
     """Alert status"""
+
     name: str
     level: str  # ok, warning, critical
     message: str
     threshold: float
     current_value: float
-    triggered_at: Optional[str] = None
+    triggered_at: str | None = None
 
 
 class AlertsResponse(BaseModel):
     """Active alerts response"""
-    alerts: List[AlertStatus]
+
+    alerts: list[AlertStatus]
     last_check: str
 
 
 class UserDashboard(BaseModel):
     """Per-user dashboard for multi-tenant view"""
+
     user_id: str
     tokens: TokenMetrics
     active_threads: int
@@ -143,6 +155,7 @@ class UserDashboard(BaseModel):
 
 class UsageBreakdown(BaseModel):
     """Usage breakdown item"""
+
     dimension_value: str
     requests: int
     input_tokens: int
@@ -164,11 +177,12 @@ ALERT_THRESHOLDS = {
 
 # ============ WebSocket Connection Manager ============
 
+
 class DashboardConnectionManager:
     """Manage WebSocket connections for real-time updates"""
 
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -178,7 +192,7 @@ class DashboardConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-    async def broadcast(self, data: Dict[str, Any]):
+    async def broadcast(self, data: dict[str, Any]):
         """Broadcast to all connected clients"""
         disconnected = []
         for connection in self.active_connections:
@@ -201,8 +215,8 @@ manager = DashboardConnectionManager()
 
 async def authenticate_websocket(
     websocket: WebSocket,
-    token: Optional[str] = None,
-) -> Optional[AuthContext]:
+    token: str | None = None,
+) -> AuthContext | None:
     """
     Authenticate WebSocket connection using token from query parameter or header.
 
@@ -381,7 +395,7 @@ async def get_realtime_dashboard(
 @router.websocket("/ws")
 async def websocket_dashboard(
     websocket: WebSocket,
-    token: Optional[str] = Query(None, description="JWT token for authentication"),
+    token: str | None = Query(None, description="JWT token for authentication"),
 ):
     """
     WebSocket endpoint for real-time dashboard updates
@@ -434,10 +448,8 @@ async def websocket_dashboard(
             try:
                 # Non-blocking receive with timeout
                 import asyncio
-                msg = await asyncio.wait_for(
-                    websocket.receive_text(),
-                    timeout=5.0
-                )
+
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
                 # Handle ping/pong or commands
                 if msg == "ping":
                     await websocket.send_json({"type": "pong"})
@@ -446,7 +458,7 @@ async def websocket_dashboard(
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-    except Exception as e:
+    except Exception:
         manager.disconnect(websocket)
 
 
@@ -454,10 +466,10 @@ async def websocket_dashboard(
 async def get_timeseries(
     metric: str,
     request: Request,
-    start: Optional[datetime] = Query(None, description="Start time (ISO format)"),
-    end: Optional[datetime] = Query(None, description="End time (ISO format)"),
+    start: datetime | None = Query(None, description="Start time (ISO format)"),
+    end: datetime | None = Query(None, description="End time (ISO format)"),
     granularity: str = Query("hour", description="minute | hour | day"),
-    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    user_id: str | None = Query(None, description="Filter by user ID"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> TimeSeriesResponse:
     """
@@ -495,10 +507,10 @@ async def get_timeseries(
                 metric_key = "cost_usd"
             elif metric == "runs":
                 # Runs might not be fully populated in UsageRecorder yet, fallback or use if available
-                metric_key = "requests" # Approximation if runs not separate
+                metric_key = "requests"  # Approximation if runs not separate
 
             ts_data = await recorder.get_usage_timeseries(
-                tenant_id=auth.tenant_id, # UsageRecorder needs tenant_id
+                tenant_id=auth.tenant_id,  # UsageRecorder needs tenant_id
                 start_date=start_date,
                 end_date=end_date,
                 user_id=user_id,
@@ -511,12 +523,14 @@ async def get_timeseries(
                 # Ensure we have a float
                 if val is None:
                     val = 0.0
-                
-                data.append(TimeSeriesDataPoint(
-                    timestamp=item["date"],
-                    value=float(val),
-                ))
-            
+
+                data.append(
+                    TimeSeriesDataPoint(
+                        timestamp=item["date"],
+                        value=float(val),
+                    )
+                )
+
             return TimeSeriesResponse(
                 metric=metric,
                 granularity=granularity,
@@ -530,7 +544,7 @@ async def get_timeseries(
 
     # Fallback to Redis implementation
     redis = getattr(request.app.state, "redis", None)
-    data: List[TimeSeriesDataPoint] = []
+    data: list[TimeSeriesDataPoint] = []
 
     if redis and redis._client:
         try:
@@ -592,10 +606,12 @@ async def get_timeseries(
                     key = f"metrics:runs:total:{date_str}"
                     value = float(await redis._client.get(key) or 0)
 
-                data.append(TimeSeriesDataPoint(
-                    timestamp=current.isoformat(),
-                    value=value,
-                ))
+                data.append(
+                    TimeSeriesDataPoint(
+                        timestamp=current.isoformat(),
+                        value=value,
+                    )
+                )
 
                 current += delta
 
@@ -611,15 +627,15 @@ async def get_timeseries(
     )
 
 
-@router.get("/breakdown", response_model=List[UsageBreakdown])
+@router.get("/breakdown", response_model=list[UsageBreakdown])
 async def get_usage_breakdown(
     request: Request,
     dimension: str = Query(..., description="model | user | service | provider"),
-    start: Optional[datetime] = Query(None, description="Start time"),
-    end: Optional[datetime] = Query(None, description="End time"),
+    start: datetime | None = Query(None, description="Start time"),
+    end: datetime | None = Query(None, description="End time"),
     limit: int = 20,
     auth: AuthContext = Depends(get_auth_context),
-) -> List[UsageBreakdown]:
+) -> list[UsageBreakdown]:
     """
     Get usage breakdown by dimension (Service, User, Vendor, Model)
     """
@@ -687,19 +703,19 @@ async def get_user_dashboard(
 
     # Get additional metrics from UsageRecorder first, fall back to MetricsRecorder
     usage_recorder = get_usage_recorder()
-    
+
     requests_today = 0
     avg_latency = 0
     error_rate = 0.0
     cost_usd = 0.0
-    
+
     if usage_recorder and usage_recorder.database:
         try:
             summary = await usage_recorder.get_usage_summary(
                 tenant_id=auth.tenant_id,
                 user_id=user_id,
                 start_date=date.today(),
-                end_date=date.today()
+                end_date=date.today(),
             )
             requests_today = summary.get("total_requests", 0)
             avg_latency = summary.get("avg_latency_ms", 0)
@@ -732,7 +748,7 @@ async def get_dashboard_summary(
     request: Request,
     period: str = Query("today", description="today | week | month"),
     auth: AuthContext = Depends(get_auth_context),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Get aggregated dashboard summary
 
@@ -751,11 +767,9 @@ async def get_dashboard_summary(
                 start_date = date.today() - timedelta(days=7)
             elif period == "month":
                 start_date = date.today() - timedelta(days=30)
-                
+
             summary = await usage_recorder.get_usage_summary(
-                tenant_id=auth.tenant_id or "public",
-                start_date=start_date,
-                end_date=date.today()
+                tenant_id=auth.tenant_id or "public", start_date=start_date, end_date=date.today()
             )
             summary_data = {
                 "total_requests": summary.get("total_requests", 0),
@@ -763,7 +777,7 @@ async def get_dashboard_summary(
                 "avg_latency_ms": summary.get("avg_latency_ms", 0),
                 "total_tokens": summary.get("total_tokens", 0),
                 "estimated_cost_usd": summary.get("total_cost_usd", 0),
-                "total_runs": 0, # UsageRecorder doesn't track runs fully separate yet
+                "total_runs": 0,  # UsageRecorder doesn't track runs fully separate yet
             }
         except Exception as e:
             logger.warning(f"Failed to fetch summary from UsageRecorder: {e}")
@@ -818,7 +832,9 @@ async def get_dashboard_summary(
             "queue_depth": snapshot.queue_depth,
         },
         "latency": {
-            "p50": summary_data.get("latency_p50", 0), # Note: UsageRecorder summary doesn't have percentiles yet
+            "p50": summary_data.get(
+                "latency_p50", 0
+            ),  # Note: UsageRecorder summary doesn't have percentiles yet
             "p95": summary_data.get("latency_p95", 0),
             "p99": summary_data.get("latency_p99", 0),
         },
@@ -830,127 +846,149 @@ async def get_dashboard_summary(
 # ============ Helper Functions ============
 
 
-def _check_alerts(snapshot: RealtimeSnapshot) -> List[AlertStatus]:
+def _check_alerts(snapshot: RealtimeSnapshot) -> list[AlertStatus]:
     """Check metrics against thresholds and return alerts"""
     alerts = []
 
     # Latency P95 alert
     lat_thresholds = ALERT_THRESHOLDS["latency_p95"]
     if snapshot.latency_p95 > lat_thresholds["critical"]:
-        alerts.append(AlertStatus(
-            name="latency_p95",
-            level="critical",
-            message=f"P95 latency ({snapshot.latency_p95}ms) exceeds critical threshold",
-            threshold=lat_thresholds["critical"],
-            current_value=snapshot.latency_p95,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="latency_p95",
+                level="critical",
+                message=f"P95 latency ({snapshot.latency_p95}ms) exceeds critical threshold",
+                threshold=lat_thresholds["critical"],
+                current_value=snapshot.latency_p95,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     elif snapshot.latency_p95 > lat_thresholds["warning"]:
-        alerts.append(AlertStatus(
-            name="latency_p95",
-            level="warning",
-            message=f"P95 latency ({snapshot.latency_p95}ms) exceeds warning threshold",
-            threshold=lat_thresholds["warning"],
-            current_value=snapshot.latency_p95,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="latency_p95",
+                level="warning",
+                message=f"P95 latency ({snapshot.latency_p95}ms) exceeds warning threshold",
+                threshold=lat_thresholds["warning"],
+                current_value=snapshot.latency_p95,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     else:
-        alerts.append(AlertStatus(
-            name="latency_p95",
-            level="ok",
-            message="P95 latency is within normal range",
-            threshold=lat_thresholds["warning"],
-            current_value=snapshot.latency_p95,
-        ))
+        alerts.append(
+            AlertStatus(
+                name="latency_p95",
+                level="ok",
+                message="P95 latency is within normal range",
+                threshold=lat_thresholds["warning"],
+                current_value=snapshot.latency_p95,
+            )
+        )
 
     # Error rate alert
     err_thresholds = ALERT_THRESHOLDS["error_rate"]
     if snapshot.error_rate > err_thresholds["critical"]:
-        alerts.append(AlertStatus(
-            name="error_rate",
-            level="critical",
-            message=f"Error rate ({snapshot.error_rate:.1f}%) exceeds critical threshold",
-            threshold=err_thresholds["critical"],
-            current_value=snapshot.error_rate,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="error_rate",
+                level="critical",
+                message=f"Error rate ({snapshot.error_rate:.1f}%) exceeds critical threshold",
+                threshold=err_thresholds["critical"],
+                current_value=snapshot.error_rate,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     elif snapshot.error_rate > err_thresholds["warning"]:
-        alerts.append(AlertStatus(
-            name="error_rate",
-            level="warning",
-            message=f"Error rate ({snapshot.error_rate:.1f}%) exceeds warning threshold",
-            threshold=err_thresholds["warning"],
-            current_value=snapshot.error_rate,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="error_rate",
+                level="warning",
+                message=f"Error rate ({snapshot.error_rate:.1f}%) exceeds warning threshold",
+                threshold=err_thresholds["warning"],
+                current_value=snapshot.error_rate,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     else:
-        alerts.append(AlertStatus(
-            name="error_rate",
-            level="ok",
-            message="Error rate is within normal range",
-            threshold=err_thresholds["warning"],
-            current_value=snapshot.error_rate,
-        ))
+        alerts.append(
+            AlertStatus(
+                name="error_rate",
+                level="ok",
+                message="Error rate is within normal range",
+                threshold=err_thresholds["warning"],
+                current_value=snapshot.error_rate,
+            )
+        )
 
     # Queue depth alert
     queue_thresholds = ALERT_THRESHOLDS["queue_depth"]
     if snapshot.queue_depth > queue_thresholds["critical"]:
-        alerts.append(AlertStatus(
-            name="queue_depth",
-            level="critical",
-            message=f"Queue depth ({snapshot.queue_depth}) exceeds critical threshold",
-            threshold=queue_thresholds["critical"],
-            current_value=snapshot.queue_depth,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="queue_depth",
+                level="critical",
+                message=f"Queue depth ({snapshot.queue_depth}) exceeds critical threshold",
+                threshold=queue_thresholds["critical"],
+                current_value=snapshot.queue_depth,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     elif snapshot.queue_depth > queue_thresholds["warning"]:
-        alerts.append(AlertStatus(
-            name="queue_depth",
-            level="warning",
-            message=f"Queue depth ({snapshot.queue_depth}) exceeds warning threshold",
-            threshold=queue_thresholds["warning"],
-            current_value=snapshot.queue_depth,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="queue_depth",
+                level="warning",
+                message=f"Queue depth ({snapshot.queue_depth}) exceeds warning threshold",
+                threshold=queue_thresholds["warning"],
+                current_value=snapshot.queue_depth,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     else:
-        alerts.append(AlertStatus(
-            name="queue_depth",
-            level="ok",
-            message="Queue depth is within normal range",
-            threshold=queue_thresholds["warning"],
-            current_value=snapshot.queue_depth,
-        ))
+        alerts.append(
+            AlertStatus(
+                name="queue_depth",
+                level="ok",
+                message="Queue depth is within normal range",
+                threshold=queue_thresholds["warning"],
+                current_value=snapshot.queue_depth,
+            )
+        )
 
     # Utilization alert
     util_thresholds = ALERT_THRESHOLDS["utilization"]
-    utilization = (
-        snapshot.concurrent_requests / max(snapshot.max_concurrent, 1) * 100
-    )
+    utilization = snapshot.concurrent_requests / max(snapshot.max_concurrent, 1) * 100
     if utilization > util_thresholds["critical"]:
-        alerts.append(AlertStatus(
-            name="utilization",
-            level="critical",
-            message=f"System utilization ({utilization:.1f}%) exceeds critical threshold",
-            threshold=util_thresholds["critical"],
-            current_value=utilization,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="utilization",
+                level="critical",
+                message=f"System utilization ({utilization:.1f}%) exceeds critical threshold",
+                threshold=util_thresholds["critical"],
+                current_value=utilization,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     elif utilization > util_thresholds["warning"]:
-        alerts.append(AlertStatus(
-            name="utilization",
-            level="warning",
-            message=f"System utilization ({utilization:.1f}%) exceeds warning threshold",
-            threshold=util_thresholds["warning"],
-            current_value=utilization,
-            triggered_at=datetime.now().isoformat(),
-        ))
+        alerts.append(
+            AlertStatus(
+                name="utilization",
+                level="warning",
+                message=f"System utilization ({utilization:.1f}%) exceeds warning threshold",
+                threshold=util_thresholds["warning"],
+                current_value=utilization,
+                triggered_at=datetime.now().isoformat(),
+            )
+        )
     else:
-        alerts.append(AlertStatus(
-            name="utilization",
-            level="ok",
-            message="System utilization is within normal range",
-            threshold=util_thresholds["warning"],
-            current_value=utilization,
-        ))
+        alerts.append(
+            AlertStatus(
+                name="utilization",
+                level="ok",
+                message="System utilization is within normal range",
+                threshold=util_thresholds["warning"],
+                current_value=utilization,
+            )
+        )
 
     return alerts

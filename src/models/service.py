@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .enums import ConnectorType, ContentType, InvocationMode, ServiceType
 
@@ -9,6 +9,7 @@ from .enums import ConnectorType, ContentType, InvocationMode, ServiceType
 @dataclass
 class ServiceRateLimitConfig:
     """服务级别限流配置"""
+
     enabled: bool = False
     requests: int = 100  # 请求数量
     window: int = 60  # 时间窗口（秒）
@@ -19,16 +20,18 @@ class ServiceRateLimitConfig:
 @dataclass
 class ServiceAuthConfig:
     """服务级别鉴权配置"""
+
     enabled: bool = False  # 是否启用服务级别鉴权
     require_auth: bool = True  # 是否必须鉴权
-    allowed_roles: List[str] = field(default_factory=list)  # 允许的角色
-    allowed_api_keys: List[str] = field(default_factory=list)  # 允许的 API Key 前缀
+    allowed_roles: list[str] = field(default_factory=list)  # 允许的角色
+    allowed_api_keys: list[str] = field(default_factory=list)  # 允许的 API Key 前缀
     public: bool = False  # 是否公开（无需鉴权）
 
 
 @dataclass
 class ServiceCacheConfig:
     """服务级别缓存配置"""
+
     enabled: bool = False
     ttl: int = 300  # 缓存过期时间（秒）
     semantic_cache: bool = False  # 是否启用语义缓存
@@ -37,6 +40,7 @@ class ServiceCacheConfig:
 @dataclass
 class ServicePriorityConfig:
     """服务优先级与调度配置"""
+
     priority: int = 5  # 1-10，数字越大优先级越高
     weight: int = 1  # 负载均衡权重
     max_queue_size: int = 100  # 最大排队数量
@@ -45,6 +49,7 @@ class ServicePriorityConfig:
 @dataclass
 class ServiceConfig:
     """服务级别综合配置"""
+
     rate_limit: ServiceRateLimitConfig = field(default_factory=ServiceRateLimitConfig)
     auth: ServiceAuthConfig = field(default_factory=ServiceAuthConfig)
     cache: ServiceCacheConfig = field(default_factory=ServiceCacheConfig)
@@ -59,20 +64,18 @@ class ServiceDefinition:
     version: str = "1.0.0"
 
     service_type: ServiceType = ServiceType.CUSTOM
-    supported_modes: List[InvocationMode] = field(
-        default_factory=lambda: [InvocationMode.SYNC]
-    )
+    supported_modes: list[InvocationMode] = field(default_factory=lambda: [InvocationMode.SYNC])
 
     connector_type: ConnectorType = ConnectorType.HTTP
-    connector_config: Dict[str, Any] = field(default_factory=dict)
+    connector_config: dict[str, Any] = field(default_factory=dict)
 
-    input_schema: Dict[str, Any] = field(default_factory=dict)
-    output_schema: Dict[str, Any] = field(default_factory=dict)
-    accepted_content_types: List[ContentType] = field(default_factory=list)
-    output_content_types: List[ContentType] = field(default_factory=list)
+    input_schema: dict[str, Any] = field(default_factory=dict)
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    accepted_content_types: list[ContentType] = field(default_factory=list)
+    output_content_types: list[ContentType] = field(default_factory=list)
 
     session_enabled: bool = False
-    session_adapter: Optional[str] = None
+    session_adapter: str | None = None
 
     timeout: int = 60
     max_retries: int = 3
@@ -83,17 +86,17 @@ class ServiceDefinition:
     recovery_timeout: int = 30
 
     # 保留原有字段兼容性
-    rate_limit: Optional[Dict[str, Any]] = None
-    concurrency_limit: Optional[int] = None
+    rate_limit: dict[str, Any] | None = None
+    concurrency_limit: int | None = None
 
     status: str = "active"
-    tags: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    async_config: Optional[Dict[str, Any]] = None
+    async_config: dict[str, Any] | None = None
 
     # 新增：服务级别配置
-    service_config: Optional[ServiceConfig] = None
+    service_config: ServiceConfig | None = None
 
     def get_service_config(self) -> ServiceConfig:
         """获取服务配置，如果没有则返回默认配置"""
