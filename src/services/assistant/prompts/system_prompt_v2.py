@@ -1129,7 +1129,10 @@ def get_cache_stable_prompt_hash(
 
 def get_streaming_first_prompt(
     available_datasets: Optional[List[str]] = None,
+    kb_mode: str = "auto",
     web_search_enabled: bool = False,
+    available_tools: Optional[List[str]] = None,
+    dataset_name_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Get an ultra-minimal system prompt for Streaming-First mode.
@@ -1154,10 +1157,40 @@ def get_streaming_first_prompt(
     """
     kb_hint = ""
     if available_datasets:
+        if dataset_name_map:
+            ds_lines = []
+            for ds_id in available_datasets:
+                ds_name = dataset_name_map.get(ds_id) or ds_id
+                ds_lines.append(f"- {ds_id}: {ds_name}")
+            ds_text = "\n".join(ds_lines)
+        else:
+            ds_text = ", ".join(available_datasets)
+
+        kb_mode_norm = str(kb_mode or "tool").strip().lower()
+        kb_instruction = "Use the `search_knowledge_base` tool when the user asks about company-specific information."
+        if kb_mode_norm == "auto":
+            kb_instruction = (
+                "Before answering, you MUST call `search_knowledge_base` at least once to ground the response "
+                "(unless the user explicitly asks you not to use the KB, or the request is purely small-talk). "
+                "Use a focused query and then cite or quote relevant snippets."
+            )
+        elif kb_mode_norm in {"off", "disabled", "false", "0"}:
+            kb_instruction = "Knowledge base retrieval is disabled for this run; do NOT call `search_knowledge_base`."
+
         kb_hint = f"""
 ## Knowledge Base
-You have access to company knowledge bases: {', '.join(available_datasets)}.
-Use the `search_knowledge_base` tool when the user asks about company-specific information.
+You have access to company knowledge bases:
+{ds_text}
+
+{kb_instruction}
+"""
+
+    tools_hint = ""
+    if available_tools:
+        # Keep this short to preserve Streaming-first TTFT advantages.
+        tools_hint = f"""
+## Available Tools
+You can call these tools when needed: {', '.join(sorted(set(available_tools)))}.
 """
 
     # Generate web search guidance based on user preference
@@ -1166,7 +1199,7 @@ Use the `search_knowledge_base` tool when the user asks about company-specific i
         web_hint = """
 ## Web Search (ENABLED - Always Use)
 The user has enabled web search mode. For ANY question that could benefit from current information,
-you MUST use the `web_search` tool to provide up-to-date, accurate answers.
+you MUST use the `search_web` tool (alias: `web_search`) to provide up-to-date, accurate answers.
 Always search first, then synthesize the results into your response.
 """
     else:
@@ -1194,7 +1227,7 @@ For general knowledge questions you can answer confidently, respond directly wit
 - Use tools intelligently based on context
 - Cite sources when using retrieved information
 - Admit uncertainty rather than hallucinate
-{kb_hint}{web_hint}
+{tools_hint}{kb_hint}{web_hint}
 ## Response Style
 - Use clear, professional language
 - Format with markdown when helpful

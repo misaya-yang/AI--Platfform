@@ -279,6 +279,7 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 success=result.is_success(),
                 result=formatted_result,
                 error=result.error_message if not result.is_success() else None,
+                output_files=output_files_info,
                 metadata={
                     "execution_id": result.execution_id,
                     "status": result.status.value,

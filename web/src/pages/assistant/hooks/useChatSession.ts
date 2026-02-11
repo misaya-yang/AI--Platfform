@@ -397,6 +397,11 @@ export function useChatSession() {
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
     let durationMs: number | undefined;
+    const markFirstResponse = (timestampMs: number) => {
+      if (firstTokenMs === undefined) {
+        firstTokenMs = timestampMs - startTime;
+      }
+    };
 
     // Helper to update search status
     let searchStatus = [...initialSearchStatus];
@@ -437,10 +442,7 @@ export function useChatSession() {
 
           case "text_delta":
             if (typeof event.data === "string") {
-              // Track TTFT - first visible response (text, tool call, or status)
-              if (firstTokenMs === undefined) {
-                firstTokenMs = now - startTime;
-              }
+              markFirstResponse(now);
               content += event.data;
               setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content, firstTokenMs } : m));
             }
@@ -575,6 +577,9 @@ export function useChatSession() {
 
           // === AG-UI Step Events (Manus-style) ===
           case SSEEventType.STEP_STARTED:
+            // Agent-first workflows may do tool planning before text generation.
+            // Treat the first visible step as first response to avoid misleading TTFT.
+            markFirstResponse(now);
             const stepStartData = event.data as {
               step_id: string;
               title: string;
@@ -653,7 +658,7 @@ export function useChatSession() {
 
           // === AG-UI Tool Call Events ===
           case SSEEventType.TOOL_CALL_START:
-            // 工具调用不计入 TTFT - TTFT 只测量文本内容出现时间
+            markFirstResponse(now);
             const toolStartData = event.data as {
               tool_call_id: string;
               tool_name: string;

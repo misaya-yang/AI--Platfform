@@ -2,8 +2,7 @@
 Image Generation Tool for Assistant Service
 
 Provides text-to-image generation using:
-- DashScope Wanx (通义万相)
-- OpenAI DALL-E (optional)
+- Smart router: Gemini native image generation (preferred) with DashScope Wanx fallback
 """
 
 from __future__ import annotations
@@ -324,8 +323,30 @@ class DashScopeImageGenerator:
 class ImageGeneratorExecutor(ToolExecutor):
     """Executor for image generation tool."""
 
-    def __init__(self, generator: DashScopeImageGenerator):
-        self.generator = generator
+    @staticmethod
+    def _size_to_aspect_ratio(size: str) -> str:
+        """Map DashScope size (e.g. 1024*1024) to Gemini aspectRatio (e.g. 1:1)."""
+        try:
+            raw = (size or "").lower()
+            parts = raw.split("*")
+            if len(parts) != 2:
+                return "1:1"
+            w = float(parts[0])
+            h = float(parts[1])
+            if w <= 0 or h <= 0:
+                return "1:1"
+            ratio = w / h
+        except Exception:
+            return "1:1"
+
+        candidates = {
+            "1:1": 1.0,
+            "16:9": 16 / 9,
+            "9:16": 9 / 16,
+            "4:3": 4 / 3,
+            "3:4": 3 / 4,
+        }
+        return min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """Execute image generation."""
@@ -343,44 +364,64 @@ class ImageGeneratorExecutor(ToolExecutor):
                 error="Prompt is required",
             )
 
-        if not self.generator.is_configured:
+        from .smart_image_generator import get_smart_image_generator
+        from .gemini_image_tool import get_gemini_image_generator
+
+        gemini = get_gemini_image_generator()
+        dash = get_image_generator()
+        if not gemini.is_configured and not dash.is_configured:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error="Image generation not configured (missing DASHSCOPE_API_KEY)",
+                error="Image generation not configured (missing GEMINI_API_KEY/GOOGLE_API_KEY and DASHSCOPE_API_KEY)",
             )
 
-        result = await self.generator.generate(
+        aspect_ratio = self._size_to_aspect_ratio(size)
+        router = get_smart_image_generator(prefer_gemini=True)
+        res = await router.generate(
             prompt=prompt,
-            negative_prompt=negative_prompt,
+            n=n,
             size=size,
             style=style,
-            n=n,
+            negative_prompt=negative_prompt,
+            aspect_ratio=aspect_ratio,
         )
 
-        if not result.success:
+        if not res.success:
+            # Preserve safety block signal for the agent
+            err = res.error or "Image generation failed"
+            if res.blocked and res.block_reason:
+                err = f"{err} (blocked: {res.block_reason})"
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=result.error,
+                error=err,
+                metadata={
+                    "provider": res.provider,
+                    "blocked": res.blocked,
+                    "block_reason": res.block_reason,
+                    "error_code": res.error_code,
+                    "duration_ms": res.duration_ms,
+                    "used_fallback": res.used_fallback,
+                },
             )
 
-        # Return success with images as output_files
         return ToolCallResult(
             call_id=request.call_id,
             tool_name=request.tool_name,
             success=True,
-            result=f"Successfully generated {len(result.images)} image(s) for: {prompt[:100]}",
-            output_files=result.images,
+            result=f"Successfully generated {len(res.images)} image(s) for: {prompt[:100]}",
+            output_files=res.images,
             metadata={
-                "task_id": result.task_id,
-                "duration_ms": result.duration_ms,
-                "image_count": len(result.images),
+                "provider": res.provider,
+                "duration_ms": res.duration_ms,
+                "image_count": len(res.images),
                 "prompt": prompt,
                 "size": size,
                 "style": style,
+                "used_fallback": res.used_fallback,
             },
         )
 
@@ -402,12 +443,22 @@ def get_image_generator() -> DashScopeImageGenerator:
 
 def register_image_generation_tool() -> bool:
     """Register image generation tool with the global registry."""
-    generator = get_image_generator()
+    from .gemini_image_tool import get_gemini_image_generator
 
-    if not generator.is_configured:
-        logger.warning("DashScope API key not configured, image generation tool not registered")
+    dash = get_image_generator()
+    gemini = get_gemini_image_generator()
+
+    if not dash.is_configured and not gemini.is_configured:
+        logger.warning(
+            "No image generation provider configured; tool not registered "
+            "(missing GEMINI_API_KEY/GOOGLE_API_KEY and DASHSCOPE_API_KEY)"
+        )
         return False
 
-    register_tool(IMAGE_GENERATION_DEFINITION, ImageGeneratorExecutor(generator))
-    logger.info("Registered image generation tool")
+    register_tool(IMAGE_GENERATION_DEFINITION, ImageGeneratorExecutor())
+    logger.info(
+        "Registered image generation tool (gemini=%s, dashscope=%s)",
+        gemini.is_configured,
+        dash.is_configured,
+    )
     return True

@@ -116,6 +116,7 @@ class KBSearchExecutor(ToolExecutor):
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """Execute KB search."""
+        start_time = time.time()
         query = request.arguments.get("query", "")
         intent = request.arguments.get("intent", "general")
         dataset_ids = request.arguments.get("dataset_ids", [])
@@ -128,6 +129,7 @@ class KBSearchExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Query is required",
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
         # Validate intent parameter
@@ -137,6 +139,9 @@ class KBSearchExecutor(ToolExecutor):
 
         try:
             all_results = []
+            contexts: List[Dict[str, Any]] = []
+            datasets_needing_reindex: List[str] = []
+            dataset_errors: Dict[str, str] = {}
 
             # If no datasets specified, return early with clear guidance for the LLM
             # This prevents expensive list_datasets() + multi-dataset search operations
@@ -149,17 +154,20 @@ class KBSearchExecutor(ToolExecutor):
                     success=False,  # Mark as failure so LLM knows not to retry
                     error="NO_KNOWLEDGE_BASE_SELECTED",
                     result="当前对话没有绑定知识库。请直接根据你的知识回答用户问题，不要再调用知识库搜索工具。如果无法回答，请告知用户需要先选择一个知识库。",
+                    duration_ms=(time.time() - start_time) * 1000,
                     metadata={
                         "total_results": 0,
                         "datasets_searched": 0,
                         "query": query,
                         "intent": intent,
                         "message": "No knowledge base selected - answer from general knowledge instead",
+                        "duration_ms": (time.time() - start_time) * 1000,
                     },
                 )
 
             for dataset_id in dataset_ids:
                 try:
+                    ds_start = time.time()
                     # Use retrieve_with_images_v2 for multimodal retrieval with intent support
                     # Set include_images based on intent (skip images for find_document intent)
                     include_images = intent != "find_document"
@@ -177,17 +185,63 @@ class KBSearchExecutor(ToolExecutor):
                         score_threshold=score_threshold,  # Pass threshold to retrieval
                     )
 
+                    took_ms = (time.time() - ds_start) * 1000
+                    dataset_name = meta.get("dataset_name", dataset_id)
+                    dataset_chunks: List[Dict[str, Any]] = []
                     for r in results:
-                        all_results.append({
+                        r_meta = r.metadata or {}
+                        source_url = (
+                            r_meta.get("source_url")
+                            or r_meta.get("source")
+                            or r_meta.get("url")
+                            or r_meta.get("document_url")
+                            or r_meta.get("file_url")
+                        )
+                        citation_text = r_meta.get("citation_text") or (r.text[:200] if r.text else "")
+                        item = {
                             "content": r.text,  # RetrieveResult uses 'text' not 'content'
                             "score": r.score,
                             "dataset_id": dataset_id,
-                            "dataset_name": meta.get("dataset_name", dataset_id),
-                            "source_url": getattr(r, "source_url", None),
-                            "metadata": r.metadata or {},
-                        })
+                            "dataset_name": dataset_name,
+                            "segment_id": getattr(r, "segment_id", None),
+                            "document_id": getattr(r, "document_id", None),
+                            "image_url": getattr(r, "image_url", None) or r_meta.get("image_url"),
+                            "citation_text": citation_text,
+                            "source_url": source_url,
+                            "metadata": r_meta,
+                        }
+                        all_results.append(item)
+                        dataset_chunks.append(item)
+
+                    contexts.append(
+                        {
+                            "dataset_id": dataset_id,
+                            "dataset_name": dataset_name,
+                            "chunks": dataset_chunks,
+                            "query": query,
+                            "took_ms": took_ms,
+                        }
+                    )
 
                 except Exception as e:
+                    took_ms = (time.time() - ds_start) * 1000
+                    msg = str(e)
+                    dataset_errors[dataset_id] = msg[:500]
+                    # Propagate dataset "needs reindex" failures explicitly.
+                    if "require re-indexing" in msg or "require reindex" in msg or "re-index" in msg:
+                        datasets_needing_reindex.append(dataset_id)
+                    # Emit an empty context entry even on errors so the UI can stop "searching..."
+                    # and show diagnostics via tool card/result.
+                    contexts.append(
+                        {
+                            "dataset_id": dataset_id,
+                            "dataset_name": dataset_id,
+                            "chunks": [],
+                            "query": query,
+                            "took_ms": took_ms,
+                            "error": msg[:500],
+                        }
+                    )
                     logger.warning(f"Failed to search dataset {dataset_id}: {e}")
                     continue
 
@@ -198,16 +252,79 @@ class KBSearchExecutor(ToolExecutor):
             # Format result for LLM consumption
             formatted_result = self._format_results(all_results, query)
 
+            # If everything failed, be explicit (avoid misleading "no results" response).
+            if not all_results and dataset_errors and len(dataset_errors) >= len(dataset_ids):
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=False,
+                    error="KB_SEARCH_FAILED",
+                    result=(
+                        "知识库检索失败：所选数据集检索过程中发生错误，未能返回任何结果。"
+                        f"dataset_errors: {dataset_errors}。"
+                        "请检查知识库服务依赖（Postgres/Qdrant）与数据集索引状态后重试。"
+                    ),
+                    duration_ms=(time.time() - start_time) * 1000,
+                    metadata={
+                        "total_results": 0,
+                        "datasets_searched": len(dataset_ids),
+                        "query": query,
+                        "intent": intent,
+                        "datasets_needing_reindex": datasets_needing_reindex,
+                        "dataset_errors": dataset_errors,
+                        "contexts": contexts,
+                        "duration_ms": (time.time() - start_time) * 1000,
+                    },
+                )
+
+            # If we have no results and at least one dataset needs reindex, be explicit.
+            if not all_results and datasets_needing_reindex:
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=False,
+                    error="DATASET_NEEDS_REINDEX",
+                    result=(
+                        "知识库检索失败：所选数据集需要重新索引（reindex）后才能进行向量检索。"
+                        f"需要 reindex 的 dataset_ids: {datasets_needing_reindex}。"
+                        "请前往知识库页面对这些数据集执行批量 reindex 后重试。"
+                    ),
+                    duration_ms=(time.time() - start_time) * 1000,
+                    metadata={
+                        "total_results": 0,
+                        "datasets_searched": len(dataset_ids),
+                        "query": query,
+                        "intent": intent,
+                        "datasets_needing_reindex": datasets_needing_reindex,
+                        "dataset_errors": dataset_errors,
+                        "contexts": contexts,
+                        "duration_ms": (time.time() - start_time) * 1000,
+                    },
+                )
+
+            # If partial results exist but some datasets need reindex, add a brief warning.
+            if datasets_needing_reindex:
+                formatted_result += (
+                    f"\n\n[Warning] Some datasets require reindex before vector retrieval: {datasets_needing_reindex}"
+                )
+            if dataset_errors:
+                formatted_result += f"\n\n[Warning] Some datasets failed during retrieval: {list(dataset_errors.keys())}"
+
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
                 result=formatted_result,
+                duration_ms=(time.time() - start_time) * 1000,
                 metadata={
                     "total_results": len(all_results),
                     "datasets_searched": len(dataset_ids),
                     "query": query,
                     "intent": intent,
+                    "datasets_needing_reindex": datasets_needing_reindex,
+                    "dataset_errors": dataset_errors,
+                    "contexts": contexts,
+                    "duration_ms": (time.time() - start_time) * 1000,
                 },
             )
 
@@ -218,6 +335,7 @@ class KBSearchExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
     def _format_results(self, results: List[Dict[str, Any]], query: str) -> str:
@@ -289,6 +407,20 @@ WEB_SEARCH_DEFINITION = ToolDefinition(
     timeout_seconds=30,
 )
 
+# Backward-compatible alias for models that call `web_search` instead of `search_web`.
+# IMPORTANT: Keep parameters identical to avoid confusing the LLM.
+WEB_SEARCH_ALIAS_DEFINITION = ToolDefinition(
+    name="web_search",
+    description=WEB_SEARCH_DEFINITION.description,
+    parameters=WEB_SEARCH_DEFINITION.parameters,
+    category=WEB_SEARCH_DEFINITION.category,
+    risk_level=WEB_SEARCH_DEFINITION.risk_level,
+    when_to_use=WEB_SEARCH_DEFINITION.when_to_use,
+    when_not_to_use=WEB_SEARCH_DEFINITION.when_not_to_use,
+    examples=WEB_SEARCH_DEFINITION.examples,
+    timeout_seconds=WEB_SEARCH_DEFINITION.timeout_seconds,
+)
+
 
 class WebSearchExecutor(ToolExecutor):
     """Executor for web search tool (Tavily)."""
@@ -298,6 +430,7 @@ class WebSearchExecutor(ToolExecutor):
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """Execute web search."""
+        start_time = time.time()
         query = request.arguments.get("query", "")
         max_results = request.arguments.get("max_results", 5)
         search_depth = request.arguments.get("search_depth", "basic")
@@ -308,6 +441,7 @@ class WebSearchExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Query is required",
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
         if not self.tavily_tool.is_configured:
@@ -316,6 +450,7 @@ class WebSearchExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Web search is not configured (missing TAVILY_API_KEY)",
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
         try:
@@ -327,16 +462,20 @@ class WebSearchExecutor(ToolExecutor):
 
             # Format for LLM consumption
             formatted_result = self.tavily_tool.format_for_context(results)
+            display = self.tavily_tool.format_for_display(results)
 
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
                 result=formatted_result,
+                duration_ms=(time.time() - start_time) * 1000,
                 metadata={
                     "total_results": len(results.results),  # TavilySearchResponse uses attribute access
                     "query": query,
                     "answer": results.answer,
+                    "display": display,
+                    "duration_ms": (time.time() - start_time) * 1000,
                 },
             )
 
@@ -347,6 +486,7 @@ class WebSearchExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error=str(e),
+                duration_ms=(time.time() - start_time) * 1000,
             )
 
 
@@ -370,7 +510,9 @@ def register_builtin_tools(
 
     # Register web search if configured
     if tavily_tool and tavily_tool.is_configured:
-        register_tool(WEB_SEARCH_DEFINITION, WebSearchExecutor(tavily_tool))
+        web_exec = WebSearchExecutor(tavily_tool)
+        register_tool(WEB_SEARCH_DEFINITION, web_exec)
+        register_tool(WEB_SEARCH_ALIAS_DEFINITION, web_exec)
         logger.info("Registered web search tool")
     else:
         logger.warning("Tavily not configured, web search tool not registered")

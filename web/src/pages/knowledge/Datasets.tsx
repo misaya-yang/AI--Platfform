@@ -502,6 +502,95 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
   );
 }
 
+// 无匹配结果（搜索/筛选）状态
+function NoResultsState({
+  searchQuery,
+  typeFilter,
+  onResetFilters,
+  onCreateClick,
+}: {
+  searchQuery: string;
+  typeFilter: string;
+  onResetFilters: () => void;
+  onCreateClick: () => void;
+}) {
+  const { darkMode } = useAppStore();
+  const { t } = useTranslation();
+
+  const normalizedQuery = searchQuery.trim();
+  const showQuery = normalizedQuery.length > 0;
+  const desc = showQuery
+    ? t("knowledge.datasets.noResultsDescQuery", { query: normalizedQuery })
+    : t("knowledge.datasets.noResultsDesc");
+
+  const typeLabelKey = typeOptions.find((opt) => opt.value === typeFilter)?.labelKey;
+  const activeFilters = [
+    ...(showQuery ? [normalizedQuery] : []),
+    ...(typeFilter !== "all" ? [typeLabelKey ? t(typeLabelKey) : typeFilter] : []),
+  ];
+
+  return (
+    <div style={{ textAlign: "center", padding: "80px 24px" }}>
+      <div
+        style={{
+          width: 80,
+          height: 80,
+          margin: "0 auto 24px",
+          borderRadius: 12,
+          background: darkMode ? colors.neutral[700] : colors.neutral[100],
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <SearchOutlined style={{ fontSize: 32, color: colors.neutral[400] }} />
+      </div>
+
+      <Title level={4} style={{ marginBottom: 8 }}>
+        {t("knowledge.datasets.noResultsTitle")}
+      </Title>
+
+      <Paragraph
+        type="secondary"
+        style={{ maxWidth: 460, margin: "0 auto 16px" }}
+      >
+        {desc}
+      </Paragraph>
+
+      {activeFilters.length > 0 ? (
+        <Space size={8} style={{ marginBottom: 24, flexWrap: "wrap" }}>
+          {activeFilters.map((f, idx) => (
+            <Tag key={`${idx}-${f}`} style={{ borderRadius: 999 }}>
+              {f}
+            </Tag>
+          ))}
+        </Space>
+      ) : (
+        <div style={{ height: 24 }} />
+      )}
+
+      <Space size={12}>
+        <Button
+          type="primary"
+          size="large"
+          onClick={onResetFilters}
+          style={{ borderRadius: 6, height: 40, paddingInline: 20 }}
+        >
+          {t("knowledge.datasets.resetFilters")}
+        </Button>
+        <Button
+          size="large"
+          icon={<PlusOutlined />}
+          onClick={onCreateClick}
+          style={{ borderRadius: 6, height: 40, paddingInline: 20 }}
+        >
+          {t("knowledge.datasets.create")}
+        </Button>
+      </Space>
+    </div>
+  );
+}
+
 // 主页面组件
 export function KnowledgeDatasetsPage() {
   const nav = useNavigate();
@@ -712,8 +801,18 @@ export function KnowledgeDatasetsPage() {
             <Text type="secondary">{t("knowledge.datasets.loading")}</Text>
           </div>
         </div>
-      ) : filteredDatasets.length === 0 ? (
+      ) : datasets.length === 0 ? (
         <EmptyState onCreateClick={() => nav("/knowledge/create")} />
+      ) : filteredDatasets.length === 0 ? (
+        <NoResultsState
+          searchQuery={searchQuery}
+          typeFilter={typeFilter}
+          onResetFilters={() => {
+            setSearchQuery("");
+            setTypeFilter("all");
+          }}
+          onCreateClick={() => nav("/knowledge/create")}
+        />
       ) : (
         <Row gutter={[16, 16]}>
           {filteredDatasets.map((dataset, index) => (

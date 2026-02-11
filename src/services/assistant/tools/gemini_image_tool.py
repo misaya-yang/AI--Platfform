@@ -27,6 +27,9 @@ class GeminiImageResult:
     success: bool
     images: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    error_code: Optional[str] = None
+    blocked: bool = False
+    block_reason: Optional[str] = None
     duration_ms: float = 0
 
 
@@ -39,7 +42,8 @@ class GeminiImageGenerator:
     DEFAULT_MODEL = "gemini-2.5-flash-image"
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        # Prefer GEMINI_API_KEY, fallback to GOOGLE_API_KEY for backward compatibility.
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self._client: Optional[httpx.AsyncClient] = None
 
     @property
@@ -81,8 +85,10 @@ class GeminiImageGenerator:
             # Endpoint format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
             endpoint = f"{self.BASE_URL}/v1beta/models/{self.DEFAULT_MODEL}:generateContent"
 
-            # Request body for native image generation
-            # Based on official docs: https://ai.google.dev/gemini-api/docs/image-generation
+            # Request body for native image generation.
+            #
+            # Docs are inconsistent across SDKs/REST examples regarding modality casing.
+            # For robustness we request IMAGE-only output (no text) using the REST example casing.
             body = {
                 "contents": [
                     {
@@ -92,9 +98,13 @@ class GeminiImageGenerator:
                     }
                 ],
                 "generationConfig": {
-                    # IMAGE modality is required for image generation
-                    # TEXT can optionally be included if you want text explanations too
-                    "responseModalities": ["TEXT", "IMAGE"],
+                    # Force image output to avoid text-only responses.
+                    "responseModalities": ["Image"],
+                    # Request multiple candidates if supported by the model.
+                    "candidateCount": max(1, min(int(n or 1), 4)),
+                    "imageConfig": {
+                        "aspectRatio": aspect_ratio,
+                    },
                 },
             }
 
@@ -127,6 +137,21 @@ class GeminiImageGenerator:
 
             result = response.json()
 
+            # Safety blocking / prompt feedback
+            prompt_feedback = result.get("promptFeedback") or result.get("prompt_feedback") or {}
+            block_reason = prompt_feedback.get("blockReason") or prompt_feedback.get("block_reason")
+            if block_reason:
+                duration_ms = (time.time() - start_time) * 1000
+                logger.warning(f"Gemini image generation blocked: {block_reason}")
+                return GeminiImageResult(
+                    success=False,
+                    error="Image generation blocked by safety filters",
+                    error_code="GEMINI_IMAGE_BLOCKED",
+                    blocked=True,
+                    block_reason=str(block_reason),
+                    duration_ms=duration_ms,
+                )
+
             # Debug: Log response structure to diagnose issues
             logger.debug(f"Gemini response keys: {result.keys()}")
             if "candidates" in result:
@@ -158,6 +183,7 @@ class GeminiImageGenerator:
                 return GeminiImageResult(
                     success=False,
                     error="Model did not generate images. Try using a different provider.",
+                    error_code="GEMINI_NO_IMAGE",
                     duration_ms=duration_ms,
                 )
 
@@ -174,6 +200,7 @@ class GeminiImageGenerator:
             return GeminiImageResult(
                 success=False,
                 error=str(e),
+                error_code="GEMINI_IMAGE_ERROR",
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
@@ -188,10 +215,19 @@ class GeminiImageGenerator:
 
             for i, part in enumerate(parts):
                 # Check for inline image data
+                inline_data = None
                 if "inlineData" in part:
-                    inline_data = part["inlineData"]
-                    mime_type = inline_data.get("mimeType", "image/png")
-                    data = inline_data.get("data", "")
+                    inline_data = part.get("inlineData")
+                elif "inline_data" in part:
+                    inline_data = part.get("inline_data")
+
+                if inline_data:
+                    mime_type = (
+                        inline_data.get("mimeType")
+                        or inline_data.get("mime_type")
+                        or "image/png"
+                    )
+                    data = inline_data.get("data", "") or ""
 
                     if data:
                         # Calculate size from base64

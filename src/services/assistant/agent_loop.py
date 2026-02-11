@@ -237,6 +237,11 @@ class AgentLoopConfig:
 
     # RAG configuration (JIT Retrieval - optimized for TTFT and relevance)
     kb_dataset_ids: List[str] = field(default_factory=list)
+    # kb_mode: auto | tool | off
+    # - auto: encourage/require KB tool usage early for better grounding
+    # - tool: KB is available but model decides when to call
+    # - off: do not use KB
+    kb_mode: str = "auto"
     kb_top_k: int = 5  # Number of KB results to retrieve
     kb_min_relevance: float = 0.6  # Higher threshold for quality (was 0.5)
     kb_max_queries: int = 1  # Single query for speed (was 3)
@@ -248,6 +253,9 @@ class AgentLoopConfig:
     # True = Force web search for all questions
     # False = AI autonomously decides when web search is needed
     web_search_enabled: bool = False
+
+    # File attachments (uploaded file paths accessible via FileProcessor/FileStorage)
+    file_paths: List[str] = field(default_factory=list)
 
     # Execution limits
     max_tool_iterations: int = 10
@@ -299,8 +307,10 @@ class AgentLoopConfig:
             "enable_memory_loading": self.enable_memory_loading,
             "enable_react_loop": self.enable_react_loop,
             "kb_dataset_ids": self.kb_dataset_ids,
+            "kb_mode": self.kb_mode,
             "kb_top_k": self.kb_top_k,
             "streaming_first_mode": self.streaming_first_mode,
+            "file_paths": self.file_paths,
         }
 
 
@@ -397,6 +407,11 @@ class AgentLoop:
 
         # System prompt
         system_prompt: str = "",
+
+        # Optional persistence / artifact / file-processing dependencies
+        session_manager: Optional[Any] = None,
+        artifact_storage: Optional[Any] = None,
+        file_processor: Optional[Any] = None,
     ):
         """
         Initialize the AgentLoop.
@@ -430,6 +445,11 @@ class AgentLoop:
         self.metrics_collector = metrics_collector or get_rag_metrics_collector()
 
         self.system_prompt = system_prompt
+
+        # Optional integrations for Streaming-First parity with legacy AssistantService
+        self.session_manager = session_manager
+        self.artifact_storage = artifact_storage
+        self.file_processor = file_processor
 
     def _create_query_intent_analyzer(self) -> QueryIntentAnalyzer:
         """Create a QueryIntentAnalyzer instance with LLM support."""
@@ -516,6 +536,10 @@ class AgentLoop:
                     phase=AgentLoopPhase.MEMORY_LOADING,
                     event_type="run_started",
                     data={
+                        # AG-UI compatible fields
+                        "run_id": ctx.request_id,
+                        "thread_id": session_id,
+
                         "session_id": session_id,
                         "task_id": task_id,
                         "request_id": ctx.request_id,
@@ -534,13 +558,48 @@ class AgentLoop:
                         f"[STREAMING-FIRST] Starting immediate generation for "
                         f"session={session_id}, query='{message[:50]}...'"
                     )
+                    had_fatal_error = False
+                    fatal_error_message: Optional[str] = None
                     async for event in self._execute_streaming_first(
                         ctx=ctx,
                         user=user,
                         history=history,
                         task_ctx=task_ctx,
                     ):
+                        # If streaming-first hits an unexpected internal exception, it emits an "error" event.
+                        # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
+                        if event.event_type == "error" and not had_fatal_error:
+                            had_fatal_error = True
+                            if isinstance(event.data, dict):
+                                fatal_error_message = str(event.data.get("message") or event.data.get("error") or "")
+                            else:
+                                fatal_error_message = str(event.data)
                         yield event
+
+                    # Ensure lifecycle is complete: always end with run_finished or run_error.
+                    if had_fatal_error:
+                        yield AgentLoopEvent(
+                            phase=AgentLoopPhase.GENERATION_STORAGE,
+                            event_type=StreamEventType.RUN_ERROR.value,
+                            data={
+                                "run_id": ctx.request_id,
+                                "thread_id": session_id,
+                                "error": fatal_error_message or "AgentLoop streaming-first failed",
+                            },
+                        )
+                    else:
+                        yield AgentLoopEvent(
+                            phase=AgentLoopPhase.GENERATION_STORAGE,
+                            event_type=StreamEventType.RUN_FINISHED.value,
+                            data={
+                                "run_id": ctx.request_id,
+                                "thread_id": session_id,
+                                "metadata": {
+                                    "usage": ctx.usage or {},
+                                    "mode": "streaming_first",
+                                },
+                            },
+                        )
                     return  # Exit after streaming-first completes
 
                 # ============================================================
@@ -919,6 +978,7 @@ class AgentLoop:
         This achieves TTFT similar to Manus (~1-2s) vs legacy mode (~10s).
         """
         from .prompts.system_prompt_v2 import get_streaming_first_prompt
+        import json
 
         phase = AgentLoopPhase.GENERATION_STORAGE  # Use generation phase for streaming
         start_time = time.time()
@@ -938,59 +998,456 @@ class AgentLoop:
         try:
             t0 = time.time()
 
-            # Step 1: Build minimal context immediately (no pre-processing)
+            # Step 1: Minimal setup (no pre-processing), but still support:
+            # - Session persistence (history + artifacts restore)
+            # - Uploaded files visibility (vision + text-only fallbacks)
             messages: List[Dict[str, Any]] = []
+            contexts_for_persistence: List[Dict[str, Any]] = []
+            web_search_results_for_persistence: Optional[Dict[str, Any]] = None
+            created_artifact_ids: List[str] = []
 
-            # System prompt - use streaming-first optimized version
-            # Pass user preferences to prompt so AI can make intelligent decisions
-            system_prompt = ctx.config.system_prompt
-            if not system_prompt:
-                system_prompt = get_streaming_first_prompt(
-                    available_datasets=ctx.config.kb_dataset_ids,
-                    web_search_enabled=ctx.config.web_search_enabled,  # AI knows user preference
+            def _sanitize_output_files(files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                """Reduce payload for non-image files when we already have download_url/artifact_id."""
+                sanitized: List[Dict[str, Any]] = []
+                for f in files:
+                    mime = str(f.get("mime_type") or "")
+                    if f.get("artifact_id") and (not mime.startswith("image/")):
+                        sanitized.append({**f, "content_base64": ""})
+                    else:
+                        sanitized.append(f)
+                return sanitized
+
+            def _tool_step_info(name: str, args: Dict[str, Any]) -> Dict[str, str]:
+                """Minimal mapping for Manus-style task panel visualization."""
+                if name == "search_knowledge_base":
+                    q = str(args.get("query") or "")[:120]
+                    return {"title": "检索知识库", "description": q, "icon": "kb"}
+                if name in ("search_web", "web_search"):
+                    q = str(args.get("query") or "")[:120]
+                    return {"title": "网页搜索", "description": q, "icon": "web"}
+                if name == "execute_python_code":
+                    return {"title": "执行代码", "description": "Python", "icon": "code"}
+                if name == "generate_image":
+                    p = str(args.get("prompt") or "")[:120]
+                    return {"title": "生成图片", "description": p, "icon": "image"}
+                if name == "generate_document":
+                    t = str(args.get("title") or "Document")[:120]
+                    return {"title": "生成文档", "description": t, "icon": "doc"}
+                if name == "generate_pptx":
+                    t = str(args.get("title") or "Presentation")[:120]
+                    return {"title": "生成PPT", "description": t, "icon": "ppt"}
+                return {"title": f"执行工具: {name}", "description": "", "icon": "tool"}
+
+            def _truncate_text(value: str, max_len: int) -> str:
+                text = (value or "").replace("\r\n", "\n").strip()
+                if len(text) <= max_len:
+                    return text
+                return text[: max_len - 3].rstrip() + "..."
+
+            def _split_text_for_stream(text: str, max_chunk_chars: int = 120) -> List[str]:
+                """Split large provider chunks so frontend receives visible incremental updates."""
+                text = text or ""
+                if len(text) <= max_chunk_chars:
+                    return [text] if text else []
+
+                chunks: List[str] = []
+                delimiters = {"。", "！", "？", ".", "!", "?", "\n"}
+                start = 0
+                n = len(text)
+                while start < n:
+                    end = min(start + max_chunk_chars, n)
+                    if end < n:
+                        split_at = -1
+                        for i in range(end, start, -1):
+                            if text[i - 1] in delimiters:
+                                split_at = i
+                                break
+                        if split_at > start + max_chunk_chars // 3:
+                            end = split_at
+                    chunk = text[start:end]
+                    if chunk:
+                        chunks.append(chunk)
+                    start = end
+                return chunks
+
+            def _compact_context_payload(ctx_item: Dict[str, Any]) -> Dict[str, Any]:
+                """Trim large KB payloads for SSE/session metadata to reduce transfer latency."""
+                compact_chunks: List[Dict[str, Any]] = []
+                for chunk in (ctx_item.get("chunks") or [])[:3]:
+                    if not isinstance(chunk, dict):
+                        continue
+                    meta = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+                    compact_meta = {
+                        "source_document": meta.get("source_document"),
+                        "section_title": meta.get("section_title"),
+                        "page_number": meta.get("page_number"),
+                    }
+                    compact_meta = {k: v for k, v in compact_meta.items() if v is not None}
+                    compact_chunks.append(
+                        {
+                            "content": _truncate_text(str(chunk.get("content") or ""), 320),
+                            "score": chunk.get("score"),
+                            "dataset_id": chunk.get("dataset_id") or ctx_item.get("dataset_id"),
+                            "dataset_name": chunk.get("dataset_name") or ctx_item.get("dataset_name"),
+                            "segment_id": chunk.get("segment_id"),
+                            "document_id": chunk.get("document_id"),
+                            "source_url": chunk.get("source_url"),
+                            "image_url": chunk.get("image_url"),
+                            "citation_text": chunk.get("citation_text"),
+                            "metadata": compact_meta,
+                        }
+                    )
+
+                compact: Dict[str, Any] = {
+                    "dataset_id": ctx_item.get("dataset_id"),
+                    "dataset_name": ctx_item.get("dataset_name"),
+                    "query": ctx_item.get("query"),
+                    "took_ms": ctx_item.get("took_ms"),
+                    "chunks": compact_chunks,
+                }
+                if ctx_item.get("error"):
+                    compact["error"] = ctx_item.get("error")
+                return compact
+
+            def _compact_tool_result_for_model(
+                tool_name: str,
+                tool_result_text: Any,
+                tool_metadata: Dict[str, Any],
+            ) -> str:
+                """
+                Build a concise tool result payload for follow-up LLM calls.
+                This prevents huge prompt expansion (high input tokens + slow first token).
+                """
+                text_result = str(tool_result_text or "")
+                if tool_name == "search_knowledge_base":
+                    contexts = tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
+                    if isinstance(contexts, list):
+                        flat_chunks: List[Dict[str, Any]] = []
+                        for ctx_item in contexts:
+                            if not isinstance(ctx_item, dict):
+                                continue
+                            for c in (ctx_item.get("chunks") or []):
+                                if isinstance(c, dict):
+                                    flat_chunks.append(c)
+
+                        flat_chunks.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+                        selected = flat_chunks[:6]
+                        lines: List[str] = []
+                        q = tool_metadata.get("query")
+                        if q:
+                            lines.append(f"KB query: {q}")
+                        lines.append(f"KB results: {len(flat_chunks)} total, using top {len(selected)} snippets.")
+                        for idx, item in enumerate(selected, 1):
+                            ds = item.get("dataset_name") or item.get("dataset_id") or "dataset"
+                            score = float(item.get("score") or 0.0)
+                            cite = item.get("citation_text")
+                            lines.append(f"[{idx}] {ds} (score={score:.2f})")
+                            lines.append(_truncate_text(str(item.get("content") or ""), 260))
+                            if cite:
+                                lines.append(f"citation: {_truncate_text(str(cite), 120)}")
+                        if not selected and text_result:
+                            lines.append(_truncate_text(text_result, 1200))
+                        return "\n".join(lines)
+
+                if tool_name in ("search_web", "web_search"):
+                    display = tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
+                    if isinstance(display, dict) and isinstance(display.get("results"), list):
+                        lines = [f"Web results for: {display.get('query') or ''}".strip()]
+                        for idx, item in enumerate(display.get("results", [])[:6], 1):
+                            if not isinstance(item, dict):
+                                continue
+                            title = item.get("title") or "untitled"
+                            url = item.get("url") or ""
+                            content = _truncate_text(str(item.get("content") or ""), 220)
+                            lines.append(f"[{idx}] {title}")
+                            if url:
+                                lines.append(f"url: {url}")
+                            if content:
+                                lines.append(content)
+                        return "\n".join(lines)
+
+                return _truncate_text(text_result, 3000)
+
+            def _select_tools_for_request(
+                all_defs: List[Any],
+                user_message: str,
+            ) -> List[Any]:
+                """
+                Select a lean tool set for question-style turns to reduce prompt overhead.
+
+                Keep full toolset for creation/execution intents so Agent capabilities are preserved.
+                """
+                message_lower = (user_message or "").lower()
+                create_markers = (
+                    "generate", "create", "build", "draft", "write", "code", "python",
+                    "ppt", "slide", "document", "docx", "image", "poster",
+                    "生成", "创建", "制作", "写", "代码", "脚本", "图片", "海报", "文档", "报告", "ppt",
                 )
+                question_markers = (
+                    "?", "？", "what", "why", "when", "where", "who", "how",
+                    "什么", "为什么", "如何", "怎么", "是否", "能否", "请问", "介绍", "解释",
+                )
+                asks_to_create = any(token in message_lower for token in create_markers)
+                question_like = any(token in message_lower for token in question_markers)
 
-            messages.append({
-                "role": "system",
-                "content": system_prompt,
-            })
+                # For non-creation Q&A turns, keep only retrieval + memory tools.
+                if question_like and not asks_to_create:
+                    keep_names = {"search_knowledge_base", "search_web", "web_search", "update_user_memory"}
+                    selected = [d for d in all_defs if getattr(d, "name", "") in keep_names]
+                    if selected:
+                        return selected
 
-            # Add conversation history (already trimmed if needed)
-            for msg in history:
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", ""),
-                })
+                return all_defs
 
-            # Add current user message
-            messages.append({
-                "role": "user",
-                "content": ctx.message,
-            })
+            def _trim_history_for_streaming(
+                messages_history: List[Dict[str, Any]],
+                max_messages: int = 12,
+                max_chars: int = 7000,
+            ) -> List[Dict[str, Any]]:
+                """
+                Keep recent turns only for streaming-first calls.
 
-            t1 = time.time()
-            logger.info(f"[STREAMING-FIRST] Context build: {(t1-t0)*1000:.0f}ms, {len(messages)} messages, prompt={len(system_prompt)} chars")
+                This avoids carrying very long sessions into each model/tool round,
+                which inflates prompt tokens and delays first visible text.
+                """
+                if not messages_history:
+                    return []
+
+                selected: List[Dict[str, Any]] = []
+                running_chars = 0
+                for item in reversed(messages_history):
+                    if len(selected) >= max_messages:
+                        break
+                    role = str(item.get("role") or "user")
+                    if role not in {"user", "assistant", "tool"}:
+                        continue
+                    content = item.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            str(part.get("text") or "")
+                            for part in content
+                            if isinstance(part, dict) and part.get("type") == "text"
+                        )
+                    content_text = str(content or "")
+                    projected = running_chars + len(content_text)
+                    # Always keep at least the latest turn, then enforce the budget.
+                    if selected and projected > max_chars:
+                        break
+                    selected.append(
+                        {
+                            "role": role,
+                            "content": _truncate_text(content_text, 1600),
+                        }
+                    )
+                    running_chars = projected
+
+                selected.reverse()
+                return selected
+
+            # Determine whether the selected model supports vision.
+            model_info = self.model_registry.get_model(ctx.config.model_id) if self.model_registry else None
+            model_supports_vision = bool(getattr(model_info, "supports_vision", False))
+
+            # Fire-and-forget persist user message for session restoration.
+            if self.session_manager:
+                try:
+                    from datetime import datetime
+
+                    user_msg_metadata: Dict[str, Any] = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                    if ctx.config.file_paths:
+                        image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+                        user_msg_metadata["attachments"] = [
+                            {
+                                "type": "image" if str(fp).lower().endswith(image_exts) else "file",
+                                "url": fp,
+                                "filename": str(fp).split("/")[-1] if "/" in str(fp) else str(fp),
+                            }
+                            for fp in (ctx.config.file_paths or [])
+                        ]
+
+                    async def _persist_user_message() -> None:
+                        try:
+                            await self.session_manager.add_message(
+                                session_id=ctx.session_id,
+                                role="user",
+                                content=ctx.message,
+                                metadata=user_msg_metadata,
+                            )
+                        except Exception as persist_err:
+                            logger.error(
+                                "[CRITICAL] User message persistence failed for session %s: %s",
+                                ctx.session_id,
+                                persist_err,
+                            )
+
+                    asyncio.create_task(_persist_user_message())
+                except Exception as e:
+                    logger.warning("Failed to schedule user message persistence: %s", e)
+
+            # Process uploaded files (if any) so the model can see them.
+            processed_files = None
+            if ctx.config.file_paths and self.file_processor:
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.STATUS.value,
+                    data={"status": "processing_files", "message": "Analyzing uploaded files..."},
+                )
+                try:
+                    processed_files = await self.file_processor.process_files(
+                        file_paths=ctx.config.file_paths,
+                        session_id=ctx.session_id,
+                        user=user,
+                        model_supports_vision=model_supports_vision,
+                    )
+
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        # NOTE: This event is consumed by the Assistant UI (web) to show file processing status.
+                        # It's not currently part of src.models.enums.StreamEventType.
+                        event_type="file_processed",
+                        data={
+                            "image_count": len(getattr(processed_files, "images", []) or []),
+                            "text_length": len(getattr(processed_files, "text_content", "") or ""),
+                            "description_count": len(getattr(processed_files, "image_descriptions", []) or []),
+                            "requires_rag": bool(getattr(processed_files, "requires_rag", False)),
+                            "file_metadata": getattr(processed_files, "file_metadata", []) or [],
+                        },
+                    )
+                except Exception as e:
+                    logger.error("File processing failed (streaming-first): %s", e, exc_info=True)
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.STATUS.value,
+                        data={
+                            "status": "file_processing_failed",
+                            "message": "File processing failed; continuing without file context.",
+                        },
+                    )
+                    processed_files = None
 
             # Step 2: Get tool definitions (ALL tools available - AI decides when to use)
-            # Design philosophy (matching GPT/Manus):
-            # - Tools are AI capabilities, not on/off switches
-            # - User settings are preferences conveyed via System Prompt
-            # - AI autonomously decides when to use tools based on context
             tools = []
+            available_tool_names: List[str] = []
             invocation_context = ToolInvocationContext(
                 session_id=ctx.session_id,
                 user_id=ctx.user_id,
                 tenant_id=ctx.tenant_id,
                 request_id=ctx.request_id,
+                run_id=ctx.request_id,  # Use request_id as run_id for traceability
                 kb_dataset_ids=ctx.config.kb_dataset_ids or [],  # Pass KB config for auto-injection
                 user=user,  # Pass UserContext for tools that need permissions (e.g., KB search)
             )
             if self.tool_invoker:
                 tool_defs = self.tool_invoker.get_tool_definitions(context=invocation_context)
-                # All tools are always available - AI makes intelligent decisions
-                # based on user preferences communicated via System Prompt
-                tools = [t.to_openai_schema() for t in tool_defs]
-                logger.info(f"[STREAMING-FIRST] All tools available: {[t.name for t in tool_defs]} (web_search_preference={ctx.config.web_search_enabled}, kb_ids={ctx.config.kb_dataset_ids})")
+                tool_defs = _select_tools_for_request(tool_defs, ctx.message)
+                tools = []
+                for t in tool_defs:
+                    try:
+                        tools.append(t.to_openai_schema(compact=True))
+                    except TypeError:
+                        # Backward compatibility for tests/mocks/custom tool defs
+                        # that haven't adopted the optional compact parameter.
+                        tools.append(t.to_openai_schema())
+                available_tool_names = [t.name for t in tool_defs]
+                logger.info(
+                    f"[STREAMING-FIRST] All tools available: {available_tool_names} "
+                    f"(web_search_preference={ctx.config.web_search_enabled}, kb_ids={ctx.config.kb_dataset_ids})"
+                )
+
+            # Best-effort dataset_id -> dataset_name mapping for prompt clarity (low latency budget).
+            dataset_name_map: Optional[Dict[str, str]] = None
+            if self.kb_service and ctx.config.kb_dataset_ids:
+                try:
+                    ds_rows = await asyncio.wait_for(
+                        self.kb_service.list_datasets(user),
+                        timeout=0.3,
+                    )
+                    if isinstance(ds_rows, list):
+                        ds_map = {}
+                        for row in ds_rows:
+                            ds_id = (row or {}).get("dataset_id")
+                            name = (row or {}).get("name")
+                            if ds_id and name:
+                                ds_map[str(ds_id)] = str(name)
+                        if ds_map:
+                            dataset_name_map = ds_map
+                except Exception:
+                    dataset_name_map = None
+
+            # System prompt - ALWAYS include the streaming-first base prompt so the model
+            # receives consistent tool/RAG instructions even when the frontend provides a
+            # style-only system prompt (common in the assistant UI).
+            base_prompt = get_streaming_first_prompt(
+                available_datasets=ctx.config.kb_dataset_ids,
+                kb_mode=ctx.config.kb_mode,
+                web_search_enabled=ctx.config.web_search_enabled,  # Preference hint for AI
+                available_tools=available_tool_names or None,
+                dataset_name_map=dataset_name_map,
+            )
+            extra_prompt = (ctx.config.system_prompt or "").strip()
+            if extra_prompt:
+                system_prompt = (
+                    f"{base_prompt}\n\n"
+                    "## Additional System Instructions\n"
+                    f"{extra_prompt}"
+                )
+            else:
+                system_prompt = base_prompt
+
+            messages.append({"role": "system", "content": system_prompt})
+
+            # Add conversation history (already trimmed if needed)
+            trimmed_history = _trim_history_for_streaming(history or [])
+            for msg in trimmed_history:
+                messages.append(
+                    {
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", ""),
+                    }
+                )
+
+            # Build the current user message with potential file content
+            final_message = ctx.message
+            user_images: Optional[List[str]] = None
+            if processed_files:
+                try:
+                    # Vision model: attach images as data URLs.
+                    if model_supports_vision and getattr(processed_files, "has_images", False):
+                        user_images = []
+                        for img in getattr(processed_files, "images", []) or []:
+                            user_images.append(f"data:{img.media_type};base64,{img.base64_data}")
+                        for pdf_page in getattr(processed_files, "pdf_pages", []) or []:
+                            user_images.append(f"data:{pdf_page.media_type};base64,{pdf_page.base64_data}")
+
+                    # Always inject extracted text (when present).
+                    text_content = getattr(processed_files, "text_content", "") or ""
+                    if text_content:
+                        final_message += f"\n\n---\n[上传文件内容]\n{text_content}"
+
+                    # For text-only models, inject image descriptions.
+                    if (not model_supports_vision) and (getattr(processed_files, "image_descriptions", None) or []):
+                        descriptions = "\n".join(
+                            f"- 图像 {i+1}: {desc}"
+                            for i, desc in enumerate(getattr(processed_files, "image_descriptions", []) or [])
+                        )
+                        if descriptions:
+                            final_message += f"\n\n---\n[图像描述]\n{descriptions}"
+                except Exception as e:
+                    logger.warning("Failed to inject processed files into prompt: %s", e)
+
+            # Add current user message
+            user_msg: Dict[str, Any] = {"role": "user", "content": final_message}
+            if user_images:
+                user_msg["images"] = user_images
+            messages.append(user_msg)
+
+            t1 = time.time()
+            logger.info(
+                f"[STREAMING-FIRST] Context build: {(t1-t0)*1000:.0f}ms, "
+                f"{len(messages)} messages, prompt={len(system_prompt)} chars"
+            )
 
             t2 = time.time()
             logger.info(f"[STREAMING-FIRST] Tool defs: {(t2-t1)*1000:.0f}ms, {len(tools)} tools")
@@ -999,6 +1456,9 @@ class AgentLoop:
             max_iterations = ctx.config.max_tool_iterations
             iteration = 0
             accumulated_content = ""
+            kb_call_count = 0
+            kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
+            force_answer_without_tools = False
 
             while iteration < max_iterations:
                 iteration += 1
@@ -1015,36 +1475,43 @@ class AgentLoop:
                 # Stream from model with tools
                 t_llm_start = time.time()
                 logger.info(f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start-t0)*1000:.0f}ms")
+                tools_for_call = (tools if tools else None)
+                if force_answer_without_tools:
+                    tools_for_call = None
+                    force_answer_without_tools = False
+                    logger.info("[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once).")
 
                 tool_calls_batch = []
+                call_usage: Dict[str, int] = {}
                 async for delta in self.model_registry.chat_stream(
                     model_id=ctx.config.model_id,
                     messages=messages,
                     temperature=ctx.config.temperature,
                     max_tokens=ctx.config.max_tokens,
-                    tools=tools if tools else None,
+                    tools=tools_for_call,
                 ):
                     # Emit text content immediately (streaming-first!)
                     if delta.content:
-                        accumulated_content += delta.content
-                        ctx.generated_content += delta.content
+                        for text_chunk in _split_text_for_stream(delta.content):
+                            accumulated_content += text_chunk
+                            ctx.generated_content += text_chunk
 
-                        # Track TTFT
-                        if not first_token_emitted:
-                            ttft_ms = (time.time() - ttft_start) * 1000
-                            first_token_emitted = True
-                            logger.info(f"[STREAMING-FIRST] TTFT: {ttft_ms:.0f}ms")
+                            # Track TTFT on first visible content chunk.
+                            if not first_token_emitted:
+                                ttft_ms = (time.time() - ttft_start) * 1000
+                                first_token_emitted = True
+                                logger.info(f"[STREAMING-FIRST] TTFT: {ttft_ms:.0f}ms")
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="ttft",
+                                    data={"ttft_ms": round(ttft_ms, 2)},
+                                )
+
                             yield AgentLoopEvent(
                                 phase=phase,
-                                event_type="ttft",
-                                data={"ttft_ms": round(ttft_ms, 2)},
+                                event_type="text_delta",
+                                data=text_chunk,
                             )
-
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type="text_delta",
-                            data=delta.content,
-                        )
 
                     # Collect tool calls
                     if delta.tool_calls:
@@ -1052,7 +1519,22 @@ class AgentLoop:
 
                     # Track usage
                     if delta.usage:
-                        ctx.usage.update(delta.usage)
+                        for key, value in delta.usage.items():
+                            if isinstance(value, (int, float)):
+                                ivalue = int(value)
+                                call_usage[key] = max(call_usage.get(key, 0), ivalue)
+                            elif value is not None:
+                                # Keep latest non-numeric field if providers add any extra metadata.
+                                # Numeric tokens are accumulated separately after each model call.
+                                try:
+                                    call_usage[key] = int(value)
+                                except Exception:
+                                    pass
+
+                # Aggregate usage per model call (sum across iterations, max within each call).
+                for key, value in call_usage.items():
+                    # Keep latest model-call usage for UI consistency (legacy behavior).
+                    ctx.usage[key] = int(value)
 
                 # If no tool calls, we're done
                 if not tool_calls_batch:
@@ -1077,7 +1559,40 @@ class AgentLoop:
                     tool_name = func_info.get("name", "unknown")
                     tool_args_str = func_info.get("arguments", "{}")
 
-                    # Emit tool_call_started event
+                    # Parse tool args up-front so we can create a human-friendly step card
+                    # and pass structured args into tool execution.
+                    try:
+                        parsed_args = json.loads(tool_args_str) if tool_args_str else {}
+                    except Exception:
+                        parsed_args = {}
+                    tool_args = parsed_args if isinstance(parsed_args, dict) else {}
+
+                    # Manus-style step card (parent) for this tool call
+                    step_id = f"step_{tool_id}"
+                    step_started_at = time.time()
+                    step_status_override: Optional[str] = None
+                    step_success: Optional[bool] = None
+                    step_error: Optional[str] = None
+                    step_result_preview: Optional[str] = None
+                    step_info = _tool_step_info(tool_name, tool_args)
+                    step_started_payload: Dict[str, Any] = {
+                        "step_id": step_id,
+                        "title": step_info.get("title") or f"执行工具: {tool_name}",
+                        "timestamp": step_started_at,
+                    }
+                    if step_info.get("description"):
+                        step_started_payload["description"] = step_info["description"]
+                    if step_info.get("icon"):
+                        step_started_payload["icon"] = step_info["icon"]
+
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.STEP_STARTED.value,
+                        data=step_started_payload,
+                        timestamp=step_started_at,
+                    )
+
+                    # Emit tool_call_started event (child) and associate it with the parent step_id.
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="tool_call_started",
@@ -1085,55 +1600,334 @@ class AgentLoop:
                             "tool_id": tool_id,
                             "tool_name": tool_name,
                             "arguments": tool_args_str,
+                            "step_id": step_id,
                         },
                     )
 
-                    # Execute the tool
+                    # Execute the tool (with artifact persistence + semantic events)
                     try:
-                        import json
-                        tool_args = json.loads(tool_args_str) if tool_args_str else {}
+                        # Semantic START events (frontend uses these for the Artifacts panel)
+                        if tool_name == "execute_python_code":
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.CODE_EXECUTION_START.value,
+                                data={
+                                    "execution_id": tool_id,
+                                    "language": "python",
+                                    "code": tool_args.get("code", ""),
+                                },
+                            )
+                        elif tool_name == "generate_image":
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.IMAGE_GENERATION_START.value,
+                                data={"execution_id": tool_id, "prompt": tool_args.get("prompt", "")},
+                            )
+                        elif tool_name == "generate_document":
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.DOCUMENT_GENERATION_START.value,
+                                data={
+                                    "execution_id": tool_id,
+                                    "title": tool_args.get("title", "Document"),
+                                    "format": tool_args.get("format", "docx"),
+                                },
+                            )
+                        elif tool_name == "generate_pptx":
+                            # Emit OUTLINE_READY so the UI can preview slides (Manus-style).
+                            title = tool_args.get("title", "Presentation")
+                            slides = tool_args.get("slides", []) or []
+                            theme = tool_args.get("theme", "professional")
 
-                        if self.tool_invoker:
+                            outline_slides = []
+                            for i, slide in enumerate(slides, start=1):
+                                slide_type = slide.get("layout", "content")
+                                type_map = {
+                                    "title_slide": "title",
+                                    "title": "title",
+                                    "content": "content",
+                                    "two_column": "two_column",
+                                    "section_header": "section",
+                                    "section": "section",
+                                    "blank": "blank",
+                                }
+                                outline_slides.append(
+                                    {
+                                        "number": i,
+                                        "title": slide.get("title", f"Slide {i}"),
+                                        "subtitle": slide.get("subtitle"),
+                                        "type": type_map.get(slide_type, "content"),
+                                        "bulletCount": len(slide.get("bullets", []) or []),
+                                    }
+                                )
+
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.OUTLINE_READY.value,
+                                data={
+                                    "outline": {
+                                        "title": title,
+                                        "slides": outline_slides,
+                                        "theme": theme,
+                                        "totalSlides": len(slides),
+                                    },
+                                    "format": "pptx",
+                                },
+                            )
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.DOCUMENT_GENERATION_START.value,
+                                data={"execution_id": tool_id, "title": title, "format": "pptx"},
+                            )
+
+                        # Invoke tool
+                        result = None
+                        tool_metadata: Dict[str, Any] = {}
+                        tool_duration_ms: Optional[float] = None
+                        tool_error: Optional[str] = None
+                        tool_success = False
+                        tool_output_files: List[Dict[str, Any]] = []
+                        tool_result_for_model = ""
+
+                        # Guardrail: avoid repeated KB searches before producing any answer text.
+                        # Keep at most `kb_max_queries` KB calls in a turn to avoid latency loops.
+                        short_circuit_kb = (
+                            tool_name == "search_knowledge_base"
+                            and kb_call_count >= kb_call_limit
+                            and bool(contexts_for_persistence)
+                        )
+
+                        if short_circuit_kb:
+                            total_cached = sum(
+                                len((c.get("chunks") or []))
+                                for c in contexts_for_persistence
+                                if isinstance(c, dict)
+                            )
+                            tool_success = True
+                            tool_error = None
+                            tool_duration_ms = 0.0
+                            tool_metadata = {
+                                "total_results": total_cached,
+                                "short_circuit": True,
+                                "message": "KB already searched in this turn; reuse prior evidence.",
+                            }
+                            tool_result_text = (
+                                "Knowledge base has already been searched in this turn. "
+                                "Use the previously retrieved evidence to answer now; "
+                                "only call KB again if the user asks about a different topic."
+                            )
+                            tool_result = tool_result_text
+                            tool_result_for_model = tool_result_text
+                        elif self.tool_invoker:
+                            if tool_name == "search_knowledge_base":
+                                kb_call_count += 1
                             result = await self.tool_invoker.invoke(
                                 tool_name=tool_name,
                                 arguments=tool_args,
                                 context=invocation_context,
                                 cancel_event=task_ctx.cancel_event if task_ctx else None,
                             )
+                            tool_success = bool(result.success)
+                            tool_error = result.error
+                            tool_metadata = result.metadata or {}
+                            tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
+                            tool_output_files = result.output_files or []
+
                             # Check if cancelled (via metadata or error message)
                             is_cancelled = (
-                                result.metadata.get("cancelled", False) or
-                                (result.error and "cancelled" in result.error.lower())
+                                (tool_metadata.get("cancelled", False) if isinstance(tool_metadata, dict) else False)
+                                or (tool_error and "cancelled" in tool_error.lower())
                             )
                             if is_cancelled:
+                                step_status_override = "skipped"
+                                step_success = False
+                                step_error = tool_error or "cancelled"
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="tool_call_cancelled",
                                     data={"tool_id": tool_id, "tool_name": tool_name},
                                 )
                                 return  # Exit streaming-first mode on cancellation
-                            tool_result = result.result if result.success else f"Error: {result.error}"
                         else:
-                            tool_result = f"Tool '{tool_name}' not available"
+                            tool_success = False
+                            tool_error = f"Tool '{tool_name}' not available"
 
-                        # Emit tool_call_completed event
-                        # Include metadata for frontend display (e.g., total_results for KB search)
-                        tool_metadata = result.metadata if self.tool_invoker and hasattr(result, 'metadata') else {}
+                        # Prefer passing through any structured/verbose tool result even on failures.
+                        # Some tools return a helpful `result` alongside a machine-readable `error` code.
+                        if short_circuit_kb:
+                            # Keep the synthetic short-circuit result produced above.
+                            pass
+                        elif result and (tool_success or result.result is not None):
+                            tool_result_text = result.result
+                        else:
+                            tool_result_text = f"Error: {tool_error}"
+                        tool_result = tool_result_text
+                        tool_result_for_model = _compact_tool_result_for_model(
+                            tool_name=tool_name,
+                            tool_result_text=tool_result_text,
+                            tool_metadata=tool_metadata,
+                        )
+                        tool_result_preview = str(tool_result_text)[:500]
+
+                        # Emit KB/Web UI panel events from tool metadata
+                        if tool_name == "search_knowledge_base":
+                            contexts = tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
+                            if isinstance(contexts, list):
+                                for ctx_item in contexts:
+                                    if isinstance(ctx_item, dict):
+                                        compact_ctx = _compact_context_payload(ctx_item)
+                                        contexts_for_persistence.append(compact_ctx)
+                                        yield AgentLoopEvent(
+                                            phase=phase,
+                                            event_type=StreamEventType.CONTEXT_RETRIEVED.value,
+                                            data=compact_ctx,
+                                        )
+                        elif tool_name in ("search_web", "web_search"):
+                            display = tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
+                            if isinstance(display, dict):
+                                web_search_results_for_persistence = display
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type=StreamEventType.WEB_SEARCH_RESULTS.value,
+                                    data=display,
+                                )
+
+                        # After successful retrieval (KB/Web) and before any answer text,
+                        # force exactly one follow-up model turn without tools.
+                        # This prevents retrieval loops that massively increase TTFT/tokens.
+                        if (
+                            not first_token_emitted
+                            and tool_success
+                            and tool_name in ("search_knowledge_base", "search_web", "web_search")
+                        ):
+                            results_count = None
+                            if isinstance(tool_metadata, dict):
+                                results_count = tool_metadata.get("total_results")
+                                if results_count is None and isinstance(tool_metadata.get("display"), dict):
+                                    results_count = len(tool_metadata.get("display", {}).get("results", []) or [])
+                            if int(results_count or 0) > 0:
+                                force_answer_without_tools = True
+
+                        # Persist output files into ArtifactStorage (if available)
+                        persisted_output_files: List[Dict[str, Any]] = tool_output_files
+                        if tool_output_files and self.artifact_storage:
+                            from .artifacts import persist_output_files
+
+                            source_map = {
+                                "execute_python_code": "code_execution",
+                                "generate_image": "image_generation",
+                                "generate_document": "document_generation",
+                                "generate_pptx": "pptx_generation",
+                            }
+                            source = source_map.get(tool_name, "tool_output")
+
+                            persisted_output_files = await persist_output_files(
+                                artifact_storage=self.artifact_storage,
+                                user=user,
+                                session_id=ctx.session_id,
+                                output_files=tool_output_files,
+                                source=source,
+                            )
+
+                            # Emit ARTIFACT_CREATED for UI panel (use presigned download_url)
+                            for file_info in persisted_output_files:
+                                artifact_id = file_info.get("artifact_id")
+                                if artifact_id:
+                                    created_artifact_ids.append(str(artifact_id))
+                                    yield AgentLoopEvent(
+                                        phase=phase,
+                                        event_type=StreamEventType.ARTIFACT_CREATED.value,
+                                        data={
+                                            "artifact_id": artifact_id,
+                                            "type": file_info.get("type") or (
+                                                "image" if str(file_info.get("mime_type", "")).startswith("image/") else "file"
+                                            ),
+                                            "format": file_info.get("format") or (
+                                                str(file_info.get("mime_type", "")).split("/")[-1] if file_info.get("mime_type") else "bin"
+                                            ),
+                                            "title": file_info.get("filename", "output"),
+                                            "filename": file_info.get("filename"),
+                                            "mime_type": file_info.get("mime_type"),
+                                            "size_bytes": file_info.get("size_bytes"),
+                                            "source": source,
+                                            "download_url": file_info.get("download_url"),
+                                        },
+                                    )
+
+                        # Reduce payload for non-image files when we already have download_url
+                        output_files_for_events = _sanitize_output_files(persisted_output_files or [])
+
+                        # Semantic RESULT events (frontend expects these)
+                        if tool_name == "execute_python_code":
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.CODE_EXECUTION_RESULT.value,
+                                data={
+                                    "execution_id": tool_id,
+                                    "success": tool_success,
+                                    "result": tool_result_text,
+                                    "error": tool_error,
+                                    "duration_ms": tool_duration_ms,
+                                    "output_files": output_files_for_events,
+                                },
+                            )
+                        elif tool_name == "generate_image":
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.IMAGE_GENERATION_RESULT.value,
+                                data={
+                                    "execution_id": tool_id,
+                                    "success": tool_success,
+                                    "result": tool_result_text,
+                                    "error": tool_error,
+                                    "duration_ms": tool_duration_ms,
+                                    "output_files": output_files_for_events,
+                                },
+                            )
+                        elif tool_name in ("generate_document", "generate_pptx"):
+                            title = tool_args.get("title", "Document")
+                            fmt = "pptx" if tool_name == "generate_pptx" else tool_args.get("format", "docx")
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.DOCUMENT_GENERATION_RESULT.value,
+                                data={
+                                    "execution_id": tool_id,
+                                    "success": tool_success,
+                                    "result": tool_result_text,
+                                    "error": tool_error,
+                                    "duration_ms": tool_duration_ms,
+                                    "title": title,
+                                    "format": fmt,
+                                    "output_files": output_files_for_events,
+                                },
+                            )
+
+                        # Emit tool_call_completed event (frontend tool cards + search status)
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="tool_call_completed",
                             data={
                                 "tool_id": tool_id,
                                 "tool_name": tool_name,
-                                "success": True,
-                                "result_preview": str(tool_result)[:500],
-                                "metadata": tool_metadata,
+                                "success": tool_success,
+                                "result_preview": tool_result_preview,
+                                "metadata": tool_metadata or {},
+                                "duration_ms": tool_duration_ms,
+                                "error": tool_error,
                             },
                         )
+                        step_success = tool_success
+                        step_error = tool_error
+                        step_result_preview = tool_result_preview or None
 
                     except Exception as e:
                         logger.error(f"[STREAMING-FIRST] Tool {tool_name} failed: {e}")
                         tool_result = f"Error executing {tool_name}: {str(e)}"
+                        tool_result_for_model = _compact_tool_result_for_model(
+                            tool_name=tool_name,
+                            tool_result_text=tool_result,
+                            tool_metadata={},
+                        )
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="tool_call_completed",
@@ -1144,19 +1938,85 @@ class AgentLoop:
                                 "error": str(e),
                             },
                         )
+                        step_success = False
+                        step_error = str(e)
+                        step_result_preview = str(tool_result)[:500] if tool_result else None
+
+                    finally:
+                        step_finished_at = time.time()
+                        if step_status_override:
+                            step_status = step_status_override
+                        elif step_success is True:
+                            step_status = "completed"
+                        elif step_success is False:
+                            step_status = "failed"
+                        else:
+                            # Defensive fallback: determine status from presence of error
+                            step_status = "failed" if step_error else "completed"
+                        step_finished_payload: Dict[str, Any] = {
+                            "step_id": step_id,
+                            "status": step_status,
+                            "duration_ms": round((step_finished_at - step_started_at) * 1000, 2),
+                            "timestamp": step_finished_at,
+                        }
+                        if step_result_preview:
+                            step_finished_payload["result"] = step_result_preview
+                        if step_error:
+                            step_finished_payload["error"] = step_error
+
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.STEP_FINISHED.value,
+                            data=step_finished_payload,
+                            timestamp=step_finished_at,
+                        )
 
                     # Add tool result to messages
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
                         "name": tool_name,
-                        "content": str(tool_result) if not isinstance(tool_result, str) else tool_result,
+                        "content": tool_result_for_model
+                        or (str(tool_result) if not isinstance(tool_result, str) else tool_result),
                     })
 
                 # Continue loop to get LLM's response to tool results
 
             # Emit completion event
             total_time_ms = (time.time() - start_time) * 1000
+
+            # Persist assistant message with metadata for session restoration (history + contexts + artifacts)
+            if self.session_manager and ctx.generated_content:
+                try:
+                    from datetime import datetime
+
+                    usage_in = int((ctx.usage or {}).get("input_tokens", 0) or 0)
+                    usage_out = int((ctx.usage or {}).get("output_tokens", 0) or 0)
+                    # Store both normalized keys and OpenAI-style keys for frontend compatibility.
+                    usage_payload = {
+                        **(ctx.usage or {}),
+                        "prompt_tokens": usage_in,
+                        "completion_tokens": usage_out,
+                    }
+
+                    await self.session_manager.add_message(
+                        session_id=ctx.session_id,
+                        role="assistant",
+                        content=ctx.generated_content,
+                        metadata={
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "model_id": ctx.config.model_id,
+                            "usage": usage_payload,
+                            "contexts": contexts_for_persistence or None,
+                            "web_search_results": web_search_results_for_persistence,
+                            "artifact_ids": created_artifact_ids or None,
+                            "engine": "agent_loop",
+                            "mode": "streaming_first",
+                        },
+                    )
+                except Exception as e:
+                    logger.warning("Failed to persist assistant message (streaming-first): %s", e)
+
             yield AgentLoopEvent(
                 phase=phase,
                 event_type="streaming_first_completed",

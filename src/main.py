@@ -845,7 +845,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             "display_name": "Google Gemini",
             "api_type": "google",
             "base_url": "https://generativelanguage.googleapis.com",
-            "env_key": "GOOGLE_API_KEY",
+            # Prefer GEMINI_API_KEY, fallback to GOOGLE_API_KEY for backward compatibility.
+            "env_key": "GEMINI_API_KEY",
             "env_base_url": None,
         },
     }
@@ -864,6 +865,10 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
             if knowledge_dashscope:
                 api_key = getattr(knowledge_dashscope, "api_key", "")
+
+        # Google Gemini: backward-compatible fallback to GOOGLE_API_KEY
+        if provider_id == "google" and not api_key:
+            api_key = os.environ.get("GOOGLE_API_KEY", "")
 
         # 获取自定义 base_url
         base_url = None
@@ -1011,7 +1016,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     if code_executor:
         register_code_executor_tool(code_executor=code_executor)
 
-    # Register image generation tool if DashScope is configured
+    # Register image generation tool if at least one provider is configured (Gemini preferred, DashScope fallback)
     image_gen_registered = register_image_generation_tool()
 
     # Register document generation tool (always available)
@@ -1056,6 +1061,28 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         logger.info(f"Assistant Service 已初始化 ({', '.join(features)})")
     else:
         logger.warning("Assistant Service 已初始化，但没有配置任何 LLM 提供商 API Key")
+
+    # One-time startup diagnostics for Assistant (engine/tools/keys) to aid debugging.
+    try:
+        tool_names = [t.name for t in tool_registry.list_tools()]
+    except Exception:
+        tool_names = []
+
+    dashscope_key_present = bool(os.environ.get("DASHSCOPE_API_KEY"))
+    if not dashscope_key_present:
+        knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
+        dashscope_key_present = bool(getattr(knowledge_dashscope, "api_key", "")) if knowledge_dashscope else False
+
+    google_key_present = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+
+    logger.info(
+        "[Assistant Startup] default_engine=agent_loop streaming_first_mode=%s tools=%s keys={google:%s,dashscope:%s,tavily:%s}",
+        True,
+        tool_names,
+        google_key_present,
+        dashscope_key_present,
+        bool(tavily_api_key),
+    )
 
 
 def _print_startup_info(settings: Settings) -> None:

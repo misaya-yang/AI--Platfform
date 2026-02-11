@@ -3486,6 +3486,7 @@ class KnowledgeService:
 
         # Precompute query vectors for dense queries (BM25 runs in parallel)
         query_vectors: Dict[str, List[float]] = {}
+        dense_disabled_reason: Optional[str] = None
 
         async def _dense_search(query_text: str) -> tuple[list, int]:
             """Dense (vector) retrieval task for a single query."""
@@ -3661,36 +3662,70 @@ class KnowledgeService:
         qvec: Optional[List[float]] = None
         embedder: Optional[BaseEmbedding] = None
         if need_query_vector and dense_queries:
-            # Use cached embedder to reduce first-call latency (connection reuse)
-            if is_multimodal:
-                # Use UnifiedMultimodalEmbedding for cross-modal retrieval
-                logger.debug(
-                    f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
+            # Fail-fast health check to avoid long retries when Qdrant is down.
+            # In hybrid mode we can degrade to BM25-only; in dense mode we return an explicit error.
+            try:
+                vector_store_ok = await self.vector_store.ping(timeout_seconds=1.0)
+            except Exception:
+                vector_store_ok = False
+            if not vector_store_ok:
+                dense_disabled_reason = f"Vector store unavailable (url={getattr(self.vector_store, 'url', '')})"
+                logger.warning(dense_disabled_reason)
+                if effective_mode == "dense":
+                    raise ValidationFailedError(dense_disabled_reason)
+                dense_queries = []
+                query_vectors.clear()
+                qvec = None
+                embedder = None
+                collection = ""
+
+        if need_query_vector and dense_queries:
+            try:
+                # Use cached embedder to reduce first-call latency (connection reuse)
+                if is_multimodal:
+                    # Use UnifiedMultimodalEmbedding for cross-modal retrieval
+                    logger.debug(
+                        f"Using UnifiedMultimodalEmbedding for retrieval on multimodal dataset {dataset_id}"
+                    )
+                    embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
+                else:
+                    econf = self._resolve_embedding_config(
+                        provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
+                    )
+                    # Use cached embedder for better performance (connection reuse)
+                    embedder = await get_cached_embedder(econf, dimension=dim)
+
+                # Reuse original query vector when available
+                qvec = await embedder.embed_query(q)
+                query_vectors[q] = qvec
+
+                # Ensure collection exists and matches dimension (when we need vector ops).
+                #
+                # If Qdrant is unavailable, we can still continue with BM25-only results
+                # in HYBRID mode (fail-soft) to keep KB search usable in degraded mode.
+                collection = await self.vector_store.ensure_collection(
+                    dataset_id=dataset_id,
+                    dimension=embedder.dimension,
+                    collection_name=collection or None,
                 )
-                embedder = self._get_unified_multimodal_embedder(dataset, embedding_config)
-            else:
-                econf = self._resolve_embedding_config(
-                    provider=embedding_provider, model=embedding_model, embedding_config=embedding_config
-                )
-                # Use cached embedder for better performance (connection reuse)
-                embedder = await get_cached_embedder(econf, dimension=dim)
+                # Note: Don't close cached embedder - it's reused across requests
 
-            # Reuse original query vector when available
-            qvec = await embedder.embed_query(q)
-            query_vectors[q] = qvec
+                missing = [dq for dq in dense_queries if dq not in query_vectors]
+                if missing:
+                    vecs = await asyncio.gather(*[embedder.embed_query(dq) for dq in missing])
+                    query_vectors.update(dict(zip(missing, vecs)))
+            except Exception as vec_prep_err:
+                dense_disabled_reason = str(vec_prep_err)
+                logger.warning(f"Vector retrieval preparation failed: {vec_prep_err}")
+                if effective_mode == "dense":
+                    raise ValidationFailedError(f"Dense retrieval preparation failed: {vec_prep_err}")
 
-            # Ensure collection exists and matches dimension (when we need vector ops).
-            collection = await self.vector_store.ensure_collection(
-                dataset_id=dataset_id,
-                dimension=embedder.dimension,
-                collection_name=collection or None,
-            )
-            # Note: Don't close cached embedder - it's reused across requests
-
-            missing = [dq for dq in dense_queries if dq not in query_vectors]
-            if missing:
-                vecs = await asyncio.gather(*[embedder.embed_query(dq) for dq in missing])
-                query_vectors.update(dict(zip(missing, vecs)))
+                # HYBRID mode: degrade to BM25-only (skip vector retrieval path).
+                dense_queries = []
+                query_vectors.clear()
+                qvec = None
+                embedder = None
+                collection = ""
 
         # Execute dense (after vectors) and await BM25 concurrently
         dense_hits, dense_hits_raw_count, dense_query_hits = await _run_dense_multi()
@@ -3949,10 +3984,16 @@ class KnowledgeService:
             # Pipeline stages
             "pipeline_stages": [],
         }
+        if dense_disabled_reason:
+            meta["dense_disabled_reason"] = dense_disabled_reason[:500]
         
         # Log pipeline stages with details
         if effective_mode in {"dense", "hybrid"}:
             meta["pipeline_stages"].append(f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results")
+            if dense_disabled_reason:
+                meta["pipeline_stages"].append(
+                    f"Dense retrieval disabled (fallback to BM25): {dense_disabled_reason[:120]}"
+                )
         if effective_mode in {"bm25", "hybrid"}:
             meta["pipeline_stages"].append(f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results")
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")

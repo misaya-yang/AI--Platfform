@@ -670,68 +670,15 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             Updated output_files list with artifact_id added to each file
         """
-        if not self.artifact_storage or not output_files:
-            return output_files
+        from .artifacts import persist_output_files
 
-        import base64
-
-        persisted_files = []
-        for file_info in output_files:
-            try:
-                # Decode base64 content
-                content = base64.b64decode(file_info.get("content_base64", ""))
-                filename = file_info.get("filename", "output")
-                mime_type = file_info.get("mime_type", "application/octet-stream")
-
-                # Determine artifact type and format from mime_type
-                if mime_type.startswith("image/"):
-                    artifact_type = "image"
-                    artifact_format = mime_type.split("/")[-1]  # png, jpeg, etc.
-                elif mime_type == "application/pdf":
-                    artifact_type = "document"
-                    artifact_format = "pdf"
-                elif mime_type in ("text/csv", "application/csv"):
-                    artifact_type = "file"
-                    artifact_format = "csv"
-                else:
-                    artifact_type = "file"
-                    artifact_format = filename.split(".")[-1] if "." in filename else "bin"
-
-                # Create artifact
-                artifact = await self.artifact_storage.create_artifact(
-                    session_id=session_id,
-                    tenant_id=user.tenant_id,
-                    user_id=user.user_id,
-                    type=artifact_type,
-                    format=artifact_format,
-                    title=filename,
-                    filename=filename,
-                    content=content,
-                    source=source,
-                )
-
-                # Generate presigned download URL (valid for 1 hour)
-                download_url = await self.artifact_storage.get_presigned_download_url(
-                    artifact, expiry_seconds=3600
-                )
-
-                # Add artifact_id and download_url to file info
-                updated_file = {
-                    **file_info,
-                    "artifact_id": artifact.artifact_id,
-                    "download_url": download_url,
-                    "type": artifact_type,
-                    "format": artifact_format,
-                }
-                persisted_files.append(updated_file)
-
-                logger.debug(f"Persisted artifact: {artifact.artifact_id} ({filename}) -> {download_url}")
-
-            except Exception as e:
-                logger.warning(f"Failed to persist artifact {file_info.get('filename')}: {e}")
-                persisted_files.append(file_info)  # Keep original file info without artifact_id
-
-        return persisted_files
+        return await persist_output_files(
+            artifact_storage=self.artifact_storage,
+            user=user,
+            session_id=session_id,
+            output_files=output_files,
+            source=source,
+        )
 
     async def chat_stream(
         self,
@@ -773,7 +720,24 @@ Please use this web search context to inform your response when relevant."""
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
 
         domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
-        if domain_policy:
+
+        # IMPORTANT: Keep streaming for AgentLoop mode.
+        # Previously, any domain policy would force buffered `chat()` path, causing
+        # no real-time text deltas (TTFT ~= total duration).
+        # For agent_loop, inject domain rules into system prompt and continue streaming.
+        if domain_policy and config.use_agent_loop:
+            domain_rules = domain_policy.scenario_rules()
+            if domain_rules:
+                existing_prompt = (config.system_prompt or "").strip()
+                config.system_prompt = (
+                    f"{existing_prompt}\n\n{domain_rules}" if existing_prompt else domain_rules
+                )
+            logger.info(
+                "[DOMAIN POLICY] Applied domain rules in streaming mode (agent_loop), "
+                "keeping SSE incremental delivery."
+            )
+
+        if domain_policy and not config.use_agent_loop:
             if persist_messages and self.session_manager:
                 try:
                     await self.session_manager.add_message(
@@ -2706,6 +2670,8 @@ Please use this web search context to inform your response when relevant."""
             system_prompt=config.system_prompt,
             # Web search preference (True=force, False=AI decides) - passed to prompt
             web_search_enabled=config.web_search_enabled,
+            # File attachments (must be processed in AgentLoop streaming-first)
+            file_paths=config.file_paths or [],
             # Legacy settings (only used when streaming_first_mode=False)
             enable_task_planning=config.enable_task_planning,
             enable_scenario_retrieval=config.use_scenario_retrieval,
@@ -2713,6 +2679,7 @@ Please use this web search context to inform your response when relevant."""
             enable_memory_loading=config.enable_memory_loading,
             enable_react_loop=config.enable_react_loop,
             kb_dataset_ids=config.kb_dataset_ids,
+            kb_mode=getattr(config.kb_mode, "value", str(config.kb_mode)),
             kb_top_k=config.kb_top_k,
             kb_min_relevance=config.kb_score_threshold,
             max_tool_iterations=5,  # Reasonable limit for tool iterations
@@ -2729,6 +2696,9 @@ Please use this web search context to inform your response when relevant."""
             model_registry=self.model_registry,
             kb_service=self.kb_service,
             memory_service=self.memory_service if hasattr(self, 'memory_service') else None,
+            session_manager=self.session_manager,
+            artifact_storage=self.artifact_storage,
+            file_processor=self.file_processor,
         )
 
         # Load history if not provided
@@ -2792,6 +2762,7 @@ Please use this web search context to inform your response when relevant."""
                         "tool_call_id": data.get("tool_id", ""),
                         "tool_name": data.get("tool_name", ""),
                         "arguments": args_dict,  # Include parsed arguments for card display
+                        "step_id": data.get("step_id"),
                         "timestamp": event.timestamp,
                     },
                 )
@@ -2803,7 +2774,19 @@ Please use this web search context to inform your response when relevant."""
                 tool_call_id = data.get("tool_id", "")
                 tool_name = data.get("tool_name", "")
                 metadata = data.get("metadata", {})
-                logger.info(f"[TOOL_CALL_COMPLETED] tool={tool_name}, metadata={metadata}, total_results={metadata.get('total_results')}")
+                total_results = metadata.get("total_results") if isinstance(metadata, dict) else None
+                duration_ms = data.get("duration_ms")
+                if duration_ms is None and isinstance(metadata, dict):
+                    duration_ms = metadata.get("duration_ms")
+                meta_keys = list(metadata.keys()) if isinstance(metadata, dict) else None
+                # Avoid logging large/sensitive metadata payloads (e.g. KB chunks, web snippets).
+                logger.info(
+                    "[TOOL_CALL_COMPLETED] tool=%s total_results=%s duration_ms=%s metadata_keys=%s",
+                    tool_name,
+                    total_results,
+                    duration_ms,
+                    meta_keys,
+                )
                 # Send tool_call_end event
                 yield AssistantStreamEvent(
                     event_type=StreamEventType.TOOL_CALL_END.value,
@@ -2821,6 +2804,7 @@ Please use this web search context to inform your response when relevant."""
                         "result": data.get("result_preview", ""),
                         "success": data.get("success", True),
                         "result_count": metadata.get("total_results"),  # For KB/Web search result count
+                        "duration_ms": duration_ms,
                         "timestamp": event.timestamp,
                     },
                 )

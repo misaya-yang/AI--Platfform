@@ -332,7 +332,6 @@ class RegistryToolInvoker(ToolInvoker):
                 tool_name=tool_name,
                 success=False,
                 error="Cancelled before execution",
-                error_type="cancelled",
             )
 
         # Check rate limit
@@ -422,7 +421,6 @@ class RegistryToolInvoker(ToolInvoker):
                     tool_name=request.tool_name,
                     success=False,
                     error="Cancelled during execution",
-                    error_type="cancelled",
                 )
 
             try:
@@ -456,7 +454,6 @@ class RegistryToolInvoker(ToolInvoker):
                             tool_name=request.tool_name,
                             success=False,
                             error="Cancelled during execution",
-                            error_type="cancelled",
                         )
 
                     # Check timeout (no tasks in done means timeout)
@@ -500,7 +497,6 @@ class RegistryToolInvoker(ToolInvoker):
                     tool_name=request.tool_name,
                     success=False,
                     error="Task cancelled",
-                    error_type="cancelled",
                 )
 
             except Exception as e:
@@ -518,7 +514,6 @@ class RegistryToolInvoker(ToolInvoker):
                         tool_name=request.tool_name,
                         success=False,
                         error="Cancelled during retry wait",
-                        error_type="cancelled",
                     )
                 await asyncio.sleep(0.5 * (2 ** attempt))
 

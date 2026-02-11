@@ -92,7 +92,7 @@ class ToolDefinition:
     # Access control
     required_permissions: List[str] = field(default_factory=list)
 
-    def to_openai_schema(self) -> Dict[str, Any]:
+    def to_openai_schema(self, compact: bool = False) -> Dict[str, Any]:
         """Convert to OpenAI function calling schema."""
         properties = {}
         required = []
@@ -100,7 +100,7 @@ class ToolDefinition:
         for param in self.parameters:
             prop = {
                 "type": param.type,
-                "description": param.description,
+                "description": self._compact_text(param.description, 140) if compact else param.description,
             }
             if param.enum:
                 prop["enum"] = param.enum
@@ -118,7 +118,7 @@ class ToolDefinition:
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self._build_full_description(),
+                "description": self._compact_text(self.description, 220) if compact else self._build_full_description(),
                 "parameters": {
                     "type": "object",
                     "properties": properties,
@@ -127,7 +127,7 @@ class ToolDefinition:
             },
         }
 
-    def to_anthropic_schema(self) -> Dict[str, Any]:
+    def to_anthropic_schema(self, compact: bool = False) -> Dict[str, Any]:
         """Convert to Anthropic tool use schema."""
         properties = {}
         required = []
@@ -135,7 +135,7 @@ class ToolDefinition:
         for param in self.parameters:
             prop = {
                 "type": param.type,
-                "description": param.description,
+                "description": self._compact_text(param.description, 140) if compact else param.description,
             }
             if param.enum:
                 prop["enum"] = param.enum
@@ -151,7 +151,7 @@ class ToolDefinition:
 
         return {
             "name": self.name,
-            "description": self._build_full_description(),
+            "description": self._compact_text(self.description, 220) if compact else self._build_full_description(),
             "input_schema": {
                 "type": "object",
                 "properties": properties,
@@ -175,6 +175,16 @@ class ToolDefinition:
                 parts.append(f"\n- {ex.description}: {json.dumps(ex.input)}")
 
         return "".join(parts)
+
+    @staticmethod
+    def _compact_text(text: str, max_len: int) -> str:
+        """Compact long tool descriptions for low-latency streaming calls."""
+        if not text:
+            return ""
+        value = " ".join(str(text).split())
+        if len(value) <= max_len:
+            return value
+        return value[: max_len - 3].rstrip() + "..."
 
 
 @dataclass

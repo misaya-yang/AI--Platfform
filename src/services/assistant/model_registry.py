@@ -1112,8 +1112,12 @@ class ModelRegistry:
                         elif "functionCall" in part:
                             # Gemini 3 function call with optional thoughtSignature
                             fc = part["functionCall"]
+                            # IMPORTANT: tool_call ids must be unique per call for the assistant UI.
+                            # Gemini streaming does not provide a stable unique call id, so we generate one.
+                            import uuid
+
                             tool_call: Dict[str, Any] = {
-                                "id": f"call_{fc.get('name', 'unknown')}",
+                                "id": f"call_{fc.get('name', 'unknown')}_{uuid.uuid4().hex[:10]}",
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name"),

@@ -89,6 +89,14 @@ class VectorStore:
             timeout=timeout_seconds,
         )
 
+    async def ping(self, timeout_seconds: float = 1.0) -> bool:
+        """Best-effort health check (fail-fast, no retries)."""
+        try:
+            await asyncio.wait_for(self._client.get_collections(), timeout=float(timeout_seconds))
+            return True
+        except Exception:
+            return False
+
     async def _call(self, coro_or_factory):
         is_factory = callable(coro_or_factory)
         retries = self.max_retries if is_factory else 1

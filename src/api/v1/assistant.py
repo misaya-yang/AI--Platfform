@@ -444,10 +444,11 @@ async def chat_stream(
     session_id = body.session_id or str(uuid.uuid4())
 
     # Debug: Log incoming request parameters
+    system_prompt_len = len(body.system_prompt) if body.system_prompt else 0
     logger.info(
         f"chat_stream request - kb_dataset_ids: {body.kb_dataset_ids}, "
         f"kb_mode: {body.kb_mode}, model: {body.model_id}, "
-        f"file_paths: {body.file_paths}"
+        f"file_paths: {body.file_paths}, system_prompt_len: {system_prompt_len}"
     )
 
     # Map string mode to enum
@@ -1167,86 +1168,23 @@ async def generate_image(
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
     """
-    Generate images with smart routing based on current model provider.
+    Generate images with smart routing.
 
-    Routing logic:
-    - DashScope models (Qwen) → Aliyun Wanx API
-    - Google models (Gemini) → Gemini Native Image (gemini-2.5-flash-image)
-    - Other providers → Fallback to DashScope Wanx
+    Routing logic (default):
+    - Prefer Gemini native image generation when configured
+    - If Gemini fails with a non-safety error, fallback to DashScope Wanx when configured
+    - If Gemini is blocked by safety filters, DO NOT fallback across providers
     """
     import time
 
     start_time = time.time()
 
-    # Get model to determine provider
-    model = model_registry.get_model(body.model_id)
-    if not model:
-        # Default to DashScope if model not found
-        provider_name = "dashscope"
-    else:
-        provider_name = model.provider.value
-
-    # Determine which image generator to use
-    use_gemini = provider_name == "google"
-
-    logger.info(f"Image generation request - provider: {provider_name}, use_gemini: {use_gemini}, prompt: {body.prompt[:50]}...")
-
     try:
-        if use_gemini:
-            # Use Gemini Native Image (Nano Banana)
-            from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
+        from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
 
-            generator = get_gemini_image_generator()
-            if not generator.is_configured:
-                # Fallback to DashScope if Gemini not configured
-                logger.warning("Gemini API not configured, falling back to DashScope")
-                use_gemini = False
-            else:
-                result = await generator.generate(
-                    prompt=body.prompt,
-                    n=body.n,
-                )
+        router = get_smart_image_generator(prefer_gemini=True)
 
-                if not result.success:
-                    return ImageGenerationResponse(
-                        success=False,
-                        images=[],
-                        provider="google",
-                        duration_ms=result.duration_ms,
-                        error=result.error,
-                    )
-
-                # Convert to response format
-                images = [
-                    GeneratedImage(
-                        url=f"data:{img.get('mime_type', 'image/png')};base64,{img.get('content_base64', '')}",
-                        width=1024,  # Gemini default
-                        height=1024,
-                    )
-                    for img in result.images
-                ]
-
-                return ImageGenerationResponse(
-                    success=True,
-                    images=images,
-                    provider="google",
-                    duration_ms=result.duration_ms,
-                )
-
-        # Use DashScope Wanx (default or fallback)
-        from ...services.assistant.tools.image_generator_tool import get_image_generator
-
-        generator = get_image_generator()
-        if not generator.is_configured:
-            return ImageGenerationResponse(
-                success=False,
-                images=[],
-                provider="dashscope",
-                duration_ms=(time.time() - start_time) * 1000,
-                error="DashScope API not configured",
-            )
-
-        # Map style
+        # Map style (DashScope only; Gemini ignores style)
         style_map = {
             "default": "<auto>",
             "auto": "<auto>",
@@ -1261,23 +1199,7 @@ async def generate_image(
         }
         style = style_map.get(body.style or "default", "<auto>")
 
-        result = await generator.generate(
-            prompt=body.prompt,
-            size=body.size or "1024*1024",
-            style=style,
-            n=body.n,
-        )
-
-        if not result.success:
-            return ImageGenerationResponse(
-                success=False,
-                images=[],
-                provider="dashscope",
-                duration_ms=result.duration_ms,
-                error=result.error,
-            )
-
-        # Parse size to get dimensions
+        # Parse size to get dimensions (for response metadata)
         width, height = 1024, 1024
         if body.size:
             try:
@@ -1285,10 +1207,55 @@ async def generate_image(
                 if len(parts) == 2:
                     width, height = int(parts[0]), int(parts[1])
             except ValueError:
-                pass
+                width, height = 1024, 1024
+
+        # Map size to Gemini aspect_ratio
+        try:
+            ratio = float(width) / float(height) if height else 1.0
+        except Exception:
+            ratio = 1.0
+        candidates = {
+            "1:1": 1.0,
+            "16:9": 16 / 9,
+            "9:16": 9 / 16,
+            "4:3": 4 / 3,
+            "3:4": 3 / 4,
+        }
+        aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
+
+        model_info = model_registry.get_model(body.model_id)
+        selected_provider = model_info.provider.value if model_info else None
+        logger.info(
+            "Image generation request - model_id=%s, provider=%s, prompt=%s..., size=%s, n=%s",
+            body.model_id,
+            selected_provider,
+            body.prompt[:50],
+            body.size,
+            body.n,
+        )
+
+        res = await router.generate(
+            prompt=body.prompt,
+            n=body.n,
+            size=body.size or "1024*1024",
+            style=style,
+            aspect_ratio=aspect_ratio,
+        )
+
+        if not res.success:
+            err = res.error or "Image generation failed"
+            if res.blocked and res.block_reason:
+                err = f"{err} (blocked: {res.block_reason})"
+            return ImageGenerationResponse(
+                success=False,
+                images=[],
+                provider=res.provider,
+                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                error=err,
+            )
 
         images = []
-        for img in result.images:
+        for img in res.images:
             mime_type = img.get('mime_type', 'image/png')
             content_base64 = img.get('content_base64', '')
             size_bytes = img.get('size_bytes', 0)
@@ -1305,8 +1272,8 @@ async def generate_image(
         return ImageGenerationResponse(
             success=True,
             images=images,
-            provider="dashscope",
-            duration_ms=result.duration_ms,
+            provider=res.provider,
+            duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
         )
 
     except Exception as e:
@@ -1314,7 +1281,7 @@ async def generate_image(
         return ImageGenerationResponse(
             success=False,
             images=[],
-            provider=provider_name,
+            provider="unknown",
             duration_ms=(time.time() - start_time) * 1000,
             error=str(e),
         )
