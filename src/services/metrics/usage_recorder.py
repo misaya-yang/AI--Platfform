@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 import contextlib
 
+from ..billing.pricing_catalog import DEFAULT_TOKEN_PRICING_PER_1K_USD, resolve_pricing
 from .observability import KNOWN_ERROR_TYPES, should_sample_trace
 
 logger = logging.getLogger(__name__)
@@ -379,79 +380,20 @@ class UsageRecorder:
             if model.startswith(cached_model) or cached_model.startswith(model):
                 return pricing
 
-        # Return default pricing
-        return self._pricing_cache.get("default")
+        # Return resolved default pricing when model is unknown.
+        return resolve_pricing(model)
 
     async def _refresh_pricing_cache(self) -> None:
         """Refresh pricing cache from database."""
         if not self.database or not self.database._pool:
             # Use default pricing if no database
             self._pricing_cache = {
-                "gpt-4o": {
-                    "input": Decimal("0.0025"),
-                    "output": Decimal("0.01"),
-                    "provider": "openai",
-                },
-                "gpt-4o-mini": {
-                    "input": Decimal("0.00015"),
-                    "output": Decimal("0.0006"),
-                    "provider": "openai",
-                },
-                "gpt-4-turbo": {
-                    "input": Decimal("0.01"),
-                    "output": Decimal("0.03"),
-                    "provider": "openai",
-                },
-                "gpt-4": {
-                    "input": Decimal("0.03"),
-                    "output": Decimal("0.06"),
-                    "provider": "openai",
-                },
-                "gpt-3.5-turbo": {
-                    "input": Decimal("0.0005"),
-                    "output": Decimal("0.0015"),
-                    "provider": "openai",
-                },
-                "claude-3-opus": {
-                    "input": Decimal("0.015"),
-                    "output": Decimal("0.075"),
-                    "provider": "anthropic",
-                },
-                "claude-3-sonnet": {
-                    "input": Decimal("0.003"),
-                    "output": Decimal("0.015"),
-                    "provider": "anthropic",
-                },
-                "claude-3-5-sonnet": {
-                    "input": Decimal("0.003"),
-                    "output": Decimal("0.015"),
-                    "provider": "anthropic",
-                },
-                "claude-3-haiku": {
-                    "input": Decimal("0.00025"),
-                    "output": Decimal("0.00125"),
-                    "provider": "anthropic",
-                },
-                "deepseek-chat": {
-                    "input": Decimal("0.00014"),
-                    "output": Decimal("0.00028"),
-                    "provider": "deepseek",
-                },
-                "qwen-turbo": {
-                    "input": Decimal("0.0008"),
-                    "output": Decimal("0.002"),
-                    "provider": "dashscope",
-                },
-                "qwen-plus": {
-                    "input": Decimal("0.004"),
-                    "output": Decimal("0.012"),
-                    "provider": "dashscope",
-                },
-                "default": {
-                    "input": Decimal("0.001"),
-                    "output": Decimal("0.002"),
-                    "provider": UNATTRIBUTED_PROVIDER,
-                },
+                model: {
+                    "input": Decimal(str(pricing["input"])),
+                    "output": Decimal(str(pricing["output"])),
+                    "provider": str(pricing.get("provider") or UNATTRIBUTED_PROVIDER),
+                }
+                for model, pricing in DEFAULT_TOKEN_PRICING_PER_1K_USD.items()
             }
             self._pricing_cache_time = time.time()
             return

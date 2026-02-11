@@ -62,6 +62,13 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/proxy", tags=["Transparent Proxy"])
 
 
+_SERVICE_ACCESS_CACHE: dict[
+    str, tuple[float, list[tuple[str, list[str]]], ServiceAccessPolicy]
+] = {}
+_SERVICE_ACCESS_CACHE_LOCK = asyncio.Lock()
+_SERVICE_ACCESS_CACHE_MAX_SIZE = 5000
+
+
 async def _record_security_event(
     event_type: str,
     tenant_id: str,
@@ -417,17 +424,91 @@ def _service_allowed(allowed: list[str], candidates: set) -> bool:
     return service_scope_matches(allowed, list(candidates))
 
 
+def _build_service_access_cache_key(request: Request, user: UserContext) -> str:
+    api_key_hash = str(getattr(request.state, "api_key_hash", "") or "")
+    db_identity = id(getattr(request.app.state, "database", None))
+    role_key = ",".join(sorted(str(role) for role in (user.roles or [])))
+    return "|".join(
+        (
+            str(db_identity),
+            str(user.user_id or ""),
+            str(user.tenant_id or ""),
+            api_key_hash,
+            role_key,
+        )
+    )
+
+
+def _proxy_constraint_cache_ttl_seconds(request: Request) -> float:
+    settings = getattr(request.app.state, "settings", None)
+    ttl = getattr(getattr(settings, "proxy", None), "constraint_cache_ttl_seconds", 0.0)
+    try:
+        return max(float(ttl or 0.0), 0.0)
+    except Exception:
+        return 0.0
+
+
+async def _get_cached_service_access_constraints(
+    request: Request, user: UserContext
+) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy] | None:
+    ttl = _proxy_constraint_cache_ttl_seconds(request)
+    if ttl <= 0:
+        return None
+    now = time.monotonic()
+    cache_key = _build_service_access_cache_key(request, user)
+    async with _SERVICE_ACCESS_CACHE_LOCK:
+        entry = _SERVICE_ACCESS_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, allowed_sources, user_policy = entry
+        if now >= expires_at:
+            _SERVICE_ACCESS_CACHE.pop(cache_key, None)
+            return None
+    copied_sources = [(source, list(scope)) for source, scope in allowed_sources]
+    return copied_sources, user_policy
+
+
+async def _set_cached_service_access_constraints(
+    request: Request,
+    user: UserContext,
+    allowed_sources: list[tuple[str, list[str]]],
+    user_policy: ServiceAccessPolicy,
+) -> None:
+    ttl = _proxy_constraint_cache_ttl_seconds(request)
+    if ttl <= 0:
+        return
+    cache_key = _build_service_access_cache_key(request, user)
+    expires_at = time.monotonic() + ttl
+    copied_sources = [(source, list(scope)) for source, scope in allowed_sources]
+    async with _SERVICE_ACCESS_CACHE_LOCK:
+        while len(_SERVICE_ACCESS_CACHE) >= _SERVICE_ACCESS_CACHE_MAX_SIZE:
+            _SERVICE_ACCESS_CACHE.pop(next(iter(_SERVICE_ACCESS_CACHE)))
+        _SERVICE_ACCESS_CACHE[cache_key] = (expires_at, copied_sources, user_policy)
+
+
 async def _load_service_access_constraints(
     request: Request,
     user: UserContext,
 ) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy]:
     """Collect API key / tenant / user-level service access constraints."""
+    request_cached = getattr(request.state, "_service_access_constraints_cache", None)
+    if isinstance(request_cached, tuple) and len(request_cached) == 2:
+        return request_cached
+
+    cached = await _get_cached_service_access_constraints(request, user)
+    if cached is not None:
+        request.state._service_access_constraints_cache = cached
+        return cached
+
     allowed_sources: list[tuple[str, list[str]]] = []
     user_policy = ServiceAccessPolicy()
 
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
-        return allowed_sources, user_policy
+        result = (allowed_sources, user_policy)
+        request.state._service_access_constraints_cache = result
+        await _set_cached_service_access_constraints(request, user, allowed_sources, user_policy)
+        return result
 
     api_key_info = getattr(request.state, "api_key_info", None)
     if api_key_info:
@@ -461,7 +542,10 @@ async def _load_service_access_constraints(
                 exc,
             )
 
-    return allowed_sources, user_policy
+    result = (allowed_sources, user_policy)
+    request.state._service_access_constraints_cache = result
+    await _set_cached_service_access_constraints(request, user, allowed_sources, user_policy)
+    return result
 
 
 async def _enforce_service_access_constraints(

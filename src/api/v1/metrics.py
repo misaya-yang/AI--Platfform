@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ...api.deps import AuthContext, get_auth_context
+from ...services.billing.pricing_catalog import microcents_to_usd
 from ...services.metrics import compute_data_status, get_metrics_recorder
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -329,7 +330,7 @@ async def get_token_usage(
 
     total_input = 0
     total_output = 0
-    total_cost_cents = 0
+    total_cost_usd = 0.0
     by_period = []
 
     if redis and redis._client:
@@ -341,21 +342,28 @@ async def get_token_usage(
                 input_key = f"metrics:tokens:input:{date_str}"
                 output_key = f"metrics:tokens:output:{date_str}"
                 cost_key = f"metrics:tokens:cost:{date_str}"
+                cost_micro_key = f"metrics:tokens:cost_micro:{date_str}"
 
                 input_val = int(await redis._client.get(input_key) or 0)
                 output_val = int(await redis._client.get(output_key) or 0)
                 cost_val = int(await redis._client.get(cost_key) or 0)
+                cost_micro_val = int(await redis._client.get(cost_micro_key) or 0)
+                period_cost_usd = (
+                    microcents_to_usd(cost_micro_val)
+                    if cost_micro_val > 0
+                    else round(cost_val / 100, 6)
+                )
 
                 total_input += input_val
                 total_output += output_val
-                total_cost_cents += cost_val
+                total_cost_usd += period_cost_usd
 
                 by_period.append(
                     TokenUsagePeriod(
                         period=date_str,
                         input_tokens=input_val,
                         output_tokens=output_val,
-                        cost_usd=round(cost_val / 100, 4),
+                        cost_usd=round(period_cost_usd, 6),
                     )
                 )
 
@@ -368,7 +376,7 @@ async def get_token_usage(
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_tokens=total_input + total_output,
-        estimated_cost_usd=round(total_cost_cents / 100, 4),
+        estimated_cost_usd=round(total_cost_usd, 6),
         by_period=by_period,
     )
 

@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ...persistence.redis import RedisStorage
 
+from ..billing.pricing_catalog import microcents_to_usd
+
 logger = logging.getLogger(__name__)
 
 # TTL constants
@@ -392,6 +394,7 @@ class RealtimeMetricsService:
             pipe.get(f"metrics:tokens:input:{today}")
             pipe.get(f"metrics:tokens:output:{today}")
             pipe.get(f"metrics:tokens:cost:{today}")
+            pipe.get(f"metrics:tokens:cost_micro:{today}")
             pipe.get(f"metrics:runs:total:{today}")
             pipe.get(f"metrics:runs:success:{today}")
             pipe.get(f"metrics:runs:duration:sum:{today}")
@@ -402,13 +405,18 @@ class RealtimeMetricsService:
             input_tokens = int(results[0] or 0)
             output_tokens = int(results[1] or 0)
             cost_cents = int(results[2] or 0)
-            total_runs = int(results[3] or 0)
-            runs_success = int(results[4] or 0)
-            duration_sum = int(results[5] or 0)
-            duration_count = int(results[6] or 0)
+            cost_microcents = int(results[3] or 0)
+            total_runs = int(results[4] or 0)
+            runs_success = int(results[5] or 0)
+            duration_sum = int(results[6] or 0)
+            duration_count = int(results[7] or 0)
 
             snapshot.total_tokens = input_tokens + output_tokens
-            snapshot.token_cost_usd = cost_cents / 100
+            snapshot.token_cost_usd = (
+                microcents_to_usd(cost_microcents)
+                if cost_microcents > 0
+                else round(cost_cents / 100, 6)
+            )
 
             # 修复：tokens/minute 使用最近5分钟滑动窗口计算（从请求窗口估算）
             # 而非"日累计/分钟数"算法

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
 import time
+from typing import Any
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -138,6 +140,16 @@ def _normalize_roles(raw_roles) -> list[str]:
     return ["user"]
 
 
+def _normalize_permissions(raw_permissions) -> list[str]:
+    if not raw_permissions:
+        return []
+    if isinstance(raw_permissions, str):
+        return [raw_permissions]
+    if isinstance(raw_permissions, list):
+        return [str(p) for p in raw_permissions if p is not None]
+    return []
+
+
 def _extract_service_id_from_path(path: str) -> str | None:
     for prefix in ("/api/v1/proxy/", "/proxy/"):
         if path.startswith(prefix):
@@ -171,6 +183,39 @@ async def _record_auth_failure(
         pass
 
 
+def _cache_auth_resolution(
+    request: Request,
+    *,
+    auth_type: str,
+    user_id: str,
+    tenant_id: str,
+    roles: list[str],
+    permissions: list[str] | None,
+    authenticated: bool,
+) -> None:
+    request.state._auth_resolution = {
+        "auth_type": auth_type,
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "roles": list(roles),
+        "permissions": list(permissions or []),
+        "authenticated": bool(authenticated),
+    }
+
+
+def _build_auth_context_from_resolution(payload: dict[str, Any]) -> AuthContext | None:
+    if not isinstance(payload, dict):
+        return None
+    if not payload.get("authenticated"):
+        return None
+    return AuthContext(
+        user_id=str(payload.get("user_id") or ""),
+        tenant_id=str(payload.get("tenant_id") or ""),
+        roles=[str(r) for r in list(payload.get("roles") or [])],
+        permissions=[str(p) for p in list(payload.get("permissions") or [])],
+    )
+
+
 async def get_user_context(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -197,6 +242,15 @@ async def get_user_context(
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
         logger.debug(
             f"[AUTH][TIMING] auth_disabled total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+        )
+        _cache_auth_resolution(
+            request,
+            auth_type="disabled",
+            user_id="guest",
+            tenant_id="public",
+            roles=["guest"],
+            permissions=[],
+            authenticated=False,
         )
         return _cache_and_return(
             UserContext(
@@ -251,6 +305,7 @@ async def get_user_context(
         t_redis_done = time.perf_counter()
 
         roles = _normalize_roles(payload.get("roles") or payload.get("role"))
+        permissions = _normalize_permissions(payload.get("permissions"))
         tier = str(payload.get("tier") or "normal")
         if "admin" in roles:
             tier = "admin"
@@ -266,6 +321,8 @@ async def get_user_context(
             try:
                 db_permissions = await db.get_user_permissions(user_id)
                 for perm in db_permissions:
+                    if perm not in permissions:
+                        permissions.append(perm)
                     if perm not in roles:
                         roles.append(perm)
             except Exception as e:
@@ -278,6 +335,15 @@ async def get_user_context(
             f"redis={((t_redis_done - t_redis_start) * 1000):.1f}ms "
             f"db_perms={((t_db_done - t_db_start) * 1000):.1f}ms "
             f"total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+        )
+        _cache_auth_resolution(
+            request,
+            auth_type="jwt",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            roles=roles,
+            permissions=permissions,
+            authenticated=True,
         )
         return _cache_and_return(
             UserContext(
@@ -300,7 +366,8 @@ async def get_user_context(
                 key_info = await db.get_api_key(key_hash)
                 if key_info:
                     roles = _normalize_roles(key_info.get("roles"))
-                    key_permissions = _normalize_roles(key_info.get("permissions"))
+                    key_permissions = _normalize_permissions(key_info.get("permissions"))
+                    merged_permissions = list(key_permissions)
                     tenant_id = str(key_info.get("tenant_id") or "")
                     user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(api_key)
                     tier = str(key_info.get("tier") or "normal")
@@ -318,6 +385,8 @@ async def get_user_context(
                     try:
                         db_permissions = await db.get_user_permissions(user_id)
                         for perm in db_permissions:
+                            if perm not in merged_permissions:
+                                merged_permissions.append(perm)
                             if perm not in roles:
                                 roles.append(perm)
                     except Exception as e:
@@ -327,6 +396,15 @@ async def get_user_context(
 
                     logger.info(
                         f"[AUTH][TIMING] API_KEY user={user_id} total={((time.perf_counter() - t_start) * 1000):.1f}ms"
+                    )
+                    _cache_auth_resolution(
+                        request,
+                        auth_type="api_key",
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        roles=roles,
+                        permissions=merged_permissions,
+                        authenticated=True,
                     )
                     return _cache_and_return(
                         UserContext(
@@ -358,9 +436,19 @@ async def get_user_context(
                 logger.warning(f"Invalid static role '{static_role}', falling back to 'user'")
                 static_role = "user"
 
+            static_user_id = _derive_api_key_user_id(api_key)
+            _cache_auth_resolution(
+                request,
+                auth_type="api_key_static",
+                user_id=static_user_id,
+                tenant_id="",
+                roles=[static_role],
+                permissions=[],
+                authenticated=True,
+            )
             return _cache_and_return(
                 UserContext(
-                    user_id=_derive_api_key_user_id(api_key),
+                    user_id=static_user_id,
                     tenant_id="",
                     tier="admin" if static_role == "admin" else "normal",
                     is_authenticated=True,
@@ -372,6 +460,15 @@ async def get_user_context(
     # 3) Anonymous (stable ID minted by middleware)
     anon_id = getattr(getattr(request, "state", None), "anonymous_id", None) or client_ip
     logger.debug(f"[AUTH][TIMING] anonymous total={((time.perf_counter() - t_start) * 1000):.1f}ms")
+    _cache_auth_resolution(
+        request,
+        auth_type="anonymous",
+        user_id=f"anon:{anon_id}",
+        tenant_id="public",
+        roles=["guest"],
+        permissions=[],
+        authenticated=False,
+    )
     return _cache_and_return(
         UserContext(
             user_id=f"anon:{anon_id}",
@@ -401,6 +498,16 @@ async def get_auth_context(
         ctx = AuthContext(user_id="guest", tenant_id="public", roles=["guest"], permissions=[])
         request.state.auth = ctx
         return ctx
+
+    auth_resolution = getattr(request.state, "_auth_resolution", None)
+    if auth_resolution is None:
+        with contextlib.suppress(Exception):
+            await get_user_context(request=request, settings=settings)
+            auth_resolution = getattr(request.state, "_auth_resolution", None)
+    resolved_ctx = _build_auth_context_from_resolution(auth_resolution)
+    if resolved_ctx is not None:
+        request.state.auth = resolved_ctx
+        return resolved_ctx
 
     # Unauthenticated requests default to a guest role.
     roles: list[str] = ["guest"]
@@ -445,11 +552,7 @@ async def get_auth_context(
             roles = [raw_roles]
         elif isinstance(raw_roles, list):
             roles = [str(r) for r in raw_roles]
-        raw_permissions = payload.get("permissions") or []
-        if isinstance(raw_permissions, str):
-            permissions = [raw_permissions]
-        elif isinstance(raw_permissions, list):
-            permissions = [str(p) for p in raw_permissions]
+        permissions = _normalize_permissions(payload.get("permissions"))
 
         # Merge permissions from DB if available (keeps JWT small when missing)
         db = getattr(request.app.state, "database", None)
@@ -472,6 +575,15 @@ async def get_auth_context(
         ctx = AuthContext(
             user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=permissions
         )
+        _cache_auth_resolution(
+            request,
+            auth_type="jwt",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            roles=roles,
+            permissions=permissions,
+            authenticated=True,
+        )
         request.state.auth = ctx
         return ctx
 
@@ -493,7 +605,7 @@ async def get_auth_context(
                 key_info = await db.get_api_key(key_hash)
             if key_info:
                 roles = _normalize_roles(key_info.get("roles"))
-                key_permissions = _normalize_roles(key_info.get("permissions"))
+                key_permissions = _normalize_permissions(key_info.get("permissions"))
                 tenant_id = str(key_info.get("tenant_id") or "")
                 user_id = str(key_info.get("user_id") or "") or _derive_api_key_user_id(key)
                 permissions = []
@@ -521,6 +633,15 @@ async def get_auth_context(
                     roles=roles,
                     permissions=permissions,
                 )
+                _cache_auth_resolution(
+                    request,
+                    auth_type="api_key",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    roles=roles,
+                    permissions=permissions,
+                    authenticated=True,
+                )
                 request.state.auth = ctx
                 return ctx
 
@@ -532,10 +653,28 @@ async def get_auth_context(
         ctx = AuthContext(
             user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[]
         )
+        _cache_auth_resolution(
+            request,
+            auth_type="api_key_static",
+            user_id=ctx.user_id,
+            tenant_id="",
+            roles=ctx.roles,
+            permissions=[],
+            authenticated=True,
+        )
         request.state.auth = ctx
         return ctx
 
     # 允许匿名访问（返回空的 AuthContext）
     ctx = AuthContext()
+    _cache_auth_resolution(
+        request,
+        auth_type="anonymous",
+        user_id=ctx.user_id,
+        tenant_id=ctx.tenant_id,
+        roles=ctx.roles,
+        permissions=ctx.permissions,
+        authenticated=False,
+    )
     request.state.auth = ctx
     return ctx

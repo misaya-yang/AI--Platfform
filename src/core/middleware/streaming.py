@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -596,6 +598,42 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
         super().__init__(app)
         self.config = config
 
+    @staticmethod
+    def _schedule_metrics_record(
+        *,
+        method: str,
+        path: str,
+        status_code: int,
+        duration_ms: float,
+        user_id: str,
+        service_id: str,
+        error_label: str,
+    ) -> None:
+        """Best-effort, non-blocking metrics recording."""
+        metrics_recorder = get_metrics_recorder()
+        try:
+            task = asyncio.create_task(
+                metrics_recorder.record_request(
+                    method=method,
+                    path=path,
+                    status_code=status_code,
+                    duration_ms=duration_ms,
+                    user_id=user_id,
+                    service_id=service_id,
+                )
+            )
+        except RuntimeError as exc:
+            logger.debug("%s: %s", error_label, exc)
+            return
+
+        def _done_callback(done: asyncio.Task) -> None:
+            with contextlib.suppress(asyncio.CancelledError):
+                exc = done.exception()
+                if exc is not None:
+                    logger.debug("%s: %s", error_label, exc)
+
+        task.add_done_callback(_done_callback)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -637,19 +675,16 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
             logger.info(f"[{request_id}] {method} {path} streaming completed ({duration:.2f}ms)")
 
             # Record metrics for streaming requests
-            try:
-                metrics_recorder = get_metrics_recorder()
-                user_info = scope.get("state", {}).get("user_info", {})
-                await metrics_recorder.record_request(
-                    method=method,
-                    path=path,
-                    status_code=200,  # Streaming requests typically succeed if they complete
-                    duration_ms=duration,
-                    user_id=user_info.get("user_id", ""),
-                    service_id=scope.get("state", {}).get("service_id", ""),
-                )
-            except Exception as metrics_err:
-                logger.debug(f"Failed to record streaming metrics: {metrics_err}")
+            user_info = scope.get("state", {}).get("user_info", {})
+            self._schedule_metrics_record(
+                method=method,
+                path=path,
+                status_code=200,  # Streaming requests typically succeed if they complete
+                duration_ms=duration,
+                user_id=user_info.get("user_id", ""),
+                service_id=scope.get("state", {}).get("service_id", ""),
+                error_label="Failed to record streaming metrics",
+            )
 
             return
 
@@ -671,38 +706,32 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
             logger.info(f"[{request_id}] {method} {path} -> {status_code} ({duration:.2f}ms)")
 
             # Record metrics for dashboard
-            try:
-                metrics_recorder = get_metrics_recorder()
-                user_info = scope.get("state", {}).get("user_info", {})
-                await metrics_recorder.record_request(
-                    method=method,
-                    path=path,
-                    status_code=status_code,
-                    duration_ms=duration,
-                    user_id=user_info.get("user_id", ""),
-                    service_id=scope.get("state", {}).get("service_id", ""),
-                )
-            except Exception as metrics_err:
-                logger.debug(f"Failed to record metrics: {metrics_err}")
+            user_info = scope.get("state", {}).get("user_info", {})
+            self._schedule_metrics_record(
+                method=method,
+                path=path,
+                status_code=status_code,
+                duration_ms=duration,
+                user_id=user_info.get("user_id", ""),
+                service_id=scope.get("state", {}).get("service_id", ""),
+                error_label="Failed to record metrics",
+            )
 
         except Exception as e:
             duration = (time.time() - start_time) * 1000
             logger.error(f"[{request_id}] {method} {path} -> ERROR ({duration:.2f}ms): {e}")
 
             # Record error metrics
-            try:
-                metrics_recorder = get_metrics_recorder()
-                user_info = scope.get("state", {}).get("user_info", {})
-                await metrics_recorder.record_request(
-                    method=method,
-                    path=path,
-                    status_code=500,
-                    duration_ms=duration,
-                    user_id=user_info.get("user_id", ""),
-                    service_id=scope.get("state", {}).get("service_id", ""),
-                )
-            except Exception as metrics_err:
-                logger.debug(f"Failed to record error metrics: {metrics_err}")
+            user_info = scope.get("state", {}).get("user_info", {})
+            self._schedule_metrics_record(
+                method=method,
+                path=path,
+                status_code=500,
+                duration_ms=duration,
+                user_id=user_info.get("user_id", ""),
+                service_id=scope.get("state", {}).get("service_id", ""),
+                error_label="Failed to record error metrics",
+            )
 
             raise
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import mimetypes
 import os
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -199,9 +202,71 @@ class KnowledgeService:
         self.ingestion_service = ingestion_service or IngestionService(
             settings, database, self.vector_store
         )
+        self._retrieval_cache_ttl_seconds = max(
+            int(getattr(settings.knowledge, "retrieval_cache_ttl_seconds", 0) or 0), 0
+        )
+        self._retrieval_cache: dict[str, tuple[float, list[RetrieveResult], dict[str, Any]]] = {}
+        self._retrieval_cache_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await self.vector_store.close()
+
+    @staticmethod
+    def _clone_retrieve_results(results: list[RetrieveResult]) -> list[RetrieveResult]:
+        cloned: list[RetrieveResult] = []
+        for item in results:
+            cloned.append(
+                RetrieveResult(
+                    segment_id=item.segment_id,
+                    document_id=item.document_id,
+                    score=item.score,
+                    text=item.text,
+                    metadata=copy.deepcopy(item.metadata or {}),
+                    content_type=item.content_type,
+                    image_url=item.image_url,
+                    vlm_description=item.vlm_description,
+                    associated_images=tuple(item.associated_images or ()),
+                )
+            )
+        return cloned
+
+    @staticmethod
+    def _compute_retrieval_query_fingerprint(payload: dict[str, Any]) -> str:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+
+    async def _get_cached_retrieval(
+        self, cache_key: str
+    ) -> tuple[list[RetrieveResult], dict[str, Any]] | None:
+        if self._retrieval_cache_ttl_seconds <= 0:
+            return None
+        now = time.monotonic()
+        async with self._retrieval_cache_lock:
+            cached = self._retrieval_cache.get(cache_key)
+            if not cached:
+                return None
+            expires_at, cached_results, cached_meta = cached
+            if now >= expires_at:
+                self._retrieval_cache.pop(cache_key, None)
+                return None
+        return self._clone_retrieve_results(cached_results), copy.deepcopy(cached_meta)
+
+    async def _set_cached_retrieval(
+        self,
+        cache_key: str,
+        results: list[RetrieveResult],
+        meta: dict[str, Any],
+    ) -> None:
+        if self._retrieval_cache_ttl_seconds <= 0:
+            return
+        async with self._retrieval_cache_lock:
+            while len(self._retrieval_cache) >= 2000:
+                self._retrieval_cache.pop(next(iter(self._retrieval_cache)))
+            self._retrieval_cache[cache_key] = (
+                time.monotonic() + self._retrieval_cache_ttl_seconds,
+                self._clone_retrieve_results(results),
+                copy.deepcopy(meta),
+            )
 
     # ========================================================================
     # Delegated Methods (will be removed after full migration to sub-services)
@@ -3682,11 +3747,15 @@ class KnowledgeService:
         # Rerank params (bool or dict in index_config)
         rerank_cfg = retrieval_defaults.get("rerank")
         rerank_api_key = None
+        rerank_provider = None
         if isinstance(rerank_cfg, dict):
             rerank_enabled = (
                 bool(rerank_cfg.get("enabled", False)) if rerank is None else bool(rerank)
             )
-            effective_rerank_model = str(rerank_model or rerank_cfg.get("model") or "gte-rerank")
+            rerank_provider = str(rerank_cfg.get("provider") or "").strip() or None
+            effective_rerank_model = str(
+                rerank_model or rerank_cfg.get("model") or "gte-rerank-v2"
+            )
             effective_rerank_top_n = (
                 int(rerank_top_n)
                 if rerank_top_n is not None
@@ -3696,8 +3765,21 @@ class KnowledgeService:
         else:
             # Rerank defaults to OFF unless explicitly configured
             rerank_enabled = bool(rerank_cfg) if rerank is None else bool(rerank)
-            effective_rerank_model = str(rerank_model or "gte-rerank")
+            effective_rerank_model = str(rerank_model or "gte-rerank-v2")
             effective_rerank_top_n = int(rerank_top_n) if rerank_top_n is not None else None
+
+        from .text_reranker import (
+            create_reranker,
+            normalize_rerank_model,
+            normalize_rerank_provider,
+        )
+
+        effective_rerank_provider = normalize_rerank_provider(
+            rerank_provider, effective_rerank_model
+        )
+        effective_rerank_model = normalize_rerank_model(
+            effective_rerank_provider, effective_rerank_model
+        )
 
         # MMR params (bool or dict in index_config)
         mmr_cfg = retrieval_defaults.get("mmr")
@@ -3769,7 +3851,10 @@ class KnowledgeService:
                 logger.warning(f"Islamic multi-query expansion failed: {mq_err}")
 
         # --- Parallel Dense + BM25 retrieval for better latency ---
-        import asyncio
+        retrieval_query_concurrency = max(
+            int(getattr(self.settings.knowledge, "retrieval_query_max_concurrency", 3) or 3),
+            1,
+        )
 
         query_lang = detect_language(q)
 
@@ -3954,13 +4039,25 @@ class KnowledgeService:
         async def _run_dense_multi() -> tuple[list, int, dict[str, int]]:
             if not dense_queries:
                 return [], 0, {}
-            results = await asyncio.gather(*[_dense_search(dq) for dq in dense_queries])
+            semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+
+            async def _run(query_text: str) -> tuple[list, int]:
+                async with semaphore:
+                    return await _dense_search(query_text)
+
+            results = await asyncio.gather(*[_run(dq) for dq in dense_queries])
             return _merge_dense_results(results)
 
         async def _run_bm25_multi() -> tuple[list, int, dict[str, int]]:
             if not bm25_queries:
                 return [], 0, {}
-            results = await asyncio.gather(*[_bm25_search(bq) for bq in bm25_queries])
+            semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+
+            async def _run(query_text: str) -> tuple[list, int]:
+                async with semaphore:
+                    return await _bm25_search(query_text)
+
+            results = await asyncio.gather(*[_run(bq) for bq in bm25_queries])
             return _merge_bm25_results(results)
 
         # Kick off BM25 first (no embeddings needed) while we prepare dense vectors
@@ -4296,6 +4393,7 @@ class KnowledgeService:
             "rrf_k": int(rrf_k_value) if effective_fusion_method == "rrf" else None,
             # Post-processing config
             "rerank": bool(rerank_enabled),
+            "rerank_provider": effective_rerank_provider if rerank_enabled else None,
             "rerank_model": effective_rerank_model if rerank_enabled else None,
             "mmr": bool(mmr_enabled),
             "mmr_lambda": float(effective_mmr_lambda) if mmr_enabled else None,
@@ -4349,32 +4447,87 @@ class KnowledgeService:
                     )
                 )
 
-        # --- Stage 4: Optional rerank (Async DashScope cross-encoder) ---
+        # --- Stage 4: Optional rerank ---
         if rerank_enabled and ranked:
             try:
-                from .text_reranker import get_text_reranker
+                def _resolve_dashscope_rerank_api_key(
+                    include_override: bool = True,
+                ) -> str | None:
+                    return (
+                        (rerank_api_key if include_override else None)
+                        or getattr(self.settings.knowledge.dashscope, "api_key", None)
+                        or os.getenv("DASHSCOPE_API_KEY")
+                        or os.getenv("Aliyun_KEY")
+                        or os.getenv("ALIYUN_KEY")
+                    )
 
-                api_key = (
-                    rerank_api_key
-                    or getattr(self.settings.knowledge.dashscope, "api_key", None)
-                    or os.getenv("DASHSCOPE_API_KEY")
-                    or os.getenv("Aliyun_KEY")
-                    or os.getenv("ALIYUN_KEY")
-                )
-                if not api_key:
-                    raise ValidationFailedError("DashScope api_key is required for rerank")
+                def _resolve_cohere_rerank_api_key() -> str | None:
+                    return rerank_api_key or os.getenv("COHERE_API_KEY")
 
                 if effective_rerank_top_n is None:
                     effective_rerank_top_n = min(len(ranked), max(top_k * 3, 20))
 
-                # Use async reranker with connection pooling and caching
-                reranker = get_text_reranker(api_key=api_key, model=effective_rerank_model)
-                docs = [str(c.get("text") or "") for c in ranked]
-                rerank_results = await reranker.rerank(
-                    query=q,
-                    documents=docs,
-                    top_n=effective_rerank_top_n,
+                api_key = None
+                if effective_rerank_provider == "dashscope":
+                    api_key = _resolve_dashscope_rerank_api_key(include_override=True)
+                    if not api_key:
+                        raise ValidationFailedError("dashscope api_key is required for rerank")
+                elif effective_rerank_provider == "cohere":
+                    api_key = _resolve_cohere_rerank_api_key()
+                    if not api_key:
+                        raise ValidationFailedError("cohere api_key is required for rerank")
+
+                # Use provider-specific async reranker with caching/connection pooling
+                reranker = create_reranker(
+                    provider=effective_rerank_provider,
+                    api_key=api_key,
+                    model=effective_rerank_model,
                 )
+                applied_rerank_provider = effective_rerank_provider
+                applied_rerank_model = effective_rerank_model
+                docs = [str(c.get("text") or "") for c in ranked]
+                try:
+                    rerank_results = await reranker.rerank(
+                        query=q,
+                        documents=docs,
+                        top_n=effective_rerank_top_n,
+                    )
+                except RuntimeError as fallback_exc:
+                    # Local BGE dependency missing: fallback to DashScope rerank if key is available.
+                    if (
+                        effective_rerank_provider == "bge"
+                        and "FlagEmbedding" in str(fallback_exc)
+                    ):
+                        fallback_api_key = _resolve_dashscope_rerank_api_key(
+                            include_override=False
+                        )
+                        if not fallback_api_key:
+                            raise
+                        fallback_model = normalize_rerank_model("dashscope", None)
+                        logger.warning(
+                            "BGE reranker unavailable (%s), fallback to DashScope model=%s",
+                            fallback_exc,
+                            fallback_model,
+                        )
+                        reranker = create_reranker(
+                            provider="dashscope",
+                            api_key=fallback_api_key,
+                            model=fallback_model,
+                        )
+                        applied_rerank_provider = "dashscope"
+                        applied_rerank_model = fallback_model
+                        rerank_results = await reranker.rerank(
+                            query=q,
+                            documents=docs,
+                            top_n=effective_rerank_top_n,
+                        )
+                        meta["rerank_fallback"] = {
+                            "from_provider": "bge",
+                            "to_provider": "dashscope",
+                            "to_model": fallback_model,
+                        }
+                    else:
+                        raise
 
                 reranked: list[dict[str, Any]] = []
                 for r in rerank_results:
@@ -4392,8 +4545,10 @@ class KnowledgeService:
                         reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True
                     )
                     meta["pipeline_stages"].append(
-                        f"Rerank ({effective_rerank_model}): {len(reranked)} results"
+                        f"Rerank ({applied_rerank_provider}/{applied_rerank_model}): {len(reranked)} results"
                     )
+                meta["rerank_applied_provider"] = applied_rerank_provider
+                meta["rerank_applied_model"] = applied_rerank_model
                 meta["rerank_top_n"] = effective_rerank_top_n
             except Exception as exc:
                 meta["rerank_error"] = str(exc)
@@ -5136,6 +5291,35 @@ class KnowledgeService:
             "fusion_method": kwargs.get("fusion_method", "rrf"),
             **{k: v for k, v in kwargs.items() if k not in ("mode", "fusion_method")},
         }
+        normalized_query = " ".join((query or "").strip().split())
+        cache_fingerprint_payload = {
+            "user_id": user.user_id,
+            "dataset_id": dataset_id,
+            "query": normalized_query,
+            "intent": intent,
+            "top_k": int(top_k),
+            "expanded_top_k": int(expanded_top_k),
+            "include_images": bool(include_images),
+            "vlm_rerank": bool(vlm_rerank),
+            "retrieve_kwargs": retrieve_kwargs,
+            "strict_section_traceability": bool(
+                retrieve_kwargs.get("strict_section_traceability")
+                or retrieve_kwargs.get("strict_traceability")
+                or False
+            ),
+        }
+        retrieval_query_fingerprint = self._compute_retrieval_query_fingerprint(
+            cache_fingerprint_payload
+        )
+        retrieval_cache_key = (
+            f"{user.user_id}:{dataset_id}:{retrieval_query_fingerprint}:intent={intent}"
+        )
+        cached_response = await self._get_cached_retrieval(retrieval_cache_key)
+        if cached_response is not None:
+            cached_results, cached_meta = cached_response
+            cached_meta["retrieval_cache_hit"] = True
+            cached_meta["retrieval_query_fingerprint"] = retrieval_query_fingerprint
+            return cached_results, cached_meta
 
         # Perform base retrieval with expanded top_k
         results, meta = await self.retrieve(
@@ -5151,6 +5335,8 @@ class KnowledgeService:
         meta["intent"] = intent
         meta["expanded_top_k"] = expanded_top_k
         meta["original_top_k"] = top_k
+        meta["retrieval_cache_hit"] = False
+        meta["retrieval_query_fingerprint"] = retrieval_query_fingerprint
 
         # Log retrieval statistics
         content_type_counts: dict[str, int] = {}
@@ -5161,6 +5347,7 @@ class KnowledgeService:
         meta["stage1_content_types"] = content_type_counts
 
         if not results:
+            await self._set_cached_retrieval(retrieval_cache_key, results, meta)
             return results, meta
 
         # Stage 2: VLM reranking (conditional)
@@ -5375,6 +5562,7 @@ class KnowledgeService:
             f"[retrieve_v2] Final: {len(results)} results, content_types={final_content_types}"
         )
 
+        await self._set_cached_retrieval(retrieval_cache_key, results, meta)
         return results, meta
 
     async def retrieve_batch(

@@ -1119,6 +1119,14 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
         if loaded > 0:
             logger.info(f"Loaded {loaded} models from database into registry")
+        try:
+            synced = await model_service.sync_pricing_from_llm_models(
+                tenant_id="default",
+                include_disabled=True,
+            )
+            logger.info(f"Synchronized {synced} model pricing records from llm_models")
+        except Exception as e:
+            logger.warning(f"Failed to sync llm_models pricing to model_pricing: {e}")
 
     features = []
     if configured_providers:

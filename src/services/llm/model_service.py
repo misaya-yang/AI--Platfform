@@ -136,22 +136,17 @@ class ModelService:
         row_dict = self._row_to_dict(row)
 
         # Sync with model_pricing table for usage recording
-        try:
-            pricing_svc = get_pricing_service()
-            await pricing_svc.update_pricing(
-                model=model_id,
-                input_price_per_1k=float(input_price_per_1k),
-                output_price_per_1k=float(output_price_per_1k),
-                provider=provider_id,
-                display_name=display_name,
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-                supports_vision=supports_vision,
-                supports_tools=supports_tools,
-            )
-            logger.info(f"Synced pricing for model {model_id}")
-        except Exception as e:
-            logger.error(f"Failed to sync pricing for model {model_id}: {e}")
+        await self._sync_single_model_pricing(
+            model_id=model_id,
+            input_price_per_1k=float(input_price_per_1k),
+            output_price_per_1k=float(output_price_per_1k),
+            provider=provider_id,
+            display_name=display_name,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            supports_vision=supports_vision,
+            supports_tools=supports_tools,
+        )
 
         return row_dict
 
@@ -248,23 +243,17 @@ class ModelService:
         if row:
             row_dict = self._row_to_dict(row)
             # Sync with model_pricing table for usage recording
-            try:
-                pricing_svc = get_pricing_service()
-                # Use values from the updated row to ensure we have the latest state
-                await pricing_svc.update_pricing(
-                    model=model_id,
-                    input_price_per_1k=float(row["input_price_per_1k"] or 0),
-                    output_price_per_1k=float(row["output_price_per_1k"] or 0),
-                    provider=row["provider_id"],
-                    display_name=row["display_name"],
-                    context_window=row["context_window"],
-                    max_output_tokens=row["max_output_tokens"],
-                    supports_vision=row["supports_vision"],
-                    supports_tools=row["supports_tools"],
-                )
-                logger.info(f"Synced pricing for model {model_id}")
-            except Exception as e:
-                logger.error(f"Failed to sync pricing for model {model_id}: {e}")
+            await self._sync_single_model_pricing(
+                model_id=model_id,
+                input_price_per_1k=float(row["input_price_per_1k"] or 0),
+                output_price_per_1k=float(row["output_price_per_1k"] or 0),
+                provider=row["provider_id"],
+                display_name=row["display_name"],
+                context_window=row["context_window"],
+                max_output_tokens=row["max_output_tokens"],
+                supports_vision=row["supports_vision"],
+                supports_tools=row["supports_tools"],
+            )
             return row_dict
 
         return None
@@ -324,6 +313,70 @@ class ModelService:
         """
         rows = await self.db.fetch(query, tenant_id)
         return [self._row_to_dict(row) for row in rows]
+
+    async def sync_pricing_from_llm_models(
+        self,
+        tenant_id: str,
+        include_disabled: bool = True,
+    ) -> int:
+        """
+        Sync pricing records from llm_models to model_pricing table.
+
+        Returns:
+            Number of models successfully synced.
+        """
+        models = await self.list_models(
+            tenant_id=tenant_id,
+            include_disabled=include_disabled,
+        )
+        synced = 0
+        for row in models:
+            ok = await self._sync_single_model_pricing(
+                model_id=row["model_id"],
+                input_price_per_1k=float(row.get("input_price_per_1k") or 0),
+                output_price_per_1k=float(row.get("output_price_per_1k") or 0),
+                provider=row.get("provider_id"),
+                display_name=row.get("display_name"),
+                context_window=row.get("context_window"),
+                max_output_tokens=row.get("max_output_tokens"),
+                supports_vision=row.get("supports_vision"),
+                supports_tools=row.get("supports_tools"),
+            )
+            if ok:
+                synced += 1
+        return synced
+
+    async def _sync_single_model_pricing(
+        self,
+        *,
+        model_id: str,
+        input_price_per_1k: float,
+        output_price_per_1k: float,
+        provider: str | None = None,
+        display_name: str | None = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
+        supports_vision: bool | None = None,
+        supports_tools: bool | None = None,
+    ) -> bool:
+        try:
+            pricing_svc = get_pricing_service()
+            await pricing_svc.update_pricing(
+                model=model_id,
+                input_price_per_1k=input_price_per_1k,
+                output_price_per_1k=output_price_per_1k,
+                provider=provider,
+                display_name=display_name,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_vision=supports_vision,
+                supports_tools=supports_tools,
+            )
+            logger.info(f"Synced pricing for model {model_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to sync pricing for model {model_id}: {e}")
+            return False
 
     def _row_to_dict(self, row) -> dict[str, Any]:
         """Convert database row to dictionary."""

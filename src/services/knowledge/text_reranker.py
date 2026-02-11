@@ -7,7 +7,7 @@ Optimized for low latency with:
 - Result caching
 
 Supported Providers:
-- DashScope (gte-rerank)
+- DashScope (gte-rerank-v2 / qwen3-rerank)
 - BGE Reranker (BAAI/bge-reranker-v2-m3)
 - Cohere (rerank-multilingual-v3.0)
 - Local Cross-Encoder (sentence-transformers)
@@ -146,7 +146,7 @@ class AsyncTextReranker:
     def __init__(
         self,
         api_key: str,
-        model: str = "gte-rerank",
+        model: str = "gte-rerank-v2",
         base_url: str | None = None,
     ):
         self.api_key = api_key
@@ -252,7 +252,7 @@ _reranker_cache: dict[str, AsyncTextReranker] = {}
 _reranker_cache_lock = threading.Lock()
 
 
-def get_text_reranker(api_key: str, model: str = "gte-rerank") -> AsyncTextReranker:
+def get_text_reranker(api_key: str, model: str = "gte-rerank-v2") -> AsyncTextReranker:
     """Get or create cached reranker instance."""
     key = f"{api_key[:8]}:{model}"
     with _reranker_cache_lock:
@@ -524,6 +524,63 @@ class LocalCrossEncoderReranker:
 # =============================================================================
 
 
+_DASHSCOPE_DEFAULT_MODEL = "gte-rerank-v2"
+_BGE_DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
+_COHERE_DEFAULT_MODEL = "rerank-multilingual-v3.0"
+_LOCAL_DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+
+
+def normalize_rerank_provider(provider: str | None, model: str | None = None) -> str:
+    """Normalize rerank provider to a canonical value."""
+    raw_provider = str(provider or "").strip().lower()
+    if raw_provider in {"dashscope", "gte", "aliyun"}:
+        return "dashscope"
+    if raw_provider in {"bge", "flagembedding", "baai"}:
+        return "bge"
+    if raw_provider in {"cohere"}:
+        return "cohere"
+    if raw_provider in {"local", "cross-encoder", "sentence-transformers"}:
+        return "local"
+    if raw_provider:
+        logger.warning(f"Unknown rerank provider '{provider}', infer from model")
+
+    model_text = str(model or "").strip().lower()
+    if model_text.startswith("baai/") or "bge-reranker" in model_text:
+        return "bge"
+    if model_text.startswith("rerank-multilingual"):
+        return "cohere"
+    if model_text.startswith("cross-encoder/"):
+        return "local"
+    return "dashscope"
+
+
+def normalize_rerank_model(provider: str | None, model: str | None) -> str:
+    """Normalize rerank model by provider with backward-compatible aliases."""
+    normalized_provider = normalize_rerank_provider(provider, model)
+    model_text = str(model or "").strip()
+    model_text_lower = model_text.lower()
+
+    if normalized_provider == "dashscope":
+        if not model_text or model_text_lower in {"gte-rerank", "gte-reranker", "default"}:
+            return _DASHSCOPE_DEFAULT_MODEL
+        return model_text
+
+    if normalized_provider == "bge":
+        if not model_text:
+            return _BGE_DEFAULT_MODEL
+        if model_text_lower == "bge-reranker-v2-m3":
+            return _BGE_DEFAULT_MODEL
+        return model_text
+
+    if normalized_provider == "cohere":
+        return model_text or _COHERE_DEFAULT_MODEL
+
+    if normalized_provider == "local":
+        return model_text or _LOCAL_DEFAULT_MODEL
+
+    return model_text or _DASHSCOPE_DEFAULT_MODEL
+
+
 def create_reranker(
     provider: str = "dashscope",
     api_key: str | None = None,
@@ -552,42 +609,41 @@ def create_reranker(
         # Cohere
         reranker = create_reranker(provider="cohere", api_key="...")
     """
-    provider = provider.lower()
+    normalized_provider = normalize_rerank_provider(provider, model)
+    normalized_model = normalize_rerank_model(normalized_provider, model)
 
-    if provider in ("dashscope", "gte", "aliyun"):
+    if normalized_provider == "dashscope":
         if not api_key:
             raise ValueError("API key required for DashScope reranker")
         return AsyncTextReranker(
             api_key=api_key,
-            model=model or "gte-rerank",
+            model=normalized_model,
             **kwargs,
         )
 
-    elif provider in ("bge", "flagembedding", "baai"):
+    if normalized_provider == "bge":
         return BGEReranker(
-            model=model or "BAAI/bge-reranker-v2-m3",
+            model=normalized_model,
             **kwargs,
         )
 
-    elif provider in ("cohere",):
+    if normalized_provider == "cohere":
         if not api_key:
             raise ValueError("API key required for Cohere reranker")
         return CohereReranker(
             api_key=api_key,
-            model=model or "rerank-multilingual-v3.0",
+            model=normalized_model,
         )
 
-    elif provider in ("local", "cross-encoder", "sentence-transformers"):
+    if normalized_provider == "local":
         return LocalCrossEncoderReranker(
-            model=model or "cross-encoder/ms-marco-MiniLM-L-12-v2",
+            model=normalized_model,
             **kwargs,
         )
 
-    else:
-        logger.warning(f"Unknown provider '{provider}', defaulting to DashScope")
-        if not api_key:
-            raise ValueError("API key required for default DashScope reranker")
-        return AsyncTextReranker(api_key=api_key, model=model or "gte-rerank")
+    if not api_key:
+        raise ValueError("API key required for default DashScope reranker")
+    return AsyncTextReranker(api_key=api_key, model=normalized_model)
 
 
 # =============================================================================

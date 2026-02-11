@@ -449,7 +449,7 @@ class RetrievalConfig:
             ),
             rerank=RerankConfig(
                 enabled=bool(data.get("rerank", False)),
-                model=str(data.get("rerank_model", "gte-rerank")),
+                model=str(data.get("rerank_model", "gte-rerank-v2")),
                 top_n=int(data["rerank_top_n"]) if data.get("rerank_top_n") is not None else None,
             ),
             mmr=MMRConfig(

@@ -36,6 +36,9 @@ class DatabaseSettings(BaseModel):
     # Connection pool settings
     pool_min_size: int = 2
     pool_max_size: int = 10
+    # API key usage stats flush strategy (0 disables background batching)
+    api_key_usage_flush_interval_seconds: int = 2
+    api_key_usage_flush_batch_size: int = 100
 
 
 class RedisSettings(BaseModel):
@@ -285,6 +288,10 @@ class KnowledgeSettings(BaseModel):
     islamic_profile: KnowledgeIslamicProfileSettings = Field(
         default_factory=KnowledgeIslamicProfileSettings
     )
+    # Retrieval latency controls
+    dataset_fanout_max_concurrency: int = 3
+    retrieval_query_max_concurrency: int = 3
+    retrieval_cache_ttl_seconds: int = 45
 
     # =============================================
     # Text Embedding Configuration (for text-only datasets)
@@ -488,6 +495,8 @@ class ProxySettings(BaseModel):
 
     # 配置缓存 TTL（秒）
     config_cache_ttl: float = 60.0
+    # 服务访问约束缓存 TTL（秒）
+    constraint_cache_ttl_seconds: float = 30.0
 
     # 计费配置
     billing_enabled: bool = True

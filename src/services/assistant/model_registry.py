@@ -178,8 +178,8 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=128000,
             max_output_tokens=65536,
             supports_vision=False,
-            input_price_per_1k=0.003,
-            output_price_per_1k=0.012,
+            input_price_per_1k=0.0011,
+            output_price_per_1k=0.0044,
         ),
     ],
     ModelProvider.ANTHROPIC: [
@@ -222,8 +222,8 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=64000,
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.00014,
-            output_price_per_1k=0.00028,
+            input_price_per_1k=0.00028,
+            output_price_per_1k=0.00042,
         ),
         ModelInfo(
             id="deepseek-reasoner",
@@ -232,8 +232,8 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=64000,
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.00055,
-            output_price_per_1k=0.00219,
+            input_price_per_1k=0.00028,
+            output_price_per_1k=0.00042,
         ),
     ],
     ModelProvider.DASHSCOPE: [
@@ -311,7 +311,7 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             max_output_tokens=65536,
             supports_vision=True,
             input_price_per_1k=0.00125,  # $1.25 per 1M
-            output_price_per_1k=0.005,  # $5 per 1M
+            output_price_per_1k=0.01,  # $10 per 1M
             access_level=ModelAccessLevel.ADMIN,  # 高价模型
         ),
         ModelInfo(
@@ -321,8 +321,8 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.000075,  # $0.075 per 1M
-            output_price_per_1k=0.0003,  # $0.30 per 1M
+            input_price_per_1k=0.0003,  # $0.30 per 1M
+            output_price_per_1k=0.0025,  # $2.50 per 1M
             access_level=ModelAccessLevel.PREMIUM,  # 性价比较高，付费用户可用
         ),
         ModelInfo(
@@ -332,8 +332,8 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.00005,
-            output_price_per_1k=0.0002,
+            input_price_per_1k=0.0001,
+            output_price_per_1k=0.0004,
             access_level=ModelAccessLevel.PUBLIC,  # 最便宜的Google模型，普通用户可用
         ),
     ],

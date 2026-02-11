@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
 
+from .pricing_catalog import resolve_pricing, to_model_pricing_defaults
+
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
@@ -26,29 +28,7 @@ _pricing_service: ModelPricingService | None = None
 
 
 # Default pricing when database is not available
-DEFAULT_PRICING: dict[str, dict[str, Any]] = {
-    # OpenAI Models
-    "gpt-4o": {"input": 0.0025, "output": 0.01, "provider": "openai"},
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006, "provider": "openai"},
-    "gpt-4-turbo": {"input": 0.01, "output": 0.03, "provider": "openai"},
-    "gpt-4": {"input": 0.03, "output": 0.06, "provider": "openai"},
-    "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015, "provider": "openai"},
-    # Anthropic Models
-    "claude-3-opus": {"input": 0.015, "output": 0.075, "provider": "anthropic"},
-    "claude-3-sonnet": {"input": 0.003, "output": 0.015, "provider": "anthropic"},
-    "claude-3-5-sonnet": {"input": 0.003, "output": 0.015, "provider": "anthropic"},
-    "claude-3-haiku": {"input": 0.00025, "output": 0.00125, "provider": "anthropic"},
-    # DeepSeek Models
-    "deepseek-chat": {"input": 0.00014, "output": 0.00028, "provider": "deepseek"},
-    "deepseek-coder": {"input": 0.00014, "output": 0.00028, "provider": "deepseek"},
-    # DashScope Models
-    "qwen-turbo": {"input": 0.0008, "output": 0.002, "provider": "dashscope"},
-    "qwen-plus": {"input": 0.004, "output": 0.012, "provider": "dashscope"},
-    "qwen-max": {"input": 0.02, "output": 0.06, "provider": "dashscope"},
-    "qwen-vl-plus": {"input": 0.008, "output": 0.008, "provider": "dashscope"},
-    # Default
-    "default": {"input": 0.001, "output": 0.002, "provider": "unknown"},
-}
+DEFAULT_PRICING: dict[str, dict[str, Any]] = to_model_pricing_defaults()
 
 
 @dataclass
@@ -338,11 +318,12 @@ class ModelPricingService:
 
     def _get_default_price(self, model: str) -> ModelPrice:
         """Get default price for unknown model."""
+        pricing = resolve_pricing(model)
         return ModelPrice(
             model=model,
-            provider="unknown",
-            input_price_per_1k=Decimal("0.001"),
-            output_price_per_1k=Decimal("0.002"),
+            provider=pricing.get("provider", "unknown"),
+            input_price_per_1k=Decimal(str(pricing["input"])),
+            output_price_per_1k=Decimal(str(pricing["output"])),
         )
 
 

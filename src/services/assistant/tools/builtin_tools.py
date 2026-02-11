@@ -9,6 +9,7 @@ Phase 2: Provides standard tools for the assistant:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -141,6 +142,7 @@ class KBSearchExecutor(ToolExecutor):
             contexts: list[dict[str, Any]] = []
             datasets_needing_reindex: list[str] = []
             dataset_errors: dict[str, str] = {}
+            retrieval_cache_hits = 0
 
             # If no datasets specified, return early with clear guidance for the LLM
             # This prevents expensive list_datasets() + multi-dataset search operations
@@ -164,79 +166,66 @@ class KBSearchExecutor(ToolExecutor):
                     },
                 )
 
-            for dataset_id in dataset_ids:
+            knowledge_settings = getattr(
+                getattr(self.kb_service, "settings", None), "knowledge", None
+            )
+            dataset_fanout_concurrency = max(
+                int(getattr(knowledge_settings, "dataset_fanout_max_concurrency", 3) or 3),
+                1,
+            )
+            fanout_semaphore = asyncio.Semaphore(dataset_fanout_concurrency)
+
+            async def _search_one_dataset(dataset_id: str) -> dict[str, Any]:
+                ds_start = time.time()
                 try:
-                    ds_start = time.time()
-                    # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-                    # Set include_images based on intent (skip images for find_document intent)
-                    include_images = intent != "find_document"
-                    # Enable VLM reranking for image-focused queries
-                    vlm_rerank = intent in ("general", "find_image")
-
-                    results, meta = await self.kb_service.retrieve_with_images_v2(
-                        user=request.user,
-                        dataset_id=dataset_id,
-                        query=query,
-                        top_k=top_k,
-                        intent=intent,
-                        vlm_rerank=vlm_rerank,
-                        include_images=include_images,
-                        score_threshold=score_threshold,  # Pass threshold to retrieval
-                    )
-
-                    took_ms = (time.time() - ds_start) * 1000
-                    dataset_name = meta.get("dataset_name", dataset_id)
-                    dataset_chunks: list[dict[str, Any]] = []
-                    for r in results:
-                        r_meta = r.metadata or {}
-                        source_url = (
-                            r_meta.get("source_url")
-                            or r_meta.get("source")
-                            or r_meta.get("url")
-                            or r_meta.get("document_url")
-                            or r_meta.get("file_url")
+                    async with fanout_semaphore:
+                        # Use retrieve_with_images_v2 for multimodal retrieval with intent support
+                        # Set include_images based on intent (skip images for find_document intent)
+                        include_images = intent != "find_document"
+                        # Enable VLM reranking for image-focused queries
+                        vlm_rerank = intent in ("general", "find_image")
+                        results, meta = await self.kb_service.retrieve_with_images_v2(
+                            user=request.user,
+                            dataset_id=dataset_id,
+                            query=query,
+                            top_k=top_k,
+                            intent=intent,
+                            vlm_rerank=vlm_rerank,
+                            include_images=include_images,
+                            score_threshold=score_threshold,  # Pass threshold to retrieval
                         )
-                        citation_text = r_meta.get("citation_text") or (
-                            r.text[:200] if r.text else ""
-                        )
-                        item = {
-                            "content": r.text,  # RetrieveResult uses 'text' not 'content'
-                            "score": r.score,
-                            "dataset_id": dataset_id,
-                            "dataset_name": dataset_name,
-                            "segment_id": getattr(r, "segment_id", None),
-                            "document_id": getattr(r, "document_id", None),
-                            "image_url": getattr(r, "image_url", None) or r_meta.get("image_url"),
-                            "citation_text": citation_text,
-                            "source_url": source_url,
-                            "metadata": r_meta,
-                        }
-                        all_results.append(item)
-                        dataset_chunks.append(item)
+                    return {
+                        "dataset_id": dataset_id,
+                        "results": results,
+                        "meta": meta,
+                        "took_ms": (time.time() - ds_start) * 1000,
+                        "error": None,
+                    }
+                except Exception as exc:
+                    return {
+                        "dataset_id": dataset_id,
+                        "results": [],
+                        "meta": {},
+                        "took_ms": (time.time() - ds_start) * 1000,
+                        "error": str(exc),
+                    }
 
-                    contexts.append(
-                        {
-                            "dataset_id": dataset_id,
-                            "dataset_name": dataset_name,
-                            "chunks": dataset_chunks,
-                            "query": query,
-                            "took_ms": took_ms,
-                        }
-                    )
-
-                except Exception as e:
-                    took_ms = (time.time() - ds_start) * 1000
-                    msg = str(e)
+            search_outcomes = await asyncio.gather(
+                *[_search_one_dataset(dataset_id) for dataset_id in dataset_ids]
+            )
+            for outcome in search_outcomes:
+                dataset_id = str(outcome.get("dataset_id") or "")
+                took_ms = float(outcome.get("took_ms") or 0.0)
+                error_message = outcome.get("error")
+                if error_message:
+                    msg = str(error_message)
                     dataset_errors[dataset_id] = msg[:500]
-                    # Propagate dataset "needs reindex" failures explicitly.
                     if (
                         "require re-indexing" in msg
                         or "require reindex" in msg
                         or "re-index" in msg
                     ):
                         datasets_needing_reindex.append(dataset_id)
-                    # Emit an empty context entry even on errors so the UI can stop "searching..."
-                    # and show diagnostics via tool card/result.
                     contexts.append(
                         {
                             "dataset_id": dataset_id,
@@ -247,8 +236,51 @@ class KBSearchExecutor(ToolExecutor):
                             "error": msg[:500],
                         }
                     )
-                    logger.warning(f"Failed to search dataset {dataset_id}: {e}")
+                    logger.warning(f"Failed to search dataset {dataset_id}: {msg}")
                     continue
+
+                results = list(outcome.get("results") or [])
+                meta = outcome.get("meta") or {}
+                if bool(meta.get("retrieval_cache_hit")):
+                    retrieval_cache_hits += 1
+                dataset_name = meta.get("dataset_name", dataset_id)
+                dataset_chunks: list[dict[str, Any]] = []
+                for r in results:
+                    r_meta = r.metadata or {}
+                    source_url = (
+                        r_meta.get("source_url")
+                        or r_meta.get("source")
+                        or r_meta.get("url")
+                        or r_meta.get("document_url")
+                        or r_meta.get("file_url")
+                    )
+                    citation_text = r_meta.get("citation_text") or (r.text[:200] if r.text else "")
+                    item = {
+                        "content": r.text,  # RetrieveResult uses 'text' not 'content'
+                        "score": r.score,
+                        "dataset_id": dataset_id,
+                        "dataset_name": dataset_name,
+                        "segment_id": getattr(r, "segment_id", None),
+                        "document_id": getattr(r, "document_id", None),
+                        "image_url": getattr(r, "image_url", None) or r_meta.get("image_url"),
+                        "citation_text": citation_text,
+                        "source_url": source_url,
+                        "metadata": r_meta,
+                    }
+                    all_results.append(item)
+                    dataset_chunks.append(item)
+
+                contexts.append(
+                    {
+                        "dataset_id": dataset_id,
+                        "dataset_name": dataset_name,
+                        "chunks": dataset_chunks,
+                        "query": query,
+                        "took_ms": took_ms,
+                        "retrieval_cache_hit": bool(meta.get("retrieval_cache_hit")),
+                        "retrieval_query_fingerprint": meta.get("retrieval_query_fingerprint"),
+                    }
+                )
 
             # Sort by score and limit
             all_results.sort(key=lambda x: x["score"], reverse=True)
@@ -275,6 +307,7 @@ class KBSearchExecutor(ToolExecutor):
                         "datasets_searched": len(dataset_ids),
                         "query": query,
                         "intent": intent,
+                        "retrieval_cache_hits": retrieval_cache_hits,
                         "datasets_needing_reindex": datasets_needing_reindex,
                         "dataset_errors": dataset_errors,
                         "contexts": contexts,
@@ -300,6 +333,7 @@ class KBSearchExecutor(ToolExecutor):
                         "datasets_searched": len(dataset_ids),
                         "query": query,
                         "intent": intent,
+                        "retrieval_cache_hits": retrieval_cache_hits,
                         "datasets_needing_reindex": datasets_needing_reindex,
                         "dataset_errors": dataset_errors,
                         "contexts": contexts,
@@ -324,6 +358,7 @@ class KBSearchExecutor(ToolExecutor):
                     "datasets_searched": len(dataset_ids),
                     "query": query,
                     "intent": intent,
+                    "retrieval_cache_hits": retrieval_cache_hits,
                     "datasets_needing_reindex": datasets_needing_reindex,
                     "dataset_errors": dataset_errors,
                     "contexts": contexts,

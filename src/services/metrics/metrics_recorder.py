@@ -11,26 +11,18 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...persistence.redis import RedisStorage
 
+from ..billing.pricing_catalog import microcents_to_usd, resolve_pricing, usd_to_microcents
+
 logger = logging.getLogger(__name__)
 
 # Global singleton instance
 _metrics_recorder: MetricsRecorder | None = None
-
-# Token pricing for cost estimation (per 1K tokens, USD)
-TOKEN_PRICING = {
-    "gpt-4": {"input": 0.03, "output": 0.06},
-    "gpt-4-turbo": {"input": 0.01, "output": 0.03},
-    "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
-    "claude-3-opus": {"input": 0.015, "output": 0.075},
-    "claude-3-sonnet": {"input": 0.003, "output": 0.015},
-    "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
-    "default": {"input": 0.001, "output": 0.002},
-}
 
 # TTL constants
 TTL_24H = 86400  # 24 hours
@@ -55,6 +47,14 @@ class MetricsRecorder:
     def _get_hour_str(self) -> str:
         """Get current hour as string (HH)"""
         return datetime.now().strftime("%H")
+
+    @staticmethod
+    def _cost_cents_key(date_str: str) -> str:
+        return f"metrics:tokens:cost:{date_str}"
+
+    @staticmethod
+    def _cost_microcents_key(date_str: str) -> str:
+        return f"metrics:tokens:cost_micro:{date_str}"
 
     async def record_request(
         self,
@@ -162,23 +162,28 @@ class MetricsRecorder:
             today = self._get_date_str()
 
             # Calculate cost
-            pricing = TOKEN_PRICING.get(model, TOKEN_PRICING["default"])
-            cost = (input_tokens / 1000 * pricing["input"]) + (
-                output_tokens / 1000 * pricing["output"]
-            )
-            cost_cents = int(cost * 100)  # Store in cents for integer precision
+            pricing = resolve_pricing(model)
+            input_cost_usd = (Decimal(input_tokens) / 1000) * Decimal(str(pricing["input"]))
+            output_cost_usd = (Decimal(output_tokens) / 1000) * Decimal(str(pricing["output"]))
+            cost_usd = input_cost_usd + output_cost_usd
+            cost_microcents = usd_to_microcents(cost_usd)
+            # Backward-compatible key kept for old consumers.
+            cost_cents = int(round(cost_microcents / 10000))
 
             pipe = self.redis._client.pipeline()
 
             # Global token counters
             input_key = f"metrics:tokens:input:{today}"
             output_key = f"metrics:tokens:output:{today}"
-            cost_key = f"metrics:tokens:cost:{today}"
+            cost_key = self._cost_cents_key(today)
+            cost_micro_key = self._cost_microcents_key(today)
 
             pipe.incrby(input_key, input_tokens)
             pipe.expire(input_key, TTL_7D)
             pipe.incrby(output_key, output_tokens)
             pipe.expire(output_key, TTL_7D)
+            pipe.incrby(cost_micro_key, cost_microcents)
+            pipe.expire(cost_micro_key, TTL_7D)
             pipe.incrby(cost_key, cost_cents)
             pipe.expire(cost_key, TTL_7D)
 
@@ -348,7 +353,8 @@ class MetricsRecorder:
             # Token metrics
             pipe.get(f"metrics:tokens:input:{today}")
             pipe.get(f"metrics:tokens:output:{today}")
-            pipe.get(f"metrics:tokens:cost:{today}")
+            pipe.get(self._cost_cents_key(today))
+            pipe.get(self._cost_microcents_key(today))
 
             # Run metrics
             pipe.get(f"metrics:runs:total:{today}")
@@ -370,15 +376,16 @@ class MetricsRecorder:
             input_tokens = int(results[4] or 0)
             output_tokens = int(results[5] or 0)
             cost_cents = int(results[6] or 0)
-            total_runs = int(results[7] or 0)
-            runs_success = int(results[8] or 0)
-            runs_duration_sum = int(results[9] or 0)
-            runs_duration_count = int(results[10] or 0)
+            cost_microcents = int(results[7] or 0)
+            total_runs = int(results[8] or 0)
+            runs_success = int(results[9] or 0)
+            runs_duration_sum = int(results[10] or 0)
+            runs_duration_count = int(results[11] or 0)
 
-            # Parse hourly data (indices 11-34)
+            # Parse hourly data (indices 12-35)
             hourly_data = []
             for i in range(24):
-                count = int(results[11 + i] or 0)
+                count = int(results[12 + i] or 0)
                 hourly_data.append({"hour": f"{i:02d}:00", "count": count})
 
             # Calculate derived metrics
@@ -391,6 +398,12 @@ class MetricsRecorder:
             )
             avg_run_duration = (
                 int(runs_duration_sum / runs_duration_count) if runs_duration_count > 0 else 0
+            )
+
+            estimated_cost_usd = (
+                microcents_to_usd(cost_microcents)
+                if cost_microcents > 0
+                else round(cost_cents / 100, 6)
             )
 
             # Get percentiles
@@ -406,7 +419,7 @@ class MetricsRecorder:
                 "total_tokens": input_tokens + output_tokens,
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
-                "estimated_cost_usd": round(cost_cents / 100, 4),
+                "estimated_cost_usd": round(estimated_cost_usd, 6),
                 "total_runs": total_runs,
                 "run_success_rate": run_success_rate,
                 "avg_run_duration_ms": avg_run_duration,

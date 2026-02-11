@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from ...api.deps import AuthContext, get_auth_context
 from ...core.auth.jwt import decode_jwt_token
 from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
+from ...services.billing.pricing_catalog import microcents_to_usd
 from ...services.metrics import get_metrics_recorder
 from ...services.metrics.realtime_metrics import RealtimeSnapshot, get_realtime_metrics
 from ...services.metrics.usage_recorder import get_usage_recorder
@@ -599,8 +600,14 @@ async def get_timeseries(
 
                 elif metric == "cost":
                     cost_key = f"metrics:tokens:cost:{date_str}"
+                    cost_micro_key = f"metrics:tokens:cost_micro:{date_str}"
                     cost_cents = int(await redis._client.get(cost_key) or 0)
-                    value = cost_cents / 100
+                    cost_microcents = int(await redis._client.get(cost_micro_key) or 0)
+                    value = (
+                        microcents_to_usd(cost_microcents)
+                        if cost_microcents > 0
+                        else round(cost_cents / 100, 6)
+                    )
 
                 elif metric == "runs":
                     key = f"metrics:runs:total:{date_str}"

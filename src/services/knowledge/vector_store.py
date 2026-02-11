@@ -181,13 +181,22 @@ class VectorStore:
         )
 
         # Payload indexes for fast filtering.
-        for field_name in ("document_id", "segment_id"):
+        payload_indexes: tuple[tuple[str, qmodels.PayloadSchemaType], ...] = (
+            ("document_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("segment_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("source_type", qmodels.PayloadSchemaType.KEYWORD),
+            ("language", qmodels.PayloadSchemaType.KEYWORD),
+            ("madhab", qmodels.PayloadSchemaType.KEYWORD),
+            ("authority_rank", qmodels.PayloadSchemaType.INTEGER),
+            ("section_title", qmodels.PayloadSchemaType.KEYWORD),
+        )
+        for field_name, field_schema in payload_indexes:
             with contextlib.suppress(Exception):
                 await self._call(
-                    lambda: self._client.create_payload_index(
+                    lambda fn=field_name, fs=field_schema: self._client.create_payload_index(
                         collection_name=actual,
-                        field_name=field_name,
-                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                        field_name=fn,
+                        field_schema=fs,
                     )
                 )
 

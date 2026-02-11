@@ -214,6 +214,28 @@ class TestModelServicePricingSync:
             # Pricing sync should not be called
             mock_pricing_svc.update_pricing.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_sync_pricing_from_llm_models(self, model_service, mock_db, sample_model_row):
+        """Startup sync should mirror llm_models pricing into model_pricing."""
+        mock_db.fetch.return_value = [sample_model_row]
+
+        with patch("src.services.llm.model_service.get_pricing_service") as mock_get_pricing:
+            mock_pricing_svc = MagicMock()
+            mock_pricing_svc.update_pricing = AsyncMock(return_value={"success": True})
+            mock_get_pricing.return_value = mock_pricing_svc
+
+            synced = await model_service.sync_pricing_from_llm_models(
+                tenant_id="test-tenant",
+                include_disabled=True,
+            )
+
+            assert synced == 1
+            mock_pricing_svc.update_pricing.assert_called_once()
+            call_kwargs = mock_pricing_svc.update_pricing.call_args.kwargs
+            assert call_kwargs["model"] == "gpt-4o"
+            assert call_kwargs["input_price_per_1k"] == 0.0025
+            assert call_kwargs["output_price_per_1k"] == 0.01
+
 
 class TestModelServicePricingValues:
     """Tests for pricing value handling."""

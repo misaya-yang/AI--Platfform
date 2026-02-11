@@ -219,6 +219,12 @@ class Container:
             ),
             pool_min_size=getattr(self.settings.database, "pool_min_size", 2),
             pool_max_size=getattr(self.settings.database, "pool_max_size", 10),
+            api_key_usage_flush_interval_seconds=getattr(
+                self.settings.database, "api_key_usage_flush_interval_seconds", 2
+            ),
+            api_key_usage_flush_batch_size=getattr(
+                self.settings.database, "api_key_usage_flush_batch_size", 100
+            ),
         )
 
     def _create_redis(self):

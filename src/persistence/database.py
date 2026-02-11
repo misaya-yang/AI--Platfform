@@ -7,6 +7,7 @@ PostgreSQL 数据库存储层
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -76,6 +77,8 @@ class DatabaseStorage:
         permission_cache_ttl_seconds: int = 60,
         pool_min_size: int = 2,
         pool_max_size: int = 10,
+        api_key_usage_flush_interval_seconds: int = 2,
+        api_key_usage_flush_batch_size: int = 100,
     ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
@@ -90,6 +93,13 @@ class DatabaseStorage:
         self._permission_cache_max_size = 10000  # Prevent unbounded memory growth
         self._permission_cache_ttl_seconds = max(int(permission_cache_ttl_seconds or 0), 0)
         self._permission_cache_lock = asyncio.Lock()
+        self._api_key_usage_flush_interval_seconds = max(
+            int(api_key_usage_flush_interval_seconds or 0), 0
+        )
+        self._api_key_usage_flush_batch_size = max(int(api_key_usage_flush_batch_size or 0), 0)
+        self._api_key_usage_buffer: dict[str, int] = {}
+        self._api_key_usage_lock = asyncio.Lock()
+        self._api_key_usage_task: asyncio.Task | None = None
 
     async def _get_cached_permissions(self, user_id: str) -> list[str] | None:
         if self._permission_cache_ttl_seconds <= 0:
@@ -133,6 +143,121 @@ class DatabaseStorage:
             else:
                 self._permission_cache.clear()
 
+    async def _update_api_key_usage_sync(self, key_hash: str) -> None:
+        """Fallback path: update usage counters synchronously."""
+        if not self._pool:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE api_keys SET
+                    last_used_at = NOW(),
+                    use_count = use_count + 1
+                WHERE key_hash = $1
+            """,
+                key_hash,
+            )
+
+    async def _flush_api_key_usage_buffer(self) -> None:
+        """Flush buffered API key usage counters in batch."""
+        if not self._pool:
+            return
+
+        async with self._api_key_usage_lock:
+            if not self._api_key_usage_buffer:
+                return
+            pending = self._api_key_usage_buffer
+            self._api_key_usage_buffer = {}
+
+        try:
+            rows = [(key_hash, count) for key_hash, count in pending.items() if count > 0]
+            if not rows:
+                return
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.executemany(
+                        """
+                        UPDATE api_keys SET
+                            last_used_at = NOW(),
+                            use_count = use_count + $2
+                        WHERE key_hash = $1
+                    """,
+                        rows,
+                    )
+        except Exception:
+            # Put counts back to buffer to avoid silently losing stats.
+            async with self._api_key_usage_lock:
+                for key_hash, count in pending.items():
+                    self._api_key_usage_buffer[key_hash] = (
+                        self._api_key_usage_buffer.get(key_hash, 0) + count
+                    )
+            raise
+
+    async def _run_api_key_usage_flusher(self) -> None:
+        """Background task to periodically flush buffered usage updates."""
+        interval = self._api_key_usage_flush_interval_seconds
+        if interval <= 0:
+            return
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await self._flush_api_key_usage_buffer()
+                except Exception as exc:
+                    logger.warning("Failed to flush API key usage batch: %s", exc)
+        except asyncio.CancelledError:
+            raise
+
+    async def _track_api_key_usage(self, key_hash: str) -> None:
+        """Track API key usage with async batching; fallback to sync on errors."""
+        if (
+            self._api_key_usage_flush_interval_seconds <= 0
+            or self._api_key_usage_flush_batch_size <= 1
+        ):
+            await self._update_api_key_usage_sync(key_hash)
+            return
+
+        try:
+            should_flush = False
+            async with self._api_key_usage_lock:
+                self._api_key_usage_buffer[key_hash] = (
+                    self._api_key_usage_buffer.get(key_hash, 0) + 1
+                )
+                should_flush = (
+                    len(self._api_key_usage_buffer) >= self._api_key_usage_flush_batch_size
+                )
+            if should_flush:
+                await self._flush_api_key_usage_buffer()
+        except Exception as exc:
+            logger.warning(
+                "API key usage batching failed for %s, falling back to sync update: %s",
+                key_hash[:8],
+                exc,
+            )
+            detached_from_buffer = False
+            async with self._api_key_usage_lock:
+                buffered_count = self._api_key_usage_buffer.get(key_hash, 0)
+                if buffered_count > 0:
+                    detached_from_buffer = True
+                    if buffered_count == 1:
+                        self._api_key_usage_buffer.pop(key_hash, None)
+                    else:
+                        self._api_key_usage_buffer[key_hash] = buffered_count - 1
+
+            try:
+                await self._update_api_key_usage_sync(key_hash)
+            except Exception as sync_exc:
+                logger.warning(
+                    "Fallback sync API key usage update failed for %s: %s",
+                    key_hash[:8],
+                    sync_exc,
+                )
+                if detached_from_buffer:
+                    async with self._api_key_usage_lock:
+                        self._api_key_usage_buffer[key_hash] = (
+                            self._api_key_usage_buffer.get(key_hash, 0) + 1
+                        )
+
     async def connect(self) -> None:
         """建立数据库连接池"""
         if not self.enabled:
@@ -147,6 +272,12 @@ class DatabaseStorage:
         logger.info(
             f"Database pool created: min_size={self._pool_min_size}, max_size={self._pool_max_size}"
         )
+        if (
+            self._api_key_usage_flush_interval_seconds > 0
+            and self._api_key_usage_flush_batch_size > 1
+            and self._api_key_usage_task is None
+        ):
+            self._api_key_usage_task = asyncio.create_task(self._run_api_key_usage_flusher())
         if self.auto_init:
             await self._auto_initialize_schema()
             await self._auto_apply_account_permission_migration()
@@ -160,6 +291,13 @@ class DatabaseStorage:
 
     async def close(self) -> None:
         """关闭连接池"""
+        if self._api_key_usage_task is not None:
+            self._api_key_usage_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._api_key_usage_task
+            self._api_key_usage_task = None
+        with contextlib.suppress(Exception):
+            await self._flush_api_key_usage_buffer()
         if self._pool:
             await self._pool.close()
             self._pool = None
@@ -2596,18 +2734,10 @@ class DatabaseStorage:
             """,
                 key_hash,
             )
-            if row:
-                # 更新使用统计
-                await conn.execute(
-                    """
-                    UPDATE api_keys SET
-                        last_used_at = NOW(),
-                        use_count = use_count + 1
-                    WHERE key_hash = $1
-                """,
-                    key_hash,
-                )
-            return self._row_to_dict(row) if row else None
+        if row:
+            with contextlib.suppress(Exception):
+                await self._track_api_key_usage(key_hash)
+        return self._row_to_dict(row) if row else None
 
     async def list_api_keys(
         self, tenant_id: str | None = None, user_id: str | None = None, enabled: bool = None
