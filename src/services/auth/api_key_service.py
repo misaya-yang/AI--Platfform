@@ -52,6 +52,12 @@ class APIKeyService:
     def __init__(self, database: DatabaseStorage):
         self.db = database
 
+    @staticmethod
+    def _public_key_id_sql(alias: str = "") -> str:
+        """Stable public key_id expression compatible with legacy rows."""
+        prefix = f"{alias}." if alias else ""
+        return f"COALESCE({prefix}key_id, ('ak_legacy_' || {prefix}id::text))"
+
     async def create_api_key(
         self,
         name: str,
@@ -126,9 +132,12 @@ class APIKeyService:
 
         key_hash = hash_api_key(api_key)
 
-        query = """
+        public_key_id_expr = self._public_key_id_sql("ak")
+        query = f"""
             SELECT
-                ak.id, ak.key_id, ak.name, ak.user_id, ak.tenant_id,
+                ak.id,
+                {public_key_id_expr} AS key_id,
+                ak.name, ak.user_id, ak.tenant_id,
                 ak.scopes, ak.roles, ak.tier, ak.rate_limit,
                 ak.enabled, ak.expires_at
             FROM api_keys ak
@@ -203,7 +212,8 @@ class APIKeyService:
 
         query = f"""
             SELECT
-                key_id, key_prefix, name, description,
+                {self._public_key_id_sql()} AS key_id,
+                key_prefix, name, description,
                 user_id, tenant_id, scopes, roles, tier,
                 rate_limit, enabled as is_active, created_at,
                 ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
@@ -218,15 +228,17 @@ class APIKeyService:
 
     async def get_api_key(self, key_id: str) -> dict[str, Any] | None:
         """获取 API Key 详情（不返回实际的 key）"""
-        query = """
+        public_key_id_expr = self._public_key_id_sql()
+        query = f"""
             SELECT
-                key_id, key_prefix, name, description,
+                {public_key_id_expr} AS key_id,
+                key_prefix, name, description,
                 user_id, tenant_id, scopes, roles, tier,
                 rate_limit, enabled as is_active,
                 ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
                 created_at, last_used_at, expires_at, use_count
             FROM api_keys
-            WHERE key_id = $1
+            WHERE {public_key_id_expr} = $1
         """
 
         row = await self.db.fetchrow(query, key_id)
@@ -234,7 +246,8 @@ class APIKeyService:
 
     async def revoke_api_key(self, key_id: str, user_id: str | None = None) -> bool:
         """吊销 API Key（设置 enabled=FALSE）"""
-        conditions = ["key_id = $1"]
+        public_key_id_expr = self._public_key_id_sql()
+        conditions = [f"{public_key_id_expr} = $1"]
         params = [key_id]
 
         if user_id:
@@ -245,7 +258,7 @@ class APIKeyService:
             UPDATE api_keys
             SET enabled = FALSE, updated_at = NOW()
             WHERE {" AND ".join(conditions)}
-            RETURNING key_id
+            RETURNING {public_key_id_expr} AS key_id
         """
 
         row = await self.db.fetchrow(query, *params)
@@ -256,7 +269,8 @@ class APIKeyService:
 
     async def delete_api_key(self, key_id: str, user_id: str | None = None) -> bool:
         """删除 API Key"""
-        conditions = ["key_id = $1"]
+        public_key_id_expr = self._public_key_id_sql()
+        conditions = [f"{public_key_id_expr} = $1"]
         params = [key_id]
 
         if user_id:
@@ -266,7 +280,7 @@ class APIKeyService:
         query = f"""
             DELETE FROM api_keys
             WHERE {" AND ".join(conditions)}
-            RETURNING key_id
+            RETURNING {public_key_id_expr} AS key_id
         """
 
         row = await self.db.fetchrow(query, *params)
