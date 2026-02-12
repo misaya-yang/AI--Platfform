@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config.settings import Settings
+from ...core.exceptions import PermissionDeniedError
+from ...core.errors.exceptions import ResourceNotFoundError
 from ...core.observability.logging import get_logger
 from ...persistence.database import DatabaseStorage
 from .embedding import get_cached_embedder
@@ -350,12 +352,29 @@ class RetrievalService:
         query: str,
         config: RetrievalConfig | None = None,
         filters: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
     ) -> list[RetrieveResult]:
         """Retrieve relevant segments from dataset.
 
         Supports cross-language retrieval for Islamic content (EN <-> AR).
+
+        Args:
+            dataset_id: Dataset ID to search in.
+            query: Search query string.
+            config: Retrieval configuration.
+            filters: Additional filters to apply.
+            tenant_id: Tenant ID for multi-tenant isolation. If provided,
+                       validates dataset ownership and filters results.
+
+        Raises:
+            ResourceNotFoundError: If dataset does not exist.
+            PermissionDeniedError: If dataset does not belong to tenant.
         """
         config = config or RetrievalConfig()
+
+        # Validate dataset tenant ownership if tenant_id is provided
+        if tenant_id:
+            await self._validate_dataset_tenant(dataset_id, tenant_id)
 
         # Determine retrieval mode
         mode = config.mode
@@ -365,20 +384,20 @@ class RetrievalService:
         # Check if cross-language retrieval is enabled
         if config.enable_cross_language:
             return await self._retrieve_with_cross_language(
-                dataset_id, query, mode, config, filters
+                dataset_id, query, mode, config, filters, tenant_id
             )
 
         logger.info(f"Retrieving with mode={mode}, query='{query[:50]}...'")
 
         if mode == "dense":
-            return await self._dense_retrieval(dataset_id, query, config, filters)
+            return await self._dense_retrieval(dataset_id, query, config, filters, tenant_id)
         elif mode == "sparse":
             return await self._sparse_retrieval(dataset_id, query, config, filters)
         elif mode == "hybrid":
-            return await self._hybrid_retrieval(dataset_id, query, config, filters)
+            return await self._hybrid_retrieval(dataset_id, query, config, filters, tenant_id)
         else:
             # Default to dense
-            return await self._dense_retrieval(dataset_id, query, config, filters)
+            return await self._dense_retrieval(dataset_id, query, config, filters, tenant_id)
 
     async def _retrieve_with_cross_language(
         self,
@@ -387,6 +406,7 @@ class RetrievalService:
         mode: str,
         config: RetrievalConfig,
         filters: dict[str, Any] | None,
+        tenant_id: str | None = None,
     ) -> list[RetrieveResult]:
         """
         Retrieve with automatic cross-language query expansion.
@@ -413,13 +433,13 @@ class RetrievalService:
         # Create tasks for parallel execution
         async def retrieve_single(q: str) -> list[RetrieveResult]:
             if mode == "dense":
-                return await self._dense_retrieval(dataset_id, q, config, filters)
+                return await self._dense_retrieval(dataset_id, q, config, filters, tenant_id)
             elif mode == "sparse":
                 return await self._sparse_retrieval(dataset_id, q, config, filters)
             elif mode == "hybrid":
-                return await self._hybrid_retrieval(dataset_id, q, config, filters)
+                return await self._hybrid_retrieval(dataset_id, q, config, filters, tenant_id)
             else:
-                return await self._dense_retrieval(dataset_id, q, config, filters)
+                return await self._dense_retrieval(dataset_id, q, config, filters, tenant_id)
 
         # Run all queries (original + expanded)
         tasks = [retrieve_single(q) for q in expanded_queries]
@@ -509,18 +529,28 @@ class RetrievalService:
         query: str,
         config: RetrievalConfig,
         filters: dict[str, Any] | None,
+        tenant_id: str | None = None,
     ) -> list[RetrieveResult]:
-        """Dense retrieval using vector similarity."""
+        """Dense retrieval using vector similarity.
+
+        Args:
+            dataset_id: Dataset ID to search in.
+            query: Search query string.
+            config: Retrieval configuration.
+            filters: Additional filters to apply.
+            tenant_id: Tenant ID for multi-tenant isolation in vector search.
+        """
         # Get embedding
         embedder = await get_cached_embedder(self.settings)
         query_embedding = await embedder.embed_query(query)
 
-        # Search vector store
+        # Search vector store with tenant isolation
         if self.vector_store:
             vector_results = await self.vector_store.search(
                 collection_name=dataset_id,
                 query_vector=query_embedding,
                 top_k=config.top_k * 2,  # Get more for filtering
+                tenant_id=tenant_id,  # Pass tenant_id for filtering
                 filters=filters,
             )
         else:
@@ -627,6 +657,7 @@ class RetrievalService:
         query: str,
         config: RetrievalConfig,
         filters: dict[str, Any] | None,
+        tenant_id: str | None = None,
     ) -> list[RetrieveResult]:
         """Hybrid retrieval with parallel dense + sparse + optional rerank.
 
@@ -636,6 +667,13 @@ class RetrievalService:
         3. Query expansion (if enabled)
 
         Then: RRF fusion -> Optional Rerank -> Optional MMR
+
+        Args:
+            dataset_id: Dataset ID to search in.
+            query: Search query string.
+            config: Retrieval configuration.
+            filters: Additional filters to apply.
+            tenant_id: Tenant ID for multi-tenant isolation in vector search.
         """
         import time
 
@@ -648,6 +686,7 @@ class RetrievalService:
                 query,
                 RetrievalConfig(mode="dense", top_k=config.top_k * 3, use_mmr=False),
                 filters,
+                tenant_id,
             )
         )
         sparse_task = asyncio.create_task(
@@ -902,6 +941,32 @@ class RetrievalService:
     # ========================================================================
     # Helpers
     # ========================================================================
+
+    async def _validate_dataset_tenant(self, dataset_id: str, tenant_id: str) -> None:
+        """Validate that dataset belongs to the specified tenant.
+
+        Args:
+            dataset_id: Dataset ID to validate.
+            tenant_id: Expected tenant ID.
+
+        Raises:
+            ResourceNotFoundError: If dataset does not exist.
+            PermissionDeniedError: If dataset does not belong to tenant.
+        """
+        dataset = await self.db.get_dataset(dataset_id)
+        if not dataset:
+            logger.warning(f"Dataset not found: {dataset_id}")
+            raise ResourceNotFoundError("Dataset", dataset_id)
+
+        dataset_tenant = dataset.get("tenant_id", "")
+        if dataset_tenant and dataset_tenant != tenant_id:
+            logger.warning(
+                f"Tenant mismatch: dataset {dataset_id} belongs to tenant {dataset_tenant}, "
+                f"but request is from tenant {tenant_id}"
+            )
+            raise PermissionDeniedError("Access denied: dataset does not belong to your tenant")
+
+        logger.debug(f"Dataset {dataset_id} tenant validation passed for tenant {tenant_id}")
 
     async def _determine_optimal_mode(self, dataset_id: str, query: str) -> str:
         """Determine optimal retrieval mode for query."""

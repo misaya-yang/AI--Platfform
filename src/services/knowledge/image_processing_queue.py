@@ -66,6 +66,7 @@ class ImageProcessingTask:
     user_id: str
     tenant_id: str
     document_id: str
+    dataset_id: str  # Required for segment creation
     storage_key: str
     filename: str
     content_type: str
@@ -394,44 +395,90 @@ class ImageProcessingQueue:
         """
         Create an image segment in the database.
 
+        This method stores the image segment with its VLM-generated description
+        and metadata to the database for later retrieval and search.
+
         Args:
-            task: Processing task with results
+            task: Processing task with VLM description and embedding results
 
         Returns:
             Segment ID or None if creation failed
         """
         if not self.database:
+            logger.warning("Database not available, cannot create image segment")
             return None
 
         try:
-            # Prepare segment data
-            {
+            # Generate unique segment ID
+            segment_id = f"seg_{uuid.uuid4().hex[:16]}"
+            position = await self._get_next_segment_position(task.document_id)
+
+            # Calculate word count from VLM description
+            text_content = task.vlm_description or f"Image: {task.filename}"
+            token_count = len(text_content.split()) if text_content else 0
+
+            # Prepare image segment data and persist image-specific fields
+            segment_data = {
+                "segment_id": segment_id,
+                "dataset_id": task.dataset_id,
                 "document_id": task.document_id,
+                "position": position,
+                "text": text_content,
+                "token_count": token_count,  # Approximate token count
                 "content_type": "image",
-                "text": task.vlm_description or f"Image: {task.filename}",
+                "image_url": task.storage_key,
+                "image_filename": task.filename,
+                "image_media_type": task.content_type,
+                "image_file_size": task.file_size_bytes,
                 "metadata": {
                     **task.metadata,
                     "storage_key": task.storage_key,
                     "filename": task.filename,
-                    "content_type": task.content_type,
+                    "mime_type": task.content_type,
                     "file_size_bytes": task.file_size_bytes,
                     "has_vlm_description": bool(task.vlm_description),
+                    "processing_task_id": task.task_id,
                 },
             }
 
-            # Create segment in database
-            # Note: This is a placeholder - actual implementation depends on database schema
-            segment_id = f"seg_{uuid.uuid4().hex[:16]}"
+            # Persist through image-specific DB path to keep content_type/image fields intact
+            await self.database.save_image_segment(segment_data)
 
-            # Store in database using appropriate method
-            # await self.database.create_segment(segment_data)
-
-            logger.info(f"Created image segment {segment_id} for document {task.document_id}")
+            logger.info(
+                f"Created image segment {segment_id} for document {task.document_id} "
+                f"in dataset {task.dataset_id}"
+            )
             return segment_id
 
         except Exception as e:
-            logger.error(f"Failed to create image segment: {e}", exc_info=True)
+            logger.error(
+                f"Failed to create image segment for document {task.document_id}: {e}",
+                exc_info=True
+            )
             return None
+
+    async def _get_next_segment_position(self, document_id: str) -> int:
+        """Get the next available segment position for a document."""
+        if not self.database:
+            return 0
+
+        try:
+            text_positions = await self.database.get_segment_hashes_by_document(
+                document_id,
+                content_type="text",
+            )
+            image_positions = await self.database.get_segment_hashes_by_document(
+                document_id,
+                content_type="image",
+            )
+            max_position = max([*text_positions.keys(), *image_positions.keys()], default=-1)
+            return int(max_position) + 1
+        except Exception as exc:
+            logger.warning(
+                f"Failed to determine next segment position for document {document_id}: {exc}; "
+                "falling back to 0"
+            )
+            return 0
 
     def cleanup_old_tasks(self, max_age_hours: int = 24) -> int:
         """
@@ -493,6 +540,7 @@ def create_processing_task(
     user_id: str,
     tenant_id: str,
     document_id: str,
+    dataset_id: str,
     storage_key: str,
     filename: str,
     content_type: str,
@@ -506,6 +554,7 @@ def create_processing_task(
         user_id: User who uploaded the image
         tenant_id: Tenant ID
         document_id: Document to associate with
+        dataset_id: Dataset ID for segment creation
         storage_key: Storage key (S3/OSS path)
         filename: Original filename
         content_type: MIME type
@@ -520,6 +569,7 @@ def create_processing_task(
         user_id=user_id,
         tenant_id=tenant_id,
         document_id=document_id,
+        dataset_id=dataset_id,
         storage_key=storage_key,
         filename=filename,
         content_type=content_type,
