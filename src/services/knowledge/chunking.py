@@ -103,11 +103,16 @@ class TokenCounter:
         cjk_chars = len(_CJK_RANGE.findall(text))
         total_chars = len(text)
 
-        arabic_chars / max(total_chars, 1)
+        arabic_ratio = arabic_chars / max(total_chars, 1)
         cjk_ratio = cjk_chars / max(total_chars, 1)
 
         # Calculate result
-        if self.encoder:
+        # For Arabic-heavy text, use specialized Arabic token counter for better accuracy
+        # tiktoken doesn't handle Arabic morphology well (prefixes/suffixes add tokens)
+        if arabic_ratio > 0.5 and self.encoder:
+            # Use Arabic-specific heuristics for text with >50% Arabic content
+            result = self._count_arabic_tokens(text, arabic_ratio)
+        elif self.encoder:
             try:
                 result = len(self.encoder.encode(text))
             except (UnicodeEncodeError, ValueError, TypeError) as e:
@@ -187,8 +192,7 @@ class TokenCounter:
         # CJK characters
         cjk_count = len(_CJK_RANGE.findall(text))
 
-        # Arabic characters
-        len(_ARABIC_RANGE.findall(text))
+        # Arabic characters - count words after removing diacritics
         arabic_clean = _ARABIC_DIACRITICS.sub("", text)
         arabic_words = len([w for w in arabic_clean.split() if _ARABIC_RANGE.search(w)])
 
@@ -633,7 +637,7 @@ class ChunkingConfig:
         # Token limit resolution (backward compatible):
         # 1) Explicit token_limit/max_tokens
         # 2) Dify-style segmentation.max_tokens
-        # 3) Interpret chunk_size as tokens when use_token_count=True
+        # 3) For fixed-size mode, interpret chunk_size as tokens when use_token_count=True
         token_limit_source = "default"
         token_limit_raw = (
             data.get("token_limit")
@@ -649,26 +653,18 @@ class ChunkingConfig:
             token_limit_raw = segmentation.get("max_tokens")
             if token_limit_raw is not None:
                 token_limit_source = "segmentation"
+        chunk_size_explicit = data.get("chunk_size") is not None
         chunk_size_val: int | None = None
-        if data.get("chunk_size") is not None:
+        if chunk_size_explicit:
             try:
                 chunk_size_val = int(data.get("chunk_size"))
             except Exception:
                 chunk_size_val = None
-        if token_limit_raw is None and use_token_count and data.get("chunk_size") is not None:
-            if chunk_size_val:
-                if mode == ChunkingMode.FIXED_SIZE:
-                    # Fixed-size mode: chunk_size is the exact token limit.
-                    token_limit_raw = chunk_size_val
-                    token_limit_source = "chunk_size_tokens"
-                else:
-                    # Heuristic for non-fixed modes: treat small values as tokens, large as chars.
-                    if chunk_size_val <= 1200:
-                        token_limit_raw = chunk_size_val
-                        token_limit_source = "chunk_size_tokens"
-                    else:
-                        token_limit_raw = max(80, int(chunk_size_val / 4))
-                        token_limit_source = "chunk_size_chars"
+        if token_limit_raw is None and use_token_count and chunk_size_explicit and chunk_size_val:
+            if mode == ChunkingMode.FIXED_SIZE:
+                # Fixed-size mode: chunk_size is the exact token limit.
+                token_limit_raw = chunk_size_val
+                token_limit_source = "chunk_size_tokens"
         if token_limit_raw is None:
             token_limit_raw = 500
         token_limit = int(token_limit_raw)
@@ -706,6 +702,8 @@ class ChunkingConfig:
                 chunk_overlap_val = 300
 
         # Parent/child size & overlap defaults (token-aware)
+        parent_chunk_size_explicit = data.get("parent_chunk_size") is not None
+        child_chunk_size_explicit = data.get("child_chunk_size") is not None
         parent_chunk_size_val = int(data.get("parent_chunk_size", 8000))
         child_chunk_size_val = int(data.get("child_chunk_size", 2000))
         parent_overlap_val = data.get("parent_overlap")
@@ -747,22 +745,22 @@ class ChunkingConfig:
             child_overlap_val = 50
             parent_overlap_val = 50
 
-        # Treat chunk_size as token-based when use_token_count=True and size is small.
+        # Derive char/token settings for token-based mode while preserving explicit char sizes.
         if use_token_count:
             if mode == ChunkingMode.FIXED_SIZE:
                 if chunk_size_val is None:
                     chunk_size_val = int(token_limit)
             else:
-                if chunk_size_val is None or token_limit_source == "chunk_size_tokens":
+                if chunk_size_val is None:
                     chunk_size_val = max(int(token_limit * 4), 1000)
 
-            if child_chunk_size_val <= 1200:
+            if not child_chunk_size_explicit and child_chunk_size_val <= 1200:
                 if child_token_limit is None:
                     child_token_limit = int(child_chunk_size_val)
                 child_chunk_size_val = max(
                     int((child_token_limit or child_chunk_size_val) * 4), 1000
                 )
-            if parent_chunk_size_val <= 5000:
+            if not parent_chunk_size_explicit and parent_chunk_size_val <= 5000:
                 if parent_token_limit is None:
                     parent_token_limit = int(parent_chunk_size_val)
                 parent_chunk_size_val = max(
@@ -1981,7 +1979,7 @@ class RecursiveChunker(BaseChunker):
             )
             return [
                 self._create_chunk(t, i)
-                for i, t in enumerate(self._split_by_tokens(text, token_limit))
+                for i, t in enumerate(self._split_by_limits(text, token_limit))
             ]
 
         # Check if text should be split
@@ -2013,7 +2011,7 @@ class RecursiveChunker(BaseChunker):
         if not separators:
             return [
                 self._create_chunk(t, i)
-                for i, t in enumerate(self._split_by_tokens(text, token_limit))
+                for i, t in enumerate(self._split_by_limits(text, token_limit))
             ]
 
         sep = separators[0]
@@ -2022,7 +2020,7 @@ class RecursiveChunker(BaseChunker):
         if sep == "":
             return [
                 self._create_chunk(t, i)
-                for i, t in enumerate(self._split_by_tokens(text, token_limit))
+                for i, t in enumerate(self._split_by_limits(text, token_limit))
             ]
 
         parts = text.split(sep)
@@ -2032,6 +2030,7 @@ class RecursiveChunker(BaseChunker):
         chunks: list[Chunk] = []
         current_parts: list[str] = []
         current_tokens = 0
+        current_chars = 0
         sep_tokens = token_counter.count_tokens(sep) if sep else 0
 
         for part in parts:
@@ -2041,13 +2040,15 @@ class RecursiveChunker(BaseChunker):
 
             part_tokens = token_counter.count_tokens(part)
 
-            # If single part too large, recursively split it
-            if part_tokens > token_limit:
+            # If single part is too large by token or char constraints, split recursively
+            part_too_large = part_tokens > token_limit or len(part) > self.config.chunk_size
+            if part_too_large:
                 if current_parts:
                     completed_text = sep.join(current_parts)
                     chunks.append(self._create_chunk(completed_text, len(chunks)))
                     current_parts = []
                     current_tokens = 0
+                    current_chars = 0
                 sub_chunks = self._recursive_split_tokens(part, remaining_seps, depth + 1)
                 for sub in sub_chunks:
                     sub.index = len(chunks)
@@ -2056,20 +2057,25 @@ class RecursiveChunker(BaseChunker):
 
             # Check if adding this part exceeds limit
             projected = current_tokens + part_tokens
+            projected_chars = current_chars + len(part)
             if current_parts:
                 projected += sep_tokens
+                projected_chars += len(sep)
 
-            if projected > token_limit:
+            if projected > token_limit or projected_chars > self.config.chunk_size:
                 if current_parts:
                     completed_text = sep.join(current_parts)
                     chunks.append(self._create_chunk(completed_text, len(chunks)))
                 current_parts = [part]
                 current_tokens = part_tokens
+                current_chars = len(part)
             else:
                 if current_parts:
                     current_tokens += sep_tokens
+                    current_chars += len(sep)
                 current_parts.append(part)
                 current_tokens += part_tokens
+                current_chars += len(part)
 
         # Handle remaining parts - apply min/max constraints
         if current_parts:
@@ -2101,6 +2107,29 @@ class RecursiveChunker(BaseChunker):
                 chunks.append(self._create_chunk(completed_text, len(chunks)))
 
         return chunks
+
+    def _split_by_limits(self, text: str, token_limit: int) -> list[str]:
+        """Split text by token limits and enforce char hard-cap as a safety net."""
+        token_chunks = self._split_by_tokens(text, token_limit)
+        if not token_chunks:
+            return []
+
+        char_limit = max(int(self.config.chunk_size), 1)
+
+        final_chunks: list[str] = []
+        for chunk_text in token_chunks:
+            if len(chunk_text) <= char_limit:
+                if chunk_text.strip():
+                    final_chunks.append(chunk_text)
+                continue
+
+            for sub in self._split_with_overlap(
+                chunk_text, char_limit, max(int(self.config.chunk_overlap), 0)
+            ):
+                if sub.strip():
+                    final_chunks.append(sub)
+
+        return final_chunks
 
 
 class HierarchicalChunker(BaseChunker):
@@ -2365,13 +2394,41 @@ class AutomaticChunker(BaseChunker):
 
         # Analyze document characteristics
         has_images = any(re.search(p, text) for p in self.IMAGE_PATTERNS)
+        has_heading_structure = self._has_heading_structure(text)
 
         # Strategy 1: Handle documents with images
         if has_images and self.config.preserve_images:
             return self._chunk_with_image_awareness(text)
 
-        # Strategy 2: Default to parent-child indexing for automatic mode
-        return HierarchicalChunker(self.config).chunk(text)
+        # Strategy 2: Structured documents should preserve heading boundaries
+        if has_heading_structure:
+            return HeadingChunker(self.config).chunk(text)
+
+        # Strategy 3: Long plain documents benefit from hierarchical chunking
+        if len(text) > 5000:
+            return HierarchicalChunker(self.config).chunk(text)
+
+        # Strategy 4: General default
+        return RecursiveChunker(self.config).chunk(text)
+
+    def _has_heading_structure(self, text: str) -> bool:
+        """Detect whether a document likely has meaningful heading structure."""
+        patterns = self.config.heading_patterns or [
+            r"^#{1,6}\s+.+$",
+            r"^第[一二三四五六七八九十\d]+[章节条款]",
+            r"^[A-Z][A-Z\s]{4,}:?\s*$",
+        ]
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if not lines:
+            return False
+
+        heading_count = 0
+        for line in lines:
+            if any(re.match(pattern, line) for pattern in patterns):
+                heading_count += 1
+                if heading_count >= 2:
+                    return True
+        return False
 
     def _chunk_with_image_awareness(self, text: str) -> list[Chunk]:
         """

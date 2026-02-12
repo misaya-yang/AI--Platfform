@@ -182,6 +182,7 @@ class VectorStore:
 
         # Payload indexes for fast filtering.
         payload_indexes: tuple[tuple[str, qmodels.PayloadSchemaType], ...] = (
+            ("tenant_id", qmodels.PayloadSchemaType.KEYWORD),
             ("document_id", qmodels.PayloadSchemaType.KEYWORD),
             ("segment_id", qmodels.PayloadSchemaType.KEYWORD),
             ("source_type", qmodels.PayloadSchemaType.KEYWORD),
@@ -209,22 +210,55 @@ class VectorStore:
             lambda: self._client.upsert(collection_name=collection_name, points=list(points))
         )
 
-    async def delete_points(self, collection_name: str, point_ids: Sequence[str]) -> None:
+    async def delete_points(
+        self,
+        collection_name: str,
+        point_ids: Sequence[str],
+        tenant_id: str | None = None,
+    ) -> None:
+        """Delete points from collection, optionally verifying tenant ownership.
+
+        Args:
+            collection_name: Name of the collection.
+            point_ids: Sequence of point IDs to delete.
+            tenant_id: If provided, only delete points belonging to this tenant.
+        """
         ids = [pid for pid in point_ids if pid]
         if not ids:
             return
-        await self._call(
-            lambda: self._client.delete(
-                collection_name=collection_name,
-                points_selector=qmodels.PointIdsList(points=list(ids)),
+
+        if tenant_id:
+            # Use filter-based deletion to ensure tenant isolation
+            await self._call(
+                lambda: self._client.delete(
+                    collection_name=collection_name,
+                    points_selector=qmodels.FilterSelector(
+                        filter=qmodels.Filter(
+                            must=[
+                                qmodels.FieldCondition(
+                                    key="tenant_id",
+                                    match=qmodels.MatchValue(value=tenant_id),
+                                ),
+                                qmodels.HasIdCondition(has_id=ids),
+                            ]
+                        )
+                    ),
+                )
             )
-        )
+        else:
+            await self._call(
+                lambda: self._client.delete(
+                    collection_name=collection_name,
+                    points_selector=qmodels.PointIdsList(points=list(ids)),
+                )
+            )
 
     async def search(
         self,
         collection_name: str,
         query_vector: list[float],
         top_k: int = 5,
+        tenant_id: str | None = None,
         document_id: str | None = None,
         source_type: str | None = None,
         language: str | None = None,
@@ -233,7 +267,33 @@ class VectorStore:
         query_filter: qmodels.Filter | None = None,
         score_threshold: float | None = None,
     ) -> list[VectorSearchHit]:
+        """Search for similar vectors with optional tenant isolation.
+
+        Args:
+            collection_name: Name of the collection.
+            query_vector: Query embedding vector.
+            top_k: Number of results to return.
+            tenant_id: Tenant ID for multi-tenant isolation (recommended).
+            document_id: Filter by document ID.
+            source_type: Filter by source type.
+            language: Filter by language.
+            with_payload: Include payload in results.
+            with_vectors: Include vectors in results.
+            query_filter: Additional Qdrant filter.
+            score_threshold: Minimum score threshold.
+
+        Returns:
+            List of VectorSearchHit results.
+        """
         conditions = []
+        # Tenant isolation - should be first for security
+        if tenant_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="tenant_id",
+                    match=qmodels.MatchValue(value=tenant_id),
+                )
+            )
         if document_id:
             conditions.append(
                 qmodels.FieldCondition(
@@ -334,17 +394,29 @@ class VectorStore:
         query_vector: list[float],
         query_text: str,
         top_k: int = 5,
+        tenant_id: str | None = None,
         document_id: str | None = None,
         alpha: float = 0.75,
     ) -> list[VectorSearchHit]:
         """Hybrid search = vector candidates + lightweight lexical scoring.
 
-        alpha controls the weight of vector similarity in the final score.
+        Args:
+            collection_name: Name of the collection.
+            query_vector: Query embedding vector.
+            query_text: Query text for lexical scoring.
+            top_k: Number of results to return.
+            tenant_id: Tenant ID for multi-tenant isolation (recommended).
+            document_id: Filter by document ID.
+            alpha: Weight of vector similarity (0-1, higher = more vector weight).
+
+        Returns:
+            List of VectorSearchHit results with combined scores.
         """
         candidates = await self.search(
             collection_name=collection_name,
             query_vector=query_vector,
             top_k=max(int(top_k) * 4, int(top_k)),
+            tenant_id=tenant_id,
             document_id=document_id,
             with_payload=True,
         )
