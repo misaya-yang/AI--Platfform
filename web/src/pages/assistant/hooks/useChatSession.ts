@@ -2,13 +2,13 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
   chatStream,
-  SSEEventType,
   getArtifactDownloadUrl,
   type AssistantMessage,
   type WebSearchResult,
   type ArtifactInfo,
   getSessionArtifacts
 } from "@/api/assistant";
+import { SSEEventType } from "../sse-events";
 import {
   listSessions,
   createSession,
@@ -31,6 +31,9 @@ import type {
   GeneratedArtifact,
   AgentPhaseStatus,
   ReActPhase,
+  ProcessSummaryState,
+  ProcessStepItem,
+  ToolTimelineItem,
   // Agentic types
   TaskPlanningEventData,
   WorkingMemoryUpdateEventData,
@@ -108,6 +111,96 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
   }
   return baseMessage;
 };
+
+function initProcessSummary(runId?: string, startedAt?: number): ProcessSummaryState {
+  return {
+    collapsed: true,
+    runId,
+    status: "running",
+    startedAt,
+    steps: [],
+    tools: [],
+  };
+}
+
+function upsertStep(
+  steps: ProcessStepItem[],
+  incoming: ProcessStepItem
+): ProcessStepItem[] {
+  const idx = steps.findIndex((s) => s.id === incoming.id);
+  if (idx === -1) return [...steps, incoming];
+  const next = [...steps];
+  next[idx] = { ...next[idx], ...incoming };
+  return next;
+}
+
+function upsertTool(
+  tools: ToolTimelineItem[],
+  incoming: ToolTimelineItem
+): ToolTimelineItem[] {
+  const idx = tools.findIndex((s) => s.id === incoming.id);
+  if (idx === -1) return [...tools, incoming];
+  const next = [...tools];
+  next[idx] = { ...next[idx], ...incoming };
+  return next;
+}
+
+function summarizeToolResult(result: unknown): string | undefined {
+  if (result == null) return undefined;
+  if (typeof result === "string") {
+    return result.length > 120 ? `${result.slice(0, 120)}...` : result;
+  }
+  if (Array.isArray(result)) {
+    return `items: ${result.length}`;
+  }
+  if (typeof result === "object") {
+    const rec = result as Record<string, unknown>;
+    if (typeof rec.total_results === "number") return `results: ${rec.total_results}`;
+    if (typeof rec.count === "number") return `count: ${rec.count}`;
+    if (Array.isArray(rec.files)) return `files: ${rec.files.length}`;
+    if (Array.isArray(rec.citations)) return `citations: ${rec.citations.length}`;
+    try {
+      const text = JSON.stringify(rec);
+      return text.length > 120 ? `${text.slice(0, 120)}...` : text;
+    } catch {
+      return undefined;
+    }
+  }
+  return String(result);
+}
+
+function finalizeProcessSummary(
+  summary: ProcessSummaryState | undefined,
+  status: "succeeded" | "failed",
+  finishedAtMs: number,
+  keepFailed = false
+): ProcessSummaryState | undefined {
+  if (!summary) {
+    return summary;
+  }
+
+  const finalStatus =
+    keepFailed && summary.status === "failed" ? "failed" : status;
+  const totalDurationMs =
+    summary.totalDurationMs ??
+    (summary.startedAt ? finishedAtMs - summary.startedAt : undefined);
+
+  if (finalStatus === "failed") {
+    return {
+      ...summary,
+      status: "failed",
+      collapsed: false,
+      isErrorExpanded: true,
+      totalDurationMs,
+    };
+  }
+
+  return {
+    ...summary,
+    status: "succeeded",
+    totalDurationMs,
+  };
+}
 
 export function useChatSession() {
   const { t } = useTranslation();
@@ -411,6 +504,12 @@ export function useChatSession() {
       setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { ...m, searchStatus, firstTokenMs } : m));
     };
 
+    const updateAssistantMessage = (updater: (m: ChatMessageType) => ChatMessageType) => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantMessage.id ? updater(m) : m))
+      );
+    };
+
     try {
       const styleSystemPrompt = getStyleSystemPrompt(config.selected_style || "default");
       const history: AssistantMessage[] = messages.map((m) => ({ role: m.role, content: m.content }));
@@ -429,6 +528,9 @@ export function useChatSession() {
         web_search_enabled: config.web_search_enabled,
         web_search_max_results: 5,
         file_paths: filePaths.length > 0 ? filePaths : undefined,
+        execution_profile: config.execution_profile || "safe",
+        memory_mode: config.memory_mode || "auto",
+        os_agent_enabled: config.os_agent_enabled ?? false,
       }, abortControllerRef.current.signal);
 
       for await (const event of stream) {
@@ -519,7 +621,10 @@ export function useChatSession() {
 
           case "file_processed":
              const fileData = event.data as FileProcessedEventData;
-             const fileCount = fileData.image_count + (fileData.text_length > 0 ? 1 : 0);
+             const fileCount =
+               fileData.file_count ??
+               fileData.file_metadata?.length ??
+               fileData.image_count + (fileData.text_length > 0 ? 1 : 0);
              // Update existing "files" entry or add new one
              const hasFilesEntry = searchStatus.some(s => s.type === "files");
              if (hasFilesEntry) {
@@ -546,24 +651,195 @@ export function useChatSession() {
              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, ragEvaluation, ragCitations: evalData.citations } : m));
              break;
 
+          case SSEEventType.CONTEXT_BUDGET:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const budgetData = (event.data || {}) as Record<string, unknown>;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  contextBudget: {
+                    used_tokens:
+                      typeof budgetData.used_tokens === "number" ? budgetData.used_tokens : undefined,
+                    model_context_window:
+                      typeof budgetData.model_context_window === "number"
+                        ? budgetData.model_context_window
+                        : undefined,
+                    dropped_history_messages:
+                      typeof budgetData.dropped_history_messages === "number"
+                        ? budgetData.dropped_history_messages
+                        : undefined,
+                  },
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.CONTEXT_COMPACTED:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const compactData = (event.data || {}) as Record<string, unknown>;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  contextCompacted: {
+                    compacted:
+                      typeof compactData.compacted === "boolean" ? compactData.compacted : undefined,
+                    dropped_history_messages:
+                      typeof compactData.dropped_history_messages === "number"
+                        ? compactData.dropped_history_messages
+                        : undefined,
+                  },
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.QUEUE_STATE:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const queueData = (event.data || {}) as Record<string, unknown>;
+              const toolId =
+                (typeof queueData.tool_id === "string" && queueData.tool_id) ||
+                (typeof queueData.command_id === "string" && queueData.command_id) ||
+                "";
+              if (!toolId) return m;
+              const existing = prev.tools.find((tool) => tool.id === toolId);
+              if (!existing) return m;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: existing.id,
+                    name: existing.name,
+                    status: existing.status,
+                    queueState: typeof queueData.state === "string" ? queueData.state : existing.queueState,
+                  }),
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.APPROVAL_REQUIRED:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const approvalData = (event.data || {}) as Record<string, unknown>;
+              const toolId = typeof approvalData.tool_id === "string" ? approvalData.tool_id : "";
+              if (!toolId) return m;
+              const existing = prev.tools.find((tool) => tool.id === toolId);
+              if (!existing) return m;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  tools: upsertTool(prev.tools, {
+                    id: existing.id,
+                    name: existing.name,
+                    status: "approval_required",
+                    approvalId:
+                      typeof approvalData.approval_id === "string"
+                        ? approvalData.approval_id
+                        : existing.approvalId,
+                    summary:
+                      typeof approvalData.reason === "string" ? approvalData.reason : existing.summary,
+                  }),
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.APPROVAL_RESULT:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const approvalResultData = (event.data || {}) as Record<string, unknown>;
+              const toolId = typeof approvalResultData.tool_id === "string" ? approvalResultData.tool_id : "";
+              if (!toolId) return m;
+              const existing = prev.tools.find((tool) => tool.id === toolId);
+              if (!existing) return m;
+              const approved = approvalResultData.approved === true;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: existing.id,
+                    name: existing.name,
+                    status: approved ? "running" : "error",
+                    summary:
+                      typeof approvalResultData.reason === "string"
+                        ? approvalResultData.reason
+                        : existing.summary,
+                  }),
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.GATEWAY_DECISION:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const decisionData = (event.data || {}) as Record<string, unknown>;
+              const toolId = typeof decisionData.tool_id === "string" ? decisionData.tool_id : "";
+              if (!toolId) return m;
+              const existing = prev.tools.find((tool) => tool.id === toolId);
+              if (!existing) return m;
+              const reason = typeof decisionData.reason === "string" ? decisionData.reason : undefined;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: existing.id,
+                    name: existing.name,
+                    status: existing.status,
+                    summary: reason || existing.summary,
+                  }),
+                },
+              };
+            });
+            break;
+
           // === AG-UI Lifecycle Events ===
           case SSEEventType.RUN_STARTED:
             // Agent execution started - initialize working memory if needed
+            const runStartedData = event.data as { run_id?: string; timestamp?: number };
             if (!workingMemory) {
               setWorkingMemory({
                 goal: "",
                 tasks: [],
                 collectedInfo: [],
                 notes: [],
-                runId: (event.data as any)?.run_id,
+                runId: runStartedData?.run_id,
               });
             }
             setShowTaskPanel(true);
+            updateAssistantMessage((m) => ({
+              ...m,
+              processSummary: initProcessSummary(
+                runStartedData?.run_id,
+                runStartedData?.timestamp ?? now
+              ),
+            }));
             break;
 
           case SSEEventType.RUN_FINISHED:
             // Agent execution completed
             // Working memory stays visible for user reference
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  status: "succeeded",
+                  totalDurationMs: prev.startedAt ? now - prev.startedAt : prev.totalDurationMs,
+                },
+              };
+            });
             break;
 
           case SSEEventType.RUN_ERROR:
@@ -573,6 +849,20 @@ export function useChatSession() {
               ...prev,
               error: runErrorData.error,
             } : null);
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(runErrorData.run_id, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  runId: runErrorData.run_id || prev.runId,
+                  status: "failed",
+                  collapsed: false,
+                  isErrorExpanded: true,
+                  totalDurationMs: prev.startedAt ? now - prev.startedAt : prev.totalDurationMs,
+                },
+              };
+            });
             break;
 
           // === AG-UI Step Events (Manus-style) ===
@@ -628,6 +918,23 @@ export function useChatSession() {
               };
             });
             setShowTaskPanel(true);
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  currentStep: stepStartData.title,
+                  steps: upsertStep(prev.steps, {
+                    id: stepStartData.step_id,
+                    title: stepStartData.title,
+                    description: stepStartData.description,
+                    status: "running",
+                    startedAt: stepStartData.timestamp ?? now,
+                  }),
+                },
+              };
+            });
             break;
 
           case SSEEventType.STEP_FINISHED:
@@ -654,6 +961,27 @@ export function useChatSession() {
                   : t
               ),
             } : null);
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const status: ProcessStepItem["status"] =
+                stepFinishData.status === "failed" ? "failed" : "completed";
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  steps: upsertStep(prev.steps, {
+                    id: stepFinishData.step_id,
+                    title:
+                      prev.steps.find((s) => s.id === stepFinishData.step_id)?.title ||
+                      stepFinishData.step_id,
+                    status,
+                    finishedAt: stepFinishData.timestamp ?? now,
+                    durationMs: stepFinishData.duration_ms,
+                    error: stepFinishData.error,
+                  }),
+                },
+              };
+            });
             break;
 
           // === AG-UI Tool Call Events ===
@@ -692,19 +1020,47 @@ export function useChatSession() {
                 m.id === assistantMessage.id
                   ? {
                       ...m,
-                      toolCalls: [
-                        ...(m.toolCalls || []),
-                        {
-                          id: toolStartData.tool_call_id,
-                          name: toolStartData.tool_name,
-                          arguments: toolStartData.arguments || {},
-                          status: "running" as const,
-                        },
-                      ],
+                      toolCalls: (m.toolCalls || []).some(
+                        (tc) => tc.id === toolStartData.tool_call_id
+                      )
+                        ? (m.toolCalls || []).map((tc) =>
+                            tc.id === toolStartData.tool_call_id
+                              ? {
+                                  ...tc,
+                                  name: toolStartData.tool_name,
+                                  arguments: toolStartData.arguments || tc.arguments || {},
+                                  status: "running" as const,
+                                }
+                              : tc
+                          )
+                        : [
+                            ...(m.toolCalls || []),
+                            {
+                              id: toolStartData.tool_call_id,
+                              name: toolStartData.tool_name,
+                              arguments: toolStartData.arguments || {},
+                              status: "running" as const,
+                            },
+                          ],
                     }
                   : m
               )
             );
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: toolStartData.tool_call_id,
+                    name: toolStartData.tool_name,
+                    status: "running",
+                    startedAt: toolStartData.timestamp ?? now,
+                  }),
+                },
+              };
+            });
             break;
 
           case SSEEventType.TOOL_CALL_END:
@@ -723,6 +1079,27 @@ export function useChatSession() {
                 ),
               })),
             } : null);
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const existing = prev.tools.find((tool) => tool.id === toolEndData.tool_call_id);
+              if (!existing) return m;
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: existing.id,
+                    name: existing.name,
+                    status: existing.status === "running" ? "completed" : existing.status,
+                    finishedAt: toolEndData.timestamp ?? now,
+                    durationMs:
+                      existing.startedAt != null
+                        ? (toolEndData.timestamp ?? now) - existing.startedAt
+                        : existing.durationMs,
+                  }),
+                },
+              };
+            });
             break;
 
           case SSEEventType.TOOL_CALL_RESULT:
@@ -799,6 +1176,25 @@ export function useChatSession() {
                 );
               }
             }
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const existing = prev.tools.find((tool) => tool.id === toolResultData.tool_call_id);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  tools: upsertTool(prev.tools, {
+                    id: toolResultData.tool_call_id,
+                    name: existing?.name || toolResultData.tool_name || "tool",
+                    status: toolResultData.success ? "completed" : "error",
+                    finishedAt: toolResultData.timestamp ?? now,
+                    durationMs: toolResultData.duration_ms,
+                    summary: summarizeToolResult(toolResultData.result),
+                    error: toolResultData.success ? undefined : summarizeToolResult(toolResultData.result),
+                  }),
+                },
+              };
+            });
             break;
 
           // === Custom File Events ===
@@ -1068,21 +1464,26 @@ export function useChatSession() {
               const downloadUrl = artifactData.download_url || getArtifactDownloadUrl(artifactData.artifact_id);
 
               // Add to artifacts panel
-              setArtifacts((prev) => [
-                ...prev,
-                {
-                  id: artifactData.artifact_id,
-                  type: artifactData.type as any,
-                  format: artifactData.format,
-                  title: artifactData.title,
-                  url: downloadUrl,
-                  filename: artifactData.filename,
-                  mimeType: artifactData.mime_type,
-                  sizeBytes: artifactData.size_bytes,
-                  source: artifactData.source as any,
-                  createdAt: new Date(),
-                },
-              ]);
+              setArtifacts((prev) => {
+                if (prev.some((artifact) => artifact.id === artifactData.artifact_id)) {
+                  return prev;
+                }
+                return [
+                  ...prev,
+                  {
+                    id: artifactData.artifact_id,
+                    type: artifactData.type as any,
+                    format: artifactData.format,
+                    title: artifactData.title,
+                    url: downloadUrl,
+                    filename: artifactData.filename,
+                    mimeType: artifactData.mime_type,
+                    sizeBytes: artifactData.size_bytes,
+                    source: artifactData.source as any,
+                    createdAt: new Date(),
+                  },
+                ];
+              });
               setShowArtifacts(true);
 
               // Also add to current message's generatedArtifacts for inline display
@@ -1096,11 +1497,16 @@ export function useChatSession() {
                 mimeType: artifactData.mime_type,
                 sizeBytes: artifactData.size_bytes,
               };
-              setMessages(prev => prev.map(m =>
-                m.id === assistantMessage.id
-                  ? { ...m, generatedArtifacts: [...(m.generatedArtifacts || []), generatedArtifact] }
-                  : m
-              ));
+              setMessages((prev) =>
+                prev.map((m) => {
+                  if (m.id !== assistantMessage.id) return m;
+                  const nextGeneratedArtifacts = [...(m.generatedArtifacts || [])];
+                  if (!nextGeneratedArtifacts.some((artifact) => artifact.id === generatedArtifact.id)) {
+                    nextGeneratedArtifacts.push(generatedArtifact);
+                  }
+                  return { ...m, generatedArtifacts: nextGeneratedArtifacts };
+                })
+              );
             }
             break;
 
@@ -1124,18 +1530,51 @@ export function useChatSession() {
       }
 
       // Final update
+      const finishedAtMs = Date.now();
       setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
-        ...m, content, contexts, webSearchResults, usage, durationMs, firstTokenMs, isStreaming: false
+        ...m,
+        content,
+        contexts,
+        webSearchResults,
+        usage,
+        durationMs,
+        firstTokenMs,
+        isStreaming: false,
+        processSummary: finalizeProcessSummary(
+          m.processSummary,
+          "succeeded",
+          finishedAtMs,
+          true
+        ),
       } : m));
 
     } catch (error: any) {
       if (error.name !== "AbortError") {
+        const finishedAtMs = Date.now();
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m, content: `**Error:** ${error.message}`, isStreaming: false, firstTokenMs 
+          ...m,
+          content: `**Error:** ${error.message}`,
+          isStreaming: false,
+          firstTokenMs,
+          processSummary: finalizeProcessSummary(
+            m.processSummary,
+            "failed",
+            finishedAtMs
+          ),
         } : m));
       } else {
+        const finishedAtMs = Date.now();
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
-          ...m, content: content || "(Cancelled)", isStreaming: false, firstTokenMs 
+          ...m,
+          content: content || "(Cancelled)",
+          isStreaming: false,
+          firstTokenMs,
+          processSummary: finalizeProcessSummary(
+            m.processSummary,
+            "succeeded",
+            finishedAtMs,
+            true
+          ),
         } : m));
       }
     } finally {

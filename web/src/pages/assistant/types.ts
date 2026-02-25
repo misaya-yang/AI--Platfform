@@ -6,60 +6,11 @@
  * - Standard SSE event types
  */
 
-import type { WebSearchResult } from "@/api/assistant";
 import type { FileUploadResponse } from "@/api/files";
+import { SSEEventType, type SSEEventTypeValue } from "./sse-events";
 
-// =============================================================================
-// SSE Event Types (matches backend SSEEventType)
-// =============================================================================
-
-export const SSEEventType = {
-  STARTED: "started",  // Immediate response to reduce first-token latency
-  TEXT_DELTA: "text_delta",
-  STATUS: "status",  // Added for agent thinking status
-  THINKING_DELTA: "thinking_delta",
-  TOOL_CALL: "tool_call",
-  TOOL_RESULT: "tool_result",
-  CONTEXT_RETRIEVED: "context_retrieved",
-  WEB_SEARCH_RESULTS: "web_search_results",
-  FILE_PROCESSED: "file_processed",  // File upload processing complete
-  RAG_EVALUATION: "rag_evaluation",  // Phase 3: RAG quality metrics
-  CACHE_METRICS: "cache_metrics",  // KV-Cache optimization metrics
-  SESSION_CREATED: "session_created",
-  SESSION_UPDATED: "session_updated",
-  USAGE: "usage",
-  FINISH: "finish",
-  DONE: "done",
-  ERROR: "error",
-  // Output validation
-  OUTPUT_WARNINGS: "output_warnings",
-  // Code execution events
-  CODE_EXECUTION_START: "code_execution_start",
-  CODE_EXECUTION_OUTPUT: "code_execution_output",
-  CODE_EXECUTION_RESULT: "code_execution_result",
-  // Document/Image generation events
-  IMAGE_GENERATION_START: "image_generation_start",
-  IMAGE_GENERATION_RESULT: "image_generation_result",
-  DOCUMENT_GENERATION_START: "document_generation_start",
-  DOCUMENT_GENERATION_RESULT: "document_generation_result",
-  // Manus-style PPT outline events
-  OUTLINE_READY: "outline_ready",  // Slide outline parsed and ready for preview
-  // Artifact events
-  ARTIFACT_CREATED: "artifact_created",
-  // Agentic workflow events
-  WORKING_MEMORY_UPDATE: "working_memory_update",
-  TASK_PLANNING: "task_planning",
-  MEMORY_LOADED: "memory_loaded",
-  TOOL_ERROR: "tool_error",
-  // AG-UI step events
-  STEP_STARTED: "step_started",
-  STEP_FINISHED: "step_finished",
-  RUN_STARTED: "run_started",
-  RUN_FINISHED: "run_finished",
-  RUN_ERROR: "run_error",
-} as const;
-
-export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
+export { SSEEventType };
+export type { SSEEventTypeValue };
 
 // =============================================================================
 // Tool Call Structures (for Agentic workflows)
@@ -80,6 +31,59 @@ export interface ToolResult {
   duration_ms?: number;
 }
 
+export type ProcessStepStatus = "pending" | "running" | "completed" | "failed";
+export type ProcessToolStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "error"
+  | "approval_required";
+
+export interface ProcessStepItem {
+  id: string;
+  title: string;
+  description?: string;
+  status: ProcessStepStatus;
+  startedAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface ToolTimelineItem {
+  id: string;
+  name: string;
+  status: ProcessToolStatus;
+  startedAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
+  summary?: string;
+  error?: string;
+  queueState?: string;
+  approvalId?: string;
+}
+
+export interface ProcessSummaryState {
+  collapsed: boolean;
+  runId?: string;
+  status: "running" | "succeeded" | "failed";
+  startedAt?: number;
+  totalDurationMs?: number;
+  currentStep?: string;
+  isErrorExpanded?: boolean;
+  steps: ProcessStepItem[];
+  tools: ToolTimelineItem[];
+  contextBudget?: {
+    used_tokens?: number;
+    model_context_window?: number;
+    dropped_history_messages?: number;
+  };
+  contextCompacted?: {
+    compacted?: boolean;
+    dropped_history_messages?: number;
+  };
+}
+
 // =============================================================================
 // Citation Structures (for RAG traceability)
 // =============================================================================
@@ -92,6 +96,13 @@ export interface Citation {
   title?: string;
   score?: number;
   content_preview?: string;
+}
+
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  content: string;
+  score: number;
 }
 
 // =============================================================================
@@ -210,6 +221,18 @@ export interface GeneratedArtifact {
   content?: string;  // For markdown preview
 }
 
+export interface ArtifactWorkspaceGroup<T = GeneratedArtifact> {
+  id: "current_run" | "session_artifacts";
+  title: string;
+  items: T[];
+}
+
+export interface AssistantUiV2Flags {
+  enabled: boolean;
+  mobileBottomSheet: boolean;
+  framelessConversation: boolean;
+}
+
 // =============================================================================
 // Enhanced Chat Message (Phase 1)
 // =============================================================================
@@ -235,6 +258,7 @@ export interface ChatMessage {
   // Agentic extensions
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
+  processSummary?: ProcessSummaryState;
 
   // RAG context
   contexts?: RetrievedContext[];
@@ -348,10 +372,52 @@ export interface FileProcessedEventData {
   text_length: number;
   description_count: number;
   requires_rag: boolean;
-  files?: Array<{
+  file_count?: number;
+  file_metadata?: Array<{
     file_path: string;
-    type: "image" | "document";
+    file_type?: string;
+    error?: string;
   }>;
+}
+
+export interface ContextBudgetEventData {
+  used_tokens?: number;
+  model_context_window?: number;
+  dropped_history_messages?: number;
+}
+
+export interface ContextCompactedEventData {
+  compacted?: boolean;
+  dropped_history_messages?: number;
+}
+
+export interface QueueStateEventData {
+  tool_id?: string;
+  tool_name?: string;
+  command_id?: string;
+  state?: string;
+}
+
+export interface ApprovalRequiredEventData {
+  tool_id?: string;
+  tool_name?: string;
+  approval_id?: string;
+  reason?: string;
+}
+
+export interface ApprovalResultEventData {
+  tool_id?: string;
+  approval_id?: string;
+  approved?: boolean;
+  reason?: string;
+}
+
+export interface GatewayDecisionEventData {
+  tool_id?: string;
+  tool_name?: string;
+  policy_profile?: string;
+  decision?: string;
+  reason?: string;
 }
 
 // Task planning event data - sent when agent creates an execution plan

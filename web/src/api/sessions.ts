@@ -7,6 +7,9 @@ export interface SessionConfig {
   web_search_enabled?: boolean;
   temperature?: number;
   selected_style?: string;
+  execution_profile?: "safe" | "balanced" | "power";
+  memory_mode?: "auto" | "strict" | "off";
+  os_agent_enabled?: boolean;
 }
 
 export interface SessionSummary {

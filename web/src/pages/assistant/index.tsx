@@ -34,9 +34,15 @@ import {
 } from "@/api/assistant";
 import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
+import { cn } from "@/lib/utils";
 
 // Local Components & Hooks
-import { ChatMessage, CompactModelSelector, AgentTaskTimeline, type AgentTask } from "./components";
+import {
+  ChatMessage,
+  CompactModelSelector,
+  AgentTaskTimeline,
+  type AgentTask,
+} from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useChatSession } from "./hooks/useChatSession";
@@ -44,6 +50,8 @@ import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
 import i18n from "@/i18n";
+
+const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 
 // Error Boundary for ChatMessage rendering failures
 interface ErrorBoundaryProps {
@@ -108,6 +116,7 @@ export function AssistantPage() {
   const [input, setInput] = useState("");
   const [showLeftPanel, setShowLeftPanel] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   
   // 4. Complex Logic Hooks
@@ -184,10 +193,11 @@ export function AssistantPage() {
         setDatasets(datasetsData);
         setConfig(configData);
 
-        if (modelsData.length > 0 && !selectedModel) {
+        if (modelsData.length > 0) {
           const defaultId = configData.default_model_id || modelsData[0].id;
           const exists = modelsData.some((m) => m.id === defaultId);
-          setSelectedModel(exists ? defaultId : modelsData[0].id);
+          const fallbackModelId = exists ? defaultId : modelsData[0].id;
+          setSelectedModel((current) => current || fallbackModelId);
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
@@ -196,6 +206,14 @@ export function AssistantPage() {
       }
     }
     loadData();
+  }, []);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const sync = () => setIsMobile(mediaQuery.matches);
+    sync();
+    mediaQuery.addEventListener("change", sync);
+    return () => mediaQuery.removeEventListener("change", sync);
   }, []);
 
   // Sync settings when session changes
@@ -261,6 +279,9 @@ export function AssistantPage() {
         web_search_enabled: webSearchEnabled,
         temperature,
         selected_style: selectedStyle,
+        execution_profile: "safe",
+        memory_mode: "auto",
+        os_agent_enabled: false,
       },
       selectedDatasets,
       models,
@@ -315,7 +336,13 @@ export function AssistantPage() {
 
   return (
     <TooltipProvider>
-      <div className="flex flex-col bg-slate-50 dark:bg-slate-900 -m-6" style={{ height: "calc(100vh - 64px)", width: "calc(100% + 48px)" }}>
+      <div
+        className={cn(
+          "flex flex-col -m-6",
+          ASSISTANT_UI_V2 ? "assistant-v2 font-assistant" : "bg-slate-50 dark:bg-slate-900"
+        )}
+        style={{ height: "calc(100vh - 64px)", width: "calc(100% + 48px)" }}
+      >
         <div className="flex flex-1 overflow-hidden">
           
           {/* Left Sidebar */}
@@ -342,7 +369,7 @@ export function AssistantPage() {
           </AnimatePresence>
 
           {/* Main Content */}
-          <div className="flex-1 flex flex-col min-w-0 bg-slate-50 dark:bg-slate-900 relative">
+          <div className={cn("flex-1 flex flex-col min-w-0 relative", ASSISTANT_UI_V2 ? "assistant-v2" : "bg-slate-50 dark:bg-slate-900")}>
             {/* Header */}
             <div className="flex items-center gap-2 py-3 px-4 shrink-0">
               <Tooltip>
@@ -358,23 +385,35 @@ export function AssistantPage() {
 
             {/* Messages Area */}
             <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
-              <div className="max-w-3xl mx-auto px-6 py-8">
+              <div className={cn("mx-auto px-6 py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
                 {messages.length === 0 ? (
                   <WelcomeScreen />
                 ) : (
                   <div className="space-y-6">
                     {/* Manus-style task timeline for agentic workflows */}
-                    {showTaskPanel && workingMemory && workingMemory.tasks?.length > 0 && (
+                    {!ASSISTANT_UI_V2 && showTaskPanel && workingMemory && workingMemory.tasks?.length > 0 && (
                       <AgentTaskTimeline
                         goal={workingMemory.goal}
-                        tasks={workingMemory.tasks.map((task: any): AgentTask => ({
-                          id: task.id,
-                          title: task.description,
-                          status: task.status === "blocked" ? "failed" : task.status,
-                          result: task.result,
-                          error: task.error,
-                        }))}
-                        isThinking={isStreaming && workingMemory.tasks.some((t: any) => t.status === "in_progress")}
+                        tasks={workingMemory.tasks.map((task): AgentTask => {
+                          const timelineStatus: AgentTask["status"] =
+                            task.status === "blocked" || task.status === "failed"
+                              ? "failed"
+                              : task.status === "skipped"
+                                ? "completed"
+                                : task.status;
+
+                          return {
+                            id: task.id,
+                            title: task.description,
+                            status: timelineStatus,
+                            result: task.result,
+                            error: task.error,
+                          };
+                        })}
+                        isThinking={
+                          isStreaming &&
+                          workingMemory.tasks.some((task) => task.status === "in_progress")
+                        }
                         thinkingMessage={t("assistant.taskRunning")}
                         className="mb-4"
                       />
@@ -408,7 +447,7 @@ export function AssistantPage() {
                   animate={{ opacity: 1, scale: 1, x: 0 }}
                   exit={{ opacity: 0, scale: 0.8, x: 20 }}
                   transition={{ type: "spring", stiffness: 300, damping: 25 }}
-                  className="absolute right-4 bottom-[180px] z-20"
+                  className={cn("absolute right-4 bottom-[180px] z-20", isMobile && "bottom-[150px]")}
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -465,7 +504,7 @@ export function AssistantPage() {
 
           {/* Artifacts Panel */}
           <AnimatePresence>
-            {showArtifacts && (
+            {showArtifacts && !isMobile && (
               <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden flex-shrink-0">
                 <div className="h-full w-[400px]">
                   <ArtifactsPanel
@@ -480,6 +519,39 @@ export function AssistantPage() {
                   />
                 </div>
               </motion.aside>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {showArtifacts && isMobile && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-40 bg-black/45"
+                onClick={() => setShowArtifacts(false)}
+              >
+                <motion.div
+                  initial={{ y: "100%" }}
+                  animate={{ y: 0 }}
+                  exit={{ y: "100%" }}
+                  transition={{ type: "spring", damping: 28, stiffness: 260 }}
+                  className="absolute bottom-0 left-0 right-0 h-[78vh] rounded-t-2xl overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <ArtifactsPanel
+                    isOpen={showArtifacts}
+                    onClose={() => setShowArtifacts(false)}
+                    artifacts={artifacts}
+                    executionStatus={codeExecution.status}
+                    executionOutput={codeExecution.output}
+                    currentCode={codeExecution.code || undefined}
+                    executionTimeMs={codeExecution.executionTimeMs || undefined}
+                    outputFiles={codeExecution.outputFiles}
+                    className="h-full rounded-t-2xl"
+                  />
+                </motion.div>
+              </motion.div>
             )}
           </AnimatePresence>
 

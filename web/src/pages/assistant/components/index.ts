@@ -28,3 +28,4 @@ export type { DocumentPreviewProps } from "./DocumentPreview";
 
 // Parallel execution visualization
 export { ParallelExecutionView } from "./ParallelExecutionView";
+export { ProcessSummaryBar } from "./ProcessSummaryBar";

@@ -11,6 +11,8 @@ import type { UploadedFile } from "../hooks/useFileHandler";
 import { isImageFile, formatFileSize } from "@/api/files";
 import type { DatasetInfo, AssistantConfig, ModelInfo } from "@/api/assistant";
 
+const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+
 interface ChatInputAreaProps {
   input: string;
   setInput: (val: string) => void;
@@ -166,7 +168,7 @@ export function ChatInputArea({
       </AnimatePresence>
 
       <div className="p-4">
-        <div className="max-w-3xl mx-auto">
+        <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
           {/* Input container */}
           <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm focus-within:border-violet-300 dark:focus-within:border-violet-700 focus-within:shadow-lg focus-within:shadow-violet-500/5 transition-all duration-200">
             {/* Quick actions menu */}

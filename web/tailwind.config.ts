@@ -14,6 +14,14 @@ export default {
     },
     extend: {
       fontFamily: {
+        assistant: [
+          "\"IBM Plex Sans\"",
+          "\"Noto Sans SC\"",
+          "\"PingFang SC\"",
+          "\"Microsoft YaHei\"",
+          "system-ui",
+          "sans-serif",
+        ],
         sans: [
           "Inter",
           "-apple-system",

@@ -2357,6 +2357,18 @@
     "taskList": "Tasks",
     "taskRunning": "Task running...",
     "taskCompleted": "{{completed}}/{{total}} tasks completed",
+    "processSummary": {
+      "running": "Running {{tools}} tools",
+      "runningStep": "Running: {{step}}",
+      "completed": "{{tools}} tools · {{steps}} steps",
+      "failed": "Execution failed",
+      "steps": "Steps",
+      "tools": "Tools"
+    },
+    "workspace": {
+      "currentRun": "Current run",
+      "sessionArtifacts": "Session artifacts"
+    },
     "styles": {
       "custom": {
         "name": "Custom",

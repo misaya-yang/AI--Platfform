@@ -14,7 +14,29 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bot, User, Clock, MessageSquare, FileText, Image as ImageIcon, Database, Globe, Loader2, CheckCircle2, Zap, Brain, PenTool, Cog, Eye, ListTodo, ChevronRight, ChevronDown, Search } from "lucide-react";
+import {
+  Bot,
+  User,
+  Clock,
+  MessageSquare,
+  FileText,
+  Image as ImageIcon,
+  Database,
+  Globe,
+  Loader2,
+  CheckCircle2,
+  Zap,
+  Brain,
+  PenTool,
+  Cog,
+  Eye,
+  ListTodo,
+  ChevronRight,
+  ChevronDown,
+  Search,
+  Download,
+  ExternalLink,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import { WebSearchDisplay } from "./WebSearchDisplay";
@@ -22,9 +44,64 @@ import { ContextDisplay } from "./ContextDisplay";
 import { CitationDisplay } from "./CitationDisplay";
 import { DocumentPreview } from "./DocumentPreview";
 import type { ChatMessage as ChatMessageType, SearchStatusItem, AgentPhaseStatus } from "../types";
+import { ProcessSummaryBar } from "./ProcessSummaryBar";
 
 interface ChatMessageProps {
   message: ChatMessageType;
+}
+
+const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+
+function InlineArtifactCard({
+  artifact,
+}: {
+  artifact: NonNullable<ChatMessageType["generatedArtifacts"]>[number];
+}) {
+  const { t } = useTranslation();
+  const hasUrl = Boolean(artifact.url);
+  const format = (artifact.format || "file").toUpperCase();
+  const title = artifact.title || artifact.filename || "Artifact";
+  const meta = [format, artifact.sizeBytes ? `${Math.round(artifact.sizeBytes / 1024)} KB` : null]
+    .filter(Boolean)
+    .join(" · ");
+
+  const openArtifact = () => {
+    if (!artifact.url) return;
+    window.open(artifact.url, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div className="rounded-xl border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/60 p-3">
+      <div className="flex items-center gap-2">
+        <FileText className="h-4 w-4 text-[hsl(var(--assistant-accent))]" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-[hsl(var(--assistant-text-primary))] truncate">{title}</p>
+          <p className="text-[11px] text-[hsl(var(--assistant-text-secondary))]">{meta}</p>
+        </div>
+        {hasUrl && (
+          <>
+            <button
+              type="button"
+              onClick={openArtifact}
+              className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
+            >
+              <ExternalLink className="h-3 w-3" />
+              {t("common.openInNewTab", "Open")}
+            </button>
+            <a
+              href={artifact.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
+            >
+              <Download className="h-3 w-3" />
+              {t("artifact.download", "Save")}
+            </a>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /** Manus-style collapsible task panel */
@@ -335,8 +412,10 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
 /** Attachments display in message */
 function AttachmentsDisplay({
   attachments,
+  useV2,
 }: {
   attachments: ChatMessageType["attachments"];
+  useV2: boolean;
 }) {
   if (!attachments || attachments.length === 0) return null;
 
@@ -345,7 +424,11 @@ function AttachmentsDisplay({
       {attachments.map((att, idx) => (
         <div
           key={idx}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/20 backdrop-blur-sm text-xs text-white/90 border border-white/20"
+          className={
+            useV2
+              ? "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/80 text-[hsl(var(--assistant-text-secondary))]"
+              : "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/20 backdrop-blur-sm text-xs text-white/90 border border-white/20"
+          }
         >
           {att.type === "image" ? (
             <ImageIcon className="h-3.5 w-3.5" />
@@ -666,7 +749,8 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
-  // Show thinking when streaming but no content yet (regardless of tool calls)
+  const hasProcessSummary = ASSISTANT_UI_V2 && !!message.processSummary;
+  // Show thinking when streaming but no content yet
   const isThinking = message.isStreaming && !message.content;
 
   return (
@@ -703,8 +787,14 @@ export function ChatMessage({ message }: ChatMessageProps) {
       >
         {/* User message with bubble */}
         {isUser ? (
-          <div className="max-w-[85%] bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15">
-            <AttachmentsDisplay attachments={message.attachments} />
+          <div
+            className={
+              ASSISTANT_UI_V2
+                ? "max-w-[85%] bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-primary))] rounded-2xl rounded-tr-sm px-4 py-3 border border-[hsl(var(--assistant-border-soft))] shadow-sm"
+                : "max-w-[85%] bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15"
+            }
+          >
+            <AttachmentsDisplay attachments={message.attachments} useV2={ASSISTANT_UI_V2} />
             <div className="whitespace-pre-wrap leading-relaxed text-sm">
               {message.content}
             </div>
@@ -712,43 +802,47 @@ export function ChatMessage({ message }: ChatMessageProps) {
         ) : (
           /* Assistant message - GPT style without wrapper */
           <div className="w-full space-y-3">
-            {/* Thinking indicator - shown when streaming starts but no content yet */}
-            {isThinking && !hasToolCalls && (
-              <motion.div
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
-              >
-                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
-                  <div className="flex gap-1">
-                    {[0, 1, 2].map((i) => (
-                      <motion.div
-                        key={i}
-                        className="w-2 h-2 rounded-full bg-violet-500"
-                        animate={{ 
-                          scale: [1, 1.4, 1],
-                          opacity: [0.5, 1, 0.5] 
-                        }}
-                        transition={{ 
-                          duration: 1.2, 
-                          repeat: Infinity, 
-                          delay: i * 0.15,
-                          ease: "easeInOut"
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
-                  {t("assistant.thinking")}
-                </span>
-              </motion.div>
-            )}
-
-            {/* Tool calls display - always show when there are tool calls */}
-            {hasToolCalls && (
+            {hasProcessSummary && message.processSummary ? (
+              <ProcessSummaryBar summary={message.processSummary} />
+            ) : hasToolCalls ? (
               <ToolCallsDisplay toolCalls={message.toolCalls} isStreaming={!!message.isStreaming} />
-            )}
+            ) : isThinking ? (
+              ASSISTANT_UI_V2 ? (
+                <div className="text-xs text-[hsl(var(--assistant-text-secondary))]">
+                  {t("assistant.processSummary.running", "Running tools...")}
+                </div>
+              ) : (
+                <motion.div
+                  initial={{ opacity: 0, y: -4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
+                >
+                  <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
+                    <div className="flex gap-1">
+                      {[0, 1, 2].map((i) => (
+                        <motion.div
+                          key={i}
+                          className="w-2 h-2 rounded-full bg-violet-500"
+                          animate={{
+                            scale: [1, 1.4, 1],
+                            opacity: [0.5, 1, 0.5]
+                          }}
+                          transition={{
+                            duration: 1.2,
+                            repeat: Infinity,
+                            delay: i * 0.15,
+                            ease: "easeInOut"
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
+                    {t("assistant.thinking")}
+                  </span>
+                </motion.div>
+              )
+            ) : null}
 
             {/* Search status display */}
             {message.searchStatus && message.searchStatus.length > 0 && (
@@ -797,19 +891,27 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
             {/* Generated artifacts */}
             {!message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
-              <div className="mt-4 space-y-3">
-                {message.generatedArtifacts.map((artifact) => (
-                  <DocumentPreview
-                    key={artifact.id}
-                    title={artifact.title || artifact.filename || "Document"}
-                    content={artifact.content || ""}
-                    format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
-                    downloadUrl={artifact.url}
-                    defaultExpanded={false}
-                    maxHeight={300}
-                  />
-                ))}
-              </div>
+              ASSISTANT_UI_V2 ? (
+                <div className="mt-4 space-y-2">
+                  {message.generatedArtifacts.map((artifact) => (
+                    <InlineArtifactCard key={artifact.id} artifact={artifact} />
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {message.generatedArtifacts.map((artifact) => (
+                    <DocumentPreview
+                      key={artifact.id}
+                      title={artifact.title || artifact.filename || "Document"}
+                      content={artifact.content || ""}
+                      format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
+                      downloadUrl={artifact.url}
+                      defaultExpanded={false}
+                      maxHeight={300}
+                    />
+                  ))}
+                </div>
+              )
             )}
 
             {/* Stats */}

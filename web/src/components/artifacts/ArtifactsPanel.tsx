@@ -78,6 +78,8 @@ interface ArtifactsPanelProps {
   onVersionSelect?: (artifactId: string, versionId: string) => void;
 }
 
+const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -373,50 +375,60 @@ export function ArtifactsPanel({
   onRerun,
   className,
 }: ArtifactsPanelProps) {
+  const { t } = useTranslation();
   const [view, setView] = React.useState<"preview" | "code" | "output">("preview");
   const [copied, setCopied] = React.useState(false);
 
-  // Categorize files - combine images from both artifacts and outputFiles
-  const imageFiles = React.useMemo(() => {
-    // Get image artifacts (from image generation, etc.)
-    const imageArtifacts = artifacts.filter(
-      (a) => a.type === "image" || a.mimeType?.startsWith("image/")
-    );
-    // Get image outputFiles (from code execution)
-    const imageOutputFiles = outputFiles.filter((f) => f.mime_type?.startsWith("image/"));
-    // Combine, avoiding duplicates by artifact_id
-    const artifactIds = new Set(imageArtifacts.map(a => a.id));
-    const uniqueOutputFiles = imageOutputFiles.filter(
-      (f) => !f.artifact_id || !artifactIds.has(f.artifact_id)
-    );
-    return [...imageArtifacts, ...uniqueOutputFiles] as (Artifact | OutputFile)[];
-  }, [artifacts, outputFiles]);
+  const currentRunImages = React.useMemo(
+    () => outputFiles.filter((f) => f.mime_type?.startsWith("image/")),
+    [outputFiles]
+  );
 
-  const documentFiles = React.useMemo(() => {
-    // Get document artifacts (excluding images which are handled separately)
-    const docs = artifacts.filter(
-      (a) =>
-        a.type !== "image" &&
-        !a.mimeType?.startsWith("image/") &&
-        (a.type === "document" ||
-         a.type === "file" ||
-         ["docx", "pdf", "md", "xlsx", "csv"].includes(a.format))
+  const currentRunDocuments = React.useMemo(
+    () => outputFiles.filter((f) => !f.mime_type?.startsWith("image/")),
+    [outputFiles]
+  );
+
+  const sessionImages = React.useMemo(
+    () => artifacts.filter((a) => a.type === "image" || a.mimeType?.startsWith("image/")),
+    [artifacts]
+  );
+
+  const sessionDocuments = React.useMemo(
+    () =>
+      artifacts.filter(
+        (a) =>
+          a.type !== "image" &&
+          !a.mimeType?.startsWith("image/") &&
+          (a.type === "document" ||
+            a.type === "file" ||
+            ["docx", "pdf", "md", "xlsx", "csv"].includes(a.format))
+      ),
+    [artifacts]
+  );
+
+  const imageFiles = React.useMemo<(Artifact | OutputFile)[]>(() => {
+    const sessionIds = new Set(sessionImages.map((image) => image.id));
+    const uniqueCurrentRunImages = currentRunImages.filter(
+      (image) => !image.artifact_id || !sessionIds.has(image.artifact_id)
     );
-    // Get artifact IDs to avoid duplicates
-    const artifactIds = new Set(docs.map(d => d.id));
-    // Only include outputFiles that aren't images and don't have a matching artifact_id
-    const otherFiles = outputFiles.filter(
-      (f) => !f.mime_type?.startsWith("image/") && !(f.artifact_id && artifactIds.has(f.artifact_id))
+    return [...sessionImages, ...uniqueCurrentRunImages];
+  }, [sessionImages, currentRunImages]);
+
+  const documentFiles = React.useMemo<(Artifact | OutputFile)[]>(() => {
+    const sessionIds = new Set(sessionDocuments.map((doc) => doc.id));
+    const uniqueCurrentRunDocs = currentRunDocuments.filter(
+      (doc) => !doc.artifact_id || !sessionIds.has(doc.artifact_id)
     );
-    return [...docs, ...otherFiles];
-  }, [artifacts, outputFiles]);
+    return [...sessionDocuments, ...uniqueCurrentRunDocs];
+  }, [sessionDocuments, currentRunDocuments]);
 
   const hasCode = Boolean(currentCode);
 
   // Get display title
-  const firstDoc = documentFiles[0];
+  const firstDoc = currentRunDocuments.at(0) ?? sessionDocuments.at(0);
   const displayTitle = firstDoc
-    ? "filename" in firstDoc
+    ? "content_base64" in firstDoc
       ? firstDoc.filename
       : firstDoc.title || firstDoc.filename
     : "Artifacts";
@@ -543,49 +555,103 @@ export function ArtifactsPanel({
               exit={{ opacity: 0 }}
               className="h-full overflow-y-auto p-4 space-y-4"
             >
-              {/* Image previews */}
-              {imageFiles.length > 0 && (
-                <div className="space-y-3">
-                  <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                    Images ({imageFiles.length})
-                  </h3>
-                  <div className="grid grid-cols-2 gap-3">
-                    {imageFiles.map((item, idx) => (
-                      <ImageCard
-                        key={"id" in item ? item.id : `img-${idx}`}
-                        item={item}
-                        onDownload={() => handleDownload(item)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
+              {ASSISTANT_UI_V2 ? (
+                <>
+                  {currentRunImages.length > 0 || currentRunDocuments.length > 0 ? (
+                    <div className="space-y-3">
+                      <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        {t("assistant.workspace.currentRun", "Current run")}
+                      </h3>
+                      {currentRunImages.length > 0 && (
+                        <div className="grid grid-cols-2 gap-3">
+                          {currentRunImages.map((item, idx) => (
+                            <ImageCard key={`run-img-${idx}`} item={item} onDownload={() => handleDownload(item)} />
+                          ))}
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        {currentRunDocuments.map((item, idx) => (
+                          <ArtifactCard key={`run-doc-${idx}`} artifact={item} onDownload={() => handleDownload(item)} />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
-              {/* Document files */}
-              {documentFiles.length > 0 && (
-                <div className="space-y-3">
-                  <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
-                    Files
-                  </h3>
-                  <div className="space-y-2">
-                    {documentFiles.map((item, idx) => (
-                      <ArtifactCard
-                        key={"id" in item ? item.id : `file-${idx}`}
-                        artifact={item}
-                        onDownload={() => handleDownload(item)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
+                  {sessionImages.length > 0 || sessionDocuments.length > 0 ? (
+                    <div className="space-y-3">
+                      <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        {t("assistant.workspace.sessionArtifacts", "Session artifacts")}
+                      </h3>
+                      {sessionImages.length > 0 && (
+                        <div className="grid grid-cols-2 gap-3">
+                          {sessionImages.map((item) => (
+                            <ImageCard key={item.id} item={item} onDownload={() => handleDownload(item)} />
+                          ))}
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        {sessionDocuments.map((item) => (
+                          <ArtifactCard key={item.id} artifact={item} onDownload={() => handleDownload(item)} />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
-              {/* Empty state */}
-              {imageFiles.length === 0 && documentFiles.length === 0 && (
-                <div className="flex flex-col items-center justify-center h-full text-slate-400">
-                  <FileText className="h-12 w-12 mb-3 opacity-50" />
-                  <p className="text-sm">No files yet</p>
-                  <p className="text-xs mt-1">Generated files will appear here</p>
-                </div>
+                  {currentRunImages.length === 0 &&
+                    currentRunDocuments.length === 0 &&
+                    sessionImages.length === 0 &&
+                    sessionDocuments.length === 0 && (
+                    <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                      <FileText className="h-12 w-12 mb-3 opacity-50" />
+                      <p className="text-sm">No files yet</p>
+                      <p className="text-xs mt-1">Generated files will appear here</p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {imageFiles.length > 0 && (
+                    <div className="space-y-3">
+                      <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        Images ({imageFiles.length})
+                      </h3>
+                      <div className="grid grid-cols-2 gap-3">
+                        {imageFiles.map((item, idx) => (
+                          <ImageCard
+                            key={"id" in item ? item.id : `img-${idx}`}
+                            item={item}
+                            onDownload={() => handleDownload(item)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {documentFiles.length > 0 && (
+                    <div className="space-y-3">
+                      <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                        Files
+                      </h3>
+                      <div className="space-y-2">
+                        {documentFiles.map((item, idx) => (
+                          <ArtifactCard
+                            key={"id" in item ? item.id : `file-${idx}`}
+                            artifact={item}
+                            onDownload={() => handleDownload(item)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {imageFiles.length === 0 && documentFiles.length === 0 && (
+                    <div className="flex flex-col items-center justify-center h-full text-slate-400">
+                      <FileText className="h-12 w-12 mb-3 opacity-50" />
+                      <p className="text-sm">No files yet</p>
+                      <p className="text-xs mt-1">Generated files will appear here</p>
+                    </div>
+                  )}
+                </>
               )}
             </motion.div>
           )}

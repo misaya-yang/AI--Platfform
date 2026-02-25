@@ -42,6 +42,14 @@
     /* Simplified transitions */
     --transition-fast: 150ms;
     --transition-normal: 200ms;
+
+    /* Assistant UI V2 scoped tokens */
+    --assistant-canvas-bg: 210 40% 98%;
+    --assistant-text-primary: 222 47% 12%;
+    --assistant-text-secondary: 215 16% 46%;
+    --assistant-border-soft: 214 28% 85%;
+    --assistant-accent: 221 75% 53%;
+    --assistant-chip-bg: 0 0% 100%;
   }
 
   .dark {
@@ -72,6 +80,13 @@
     --border: 217 33% 22%;
     --input: 217 33% 22%;
     --ring: 239 84% 67%;
+
+    --assistant-canvas-bg: 222 47% 10%;
+    --assistant-text-primary: 210 40% 96%;
+    --assistant-text-secondary: 215 19% 70%;
+    --assistant-border-soft: 217 24% 30%;
+    --assistant-accent: 216 91% 64%;
+    --assistant-chip-bg: 222 38% 14%;
   }
 
   * {
@@ -95,6 +110,15 @@
     background-image:
       radial-gradient(1000px circle at 0% -20%, hsl(var(--primary) / 0.18), transparent 60%),
       radial-gradient(800px circle at 100% 0%, hsl(210 40% 30% / 0.35), transparent 65%);
+  }
+
+  .assistant-v2 {
+    background: hsl(var(--assistant-canvas-bg));
+    color: hsl(var(--assistant-text-primary));
+  }
+
+  .assistant-v2 .assistant-copy {
+    color: hsl(var(--assistant-text-primary));
   }
 
   /* 选中文本样式 */
