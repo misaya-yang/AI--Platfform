@@ -749,7 +749,19 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
-  const hasProcessSummary = ASSISTANT_UI_V2 && !!message.processSummary;
+  const hasProcessSummaryDetails =
+    !!message.processSummary &&
+    (
+      message.processSummary.status === "failed" ||
+      message.processSummary.steps.length > 0 ||
+      message.processSummary.tools.length > 0 ||
+      !!message.processSummary.contextBudget ||
+      !!message.processSummary.contextCompacted
+    );
+  const hasProcessSummary =
+    ASSISTANT_UI_V2 &&
+    !!message.processSummary &&
+    (message.isStreaming || hasProcessSummaryDetails);
   // Show thinking when streaming but no content yet
   const isThinking = message.isStreaming && !message.content;
 
@@ -809,7 +821,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
             ) : isThinking ? (
               ASSISTANT_UI_V2 ? (
                 <div className="text-xs text-[hsl(var(--assistant-text-secondary))]">
-                  {t("assistant.processSummary.running", "Running tools...")}
+                  {t("assistant.processSummary.preparing", "Preparing response")}
                 </div>
               ) : (
                 <motion.div

@@ -2359,11 +2359,16 @@
     "taskCompleted": "{{completed}}/{{total}} tasks completed",
     "processSummary": {
       "running": "Running {{tools}} tools",
+      "preparing": "Preparing response",
       "runningStep": "Running: {{step}}",
       "completed": "{{tools}} tools · {{steps}} steps",
+      "completedSimple": "Completed",
       "failed": "Execution failed",
       "steps": "Steps",
-      "tools": "Tools"
+      "tools": "Tools",
+      "contextBudget": "Context used",
+      "historyDropped": "dropped",
+      "contextCompacted": "Context compacted"
     },
     "workspace": {
       "currentRun": "Current run",

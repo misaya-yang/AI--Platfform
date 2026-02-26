@@ -34,6 +34,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const stepCompleted = summary.steps.filter((s) => s.status === "completed").length;
   const toolTotal = summary.tools.length;
   const toolRunning = summary.tools.filter((s) => s.status === "running").length;
+  const hasContextBudget = Boolean(summary.contextBudget);
+  const hasContextCompacted = Boolean(summary.contextCompacted?.compacted);
+  const canExpand = stepTotal > 0 || toolTotal > 0 || hasContextBudget || hasContextCompacted;
   const hasError =
     summary.status === "failed" ||
     summary.steps.some((s) => s.status === "failed") ||
@@ -43,6 +46,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const headerText = useMemo(() => {
     if (hasError) return t("assistant.processSummary.failed", "Execution failed");
     if (summary.status === "succeeded") {
+      if (toolTotal === 0 && stepTotal === 0) {
+        return t("assistant.processSummary.completedSimple", "Completed");
+      }
       return t("assistant.processSummary.completed", "{{tools}} tools · {{steps}} steps", {
         tools: toolTotal,
         steps: stepTotal,
@@ -52,6 +58,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
       return t("assistant.processSummary.runningStep", "Running: {{step}}", {
         step: summary.currentStep,
       });
+    }
+    if (toolRunning === 0 && toolTotal === 0) {
+      return t("assistant.processSummary.preparing", "Preparing response");
     }
     return t("assistant.processSummary.running", "Running {{tools}} tools", {
       tools: toolRunning || toolTotal,
@@ -68,29 +77,44 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
 
   return (
     <div className="rounded-xl border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/60">
-      <button
-        type="button"
-        onClick={() => setUserExpanded((current) => !(current ?? defaultExpanded))}
-        className="w-full px-3 py-2.5 flex items-center gap-2 text-left"
-        aria-expanded={expanded}
-      >
-        {headerIcon}
-        <span className="text-xs sm:text-sm font-medium text-[hsl(var(--assistant-text-primary))] flex-1 truncate">
-          {headerText}
-        </span>
-        {durationMs != null && durationMs > 0 && (
-          <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
-            <Clock3 className="h-3 w-3" />
-            {(durationMs / 1000).toFixed(1)}s
+      {canExpand ? (
+        <button
+          type="button"
+          onClick={() => setUserExpanded((current) => !(current ?? defaultExpanded))}
+          className="w-full px-3 py-2.5 flex items-center gap-2 text-left"
+          aria-expanded={expanded}
+        >
+          {headerIcon}
+          <span className="text-xs sm:text-sm font-medium text-[hsl(var(--assistant-text-primary))] flex-1 truncate">
+            {headerText}
           </span>
-        )}
-        <motion.span animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.15 }}>
-          <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
-        </motion.span>
-      </button>
+          {durationMs != null && durationMs > 0 && (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
+              <Clock3 className="h-3 w-3" />
+              {(durationMs / 1000).toFixed(1)}s
+            </span>
+          )}
+          <motion.span animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.15 }}>
+            <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
+          </motion.span>
+        </button>
+      ) : (
+        <div className="w-full px-3 py-2.5 flex items-center gap-2 text-left">
+          {headerIcon}
+          <span className="text-xs sm:text-sm font-medium text-[hsl(var(--assistant-text-primary))] flex-1 truncate">
+            {headerText}
+          </span>
+          {durationMs != null && durationMs > 0 && (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
+              <Clock3 className="h-3 w-3" />
+              {(durationMs / 1000).toFixed(1)}s
+            </span>
+          )}
+        </div>
+      )}
 
       <AnimatePresence initial={false}>
-        {expanded && (
+        {expanded && canExpand && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
@@ -169,6 +193,25 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
                       );
                     })}
                   </div>
+                </div>
+              )}
+
+              {hasContextBudget && summary.contextBudget && (
+                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2 text-xs text-[hsl(var(--assistant-text-secondary))]">
+                  {t("assistant.processSummary.contextBudget", "Context used")}:{" "}
+                  {summary.contextBudget.used_tokens ?? "-"}
+                  {summary.contextBudget.model_context_window
+                    ? ` / ${summary.contextBudget.model_context_window}`
+                    : ""}
+                  {typeof summary.contextBudget.dropped_history_messages === "number"
+                    ? ` · ${t("assistant.processSummary.historyDropped", "dropped")} ${summary.contextBudget.dropped_history_messages}`
+                    : ""}
+                </div>
+              )}
+
+              {hasContextCompacted && (
+                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2 text-xs text-[hsl(var(--assistant-text-secondary))]">
+                  {t("assistant.processSummary.contextCompacted", "Context compacted")}
                 </div>
               )}
             </div>
