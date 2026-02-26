@@ -7,7 +7,7 @@ Phase 1: Unified session + message + streaming protocol.
 - Enhanced message with tool_calls/tool_results/citations/attachments
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -166,6 +166,17 @@ class AssistantChatRequest(BaseModel):
         default=False, description="Confirm execution plan before running tools"
     )
 
+    # Assistant gateway policy profile
+    execution_profile: Literal["safe", "balanced", "power"] = Field(
+        default="safe", description="Execution profile: safe, balanced, power"
+    )
+    memory_mode: Literal["auto", "strict", "off"] = Field(
+        default="auto", description="Memory mode: auto, strict, off"
+    )
+    os_agent_enabled: bool = Field(
+        default=False, description="Enable OS-Agent Lite tools for this request"
+    )
+
 
 class AssistantChatResponse(BaseModel):
     """Response body for non-streaming chat."""
@@ -178,6 +189,7 @@ class AssistantChatResponse(BaseModel):
     duration_ms: float = Field(..., description="Total processing time in milliseconds")
     model_id: str = Field(..., description="Model ID used")
     session_id: str | None = Field(default=None, description="Session ID")
+    run_id: str | None = Field(default=None, description="Assistant run ID")
 
 
 class ModelInfoResponse(BaseModel):
@@ -240,9 +252,17 @@ class SSEEventType:
     # RAG context
     CONTEXT_RETRIEVED = "context_retrieved"  # KB search results
     WEB_SEARCH_RESULTS = "web_search_results"  # Web search results
+    CONTEXT_BUDGET = "context_budget"  # Context token budget and usage
+    CONTEXT_COMPACTED = "context_compacted"  # Context compaction executed
 
     # Phase 3: RAG evaluation
     RAG_EVALUATION = "rag_evaluation"  # RAG quality metrics and citations
+
+    # Gateway / queue / approval
+    QUEUE_STATE = "queue_state"  # Command queue state update
+    APPROVAL_REQUIRED = "approval_required"  # Tool call needs approval
+    APPROVAL_RESULT = "approval_result"  # Approval decision applied
+    GATEWAY_DECISION = "gateway_decision"  # Gateway policy decision
 
     # KV-Cache metrics
     CACHE_METRICS = "cache_metrics"  # Cache performance metrics

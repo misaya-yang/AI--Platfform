@@ -301,22 +301,96 @@ def weighted_fusion(
             c.fusion_score = dense * dense_weight + bm25 * bm25_weight
 
 
+def _rrf_fusion_ranked_lists(
+    ranked_lists: list[list[dict[str, Any]]],
+    k: int,
+    dense_weight: float,
+    bm25_weight: float,
+) -> list[dict[str, Any]]:
+    """Legacy RRF helper for ranked list inputs.
+
+    Input format:
+    - [[{"id": "...", "score": ...}, ...], [...]]
+    """
+    if not ranked_lists:
+        return []
+
+    # Preserve two-list weighting support (dense/bm25), otherwise use equal weights.
+    if len(ranked_lists) == 2:
+        total = dense_weight + bm25_weight
+        if total <= 0:
+            weights = [0.5, 0.5]
+        else:
+            weights = [dense_weight / total, bm25_weight / total]
+    else:
+        uniform_weight = 1.0 / len(ranked_lists)
+        weights = [uniform_weight] * len(ranked_lists)
+
+    fused_by_id: dict[str, dict[str, Any]] = {}
+
+    for list_idx, ranked in enumerate(ranked_lists):
+        weight = weights[list_idx]
+        for rank, item in enumerate(ranked, start=1):
+            if not isinstance(item, dict):
+                continue
+
+            doc_id = item.get("id") or item.get("segment_id") or item.get("document_id")
+            if not doc_id:
+                continue
+
+            doc_key = str(doc_id)
+            fused = fused_by_id.get(doc_key)
+            if fused is None:
+                fused = {"id": doc_key, "rrf_score": 0.0}
+                if "score" in item:
+                    fused["score"] = item["score"]
+                fused_by_id[doc_key] = fused
+            elif "score" in item and "score" in fused:
+                try:
+                    fused["score"] = max(float(fused["score"]), float(item["score"]))
+                except (TypeError, ValueError):
+                    pass
+
+            fused["rrf_score"] += weight / (k + rank)
+
+    return sorted(
+        fused_by_id.values(),
+        key=lambda row: (-float(row.get("rrf_score", 0.0)), str(row.get("id", ""))),
+    )
+
+
 def rrf_fusion(
-    candidates: list[RetrievalCandidate],
+    candidates: list[RetrievalCandidate] | list[list[dict[str, Any]]] | list[dict[str, Any]],
     k: int = 60,
     dense_weight: float = 0.5,
     bm25_weight: float = 0.5,
-) -> None:
-    """Reciprocal Rank Fusion with weights.
+) -> list[RetrievalCandidate] | list[dict[str, Any]]:
+    """Reciprocal Rank Fusion with backward-compatible input support.
 
-    RRF formula: score = Σ (weight / (k + rank))
-
-    Args:
-        candidates: List of candidates
-        k: RRF constant (higher = less emphasis on top ranks)
-        dense_weight: Weight for dense rankings
-        bm25_weight: Weight for BM25 rankings
+    Supported input formats:
+    - Current: ``list[RetrievalCandidate]`` (scores written in-place, list returned)
+    - Legacy: ``list[list[dict]]`` ranked lists, returning fused dict rows
+    - Legacy single list shorthand: ``list[dict]``
     """
+    if not candidates:
+        return []
+
+    first = candidates[0]
+
+    # Legacy: single ranked list shorthand
+    if isinstance(first, dict):
+        return _rrf_fusion_ranked_lists([candidates], k, dense_weight, bm25_weight)
+
+    # Legacy: list of ranked lists
+    if isinstance(first, list):
+        return _rrf_fusion_ranked_lists(candidates, k, dense_weight, bm25_weight)
+
+    if not isinstance(first, RetrievalCandidate):
+        raise TypeError("Unsupported rrf_fusion input format")
+
+    # Current mode: candidate objects (mutates in-place and returns the list)
+    typed_candidates = candidates
+
     # Normalize weights
     total = dense_weight + bm25_weight
     if total <= 0:
@@ -327,8 +401,8 @@ def rrf_fusion(
     bm25_weight /= total
 
     # Get rankings by source
-    dense_candidates = [c for c in candidates if "dense" in c.sources]
-    bm25_candidates = [c for c in candidates if "bm25" in c.sources]
+    dense_candidates = [c for c in typed_candidates if "dense" in c.sources]
+    bm25_candidates = [c for c in typed_candidates if "bm25" in c.sources]
 
     # Sort by respective scores to get ranks
     dense_candidates.sort(key=lambda c: c.dense_score_norm or 0, reverse=True)
@@ -339,7 +413,7 @@ def rrf_fusion(
     bm25_rank = {c.segment_id: i + 1 for i, c in enumerate(bm25_candidates)}
 
     # Calculate RRF scores
-    for c in candidates:
+    for c in typed_candidates:
         rrf_score = 0.0
         if c.segment_id in dense_rank:
             rrf_score += dense_weight / (k + dense_rank[c.segment_id])
@@ -348,11 +422,13 @@ def rrf_fusion(
         c.fusion_score = rrf_score
 
     # Normalize RRF scores to [0, 1]
-    max_rrf = max((c.fusion_score or 0 for c in candidates), default=1.0)
+    max_rrf = max((c.fusion_score or 0 for c in typed_candidates), default=1.0)
     if max_rrf > 0:
-        for c in candidates:
+        for c in typed_candidates:
             if c.fusion_score is not None:
                 c.fusion_score /= max_rrf
+
+    return typed_candidates
 
 
 def compute_text_match(query: str, text: str) -> tuple[bool, int, float]:

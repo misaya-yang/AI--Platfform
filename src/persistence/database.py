@@ -288,6 +288,7 @@ class DatabaseStorage:
             await self._auto_apply_islamic_metadata_migration()
             await self._auto_apply_openai_embedding_migration()
             await self._auto_apply_observability_governance_migration()
+            await self._auto_apply_assistant_gateway_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -726,6 +727,68 @@ class DatabaseStorage:
                 logger.info("Migration 033 already applied")
             else:
                 logger.error(f"Failed to apply migration 033: {e}")
+
+    async def _assistant_gateway_needs_migration(self) -> bool:
+        """Check whether assistant gateway schema migration (034) is required."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            runs_table = await conn.fetchval("SELECT to_regclass('public.assistant_runs')")
+            queue_table = await conn.fetchval(
+                "SELECT to_regclass('public.assistant_command_queue')"
+            )
+            approvals_table = await conn.fetchval(
+                "SELECT to_regclass('public.assistant_tool_approvals')"
+            )
+            if runs_table is None or queue_table is None or approvals_table is None:
+                return True
+
+            session_namespace_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'session_memory' AND column_name = 'namespace'
+                """
+            )
+            user_namespace_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'user_memory' AND column_name = 'namespace'
+                """
+            )
+            return session_namespace_col is None or user_namespace_col is None
+
+    async def _auto_apply_assistant_gateway_migration(self) -> None:
+        """Apply migration 034 for assistant gateway + memory v2 schema when required."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._assistant_gateway_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check assistant gateway schema: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "034_assistant_gateway_foundation.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 034 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 034_assistant_gateway_foundation.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 034 already applied")
+            else:
+                logger.error(f"Failed to apply migration 034: {e}")
 
     # =========================================================================
     # 服务定义表 (services)

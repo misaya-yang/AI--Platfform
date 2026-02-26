@@ -108,10 +108,18 @@ ISLAMIC_TERM_TRANSLATIONS_EN_AR: dict[str, str] = {
     "interest": "ربا",
 }
 
+def _build_reverse_term_map(translations_en_ar: dict[str, str]) -> dict[str, str]:
+    """Build AR->EN map while preserving the first (canonical) EN term."""
+    reverse: dict[str, str] = {}
+    for en_term, ar_term in translations_en_ar.items():
+        reverse.setdefault(ar_term, en_term)
+    return reverse
+
+
 # Arabic -> English reverse mapping
-ISLAMIC_TERM_TRANSLATIONS_AR_EN: dict[str, str] = {
-    v: k for k, v in ISLAMIC_TERM_TRANSLATIONS_EN_AR.items()
-}
+ISLAMIC_TERM_TRANSLATIONS_AR_EN: dict[str, str] = _build_reverse_term_map(
+    ISLAMIC_TERM_TRANSLATIONS_EN_AR
+)
 
 # Arabic pattern for detection
 _ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]")
@@ -229,6 +237,14 @@ class CrossLanguageQueryExpander:
             List of expanded queries (includes original)
         """
         _, expanded_queries, _ = expand_query_cross_language(query)
+
+        # Optional translator hook for richer expansions (deduplicated).
+        translated_terms = (await self._translate_query(query)).strip()
+        if translated_terms:
+            translated_query = f"{query} {translated_terms}".strip()
+            if translated_query and translated_query not in expanded_queries:
+                expanded_queries.append(translated_query)
+
         return expanded_queries[:max_expansions]
 
     async def _translate_query(self, query: str) -> str:

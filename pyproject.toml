@@ -171,6 +171,9 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
 ]
+markers = [
+    "integration: live integration or end-to-end tests",
+]
 
 # Ruff configuration (replaces black, isort, flake8)
 [tool.ruff]

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from datetime import datetime
 from typing import Any
 
 from ...core.observability.logging import get_logger
@@ -23,6 +24,43 @@ logger = get_logger(__name__)
 class MemoryService:
     def __init__(self, database: DatabaseStorage):
         self.database = database
+
+    @staticmethod
+    def _extract_extended_memory_metadata(
+        key: str,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[str, datetime | None, str, str, dict[str, Any] | None]:
+        data = dict(metadata or {})
+        namespace = str(data.get("namespace") or "default")
+        if "/" in key:
+            namespace = str(key.split("/", 1)[0]) or namespace
+
+        sensitivity = str(data.get("sensitivity") or "normal")
+        source = str(data.get("source") or "assistant")
+
+        expires_at = None
+        raw_expires_at = data.get("expires_at")
+        if isinstance(raw_expires_at, datetime):
+            expires_at = raw_expires_at
+        elif isinstance(raw_expires_at, str) and raw_expires_at:
+            normalized = raw_expires_at.replace("Z", "+00:00")
+            with contextlib.suppress(ValueError):
+                expires_at = datetime.fromisoformat(normalized)
+
+        data["namespace"] = namespace
+        data["sensitivity"] = sensitivity
+        data["source"] = source
+        if expires_at:
+            data["expires_at"] = expires_at.isoformat()
+
+        return namespace, expires_at, sensitivity, source, data or None
+
+    @staticmethod
+    def _normalize_memory_value(value: Any) -> str:
+        """Normalize memory value to JSON string for JSONB columns."""
+        if not isinstance(value, (dict, list, str, int, float, bool, type(None))):
+            value = str(value)
+        return json.dumps(value)
 
     # =========================================================================
     # User Memory (Long-term)
@@ -48,32 +86,37 @@ class MemoryService:
             metadata: Optional metadata
         """
         query = """
-            INSERT INTO user_memory (tenant_id, user_id, key, value, metadata, updated_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
+            INSERT INTO user_memory (
+                tenant_id, user_id, key, value, metadata,
+                namespace, expires_at, sensitivity, source, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
             ON CONFLICT (tenant_id, user_id, key)
             DO UPDATE SET
                 value = EXCLUDED.value,
                 metadata = COALESCE(EXCLUDED.metadata, user_memory.metadata),
+                namespace = EXCLUDED.namespace,
+                expires_at = COALESCE(EXCLUDED.expires_at, user_memory.expires_at),
+                sensitivity = EXCLUDED.sensitivity,
+                source = EXCLUDED.source,
                 updated_at = NOW();
         """
         try:
-            # Ensure value is JSON serializable
-            if not isinstance(value, (dict, list, str, int, float, bool, type(None))):
-                value = str(value)
-
-            # Use json.dumps for the JSONB column if the driver requires string input for JSONB
-            # asyncpg usually handles dict/list -> JSONB automatically, but let's be safe if using simple query
-            # Assuming DatabaseStorage handles binding correctly.
+            namespace, expires_at, sensitivity, source, extended_metadata = (
+                self._extract_extended_memory_metadata(key, metadata)
+            )
 
             await self.database.execute(
                 query,
                 tenant_id,
                 user_id,
                 key,
-                json.dumps(value)
-                if isinstance(value, (dict, list))
-                else value,  # Depending on DB wrapper implementation
-                json.dumps(metadata) if metadata else None,
+                self._normalize_memory_value(value),
+                json.dumps(extended_metadata) if extended_metadata else None,
+                namespace,
+                expires_at,
+                sensitivity,
+                source,
             )
             return True
         except Exception as e:
@@ -99,6 +142,7 @@ class MemoryService:
         query = """
             SELECT value FROM user_memory
             WHERE tenant_id = $1 AND user_id = $2 AND key = $3
+              AND (expires_at IS NULL OR expires_at > NOW())
         """
         result = await self.database.fetchrow(query, tenant_id, user_id, key)
 
@@ -140,6 +184,7 @@ class MemoryService:
         query = """
             SELECT key, value FROM user_memory
             WHERE tenant_id = $1 AND user_id = $2
+              AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY last_accessed_at DESC NULLS LAST, created_at DESC
             LIMIT $3
         """
@@ -199,25 +244,37 @@ class MemoryService:
             metadata: Optional metadata
         """
         query = """
-            INSERT INTO session_memory (tenant_id, session_id, key, value, metadata, updated_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
+            INSERT INTO session_memory (
+                tenant_id, session_id, key, value, metadata,
+                namespace, expires_at, sensitivity, source, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
             ON CONFLICT (tenant_id, session_id, key)
             DO UPDATE SET
                 value = EXCLUDED.value,
                 metadata = COALESCE(EXCLUDED.metadata, session_memory.metadata),
+                namespace = EXCLUDED.namespace,
+                expires_at = COALESCE(EXCLUDED.expires_at, session_memory.expires_at),
+                sensitivity = EXCLUDED.sensitivity,
+                source = EXCLUDED.source,
                 updated_at = NOW();
         """
         try:
-            if not isinstance(value, (dict, list, str, int, float, bool, type(None))):
-                value = str(value)
+            namespace, expires_at, sensitivity, source, extended_metadata = (
+                self._extract_extended_memory_metadata(key, metadata)
+            )
 
             await self.database.execute(
                 query,
                 tenant_id,
                 session_id,
                 key,
-                json.dumps(value) if isinstance(value, (dict, list)) else value,
-                json.dumps(metadata) if metadata else None,
+                self._normalize_memory_value(value),
+                json.dumps(extended_metadata) if extended_metadata else None,
+                namespace,
+                expires_at,
+                sensitivity,
+                source,
             )
             return True
         except Exception as e:
@@ -234,7 +291,9 @@ class MemoryService:
             key: Memory key
         """
         query = (
-            "SELECT value FROM session_memory WHERE tenant_id = $1 AND session_id = $2 AND key = $3"
+            "SELECT value FROM session_memory "
+            "WHERE tenant_id = $1 AND session_id = $2 AND key = $3 "
+            "AND (expires_at IS NULL OR expires_at > NOW())"
         )
         result = await self.database.fetchrow(query, tenant_id, session_id, key)
 
@@ -256,7 +315,11 @@ class MemoryService:
             tenant_id: Tenant ID for multi-tenant isolation (required)
             session_id: Session ID
         """
-        query = "SELECT key, value FROM session_memory WHERE tenant_id = $1 AND session_id = $2"
+        query = (
+            "SELECT key, value FROM session_memory "
+            "WHERE tenant_id = $1 AND session_id = $2 "
+            "AND (expires_at IS NULL OR expires_at > NOW())"
+        )
         rows = await self.database.fetch(query, tenant_id, session_id)
 
         memories = {}

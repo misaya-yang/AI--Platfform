@@ -145,6 +145,13 @@ from .tool_invoker import (
     ToolInvoker,
     create_tool_invoker,
 )
+from .gateway import (
+    AssistantExecutionGateway,
+    AssistantPolicyEngine,
+    AssistantRequestRouter,
+    RoutedAssistantRequest,
+    ToolPolicyDecision,
+)
 
 __all__ = [
     "AssistantService",
@@ -233,6 +240,11 @@ __all__ = [
     "ToolInvocationContext",
     "RegistryToolInvoker",
     "create_tool_invoker",
+    "AssistantExecutionGateway",
+    "AssistantPolicyEngine",
+    "ToolPolicyDecision",
+    "AssistantRequestRouter",
+    "RoutedAssistantRequest",
     "TaskManager",
     "SessionResources",
     "TaskContext",

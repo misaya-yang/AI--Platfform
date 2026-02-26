@@ -67,6 +67,121 @@ class ContextStructure:
     current_query: str = ""
 
 
+@dataclass
+class ContextAssemblyPlan:
+    """
+    Budget-driven context assembly plan.
+
+    Captures how each layer consumed budget and whether compaction happened.
+    """
+
+    model_context_window: int
+    reserved_output_tokens: int
+    budget_tokens: dict[str, int] = field(default_factory=dict)
+    used_tokens: dict[str, int] = field(default_factory=dict)
+    compacted: bool = False
+    dropped_history_messages: int = 0
+    compaction_reason: str | None = None
+    trimmed_history: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_budget_event(self) -> dict[str, Any]:
+        return {
+            "model_context_window": self.model_context_window,
+            "reserved_output_tokens": self.reserved_output_tokens,
+            "budget_tokens": self.budget_tokens,
+            "used_tokens": self.used_tokens,
+            "compacted": self.compacted,
+        }
+
+    def to_compaction_event(self) -> dict[str, Any]:
+        return {
+            "dropped_history_messages": self.dropped_history_messages,
+            "reason": self.compaction_reason,
+            "remaining_history_messages": len(self.trimmed_history),
+        }
+
+
+class ContextBudgetManager:
+    """
+    Compute per-layer token budgets and compact history when needed.
+
+    This keeps context assembly policy-driven instead of hard-coded prompt branching.
+    """
+
+    def __init__(
+        self,
+        reserved_output_tokens: int = 4096,
+        min_recent_messages: int = 6,
+    ) -> None:
+        self.reserved_output_tokens = reserved_output_tokens
+        self.min_recent_messages = min_recent_messages
+
+    def create_plan(
+        self,
+        context: ContextStructure,
+        model_context_window: int,
+    ) -> ContextAssemblyPlan:
+        available = max(1024, model_context_window - self.reserved_output_tokens)
+        budget_tokens = {
+            "system": int(available * 0.35),
+            "user_memory": int(available * 0.15),
+            "session": int(available * 0.20),
+            "request": int(available * 0.30),
+        }
+
+        system_text = ContextEngine(provider="openai")._build_system_content(context)
+        system_tokens = estimate_tokens(system_text)
+        request_tokens = estimate_tokens(context.current_query) + estimate_tokens(
+            context.current_context or ""
+        )
+
+        history = list(context.conversation_history or [])
+        history_tokens = estimate_history_tokens(history)
+
+        memory_tokens = estimate_tokens(context.user_preferences or "") + estimate_tokens(
+            context.long_term_memory or ""
+        )
+        session_tokens = estimate_tokens(context.task_state or "")
+
+        max_history_tokens = max(512, available - system_tokens - request_tokens - memory_tokens)
+        max_history_tokens = min(max_history_tokens, budget_tokens["session"] + budget_tokens["request"])
+
+        trimmed_history = history
+        dropped = 0
+        compacted = False
+        compaction_reason = None
+        if history_tokens > max_history_tokens and len(history) > self.min_recent_messages:
+            compacted = True
+            compaction_reason = (
+                f"history_tokens({history_tokens}) exceeded budget({max_history_tokens})"
+            )
+            trimmed_history = history[-self.min_recent_messages :]
+            dropped = len(history) - len(trimmed_history)
+            while estimate_history_tokens(trimmed_history) > max_history_tokens and len(
+                trimmed_history
+            ) > 1:
+                trimmed_history = trimmed_history[1:]
+                dropped += 1
+
+        used_tokens = {
+            "system": system_tokens,
+            "user_memory": memory_tokens,
+            "session": session_tokens + estimate_history_tokens(trimmed_history),
+            "request": request_tokens,
+        }
+
+        return ContextAssemblyPlan(
+            model_context_window=model_context_window,
+            reserved_output_tokens=self.reserved_output_tokens,
+            budget_tokens=budget_tokens,
+            used_tokens=used_tokens,
+            compacted=compacted,
+            dropped_history_messages=dropped,
+            compaction_reason=compaction_reason,
+            trimmed_history=trimmed_history,
+        )
+
+
 class ContextEngine:
     """
     Manages context construction with KV-Cache optimization.

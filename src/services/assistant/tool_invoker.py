@@ -97,6 +97,11 @@ class ToolInvocationContext:
     # Parent task context (for nested invocations)
     parent_task_id: str | None = None
 
+    # Isolation and policy metadata
+    scope_id: str | None = None
+    policy_profile: str = "safe"
+    os_agent_enabled: bool = False
+
     # Knowledge Base context - auto-injected into KB search tools
     kb_dataset_ids: list[str] = field(default_factory=list)
 
@@ -117,6 +122,9 @@ class ToolInvocationContext:
             "timeout_ms": self.timeout_ms,
             "max_retries": self.max_retries,
             "parent_task_id": self.parent_task_id,
+            "scope_id": self.scope_id,
+            "policy_profile": self.policy_profile,
+            "os_agent_enabled": self.os_agent_enabled,
             "kb_dataset_ids": self.kb_dataset_ids,
             "metadata": self.metadata,
         }
@@ -351,12 +359,15 @@ class RegistryToolInvoker(ToolInvoker):
         # Auto-inject kb_dataset_ids for KB search tool if not provided
         # This fixes the issue where LLM calls the tool without knowing which datasets to search
         final_arguments = arguments.copy()
-        if tool_name == "search_knowledge_base":
-            if not final_arguments.get("dataset_ids") and context.kb_dataset_ids:
-                final_arguments["dataset_ids"] = context.kb_dataset_ids
-                logger.info(
-                    f"Auto-injected kb_dataset_ids into search_knowledge_base: {context.kb_dataset_ids}"
-                )
+        if (
+            tool_name == "search_knowledge_base"
+            and not final_arguments.get("dataset_ids")
+            and context.kb_dataset_ids
+        ):
+            final_arguments["dataset_ids"] = context.kb_dataset_ids
+            logger.info(
+                f"Auto-injected kb_dataset_ids into search_knowledge_base: {context.kb_dataset_ids}"
+            )
 
         # Build request
         request = ToolCallRequest(
@@ -370,6 +381,8 @@ class RegistryToolInvoker(ToolInvoker):
                 "tenant_id": context.tenant_id,
                 "request_id": context.request_id,
                 "run_id": context.run_id,
+                "scope_id": context.scope_id,
+                "policy_profile": context.policy_profile,
             },
         )
 
@@ -629,7 +642,7 @@ class RegistryToolInvoker(ToolInvoker):
         context: ToolInvocationContext,
     ) -> list[str]:
         """Get list of tool names available for this context."""
-        tools = self.tool_registry.list_tools()
+        tools = self.tool_registry.list_tools(user=context.user)
         return [t.name for t in tools]
 
     def get_tool_definitions(
@@ -638,7 +651,7 @@ class RegistryToolInvoker(ToolInvoker):
         tool_names: list[str] | None = None,
     ) -> list[ToolDefinition]:
         """Get tool definitions for schema generation."""
-        tools = self.tool_registry.list_tools()
+        tools = self.tool_registry.list_tools(user=context.user)
         if tool_names:
             tools = [t for t in tools if t.name in tool_names]
         return tools

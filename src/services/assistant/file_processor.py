@@ -382,6 +382,24 @@ The description should be detailed enough for someone who hasn't seen the image 
                     file_path=actual_path,
                     api_path=file_path,
                 )
+                if not pdf_pages:
+                    fallback_text, needs_rag, fallback_meta = await self._fallback_pdf_to_text(
+                        file_path=actual_path,
+                        api_path=file_path,
+                        max_text_chars=32000,
+                    )
+                    if fallback_text:
+                        processed_data["text_content"] = fallback_text
+                    if needs_rag:
+                        processed_data["requires_rag"] = True
+                    metadata.update(
+                        {
+                            "fallback_mode": "text",
+                            "fallback_text_length": len(fallback_text),
+                            "fallback_requires_rag": needs_rag,
+                            "fallback_meta": fallback_meta,
+                        }
+                    )
                 # Serialize PDF pages
                 processed_data["pdf_pages"] = [
                     {
@@ -801,6 +819,75 @@ The description should be detailed enough for someone who hasn't seen the image 
             metadata["parse_error"] = str(e)
             return "", False, metadata
 
+    def _extract_pdf_text_with_pypdf(
+        self,
+        file_path: Path,
+        api_path: str,
+        max_text_chars: int,
+    ) -> tuple[str, bool, dict[str, Any]]:
+        """Best-effort PDF text fallback when vision conversion/parser fails."""
+        metadata: dict[str, Any] = {
+            "file_path": api_path,
+            "file_name": file_path.name,
+            "file_type": "pdf",
+            "fallback_mode": "pypdf",
+        }
+        try:
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(str(file_path))
+            text_parts: list[str] = []
+            for page in reader.pages:
+                page_text = page.extract_text() or ""
+                if page_text.strip():
+                    text_parts.append(page_text.strip())
+            text = "\n\n".join(text_parts).strip()
+
+            metadata["page_count"] = len(reader.pages)
+            metadata["text_length"] = len(text)
+
+            if not text:
+                metadata["parse_error"] = "No extractable text found in PDF"
+                return "", False, metadata
+
+            if len(text) <= max_text_chars:
+                return text, False, metadata
+
+            metadata["requires_rag"] = True
+            metadata["truncated_preview"] = text[:1000] + "..."
+            return "", True, metadata
+        except Exception as e:
+            metadata["parse_error"] = f"pypdf fallback failed: {e}"
+            return "", False, metadata
+
+    async def _fallback_pdf_to_text(
+        self,
+        file_path: Path,
+        api_path: str,
+        max_text_chars: int,
+    ) -> tuple[str, bool, dict[str, Any]]:
+        """Run PDF text fallback chain: parser first, then pypdf."""
+        fallback_text, needs_rag, fallback_meta = await self._process_document(
+            file_path=file_path,
+            api_path=api_path,
+            max_text_chars=max_text_chars,
+        )
+        if fallback_text or needs_rag:
+            return fallback_text, needs_rag, fallback_meta
+
+        fallback_text, needs_rag, pypdf_meta = self._extract_pdf_text_with_pypdf(
+            file_path=file_path,
+            api_path=api_path,
+            max_text_chars=max_text_chars,
+        )
+        fallback_meta.update(
+            {
+                "pypdf_fallback": True,
+                "pypdf_meta": pypdf_meta,
+            }
+        )
+        return fallback_text, needs_rag, fallback_meta
+
     def _analyze_document_structure(self, text_content: str) -> DocumentStructure:
         """
         Analyze document structure for deep understanding.
@@ -1094,6 +1181,31 @@ The description should be detailed enough for someone who hasn't seen the image 
                         on_progress=on_progress,
                     )
                     result.pdf_pages.extend(pdf_pages)
+
+                    if not pdf_pages:
+                        logger.warning(
+                            "[FileProcessor] PDF image conversion produced no pages, fallback to text: %s",
+                            api_path,
+                        )
+                        fallback_text, needs_rag, fallback_meta = await self._fallback_pdf_to_text(
+                            file_path=actual_path,
+                            api_path=api_path,
+                            max_text_chars=max_text_chars,
+                        )
+
+                        if fallback_text:
+                            text_parts.append(f"### {actual_path.name}\n{fallback_text}")
+                        if needs_rag:
+                            result.requires_rag = True
+                        metadata.update(
+                            {
+                                "fallback_mode": "text",
+                                "fallback_text_length": len(fallback_text),
+                                "fallback_requires_rag": needs_rag,
+                                "fallback_meta": fallback_meta,
+                            }
+                        )
+
                     result.file_metadata.append(metadata)
 
                     logger.info(

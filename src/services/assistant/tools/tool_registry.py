@@ -340,10 +340,39 @@ class ToolRegistry:
 
         # Filter by user permissions if provided
         if user:
-            # For now, return all tools. Permission filtering can be added later.
-            pass
+            tools = [t for t in tools if self._user_has_required_permissions(user, t)]
+        else:
+            tools = [t for t in tools if not t.required_permissions]
 
         return tools
+
+    @staticmethod
+    def _user_has_required_permissions(user: UserContext, tool: ToolDefinition) -> bool:
+        """Check required permissions with tier/role support."""
+        required = tool.required_permissions or []
+        if not required:
+            return True
+
+        user_roles = set(user.roles or [])
+        user_tier = (user.tier or "anonymous").lower()
+        tier_order = {
+            "anonymous": 0,
+            "normal": 1,
+            "premium": 2,
+            "enterprise": 3,
+            "admin": 4,
+        }
+
+        def _has_one(permission: str) -> bool:
+            if permission.startswith("role:"):
+                role = permission.split(":", 1)[1].strip()
+                return role in user_roles or "admin" in user_roles
+            if permission.startswith("tier:"):
+                tier = permission.split(":", 1)[1].strip().lower()
+                return tier_order.get(user_tier, 0) >= tier_order.get(tier, 999)
+            return permission in user_roles or "admin" in user_roles
+
+        return all(_has_one(p) for p in required)
 
     def get_openai_schemas(
         self,
@@ -396,6 +425,22 @@ class ToolRegistry:
                 tool_name=request.tool_name,
                 success=False,
                 error=f"No executor for tool: {request.tool_name}",
+            )
+
+        # Enforce required permissions if user context is available
+        if definition.required_permissions and not request.user:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Permission context required for tool: {request.tool_name}",
+            )
+        if request.user and not self._user_has_required_permissions(request.user, definition):
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Permission denied for tool: {request.tool_name}",
             )
 
         # Validate arguments

@@ -127,6 +127,12 @@ class StreamEventType(str, Enum):
     CONTEXT_RETRIEVED = "context_retrieved"  # RAG context retrieved
     WEB_SEARCH_RESULTS = "web_search_results"  # Web search results received
     RAG_EVALUATION = "rag_evaluation"  # RAG quality evaluation result
+    CONTEXT_BUDGET = "context_budget"  # Context budget usage snapshot
+    CONTEXT_COMPACTED = "context_compacted"  # Context compaction details
+    QUEUE_STATE = "queue_state"  # Assistant command queue state
+    APPROVAL_REQUIRED = "approval_required"  # Tool call requires approval
+    APPROVAL_RESULT = "approval_result"  # Approval accepted/rejected
+    GATEWAY_DECISION = "gateway_decision"  # Gateway policy decision
     MEMORY_LOADED = "memory_loaded"  # Memory loading completed
     DONE = "done"  # Execution complete
 

@@ -20,6 +20,7 @@ from src.services.assistant.task_planner import (
     PlannedTask,
     TaskType,
 )
+from src.services.assistant.tool_invoker import ToolInvocationContext
 from src.services.assistant.tool_orchestrator import (
     ToolExecutionResult,
     ToolOrchestrator,
@@ -33,6 +34,19 @@ from src.services.assistant.working_memory import (
 # =============================================================================
 # Test Fixtures
 # =============================================================================
+
+
+def _test_invocation_context() -> ToolInvocationContext:
+    """Create a deterministic test invocation context."""
+    return ToolInvocationContext(
+        session_id="test_session",
+        user_id="test_user",
+        tenant_id="test_tenant",
+        request_id="test_request",
+        run_id="test_run",
+        scope_id="test_scope",
+        policy_profile="safe",
+    )
 
 
 @pytest.fixture
@@ -65,6 +79,7 @@ def orchestrator(mock_tool_registry):
     return ToolOrchestrator(
         tool_registry=mock_tool_registry,
         max_parallel=3,
+        invocation_context=_test_invocation_context(),
     )
 
 
@@ -310,7 +325,9 @@ class TestToolOrchestratorExecutePlan:
     async def test_execute_simple_plan(self, orchestrator, simple_plan, working_memory):
         """Test executing a simple single-task plan."""
         results = []
-        async for result in orchestrator.execute_plan(simple_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            simple_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1
@@ -339,7 +356,9 @@ class TestToolOrchestratorExecutePlan:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(sequential_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            sequential_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 3
@@ -357,7 +376,9 @@ class TestToolOrchestratorExecutePlan:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(parallel_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            parallel_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 3
@@ -374,7 +395,9 @@ class TestToolOrchestratorExecutePlan:
     @pytest.mark.asyncio
     async def test_working_memory_updated(self, orchestrator, simple_plan, working_memory):
         """Test that working memory is updated during execution."""
-        async for _ in orchestrator.execute_plan(simple_plan, working_memory):
+        async for _ in orchestrator.execute_plan(
+            simple_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             pass
 
         # Check working memory state
@@ -394,7 +417,9 @@ class TestToolOrchestratorExecutePlan:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(simple_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            simple_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert results[0].success is False
@@ -410,7 +435,9 @@ class TestToolOrchestratorExecutePlan:
         empty_plan = ExecutionPlan(goal="Empty", tasks=[], parallel_groups=[])
 
         results = []
-        async for result in orchestrator.execute_plan(empty_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            empty_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 0
@@ -432,7 +459,9 @@ class TestToolOrchestratorExecutePlan:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(simple_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            simple_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         # Duration should be at least 50ms
@@ -488,7 +517,12 @@ class TestToolOrchestratorExecuteParallel:
         working_memory = WorkingMemory(session_id="test")
 
         results = []
-        async for result in orchestrator._execute_parallel(tasks, {}, working_memory):
+        async for result in orchestrator._execute_parallel(
+            tasks,
+            {},
+            working_memory,
+            invocation_context=_test_invocation_context(),
+        ):
             results.append(result)
 
         assert len(results) == 5
@@ -536,7 +570,12 @@ class TestToolOrchestratorExecuteParallel:
         working_memory = WorkingMemory(session_id="test")
 
         results = []
-        async for result in orchestrator._execute_parallel(tasks, {}, working_memory):
+        async for result in orchestrator._execute_parallel(
+            tasks,
+            {},
+            working_memory,
+            invocation_context=_test_invocation_context(),
+        ):
             results.append(result)
             completion_order.append(result.task_id)
 
@@ -775,7 +814,9 @@ class TestToolOrchestratorErrorHandling:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(simple_plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            simple_plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1
@@ -817,7 +858,9 @@ class TestToolOrchestratorErrorHandling:
         )
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 4
@@ -845,7 +888,9 @@ class TestToolOrchestratorErrorHandling:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1
@@ -870,7 +915,9 @@ class TestToolOrchestratorErrorHandling:
         orchestrator = ToolOrchestrator(mock_tool_registry, max_parallel=3)
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         # Should only execute the existing task
@@ -909,7 +956,9 @@ class TestToolOrchestratorConcurrency:
         working_memory = WorkingMemory(session_id="test")
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 50
@@ -956,7 +1005,9 @@ class TestToolOrchestratorConcurrency:
         working_memory = WorkingMemory(session_id="test")
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         # Verify sequential execution
@@ -1059,7 +1110,9 @@ class TestToolOrchestratorIntegration:
         working_memory = WorkingMemory(session_id="comparison_test")
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 3
@@ -1128,7 +1181,9 @@ class TestToolOrchestratorIntegration:
         working_memory = WorkingMemory(session_id="report_test")
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 3
@@ -1162,7 +1217,9 @@ class TestToolOrchestratorEdgeCases:
         )
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1
@@ -1189,7 +1246,9 @@ class TestToolOrchestratorEdgeCases:
         )
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 3
@@ -1221,7 +1280,9 @@ class TestToolOrchestratorEdgeCases:
         )
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1
@@ -1249,7 +1310,9 @@ class TestToolOrchestratorEdgeCases:
         )
 
         results = []
-        async for result in orchestrator.execute_plan(plan, working_memory):
+        async for result in orchestrator.execute_plan(
+            plan, working_memory, invocation_context=_test_invocation_context()
+        ):
             results.append(result)
 
         assert len(results) == 1

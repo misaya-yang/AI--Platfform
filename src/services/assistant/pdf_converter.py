@@ -135,6 +135,18 @@ class PDFConverter:
         self.dpi = max(self.MIN_DPI, min(dpi, self.MAX_DPI))
         self.max_dimension = max_dimension
 
+    @staticmethod
+    def _import_pymupdf():
+        """Import PyMuPDF with compatibility for old/new module names."""
+        try:
+            import pymupdf as fitz  # type: ignore
+
+            return fitz
+        except ImportError:
+            import fitz  # type: ignore
+
+            return fitz
+
     def _calculate_zoom(self, page_width: float, page_height: float) -> float:
         """
         Calculate zoom factor to fit within max dimensions while maintaining aspect ratio.
@@ -195,8 +207,7 @@ class PDFConverter:
             raise PDFConversionError(f"Not a PDF file: {file_path}", file_path)
 
         try:
-            # Import fitz here to avoid import errors if not installed
-            import fitz  # PyMuPDF
+            fitz = self._import_pymupdf()
 
             # Open PDF
             doc = fitz.open(str(path))

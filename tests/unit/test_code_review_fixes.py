@@ -185,16 +185,25 @@ class TestEmbeddingRetryMechanism:
 
     @pytest.mark.asyncio
     async def test_retry_constants_defined(self):
-        """测试重试常量已定义"""
+        """测试重试策略常量已定义且配置合理。
+
+        不对具体数字做硬编码，避免实现优化（如重试次数/基础延迟调整）导致
+        非功能性回归失败。这里仅验证“有上限重试 + 正向退避 + 超时保护”。
+        """
         from src.services.knowledge.embedding import DashScopeEmbedding
 
         assert hasattr(DashScopeEmbedding, "MAX_RETRIES")
         assert hasattr(DashScopeEmbedding, "RETRY_BASE_DELAY")
         assert hasattr(DashScopeEmbedding, "REQUEST_TIMEOUT")
 
-        assert DashScopeEmbedding.MAX_RETRIES == 3
-        assert DashScopeEmbedding.RETRY_BASE_DELAY == 1.0
-        assert DashScopeEmbedding.REQUEST_TIMEOUT == 60
+        assert isinstance(DashScopeEmbedding.MAX_RETRIES, int)
+        assert 1 <= DashScopeEmbedding.MAX_RETRIES <= 10
+
+        assert isinstance(DashScopeEmbedding.RETRY_BASE_DELAY, (int, float))
+        assert 0 < DashScopeEmbedding.RETRY_BASE_DELAY <= 5
+
+        assert isinstance(DashScopeEmbedding.REQUEST_TIMEOUT, (int, float))
+        assert DashScopeEmbedding.REQUEST_TIMEOUT >= 30
 
 
 class TestTaskQueueHandlerBinding:

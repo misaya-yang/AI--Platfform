@@ -36,10 +36,8 @@ References:
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import time
-import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -49,6 +47,7 @@ from .task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
+    from .gateway import AssistantExecutionGateway, RoutedAssistantRequest
     from .tool_invoker import ToolInvocationContext, ToolInvoker
     from .tools.tool_registry import ToolRegistry
 
@@ -193,6 +192,8 @@ class ToolOrchestrator:
         tool_invoker: ToolInvoker | None = None,
         max_parallel: int = 5,
         invocation_context: ToolInvocationContext | None = None,
+        execution_gateway: AssistantExecutionGateway | None = None,
+        routed_request: RoutedAssistantRequest | None = None,
     ):
         """
         Initialize the ToolOrchestrator.
@@ -213,6 +214,8 @@ class ToolOrchestrator:
         self.max_parallel = max_parallel
         self.semaphore = asyncio.Semaphore(max_parallel)
         self._default_invocation_context = invocation_context
+        self._execution_gateway = execution_gateway
+        self._routed_request = routed_request
 
         # If no invoker provided, create one from registry or default
         if self.tool_invoker is None:
@@ -423,41 +426,24 @@ class ToolOrchestrator:
                 )
 
                 # Execute via ToolInvoker (unified execution layer)
-                if invocation_context is not None:
+                if invocation_context is None:
+                    raise ValueError(
+                        f"invocation_context is required for task {task.id}; "
+                        "tool execution without tenant/user context is forbidden."
+                    )
+
+                if self._execution_gateway and self._execution_gateway.enabled:
+                    tool_result = await self._execution_gateway.invoke_tool(
+                        tool_name=task.tool,
+                        arguments=resolved_params,
+                        context=invocation_context,
+                        routed_request=self._routed_request,
+                    )
+                else:
                     tool_result = await self.tool_invoker.invoke(
                         tool_name=task.tool,
                         arguments=resolved_params,
                         context=invocation_context,
-                    )
-                else:
-                    # Fallback: Create a minimal context if none provided
-                    # In production, this should raise an error to prevent tenant isolation bypass
-                    env = os.getenv("ENVIRONMENT", "development")
-                    if env == "production":
-                        raise ValueError(
-                            f"invocation_context is required in production for task {task.id}. "
-                            "This prevents tenant isolation bypass and ensures proper audit trails."
-                        )
-
-                    logger.warning(
-                        f"No invocation_context provided for task {task.id}. "
-                        "Using fallback context with placeholder values. "
-                        "This may affect audit trails and multi-tenant isolation."
-                    )
-                    from .tool_invoker import ToolInvocationContext
-
-                    fallback_context = ToolInvocationContext(
-                        session_id=f"orchestrator_{task.id}",
-                        user_id="system",
-                        tenant_id="system",
-                        request_id=str(uuid.uuid4()),
-                        kb_dataset_ids=[],  # Explicit empty list for safety
-                        user=None,  # No user context in fallback
-                    )
-                    tool_result = await self.tool_invoker.invoke(
-                        tool_name=task.tool,
-                        arguments=resolved_params,
-                        context=fallback_context,
                     )
 
                 duration_ms = (time.time() - start_time) * 1000
@@ -637,6 +623,8 @@ def create_tool_orchestrator(
     tool_invoker: ToolInvoker | None = None,
     max_parallel: int = 5,
     invocation_context: ToolInvocationContext | None = None,
+    execution_gateway: AssistantExecutionGateway | None = None,
+    routed_request: RoutedAssistantRequest | None = None,
 ) -> ToolOrchestrator:
     """
     Factory function to create a ToolOrchestrator instance.
@@ -668,4 +656,6 @@ def create_tool_orchestrator(
         tool_invoker=tool_invoker,
         max_parallel=max_parallel,
         invocation_context=invocation_context,
+        execution_gateway=execution_gateway,
+        routed_request=routed_request,
     )

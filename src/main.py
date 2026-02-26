@@ -650,6 +650,11 @@ def create_app() -> FastAPI:
         # 初始化 Assistant Service (GPT-like 体验)
         await _init_assistant_service(app, settings)
 
+        # Initialize Assistant TaskManager lifecycle explicitly
+        from .services.assistant.task_manager import init_task_manager
+
+        app.state.assistant_task_manager = await init_task_manager()
+
         # 打印启动信息
         _print_startup_info(settings)
 
@@ -695,6 +700,11 @@ def create_app() -> FastAPI:
         assistant_service = getattr(app.state, "assistant_service", None)
         if assistant_service is not None:
             await assistant_service.close()
+
+        # Stop Assistant TaskManager lifecycle
+        from .services.assistant.task_manager import shutdown_task_manager
+
+        await shutdown_task_manager()
 
         # Close file storage service
         file_storage = getattr(app.state, "file_storage", None)
@@ -1078,6 +1088,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         vlm_service=assistant_vlm_service,
         redis_client=app.state.redis,
         memory_service=memory_service,
+        db=app.state.database,
     )
 
     # Initialize Tool Registry (Phase 2)
@@ -1111,6 +1122,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Store in app.state
     app.state.model_registry = model_registry
     app.state.assistant_service = assistant_service
+    app.state.assistant_gateway = assistant_service.execution_gateway
     app.state.tool_registry = tool_registry
 
     # Load models from database (if available)

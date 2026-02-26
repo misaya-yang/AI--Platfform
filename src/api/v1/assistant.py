@@ -301,6 +301,31 @@ class ToolsListResponse(BaseModel):
     tools: list[ToolInfoResponse]
 
 
+class AssistantPoliciesResponse(BaseModel):
+    """Assistant gateway policy snapshot."""
+
+    policies: dict
+
+
+class ApprovalRequest(BaseModel):
+    """Approve or reject a pending tool call."""
+
+    approved: bool
+    reason: str | None = None
+
+
+class ApprovalResponse(BaseModel):
+    """Approval mutation result."""
+
+    approval: dict
+
+
+class RunStatusResponse(BaseModel):
+    """Assistant run status response."""
+
+    run: dict
+
+
 @router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
     user: UserContext = Depends(get_user_context),
@@ -329,6 +354,54 @@ async def list_tools(
             for t in tools
         ]
     )
+
+
+@router.get("/policies", response_model=AssistantPoliciesResponse)
+async def get_policies(
+    user: UserContext = Depends(get_user_context),
+    assistant: AssistantService = Depends(get_assistant_service),
+) -> AssistantPoliciesResponse:
+    """Get assistant gateway policies and defaults."""
+    _ = user  # Ensure endpoint is authenticated
+    return AssistantPoliciesResponse(policies=assistant.get_gateway_policies())
+
+
+@router.post("/approvals/{approval_id}", response_model=ApprovalResponse)
+async def approve_tool_call(
+    approval_id: str,
+    body: ApprovalRequest,
+    user: UserContext = Depends(get_user_context),
+    assistant: AssistantService = Depends(get_assistant_service),
+) -> ApprovalResponse:
+    """Approve or reject a pending tool invocation."""
+    approval = await assistant.approve_tool_request(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=body.approved,
+        approver_user_id=user.user_id,
+        reason=body.reason,
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    return ApprovalResponse(approval=approval)
+
+
+@router.get("/runs/{run_id}", response_model=RunStatusResponse)
+async def get_run_status(
+    run_id: str,
+    user: UserContext = Depends(get_user_context),
+    assistant: AssistantService = Depends(get_assistant_service),
+) -> RunStatusResponse:
+    """Get run status for current user/tenant."""
+    run = await assistant.get_run_status(
+        run_id=run_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return RunStatusResponse(run=run)
 
 
 def _check_model_permission(
@@ -396,6 +469,9 @@ async def chat(
         system_prompt=body.system_prompt,
         enable_task_planning=body.enable_task_planning,
         confirm_plan=body.confirm_plan,
+        execution_profile=body.execution_profile,
+        memory_mode=body.memory_mode,
+        os_agent_enabled=body.os_agent_enabled,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
@@ -418,6 +494,7 @@ async def chat(
             duration_ms=result["duration_ms"],
             model_id=result["model_id"],
             session_id=session_id,
+            run_id=result.get("run_id"),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -490,6 +567,9 @@ async def chat_stream(
         system_prompt=body.system_prompt,
         enable_task_planning=body.enable_task_planning,
         confirm_plan=body.confirm_plan,
+        execution_profile=body.execution_profile,
+        memory_mode=body.memory_mode,
+        os_agent_enabled=body.os_agent_enabled,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session

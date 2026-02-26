@@ -59,6 +59,8 @@ from typing import TYPE_CHECKING, Any
 from ...core.observability.logging import get_logger
 from ...models.enums import StreamEventType
 from .context_engine import (
+    ContextAssemblyPlan,
+    ContextBudgetManager,
     ContextEngine,
     ContextStructure,
     estimate_history_tokens,
@@ -73,6 +75,7 @@ from .error_recovery import (
     ErrorType,
     RecoveryResult,
 )
+from .gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
 from .memory.compressor import CompressedContext, ContextCompressor
 from .query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from .rag_metrics import (
@@ -302,6 +305,11 @@ class AgentLoopConfig:
     # System prompt (optional override, otherwise uses default from prompts)
     system_prompt: str | None = None
 
+    # Gateway/policy profile
+    execution_profile: str = "safe"
+    memory_mode: str = "auto"
+    os_agent_enabled: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -317,6 +325,9 @@ class AgentLoopConfig:
             "kb_top_k": self.kb_top_k,
             "streaming_first_mode": self.streaming_first_mode,
             "file_paths": self.file_paths,
+            "execution_profile": self.execution_profile,
+            "memory_mode": self.memory_mode,
+            "os_agent_enabled": self.os_agent_enabled,
         }
 
 
@@ -335,8 +346,11 @@ class AgentLoopContext:
     message: str
     config: AgentLoopConfig
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     task_id: str | None = None  # For cancellation tracking
     cancel_event: asyncio.Event | None = None  # For immediate cancellation
+    routed_request: RoutedAssistantRequest | None = None
+    user: UserContext | None = None
 
     # Step 1: Memory
     user_preferences: dict[str, Any] | None = None
@@ -410,6 +424,8 @@ class AgentLoop:
         context_engine: ContextEngine | None = None,
         task_manager: TaskManager | None = None,
         metrics_collector: RAGMetricsCollector | None = None,
+        execution_gateway: AssistantExecutionGateway | None = None,
+        request_router: AssistantRequestRouter | None = None,
         # System prompt
         system_prompt: str = "",
         # Optional persistence / artifact / file-processing dependencies
@@ -447,6 +463,9 @@ class AgentLoop:
         self.context_engine = context_engine or ContextEngine(provider="openai")
         self.task_manager = task_manager or get_task_manager()
         self.metrics_collector = metrics_collector or get_rag_metrics_collector()
+        self.execution_gateway = execution_gateway
+        self.request_router = request_router or AssistantRequestRouter()
+        self.context_budget_manager = ContextBudgetManager()
 
         self.system_prompt = system_prompt
 
@@ -472,6 +491,65 @@ class AgentLoop:
             return create_scenario_analyzer()
         except Exception:
             return ScenarioAnalyzer()
+
+    def _build_invocation_context(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContext | None,
+    ) -> ToolInvocationContext:
+        """Build strict invocation context for all tool calls."""
+        effective_user = user or ctx.user
+        policy_profile = (
+            ctx.routed_request.policy_profile
+            if ctx.routed_request
+            else (ctx.config.execution_profile or "safe")
+        )
+        return ToolInvocationContext(
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
+            tenant_id=ctx.tenant_id,
+            request_id=ctx.request_id,
+            run_id=ctx.run_id,
+            scope_id=ctx.session_id,
+            policy_profile=policy_profile,
+            os_agent_enabled=(
+                ctx.routed_request.os_agent_enabled
+                if ctx.routed_request
+                else bool(ctx.config.os_agent_enabled)
+            ),
+            kb_dataset_ids=ctx.config.kb_dataset_ids or [],
+            user=effective_user,
+        )
+
+    async def _invoke_tool(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContext | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ):
+        """
+        Invoke a tool through execution gateway if available, else fallback to invoker.
+
+        Returns ToolCallResult-compatible object.
+        """
+        invocation_context = self._build_invocation_context(ctx, user=user)
+
+        if self.execution_gateway and self.execution_gateway.enabled:
+            return await self.execution_gateway.invoke_tool(
+                tool_name=tool_name,
+                arguments=arguments,
+                context=invocation_context,
+                routed_request=ctx.routed_request,
+                cancel_event=ctx.cancel_event,
+            )
+
+        return await self.tool_invoker.invoke(
+            tool_name=tool_name,
+            arguments=arguments,
+            context=invocation_context,
+            cancel_event=ctx.cancel_event,
+        )
 
     async def execute(
         self,
@@ -501,6 +579,7 @@ class AgentLoop:
             tenant_id=user.tenant_id,
             message=message,
             config=config,
+            user=user,
         )
 
         # Initialize metrics builder for observability
@@ -510,6 +589,10 @@ class AgentLoop:
             tenant_id=user.tenant_id,
             user_id=user.user_id,
         )
+        ctx.routed_request = self.request_router.route(config, user)
+        config.execution_profile = ctx.routed_request.execution_profile
+        config.memory_mode = ctx.routed_request.memory_mode
+        config.os_agent_enabled = ctx.routed_request.os_agent_enabled
 
         history = history or []
 
@@ -535,14 +618,49 @@ class AgentLoop:
             ctx.task_id = task_id
             ctx.cancel_event = task_ctx.cancel_event if task_ctx else None
 
+            run_status = "running"
+            run_error: str | None = None
+
             try:
+                if self.execution_gateway and self.execution_gateway.enabled:
+                    await self.execution_gateway.start_run(
+                        run_id=ctx.run_id,
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        session_id=ctx.session_id,
+                        engine="agent_loop",
+                        execution_profile=ctx.routed_request.execution_profile
+                        if ctx.routed_request
+                        else config.execution_profile,
+                        memory_mode=ctx.routed_request.memory_mode
+                        if ctx.routed_request
+                        else config.memory_mode,
+                        os_agent_enabled=ctx.routed_request.os_agent_enabled
+                        if ctx.routed_request
+                        else config.os_agent_enabled,
+                        request_preview=ctx.message[:500],
+                    )
+
+                if ctx.routed_request:
+                    yield AgentLoopEvent(
+                        phase=AgentLoopPhase.MEMORY_LOADING,
+                        event_type="gateway_decision",
+                        data={
+                            "run_id": ctx.run_id,
+                            "execution_profile": ctx.routed_request.execution_profile,
+                            "memory_mode": ctx.routed_request.memory_mode,
+                            "os_agent_enabled": ctx.routed_request.os_agent_enabled,
+                            "policy_profile": ctx.routed_request.policy_profile,
+                        },
+                    )
+
                 # Emit run_started with task_id for cancellation
                 yield AgentLoopEvent(
                     phase=AgentLoopPhase.MEMORY_LOADING,
                     event_type="run_started",
                     data={
                         # AG-UI compatible fields
-                        "run_id": ctx.request_id,
+                        "run_id": ctx.run_id,
                         "thread_id": session_id,
                         "session_id": session_id,
                         "task_id": task_id,
@@ -584,21 +702,24 @@ class AgentLoop:
 
                     # Ensure lifecycle is complete: always end with run_finished or run_error.
                     if had_fatal_error:
+                        run_status = "failed"
+                        run_error = fatal_error_message or "AgentLoop streaming-first failed"
                         yield AgentLoopEvent(
                             phase=AgentLoopPhase.GENERATION_STORAGE,
                             event_type=StreamEventType.RUN_ERROR.value,
                             data={
-                                "run_id": ctx.request_id,
+                                "run_id": ctx.run_id,
                                 "thread_id": session_id,
-                                "error": fatal_error_message or "AgentLoop streaming-first failed",
+                                "error": run_error,
                             },
                         )
                     else:
+                        run_status = "succeeded"
                         yield AgentLoopEvent(
                             phase=AgentLoopPhase.GENERATION_STORAGE,
                             event_type=StreamEventType.RUN_FINISHED.value,
                             data={
-                                "run_id": ctx.request_id,
+                                "run_id": ctx.run_id,
                                 "thread_id": session_id,
                                 "metadata": {
                                     "usage": ctx.usage or {},
@@ -794,8 +915,44 @@ class AgentLoop:
                         await collector.record(metrics)
                     except Exception as metrics_error:
                         logger.warning(f"Failed to record context metrics: {metrics_error}")
+                run_status = "succeeded"
+                yield AgentLoopEvent(
+                    phase=AgentLoopPhase.GENERATION_STORAGE,
+                    event_type=StreamEventType.RUN_FINISHED.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": session_id,
+                        "metadata": {
+                            "usage": ctx.usage or {},
+                            "mode": "legacy",
+                        },
+                    },
+                )
 
+            except Exception as loop_error:
+                run_status = "failed"
+                run_error = str(loop_error)
+                raise
             finally:
+                final_status = run_status
+                if final_status == "running":
+                    if task_ctx and task_ctx.cancelled:
+                        final_status = "cancelled"
+                        run_error = run_error or "Cancelled by user"
+                    else:
+                        final_status = "succeeded"
+
+                if self.execution_gateway and self.execution_gateway.enabled:
+                    try:
+                        await self.execution_gateway.finish_run(
+                            run_id=ctx.run_id,
+                            status=final_status,
+                            usage=ctx.usage,
+                            error=run_error,
+                        )
+                    except Exception as gateway_err:
+                        logger.warning("Failed to persist run completion: %s", gateway_err)
+
                 # Persist Working Memory to session memory
                 if ctx.working_memory and self.memory_service:
                     try:
@@ -1372,6 +1529,7 @@ class AgentLoop:
                                 getattr(processed_files, "image_descriptions", []) or []
                             ),
                             "requires_rag": bool(getattr(processed_files, "requires_rag", False)),
+                            "file_count": len(getattr(processed_files, "file_metadata", []) or []),
                             "file_metadata": getattr(processed_files, "file_metadata", []) or [],
                         },
                     )
@@ -1390,15 +1548,7 @@ class AgentLoop:
             # Step 2: Get tool definitions (ALL tools available - AI decides when to use)
             tools = []
             available_tool_names: list[str] = []
-            invocation_context = ToolInvocationContext(
-                session_id=ctx.session_id,
-                user_id=ctx.user_id,
-                tenant_id=ctx.tenant_id,
-                request_id=ctx.request_id,
-                run_id=ctx.request_id,  # Use request_id as run_id for traceability
-                kb_dataset_ids=ctx.config.kb_dataset_ids or [],  # Pass KB config for auto-injection
-                user=user,  # Pass UserContext for tools that need permissions (e.g., KB search)
-            )
+            invocation_context = self._build_invocation_context(ctx, user=user)
             if self.tool_invoker:
                 tool_defs = self.tool_invoker.get_tool_definitions(context=invocation_context)
                 tool_defs = _select_tools_for_request(tool_defs, ctx.message)
@@ -1792,17 +1942,56 @@ class AgentLoop:
                         elif self.tool_invoker:
                             if tool_name == "search_knowledge_base":
                                 kb_call_count += 1
-                            result = await self.tool_invoker.invoke(
+                            result = await self._invoke_tool(
+                                ctx=ctx,
+                                user=user,
                                 tool_name=tool_name,
                                 arguments=tool_args,
-                                context=invocation_context,
-                                cancel_event=task_ctx.cancel_event if task_ctx else None,
                             )
                             tool_success = bool(result.success)
                             tool_error = result.error
                             tool_metadata = result.metadata or {}
                             tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
                             tool_output_files = result.output_files or []
+
+                            queue_state = tool_metadata.get("queue_state")
+                            if queue_state:
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="queue_state",
+                                    data={
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        "state": queue_state,
+                                        "command_id": tool_metadata.get("command_id"),
+                                    },
+                                )
+
+                            gateway_decision = tool_metadata.get("gateway_decision")
+                            if isinstance(gateway_decision, dict):
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="gateway_decision",
+                                    data={
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        **gateway_decision,
+                                    },
+                                )
+
+                            if tool_error == "APPROVAL_REQUIRED":
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="approval_required",
+                                    data={
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        "approval_id": tool_metadata.get("approval_id"),
+                                        "reason": gateway_decision.get("reason")
+                                        if isinstance(gateway_decision, dict)
+                                        else None,
+                                    },
+                                )
 
                             # Check if cancelled (via metadata or error message)
                             is_cancelled = (
@@ -2125,6 +2314,7 @@ class AgentLoop:
                 phase=phase,
                 event_type="streaming_first_completed",
                 data={
+                    "run_id": ctx.run_id,
                     "total_time_ms": round(total_time_ms, 2),
                     "iterations": iteration,
                     "content_length": len(ctx.generated_content),
@@ -2440,13 +2630,7 @@ class AgentLoop:
 
         try:
             # Get available tools
-            invocation_context = ToolInvocationContext(
-                session_id=ctx.session_id,
-                user_id=ctx.user_id,
-                tenant_id=ctx.tenant_id,
-                request_id=ctx.request_id,
-                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
-            )
+            invocation_context = self._build_invocation_context(ctx, user=None)
             available_tools = self.tool_invoker.get_available_tools(invocation_context)
 
             # Create plan
@@ -2761,6 +2945,31 @@ class AgentLoop:
                 current_query=ctx.message,
             )
 
+            model_context_window = 128000
+            if self.model_registry:
+                with contextlib.suppress(Exception):
+                    model_info = self.model_registry.get_model(ctx.config.model_id)
+                    if model_info and getattr(model_info, "context_window", None):
+                        model_context_window = int(model_info.context_window)
+
+            assembly_plan: ContextAssemblyPlan = self.context_budget_manager.create_plan(
+                context=ctx.context_structure,
+                model_context_window=model_context_window,
+            )
+            ctx.context_structure.conversation_history = assembly_plan.trimmed_history
+
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type="context_budget",
+                data=assembly_plan.to_budget_event(),
+            )
+            if assembly_plan.compacted:
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type="context_compacted",
+                    data=assembly_plan.to_compaction_event(),
+                )
+
             # Build messages
             ctx.messages = self.context_engine.build_messages(ctx.context_structure)
 
@@ -2771,6 +2980,8 @@ class AgentLoop:
                     "message_count": len(ctx.messages),
                     "has_rag_context": bool(rag_context),
                     "has_task_state": bool(task_state),
+                    "history_compacted": assembly_plan.compacted,
+                    "dropped_history_messages": assembly_plan.dropped_history_messages,
                 },
             )
 
@@ -2887,7 +3098,7 @@ class AgentLoop:
 
             # Build context for ReAct
             react_context = {
-                "run_id": ctx.request_id,
+                "run_id": ctx.run_id,
                 "session_id": ctx.session_id,
                 "scenario": ctx.scenario.to_dict() if ctx.scenario else None,
                 "rag_context": ctx.retrieval_context.to_formatted_context()
@@ -2898,13 +3109,7 @@ class AgentLoop:
             # Get available tools
             available_tools = []
             if self.tool_invoker:
-                invocation_context = ToolInvocationContext(
-                    session_id=ctx.session_id,
-                    user_id=ctx.user_id,
-                    tenant_id=ctx.tenant_id,
-                    request_id=ctx.request_id,
-                    kb_dataset_ids=ctx.config.kb_dataset_ids or [],
-                )
+                invocation_context = self._build_invocation_context(ctx, user=None)
                 available_tools = self.tool_invoker.get_tool_definitions(context=invocation_context)
 
             # Execute ReAct loop
@@ -3049,15 +3254,11 @@ class AgentLoop:
             orchestrator = ToolOrchestrator(
                 tool_invoker=self.tool_invoker,
                 max_parallel=ctx.config.max_concurrent_tools,
+                execution_gateway=self.execution_gateway,
+                routed_request=ctx.routed_request,
             )
 
-            invocation_context = ToolInvocationContext(
-                session_id=ctx.session_id,
-                user_id=ctx.user_id,
-                tenant_id=ctx.tenant_id,
-                request_id=ctx.request_id,
-                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
-            )
+            invocation_context = self._build_invocation_context(ctx, user=None)
 
             async for result in orchestrator.execute_plan(
                 plan=ctx.execution_plan,
@@ -3142,16 +3343,18 @@ class AgentLoop:
             if not self.tool_invoker:
                 raise ValueError("No tool invoker configured")
 
-            invocation_context = ToolInvocationContext(
-                session_id=ctx.session_id,
-                user_id=ctx.user_id,
-                tenant_id=ctx.tenant_id,
-                request_id=ctx.request_id,
-                kb_dataset_ids=ctx.config.kb_dataset_ids or [],
-            )
+            invocation_context = self._build_invocation_context(ctx, user=None)
 
             async def _invoke_tool():
                 """Inner function for error recovery wrapping."""
+                if self.execution_gateway and self.execution_gateway.enabled:
+                    return await self.execution_gateway.invoke_tool(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        context=invocation_context,
+                        routed_request=ctx.routed_request,
+                        cancel_event=ctx.cancel_event,
+                    )
                 return await self.tool_invoker.invoke(
                     tool_name=tool_name,
                     arguments=arguments,

@@ -2981,15 +2981,33 @@ def merge_small_chunks(
 
 # Convenience functions
 def chunk_text(
-    text: str, chunk_size: int = 500, overlap: int = 50, mode: str = "automatic"
+    text: str,
+    chunk_size: int = 500,
+    overlap: int | None = None,
+    mode: str = "automatic",
+    chunk_overlap: int | None = None,
+    language: str | None = None,
 ) -> list[str]:
-    """Simple interface to chunk text and return list of strings"""
+    """Simple interface to chunk text and return list of strings.
+
+    Backward-compatible args:
+    - ``chunk_overlap`` is accepted as an alias of ``overlap``
+    - ``language`` triggers language-aware chunk size adjustment
+    """
+    effective_overlap = 50 if overlap is None else overlap
+    if chunk_overlap is not None:
+        effective_overlap = chunk_overlap
+
+    effective_chunk_size = chunk_size
+    if language:
+        effective_chunk_size = get_chunk_size_for_language(language, chunk_size)
+
     config = ChunkingConfig(
         mode=ChunkingMode(mode)
         if mode in [m.value for m in ChunkingMode]
         else ChunkingMode.AUTOMATIC,
-        chunk_size=chunk_size,
-        chunk_overlap=overlap,
+        chunk_size=effective_chunk_size,
+        chunk_overlap=effective_overlap,
     )
     chunks = process_document(text, config)
     flat = flatten_chunks(chunks)

@@ -23,7 +23,9 @@ References:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,15 +36,16 @@ from typing import TYPE_CHECKING, Any
 from ...core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ...services.session.database_session_manager import DatabaseSessionManager
+    from ..session.database_session_manager import DatabaseSessionManager
+    from .code_executor import InputFile, KBDocument
     from .memory_service import MemoryService
-import contextlib
 
 from ...core.auth.user_resolver import UserContext
 from ..knowledge.knowledge_service import KnowledgeService
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, get_file_storage
+from .agent_loop import AgentLoopEvent
 from .cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
 from .context_engine import ContextEngine, ContextStructure
@@ -81,16 +84,11 @@ from .structured_output import (
     OutputGuardrail,
 )
 from .task_planner import TaskPlanner, create_task_planner
+from .tool_invoker import ToolInvocationContext
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator, create_tool_orchestrator
 from .tools import TavilySearchTool
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .working_memory import WorkingMemory
-from .agent_loop import AgentLoopEvent
-
-if TYPE_CHECKING:
-    from ..session.database_session_manager import DatabaseSessionManager
-    from .code_executor import InputFile, KBDocument
-    from ..knowledge.chunking import Chunk
 
 logger = get_logger(__name__)
 
@@ -122,6 +120,14 @@ class StreamEventType(str, Enum):
     CONTEXT_RETRIEVED = "context_retrieved"
     WEB_SEARCH_RESULTS = "web_search_results"
     RAG_EVALUATION = "rag_evaluation"
+    CONTEXT_BUDGET = "context_budget"
+    CONTEXT_COMPACTED = "context_compacted"
+
+    # Gateway / queue / approvals
+    QUEUE_STATE = "queue_state"
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_RESULT = "approval_result"
+    GATEWAY_DECISION = "gateway_decision"
 
     # Session events
     SESSION_CREATED = "session_created"
@@ -236,6 +242,11 @@ class AssistantConfig:
     # Memory and ReAct settings (Manus architecture core features)
     enable_memory_loading: bool = False  # Disabled by default - reduces TTFT significantly
     enable_react_loop: bool = False  # Disabled by default - simple generation for most queries
+
+    # Assistant Gateway policy profile (OpenClaw-style)
+    execution_profile: str = "safe"  # safe | balanced | power
+    memory_mode: str = "auto"  # auto | strict | off
+    os_agent_enabled: bool = False  # gated by policy engine + tenant/user permissions
 
 
 @dataclass
@@ -485,6 +496,8 @@ Please use this web search context to inform your response when relevant."""
         memory_service: MemoryService | None = None,
         quality_guardrails: QualityGuardrails | None = None,
         tool_constraint_validator: ToolConstraintValidator | None = None,
+        execution_gateway: Any | None = None,
+        request_router: Any | None = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service
@@ -563,6 +576,24 @@ Please use this web search context to inform your response when relevant."""
 
         # Domain policies (e.g., Imam assistant)
         self.domain_policy_resolver = DomainPolicyResolver()
+
+        # Assistant Gateway (policy routing + queue/approval/run lifecycle)
+        # Keep this configurable to avoid hard-coded behavior.
+        from .gateway import AssistantExecutionGateway, AssistantRequestRouter
+        from .tool_invoker import create_tool_invoker
+
+        gateway_enabled = True
+        with contextlib.suppress(Exception):
+            import os
+
+            gateway_enabled = os.getenv("ASSISTANT_GATEWAY_ENABLED", "false").lower() == "true"
+
+        self.request_router = request_router or AssistantRequestRouter()
+        self.execution_gateway = execution_gateway or AssistantExecutionGateway(
+            tool_invoker=create_tool_invoker(),
+            database=db,
+            enabled=gateway_enabled,
+        )
 
     def validate_generated_content(
         self,
@@ -2424,6 +2455,7 @@ Please use this web search context to inform your response when relevant."""
                     "contexts": [],
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
+                    "run_id": None,
                 }
 
         # Retrieve KB context
@@ -2455,6 +2487,7 @@ Please use this web search context to inform your response when relevant."""
                     "contexts": ctx_payload,
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
+                    "run_id": None,
                 }
 
         # Build messages
@@ -2551,6 +2584,7 @@ Please use this web search context to inform your response when relevant."""
             ],
             "duration_ms": elapsed_ms,
             "model_id": config.model_id,
+            "run_id": None,
         }
 
     async def _retrieve_context(
@@ -2743,10 +2777,13 @@ Please use this web search context to inform your response when relevant."""
         if not self._tool_orchestrator:
             from .tools import get_tool_registry
 
-            self._tool_orchestrator = create_tool_orchestrator(tool_registry=get_tool_registry())
+            self._tool_orchestrator = create_tool_orchestrator(
+                tool_registry=get_tool_registry(),
+                execution_gateway=self.execution_gateway,
+            )
         return self._tool_orchestrator
 
-    def get_working_memory(self, session_id: str) -> WorkingMemory:
+    def _legacy_get_working_memory(self, session_id: str) -> WorkingMemory:
         """Get or create working memory for a session."""
         if not hasattr(self, "_working_memories"):
             self._working_memories = {}
@@ -2810,6 +2847,9 @@ Please use this web search context to inform your response when relevant."""
             kb_min_relevance=config.kb_score_threshold,
             max_tool_iterations=5,  # Reasonable limit for tool iterations
             max_concurrent_tools=config.max_parallel_tools,
+            execution_profile=config.execution_profile,
+            memory_mode=config.memory_mode,
+            os_agent_enabled=config.os_agent_enabled,
         )
 
         logger.info(
@@ -2825,6 +2865,8 @@ Please use this web search context to inform your response when relevant."""
             session_manager=self.session_manager,
             artifact_storage=self.artifact_storage,
             file_processor=self.file_processor,
+            execution_gateway=self.execution_gateway,
+            request_router=self.request_router,
         )
 
         # Load history if not provided
@@ -2867,6 +2909,9 @@ Please use this web search context to inform your response when relevant."""
                     event_type="done",
                     data={
                         "session_id": session_id,
+                        "run_id": event.data.get("run_id")
+                        if isinstance(event.data, dict)
+                        else None,
                         "duration_ms": duration_ms,
                         "total_length": content_length,
                     },
@@ -2958,6 +3003,12 @@ Please use this web search context to inform your response when relevant."""
             "tool_result": StreamEventType.TOOL_CALL_RESULT,
             "retrieval_complete": StreamEventType.CONTEXT_RETRIEVED,
             "rag_evaluation": StreamEventType.RAG_EVALUATION,
+            "context_budget": StreamEventType.CONTEXT_BUDGET,
+            "context_compacted": StreamEventType.CONTEXT_COMPACTED,
+            "queue_state": StreamEventType.QUEUE_STATE,
+            "approval_required": StreamEventType.APPROVAL_REQUIRED,
+            "approval_result": StreamEventType.APPROVAL_RESULT,
+            "gateway_decision": StreamEventType.GATEWAY_DECISION,
             "complete": StreamEventType.DONE,
             "error": StreamEventType.ERROR,
             # ReAct thinking events (Phase 3: Agent Intelligence)
@@ -2983,7 +3034,7 @@ Please use this web search context to inform your response when relevant."""
             timestamp=event.timestamp,
         )
 
-    async def _execute_with_planning(
+    async def _legacy_execute_with_planning(
         self,
         user: UserContext,
         session_id: str,
@@ -3038,7 +3089,24 @@ Please use this web search context to inform your response when relevant."""
                 },
             )
 
-            async for result in orchestrator.execute_plan(plan, working_memory):
+            invocation_context = ToolInvocationContext(
+                session_id=session_id,
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                request_id=f"legacy-planning:{session_id}:{int(time.time() * 1000)}",
+                run_id=str(uuid.uuid4()),
+                scope_id=session_id,
+                policy_profile=config.execution_profile,
+                os_agent_enabled=config.os_agent_enabled,
+                kb_dataset_ids=config.kb_dataset_ids or [],
+                user=user,
+            )
+
+            async for result in orchestrator.execute_plan(
+                plan,
+                working_memory,
+                invocation_context=invocation_context,
+            ):
                 # Emit result update
                 yield AssistantStreamEvent(
                     event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
@@ -3637,7 +3705,7 @@ Please use this web search context to inform your response when relevant."""
 
         return content, user_images
 
-    def _get_provider_from_model(self, model_id: str) -> str:
+    def _legacy_get_provider_from_model(self, model_id: str) -> str:
         """Get provider name from model ID for ContextEngine configuration.
 
         Args:
@@ -3709,6 +3777,7 @@ Please use this web search context to inform your response when relevant."""
             self._tool_orchestrator = ToolOrchestrator(
                 tool_registry=registry,
                 max_parallel=max_parallel,
+                execution_gateway=self.execution_gateway,
             )
         return self._tool_orchestrator
 
@@ -3754,16 +3823,19 @@ Please use this web search context to inform your response when relevant."""
         from .tools import get_tool_registry
 
         registry = get_tool_registry()
-        available_tools = [tool.name for tool in registry.list_tools()]
+        available_tools = [tool.name for tool in registry.list_tools(user=user)]
 
         # Add KB retrieval tool if KB service is available
         if self.kb_service and config.kb_dataset_ids and "kb_search" not in available_tools:
             available_tools.append("kb_search")
 
         # Add web search tool if enabled
-        if config.web_search_enabled and self.tavily_tool.is_configured:
-            if "web_search" not in available_tools:
-                available_tools.append("web_search")
+        if (
+            config.web_search_enabled
+            and self.tavily_tool.is_configured
+            and "web_search" not in available_tools
+        ):
+            available_tools.append("web_search")
 
         logger.info(f"[TASK PLANNING] Available tools: {available_tools}")
 
@@ -3873,9 +3945,25 @@ Please use this web search context to inform your response when relevant."""
         # Step 3: Execute plan using ToolOrchestrator
         orchestrator = self.get_tool_orchestrator(max_parallel=config.max_parallel_tools)
         collected_results: list[ToolExecutionResult] = []
+        invocation_context = ToolInvocationContext(
+            session_id=session_id,
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            request_id=f"planning:{session_id}:{int(time.time() * 1000)}",
+            run_id=str(uuid.uuid4()),
+            scope_id=session_id,
+            policy_profile=config.execution_profile,
+            os_agent_enabled=config.os_agent_enabled,
+            kb_dataset_ids=config.kb_dataset_ids or [],
+            user=user,
+        )
 
         try:
-            async for result in orchestrator.execute_plan(plan, working_memory):
+            async for result in orchestrator.execute_plan(
+                plan,
+                working_memory,
+                invocation_context=invocation_context,
+            ):
                 # Store result for final response generation
                 collected_results.append(result)
 
@@ -4173,6 +4261,48 @@ Please use this web search context to inform your response when relevant."""
             }
             for m in models
         ]
+
+    def get_gateway_policies(self) -> dict[str, Any]:
+        """Return assistant gateway policy snapshot for API exposure."""
+        if not self.execution_gateway:
+            return {}
+        return self.execution_gateway.get_policies()
+
+    async def approve_tool_request(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        approved: bool,
+        approver_user_id: str,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Approve or reject a pending tool invocation."""
+        if not self.execution_gateway:
+            return None
+        return await self.execution_gateway.approve(
+            approval_id=approval_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            approved=approved,
+            approver_user_id=approver_user_id,
+            reason=reason,
+        )
+
+    async def get_run_status(
+        self,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch run status for the current user/tenant."""
+        if not self.execution_gateway:
+            return None
+        return await self.execution_gateway.get_run(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
 
     async def close(self) -> None:
         """Cleanup resources."""

@@ -31,7 +31,6 @@ async def process_file_task(payload: dict[str, Any], file_processor: FileProcess
         user_id=user_id,
         tenant_id=tenant_id or "default",
         roles=[],  # Roles not needed for file processing
-        permissions=[],
     )
 
     try:
