@@ -766,6 +766,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
+  const hasSearchStatus = Boolean(message.searchStatus?.length);
   const hasProcessSummaryDetails =
     !!message.processSummary &&
     (
@@ -781,6 +782,12 @@ export function ChatMessage({ message }: ChatMessageProps) {
     (message.isStreaming || hasProcessSummaryDetails);
   // Show thinking when streaming but no content yet
   const isThinking = message.isStreaming && !message.content;
+  const shouldShowSearchStatus =
+    hasSearchStatus &&
+    (
+      !ASSISTANT_UI_V2 ||
+      (!hasProcessSummary && !hasToolCalls && !isThinking && !message.isStreaming)
+    );
 
   return (
     <motion.div
@@ -874,7 +881,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
             ) : null}
 
             {/* Search status display */}
-            {message.searchStatus && message.searchStatus.length > 0 && (
+            {shouldShowSearchStatus && message.searchStatus && (
               <SearchStatusDisplay searchStatus={message.searchStatus} />
             )}
 
