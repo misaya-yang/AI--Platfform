@@ -169,6 +169,23 @@ function summarizeToolResult(result: unknown): string | undefined {
   return String(result);
 }
 
+function isZeroToolNoise(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return false;
+
+  const zhPattern = /(正在|执行).{0,24}0\s*个?\s*工具/u;
+  const enPattern = /(running|executing).{0,24}\b0\s*tools?\b/u;
+  return zhPattern.test(normalized) || enPattern.test(normalized);
+}
+
+function sanitizeProgressLabel(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || isZeroToolNoise(trimmed)) return undefined;
+  return trimmed;
+}
+
 function finalizeProcessSummary(
   summary: ProcessSummaryState | undefined,
   status: "succeeded" | "failed",
@@ -565,7 +582,7 @@ export function useChatSession() {
             if (statusData.phase) {
               const phaseStatus: AgentPhaseStatus = {
                 phase: statusData.phase,
-                message: statusData.message,
+                message: sanitizeProgressLabel(statusData.message) ?? "",
                 isDocumentTask: statusData.is_document_task,
                 taskId: statusData.task_id,
               };
@@ -877,14 +894,18 @@ export function useChatSession() {
               icon?: string;
               timestamp: number;
             };
+            const sanitizedStepTitle = sanitizeProgressLabel(stepStartData.title);
+            const isNoiseStep = isZeroToolNoise(stepStartData.title);
+            const stepTitle = sanitizedStepTitle || stepStartData.title || stepStartData.step_id;
             // Add new step to working memory tasks
             setWorkingMemory((prev) => {
+              if (isNoiseStep) return prev;
               if (!prev) {
                 return {
                   goal: "",
                   tasks: [{
                     id: stepStartData.step_id,
-                    description: stepStartData.title,
+                    description: stepTitle,
                     status: "in_progress",
                     icon: stepStartData.icon,
                     startTime: stepStartData.timestamp,
@@ -900,7 +921,13 @@ export function useChatSession() {
                   ...prev,
                   tasks: prev.tasks.map((t) =>
                     t.id === stepStartData.step_id
-                      ? { ...t, status: "in_progress", icon: stepStartData.icon, startTime: stepStartData.timestamp }
+                      ? {
+                          ...t,
+                          description: stepTitle,
+                          status: "in_progress",
+                          icon: stepStartData.icon,
+                          startTime: stepStartData.timestamp,
+                        }
                       : t
                   ),
                 };
@@ -910,7 +937,7 @@ export function useChatSession() {
                 ...prev,
                 tasks: [...prev.tasks, {
                   id: stepStartData.step_id,
-                  description: stepStartData.title,
+                  description: stepTitle,
                   status: "in_progress",
                   icon: stepStartData.icon,
                   startTime: stepStartData.timestamp,
@@ -920,14 +947,23 @@ export function useChatSession() {
             setShowTaskPanel(true);
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              if (isNoiseStep) {
+                return {
+                  ...m,
+                  processSummary: {
+                    ...prev,
+                    currentStep: undefined,
+                  },
+                };
+              }
               return {
                 ...m,
                 processSummary: {
                   ...prev,
-                  currentStep: stepStartData.title,
+                  currentStep: stepTitle,
                   steps: upsertStep(prev.steps, {
                     id: stepStartData.step_id,
-                    title: stepStartData.title,
+                    title: stepTitle,
                     description: stepStartData.description,
                     status: "running",
                     startedAt: stepStartData.timestamp ?? now,
@@ -965,15 +1001,15 @@ export function useChatSession() {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               const status: ProcessStepItem["status"] =
                 stepFinishData.status === "failed" ? "failed" : "completed";
+              const existingStep = prev.steps.find((s) => s.id === stepFinishData.step_id);
+              if (!existingStep) return m;
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   steps: upsertStep(prev.steps, {
                     id: stepFinishData.step_id,
-                    title:
-                      prev.steps.find((s) => s.id === stepFinishData.step_id)?.title ||
-                      stepFinishData.step_id,
+                    title: existingStep.title,
                     status,
                     finishedAt: stepFinishData.timestamp ?? now,
                     durationMs: stepFinishData.duration_ms,

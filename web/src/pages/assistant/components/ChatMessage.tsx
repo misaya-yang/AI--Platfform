@@ -25,6 +25,7 @@ import {
   Globe,
   Loader2,
   CheckCircle2,
+  AlertCircle,
   Zap,
   Brain,
   PenTool,
@@ -107,14 +108,15 @@ function InlineArtifactCard({
 /** Manus-style collapsible task panel */
 function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[] }) {
   const { t } = useTranslation();
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(!ASSISTANT_UI_V2);
 
   if (!searchStatus || !Array.isArray(searchStatus) || searchStatus.length === 0) return null;
 
-  // Check if all tasks are completed
   const allCompleted = searchStatus.every(item => item.state === "completed");
   const completedCount = searchStatus.filter(item => item.state === "completed").length;
   const totalCount = searchStatus.length;
+  const hasError = searchStatus.some((item) => item.state === "error");
+  const shouldExpand = hasError ? true : isExpanded;
 
   const getStepConfig = (item: SearchStatusItem) => {
     const isKB = item.type === "kb";
@@ -144,11 +146,87 @@ function SearchStatusDisplay({ searchStatus }: { searchStatus: SearchStatusItem[
         : isFiles
         ? "text-violet-500"
         : "text-blue-500",
-      actionText,
+      actionText: actionText || "",
       isSearching,
       isCompleted,
     };
   };
+
+  const headerLabel = hasError
+    ? t("assistant.searchFailed")
+    : allCompleted
+      ? t("assistant.researchComplete")
+      : t("assistant.researching");
+
+  if (ASSISTANT_UI_V2) {
+    return (
+      <div className="mb-2">
+        <button
+          type="button"
+          onClick={() => setIsExpanded((prev) => !prev)}
+          className="w-full py-1.5 pr-1 flex items-center gap-2 text-left"
+          aria-expanded={shouldExpand}
+        >
+          {allCompleted ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+          ) : (
+            <Loader2 className="h-4 w-4 text-[hsl(var(--assistant-accent))] animate-spin shrink-0" />
+          )}
+          <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
+            {headerLabel} {completedCount}/{totalCount}
+          </span>
+          <motion.span animate={{ rotate: shouldExpand ? 180 : 0 }} transition={{ duration: 0.15 }}>
+            <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
+          </motion.span>
+        </button>
+
+        <AnimatePresence initial={false}>
+          {shouldExpand && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="overflow-hidden"
+            >
+              <div className="ml-5 pl-3 pb-2 border-l border-[hsl(var(--assistant-border-soft))]/80 space-y-1.5">
+                {searchStatus.map((item, index) => {
+                  const config = getStepConfig(item);
+                  const IconComponent = config.icon;
+                  return (
+                    <motion.div
+                      key={`${item.type}-${index}`}
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: index * 0.04 }}
+                      className="flex items-center gap-2 text-xs"
+                    >
+                      {config.isSearching ? (
+                        <Loader2 className={cn("h-3.5 w-3.5 animate-spin", config.iconColor)} />
+                      ) : config.isCompleted ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                      ) : (
+                        <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                      )}
+                      <IconComponent className={cn("h-3 w-3", config.iconColor)} />
+                      <span className="flex-1 min-w-0 truncate text-[hsl(var(--assistant-text-primary))]">
+                        {config.actionText}
+                      </span>
+                      {!config.isSearching && item.durationMs !== undefined && (
+                        <span className="text-[10px] text-[hsl(var(--assistant-text-secondary))] font-mono">
+                          {(item.durationMs / 1000).toFixed(1)}s
+                        </span>
+                      )}
+                    </motion.div>
+                  );
+                })}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  }
 
   return (
     <div className="mb-4">
@@ -471,25 +549,21 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
       case "completed":
         return {
           label: t("assistant.toolStatus.completed"),
-          color: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
           dot: "bg-emerald-500"
         };
       case "running":
         return {
           label: t("assistant.toolStatus.running"),
-          color: "bg-blue-500/10 text-blue-500 border-blue-500/20",
           dot: "bg-blue-500 animate-pulse"
         };
       case "error":
         return {
           label: t("assistant.toolStatus.error"),
-          color: "bg-red-500/10 text-red-500 border-red-500/20",
           dot: "bg-red-500"
         };
       default:
         return {
           label: t("assistant.toolStatus.pending"),
-          color: "bg-slate-500/10 text-slate-500 border-slate-500/20",
           dot: "bg-slate-500"
         };
     }
@@ -503,59 +577,35 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
       key={tc.id || idx}
       initial={{ opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: idx * 0.05 }}
-      className="group relative overflow-hidden rounded-lg bg-slate-50/80 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-700/50 hover:border-slate-300 dark:hover:border-slate-600 transition-all duration-150"
+      transition={{ delay: idx * 0.04 }}
+      className="text-xs"
     >
-      {/* Clickable header - compact */}
       <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="relative w-full flex items-center gap-2.5 px-3 py-2 text-left"
+        type="button"
+        onClick={() => hasExpandableContent && setIsExpanded((prev) => !prev)}
+        className={cn(
+          "w-full flex items-center gap-2 text-left py-1",
+          !hasExpandableContent && "cursor-default"
+        )}
+        aria-expanded={hasExpandableContent ? isExpanded : undefined}
       >
-        {/* Tool icon - smaller */}
-        <div className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-md bg-slate-200/80 dark:bg-slate-700/60">
-          <div className="text-slate-500 dark:text-slate-400 scale-75">
-            {getToolIcon(tc.name)}
-          </div>
-        </div>
-
-        {/* Content */}
-        <div className="flex-1 min-w-0">
-          {/* Tool name and status on same line */}
-          <div className="flex items-center gap-2">
-            <code className="text-[12px] font-mono font-medium text-slate-700 dark:text-slate-200 truncate">
-              {tc.name}
-            </code>
-            {/* Status badge - inline, compact */}
-            <span className={cn(
-              "flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium border flex-shrink-0",
-              statusConfig.color
-            )}>
-              <span className={cn("h-1 w-1 rounded-full", statusConfig.dot)} />
-              {statusConfig.label}
-            </span>
-          </div>
-
-          {/* Arguments preview (collapsed) - single line */}
-          {!isExpanded && tc.arguments && Object.keys(tc.arguments).length > 0 && (
-            <pre className="mt-0.5 text-[10px] font-mono text-slate-400 dark:text-slate-500 truncate">
-              {JSON.stringify(tc.arguments).length > 50
-                ? JSON.stringify(tc.arguments).slice(0, 50) + "..."
-                : JSON.stringify(tc.arguments)}
-            </pre>
-          )}
-        </div>
-
-        {/* Expand indicator - smaller */}
-        <motion.div
-          animate={{ rotate: isExpanded ? 90 : 0 }}
-          transition={{ duration: 0.15 }}
-          className="flex-shrink-0"
-        >
-          <ChevronRight className="h-3.5 w-3.5 text-slate-300 dark:text-slate-600" />
-        </motion.div>
+        <span className={cn("h-1.5 w-1.5 rounded-full", statusConfig.dot)} />
+        <span className="text-[hsl(var(--assistant-text-secondary))]">
+          {getToolIcon(tc.name)}
+        </span>
+        <code className="font-mono text-[11px] text-[hsl(var(--assistant-text-primary))] truncate">
+          {tc.name}
+        </code>
+        <span className="ml-auto text-[10px] text-[hsl(var(--assistant-text-secondary))]">
+          {statusConfig.label}
+        </span>
+        {hasExpandableContent && (
+          <motion.div animate={{ rotate: isExpanded ? 90 : 0 }} transition={{ duration: 0.15 }}>
+            <ChevronRight className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))]" />
+          </motion.div>
+        )}
       </button>
 
-      {/* Expandable content - more compact */}
       <AnimatePresence>
         {isExpanded && hasExpandableContent && (
           <motion.div
@@ -565,14 +615,14 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
             transition={{ duration: 0.15 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-2.5 pt-0 ml-8">
+            <div className="ml-4 pl-3 py-1 border-l border-[hsl(var(--assistant-border-soft))]/80 space-y-1">
               {/* Full arguments */}
               {tc.arguments && Object.keys(tc.arguments).length > 0 && (
                 <div className="space-y-1">
-                  <div className="text-[9px] font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                  <div className="text-[10px] font-medium text-[hsl(var(--assistant-text-secondary))] uppercase tracking-wide">
                     {t("assistant.toolArguments")}
                   </div>
-                  <pre className="text-[10px] font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/50 rounded p-1.5 overflow-x-auto whitespace-pre-wrap break-all max-h-32">
+                  <pre className="text-[10px] font-mono text-[hsl(var(--assistant-text-secondary))] overflow-x-auto whitespace-pre-wrap break-all max-h-32">
                     {JSON.stringify(tc.arguments, null, 2)}
                   </pre>
                 </div>
@@ -588,95 +638,62 @@ function ToolCallCard({ tc, idx }: { tc: NonNullable<ChatMessageType["toolCalls"
 /** GPT-style Tool Calls Display - Default expanded */
 function ToolCallsDisplay({ toolCalls, isStreaming }: { toolCalls: ChatMessageType["toolCalls"], isStreaming?: boolean }) {
   const { t } = useTranslation();
-  // Default to expanded so users can see tool calls immediately
-  const [isExpanded, setIsExpanded] = useState(true);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   if (!toolCalls || toolCalls.length === 0) return null;
 
   const allCompleted = toolCalls.every(tc => tc.status === "completed");
   const runningCount = toolCalls.filter(tc => tc.status === "running").length;
   const pendingCount = toolCalls.filter(tc => tc.status === "pending").length;
+  const hasError = toolCalls.some((tc) => tc.status === "error");
   const isProcessing = isStreaming && !allCompleted;
+  const expanded = hasError ? true : isExpanded;
 
   return (
-    <div className="mb-2.5">
-      {/* Thinking indicator when processing - prominent display */}
-      {isProcessing && (
-        <motion.div
-          initial={{ opacity: 0, y: -4 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex items-center gap-3 py-3 px-4 mb-2 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
-        >
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
-            <div className="flex gap-1">
-              {[0, 1, 2].map((i) => (
-                <motion.div
-                  key={i}
-                  className="w-2 h-2 rounded-full bg-violet-500"
-                  animate={{ 
-                    scale: [1, 1.4, 1],
-                    opacity: [0.5, 1, 0.5] 
-                  }}
-                  transition={{ 
-                    duration: 1.2, 
-                    repeat: Infinity, 
-                    delay: i * 0.15,
-                    ease: "easeInOut"
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-          <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
-            {t("assistant.thinking")}
-          </span>
-        </motion.div>
-      )}
-
-      {/* Header with status - always visible, compact */}
+    <div className="mb-2">
       <button
+        type="button"
         onClick={() => setIsExpanded(!isExpanded)}
-        className={cn(
-          "flex items-center gap-2.5 px-3 py-2 rounded-lg transition-all duration-150 w-full text-left",
-          "bg-slate-100/60 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800/60",
-          "border border-slate-200/50 dark:border-slate-700/50"
-        )}
+        className="w-full py-1.5 pr-1 flex items-center gap-2 text-left"
+        aria-expanded={expanded}
       >
-        {/* Status icon - smaller */}
         {allCompleted ? (
-          <CheckCircle2 className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+          <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
         ) : (
-          <Loader2 className="h-4 w-4 text-violet-500 animate-spin flex-shrink-0" />
+          <Loader2 className="h-4 w-4 text-[hsl(var(--assistant-accent))] animate-spin shrink-0" />
         )}
 
-        {/* Label - smaller */}
-        <span className="text-xs font-medium text-slate-600 dark:text-slate-300 flex-1">
-          {allCompleted 
+        <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
+          {allCompleted
             ? t("assistant.toolCallsCompleted", "{{count}} tool calls completed", { count: toolCalls.length })
             : t("assistant.toolCallsRunning", "Running tools ({{count}})", { count: runningCount || pendingCount || toolCalls.length })
           }
         </span>
 
-        {/* Expand chevron - smaller */}
         <motion.div
-          animate={{ rotate: isExpanded ? 180 : 0 }}
+          animate={{ rotate: expanded ? 180 : 0 }}
           transition={{ duration: 0.15 }}
         >
-          <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+          <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
         </motion.div>
       </button>
 
-      {/* Tool list - default expanded, compact spacing */}
+      {isProcessing && !expanded && (
+        <span className="ml-6 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
+          {t("assistant.thinking")}
+        </span>
+      )}
+
       <AnimatePresence initial={false}>
-        {isExpanded && (
+        {expanded && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15 }}
+            transition={{ duration: 0.18 }}
             className="overflow-hidden"
           >
-            <div className="pt-2 space-y-1.5">
+            <div className="ml-5 pl-3 pb-2 border-l border-[hsl(var(--assistant-border-soft))]/80 space-y-1">
               {toolCalls.map((tc, idx) => (
                 <ToolCallCard key={tc.id || idx} tc={tc} idx={idx} />
               ))}
@@ -771,7 +788,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.25, ease: "easeOut" }}
       className={cn(
-        "flex w-full gap-4",
+        "flex w-full gap-3 sm:gap-4",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
@@ -781,7 +798,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
         animate={{ scale: 1 }}
         transition={{ delay: 0.05, type: "spring", stiffness: 300, damping: 20 }}
         className={cn(
-          "flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-transform hover:scale-105",
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-transform hover:scale-105 sm:h-9 sm:w-9",
           isUser
             ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/20"
             : "bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-500/20"
@@ -802,7 +819,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
           <div
             className={
               ASSISTANT_UI_V2
-                ? "max-w-[85%] bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-primary))] rounded-2xl rounded-tr-sm px-4 py-3 border border-[hsl(var(--assistant-border-soft))] shadow-sm"
+                ? "max-w-[85%] bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-primary))] rounded-2xl rounded-tr-sm px-4 py-3 border border-[hsl(var(--assistant-border-soft))]"
                 : "max-w-[85%] bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15"
             }
           >
@@ -813,7 +830,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
           </div>
         ) : (
           /* Assistant message - GPT style without wrapper */
-          <div className="w-full space-y-3">
+          <div className="w-full space-y-3 assistant-copy">
             {hasProcessSummary && message.processSummary ? (
               <ProcessSummaryBar summary={message.processSummary} />
             ) : hasToolCalls ? (
@@ -875,7 +892,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
             {message.isGeneratingImage ? (
               <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
             ) : message.content ? (
-              <div className="text-slate-800 dark:text-slate-100 text-[15px] leading-relaxed">
+              <div className="text-[hsl(var(--assistant-text-primary))] text-[15px] sm:text-[16px] leading-7">
                 <StreamOutput
                   text={message.content}
                   isStreaming={!!message.isStreaming}

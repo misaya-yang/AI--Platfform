@@ -302,7 +302,6 @@ function filterToolJsonOutput(text: string): string {
 export const StreamOutput = memo(function StreamOutput({
   text,
   isStreaming = false,
-  id: _id = "msg"  // Reserved for future use (e.g., accessibility)
 }: StreamOutputProps) {
   // Enable LaTeX copy support - copies original LaTeX source when selecting formulas
   useLatexCopy();
@@ -313,7 +312,7 @@ export const StreamOutput = memo(function StreamOutput({
   if (!text) return null;
 
   return (
-    <div className="prose prose-lg max-w-none dark:prose-invert break-words prose-p:my-3 prose-p:leading-[1.8] prose-headings:my-4 prose-headings:font-semibold prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-pre:my-3 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[15px] prose-p:text-[17px] prose-li:text-[17px] prose-headings:tracking-tight">
+    <div className="assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-slate-200/70 dark:prose-pre:border-slate-700/60 prose-pre:bg-slate-100/70 dark:prose-pre:bg-slate-900/60 prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-slate-300 dark:prose-blockquote:border-l-slate-600">
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,

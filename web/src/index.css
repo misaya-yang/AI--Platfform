@@ -121,6 +121,14 @@
     color: hsl(var(--assistant-text-primary));
   }
 
+  .assistant-v2 .assistant-copy a {
+    color: hsl(var(--assistant-accent));
+  }
+
+  .assistant-v2 .assistant-copy code {
+    color: hsl(var(--assistant-text-primary));
+  }
+
   /* 选中文本样式 */
   ::selection {
     background: hsl(var(--primary) / 0.2);

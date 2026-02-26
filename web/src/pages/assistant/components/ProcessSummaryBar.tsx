@@ -17,6 +17,21 @@ interface ProcessSummaryBarProps {
   summary: ProcessSummaryState;
 }
 
+function isNoiseStepLabel(label: string | undefined): boolean {
+  if (!label) return false;
+  const normalized = label.trim().toLowerCase();
+  if (!normalized) return false;
+  return /(正在|执行).{0,24}0\s*个?\s*工具/u.test(normalized) ||
+    /(running|executing).{0,24}\b0\s*tools?\b/u.test(normalized);
+}
+
+function normalizeStepLabel(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const trimmed = label.trim();
+  if (!trimmed || isNoiseStepLabel(trimmed)) return undefined;
+  return trimmed;
+}
+
 function renderToolSummary(tool: ToolTimelineItem): string {
   if (tool.error) return tool.error;
   if (tool.summary) return tool.summary;
@@ -30,8 +45,20 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const defaultExpanded = summary.isErrorExpanded === true || !summary.collapsed;
   const expanded = summary.isErrorExpanded === true ? true : (userExpanded ?? defaultExpanded);
 
-  const stepTotal = summary.steps.length;
-  const stepCompleted = summary.steps.filter((s) => s.status === "completed").length;
+  const visibleCurrentStep = normalizeStepLabel(summary.currentStep);
+  const visibleSteps = useMemo(
+    () =>
+      summary.steps
+        .filter((step) => !isNoiseStepLabel(step.title))
+        .map((step) => ({
+          ...step,
+          title: normalizeStepLabel(step.title) ?? step.id,
+        })),
+    [summary.steps]
+  );
+
+  const stepTotal = visibleSteps.length;
+  const stepCompleted = visibleSteps.filter((s) => s.status === "completed").length;
   const toolTotal = summary.tools.length;
   const toolRunning = summary.tools.filter((s) => s.status === "running").length;
   const hasContextBudget = Boolean(summary.contextBudget);
@@ -54,9 +81,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
         steps: stepTotal,
       });
     }
-    if (summary.currentStep) {
+    if (visibleCurrentStep) {
       return t("assistant.processSummary.runningStep", "Running: {{step}}", {
-        step: summary.currentStep,
+        step: visibleCurrentStep,
       });
     }
     if (toolRunning === 0 && toolTotal === 0) {
@@ -65,27 +92,38 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
     return t("assistant.processSummary.running", "Running {{tools}} tools", {
       tools: toolRunning || toolTotal,
     });
-  }, [hasError, summary.status, summary.currentStep, toolTotal, stepTotal, toolRunning, t]);
+  }, [hasError, summary.status, visibleCurrentStep, toolTotal, stepTotal, toolRunning, t]);
 
   const headerIcon = hasError ? (
     <AlertCircle className="h-4 w-4 text-red-500" />
   ) : summary.status === "succeeded" ? (
     <CheckCircle2 className="h-4 w-4 text-emerald-500" />
   ) : (
-    <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
+    <Loader2 className="h-4 w-4 text-[hsl(var(--assistant-accent))] animate-spin" />
   );
 
+  if (summary.status === "succeeded" && !canExpand) {
+    return null;
+  }
+
   return (
-    <div className="rounded-xl border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/60">
+    <div
+      className={cn(
+        "w-full rounded-lg",
+        hasError
+          ? "bg-red-500/5"
+          : "bg-transparent"
+      )}
+    >
       {canExpand ? (
         <button
           type="button"
           onClick={() => setUserExpanded((current) => !(current ?? defaultExpanded))}
-          className="w-full px-3 py-2.5 flex items-center gap-2 text-left"
+          className="w-full py-1.5 pr-1 flex items-center gap-2 text-left"
           aria-expanded={expanded}
         >
           {headerIcon}
-          <span className="text-xs sm:text-sm font-medium text-[hsl(var(--assistant-text-primary))] flex-1 truncate">
+          <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
             {headerText}
           </span>
           {durationMs != null && durationMs > 0 && (
@@ -99,9 +137,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
           </motion.span>
         </button>
       ) : (
-        <div className="w-full px-3 py-2.5 flex items-center gap-2 text-left">
+        <div className="w-full py-1.5 pr-1 flex items-center gap-2 text-left">
           {headerIcon}
-          <span className="text-xs sm:text-sm font-medium text-[hsl(var(--assistant-text-primary))] flex-1 truncate">
+          <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
             {headerText}
           </span>
           {durationMs != null && durationMs > 0 && (
@@ -122,15 +160,15 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
             transition={{ duration: 0.18 }}
             className="overflow-hidden"
           >
-            <div className="px-3 pb-3 space-y-2">
+            <div className="ml-5 pl-3 pb-2 border-l border-[hsl(var(--assistant-border-soft))]/80 space-y-2">
               {stepTotal > 0 && (
-                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2">
+                <div>
                   <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-[hsl(var(--assistant-text-secondary))] mb-1.5">
                     <ListTodo className="h-3 w-3" />
                     {t("assistant.processSummary.steps", "Steps")} ({stepCompleted}/{stepTotal})
                   </div>
                   <div className="space-y-1">
-                    {summary.steps.map((step) => (
+                    {visibleSteps.map((step) => (
                       <div key={step.id} className="flex items-center gap-2 text-xs">
                         <span
                           className={cn(
@@ -154,7 +192,7 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
               )}
 
               {toolTotal > 0 && (
-                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2">
+                <div>
                   <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-[hsl(var(--assistant-text-secondary))] mb-1.5">
                     <Wrench className="h-3 w-3" />
                     {t("assistant.processSummary.tools", "Tools")} ({toolTotal})
@@ -197,7 +235,7 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
               )}
 
               {hasContextBudget && summary.contextBudget && (
-                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2 text-xs text-[hsl(var(--assistant-text-secondary))]">
+                <div className="text-xs text-[hsl(var(--assistant-text-secondary))]">
                   {t("assistant.processSummary.contextBudget", "Context used")}:{" "}
                   {summary.contextBudget.used_tokens ?? "-"}
                   {summary.contextBudget.model_context_window
@@ -210,7 +248,7 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
               )}
 
               {hasContextCompacted && (
-                <div className="rounded-lg border border-[hsl(var(--assistant-border-soft))] bg-background/60 p-2 text-xs text-[hsl(var(--assistant-text-secondary))]">
+                <div className="text-xs text-[hsl(var(--assistant-text-secondary))]">
                   {t("assistant.processSummary.contextCompacted", "Context compacted")}
                 </div>
               )}
