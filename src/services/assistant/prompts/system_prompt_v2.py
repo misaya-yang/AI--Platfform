@@ -1171,9 +1171,9 @@ def get_streaming_first_prompt(
         kb_instruction = "Use the `search_knowledge_base` tool when the user asks about company-specific information."
         if kb_mode_norm == "auto":
             kb_instruction = (
-                "Before answering, you MUST call `search_knowledge_base` at least once to ground the response "
-                "(unless the user explicitly asks you not to use the KB, or the request is purely small-talk). "
-                "Use a focused query and then cite or quote relevant snippets."
+                "Prefer `search_knowledge_base` when the question likely depends on internal/company data. "
+                "If KB evidence is weak, unavailable, or not needed for a general question, answer directly. "
+                "When you do use KB, run one focused query and cite or quote relevant snippets."
             )
         elif kb_mode_norm in {"off", "disabled", "false", "0"}:
             kb_instruction = "Knowledge base retrieval is disabled for this run; do NOT call `search_knowledge_base`."

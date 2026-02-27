@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -11,6 +12,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ....core.observability.logging import get_logger
+from ..openclaw.security.sandbox_resolver import SandboxResolver
+from ..openclaw.tools.lane_scheduler import LaneScheduler
+from ..openclaw.tools.policy_lattice import ToolPolicyLattice
 from ..tool_invoker import ToolInvocationContext, ToolInvoker
 from ..tools.tool_registry import ToolCallResult
 from .policy_engine import AssistantPolicyEngine
@@ -51,6 +55,8 @@ class RunRecord:
     memory_mode: str
     os_agent_enabled: bool
     request_preview: str
+    queue_mode: str | None = None
+    openclaw_mode: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -75,6 +81,12 @@ class AssistantExecutionGateway:
         self._runs: dict[str, RunRecord] = {}
         self._approvals: dict[str, ApprovalRecord] = {}
         self._commands: dict[str, dict[str, Any]] = {}
+        self._lane_scheduler = LaneScheduler()
+        self._policy_lattice = ToolPolicyLattice()
+        self._sandbox_resolver = SandboxResolver()
+        self._tool_policy_v2_enabled = (
+            os.getenv("ASSISTANT_OPENCLAW_TOOL_POLICY_V2", "false").lower() == "true"
+        )
 
     @staticmethod
     def _safe_uuid(value: str | None) -> str | None:
@@ -106,6 +118,8 @@ class AssistantExecutionGateway:
         memory_mode: str,
         os_agent_enabled: bool,
         request_preview: str,
+        queue_mode: str | None = None,
+        openclaw_mode: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         self._runs[run_id] = RunRecord(
@@ -118,6 +132,8 @@ class AssistantExecutionGateway:
             execution_profile=execution_profile,
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
+            queue_mode=queue_mode,
+            openclaw_mode=openclaw_mode,
             request_preview=request_preview,
             started_at=now,
         )
@@ -216,6 +232,8 @@ class AssistantExecutionGateway:
                 "execution_profile": run.execution_profile,
                 "memory_mode": run.memory_mode,
                 "os_agent_enabled": run.os_agent_enabled,
+                "queue_mode": run.queue_mode,
+                "openclaw_mode": run.openclaw_mode,
                 "request_preview": run.request_preview,
                 "usage": run.usage,
                 "error": run.error,
@@ -255,6 +273,8 @@ class AssistantExecutionGateway:
             "execution_profile": row.get("execution_profile"),
             "memory_mode": row.get("memory_mode"),
             "os_agent_enabled": bool(row.get("os_agent_enabled")),
+            "queue_mode": row.get("queue_mode"),
+            "openclaw_mode": row.get("openclaw_mode"),
             "request_preview": row.get("request_preview"),
             "usage": usage or {},
             "error": row.get("error"),
@@ -367,6 +387,14 @@ class AssistantExecutionGateway:
         profile = (routed_request.execution_profile if routed_request else None) or getattr(
             context, "policy_profile", "safe"
         )
+        queue_mode = (
+            routed_request.queue_mode
+            if routed_request is not None
+            else str((getattr(context, "metadata", {}) or {}).get("queue_mode") or "collect")
+        )
+        lane = self._resolve_lane(queue_mode, tool_name)
+        priority = self._resolve_priority(queue_mode)
+        steer_payload = arguments.get("_steer_payload")
         os_agent_enabled = (
             bool(routed_request.os_agent_enabled)
             if routed_request is not None
@@ -380,12 +408,57 @@ class AssistantExecutionGateway:
             os_agent_enabled=os_agent_enabled,
         )
 
+        if self._tool_policy_v2_enabled:
+            lattice_layers = {
+                "profile": {
+                    "require_approval": sorted(
+                        self.policy_engine.MEDIUM_RISK_TOOLS | self.policy_engine.HIGH_RISK_TOOLS
+                    )
+                    if profile == "safe"
+                    else []
+                },
+                "queue_mode": {
+                    "require_approval": sorted(self.policy_engine.HIGH_RISK_TOOLS)
+                    if queue_mode in {"steer", "interrupt"}
+                    else []
+                },
+            }
+            lattice = self._policy_lattice.evaluate(
+                tool_name=tool_name,
+                base_allowed=decision.allowed,
+                base_requires_approval=decision.requires_approval,
+                base_reason=decision.reason or "Allowed by base policy",
+                layers=lattice_layers,
+            )
+            decision.allowed = lattice.allowed
+            decision.requires_approval = lattice.requires_approval
+            decision.reason = lattice.reason
+            lattice_payload = lattice.to_dict()
+        else:
+            lattice_payload = None
+
+        sandbox_decision = self._sandbox_resolver.resolve(
+            tool_name=tool_name,
+            execution_profile=profile,
+            os_agent_enabled=os_agent_enabled,
+        )
+        if not sandbox_decision.allowed:
+            decision.allowed = False
+            decision.requires_approval = False
+            decision.reason = sandbox_decision.reason
+        elif sandbox_decision.requires_approval:
+            decision.requires_approval = True
+
         decision_payload = {
             "allowed": decision.allowed,
             "requires_approval": decision.requires_approval,
             "reason": decision.reason,
             "policy_profile": decision.policy_profile,
+            "queue_mode": queue_mode,
+            "lane": lane,
+            "lattice": lattice_payload,
         }
+        sandbox_payload = sandbox_decision.to_dict()
 
         if not decision.allowed:
             return ToolCallResult(
@@ -394,7 +467,12 @@ class AssistantExecutionGateway:
                 success=False,
                 error=decision.reason or "Tool denied by policy",
                 duration_ms=(time.time() - started) * 1000,
-                metadata={"gateway_decision": decision_payload},
+                metadata={
+                    "gateway_decision": decision_payload,
+                    "sandbox_decision": sandbox_payload,
+                    "queue_mode": queue_mode,
+                    "lane": lane,
+                },
             )
 
         command_key = self._build_command_key(
@@ -416,6 +494,9 @@ class AssistantExecutionGateway:
                     "queue_state": "deduped",
                     "command_id": existing_command_id,
                     "gateway_decision": decision_payload,
+                    "sandbox_decision": sandbox_payload,
+                    "queue_mode": queue_mode,
+                    "lane": lane,
                 },
             )
 
@@ -426,6 +507,10 @@ class AssistantExecutionGateway:
             tool_name=tool_name,
             arguments=arguments,
             status="queued",
+            lane=lane,
+            queue_mode=queue_mode,
+            priority=priority,
+            steer_payload=steer_payload if isinstance(steer_payload, dict) else None,
         )
 
         approval_id = arguments.get("_approval_id")
@@ -458,19 +543,28 @@ class AssistantExecutionGateway:
                     "queue_state": "awaiting_approval",
                     "command_id": command_id,
                     "gateway_decision": decision_payload,
+                    "sandbox_decision": sandbox_payload,
+                    "queue_mode": queue_mode,
+                    "lane": lane,
                 },
             )
 
         await self._update_command(command_id=command_id, status="running")
 
         # Remove control-only args before tool call
-        invoke_args = {k: v for k, v in arguments.items() if k != "_approval_id"}
-        result = await self.tool_invoker.invoke(
-            tool_name=tool_name,
-            arguments=invoke_args,
-            context=context,
-            cancel_event=cancel_event,
-        )
+        invoke_args = {
+            k: v for k, v in arguments.items() if k not in {"_approval_id", "_steer_payload"}
+        }
+
+        async def _invoke() -> ToolCallResult:
+            return await self.tool_invoker.invoke(
+                tool_name=tool_name,
+                arguments=invoke_args,
+                context=context,
+                cancel_event=cancel_event,
+            )
+
+        result = await self._lane_scheduler.run_in_lane(lane, _invoke)
 
         final_state = "succeeded" if result.success else "failed"
         await self._update_command(
@@ -486,6 +580,9 @@ class AssistantExecutionGateway:
                 "queue_state": final_state,
                 "command_id": command_id,
                 "gateway_decision": decision_payload,
+                "sandbox_decision": sandbox_payload,
+                "queue_mode": queue_mode,
+                "lane": lane,
             }
         )
         result.metadata = metadata
@@ -502,6 +599,10 @@ class AssistantExecutionGateway:
         tool_name: str,
         arguments: dict[str, Any],
         status: str,
+        lane: str,
+        queue_mode: str,
+        priority: int,
+        steer_payload: dict[str, Any] | None,
     ) -> None:
         command_key = self._build_command_key(
             tenant_id=context.tenant_id,
@@ -520,6 +621,10 @@ class AssistantExecutionGateway:
             "arguments": arguments,
             "status": status,
             "command_key": command_key,
+            "lane": lane,
+            "queue_mode": queue_mode,
+            "priority": priority,
+            "steer_payload": steer_payload,
             "created_at": datetime.now(timezone.utc),
         }
 
@@ -529,9 +634,10 @@ class AssistantExecutionGateway:
         query = """
             INSERT INTO assistant_command_queue (
                 command_id, tenant_id, user_id, session_id, run_id,
-                command_key, tool_name, arguments, status, retry_count,
+                command_key, tool_name, arguments, status, lane,
+                queue_mode, priority, steer_payload, retry_count,
                 max_retries, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 2, NOW(), NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, 2, NOW(), NOW())
             ON CONFLICT (command_id) DO NOTHING;
         """
         try:
@@ -546,9 +652,35 @@ class AssistantExecutionGateway:
                 tool_name,
                 json.dumps(arguments or {}),
                 status,
+                lane,
+                queue_mode,
+                priority,
+                json.dumps(steer_payload or {}),
             )
         except Exception as exc:
-            logger.warning("Failed to persist command queue item: %s", exc)
+            legacy_query = """
+                INSERT INTO assistant_command_queue (
+                    command_id, tenant_id, user_id, session_id, run_id,
+                    command_key, tool_name, arguments, status, retry_count,
+                    max_retries, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 2, NOW(), NOW())
+                ON CONFLICT (command_id) DO NOTHING;
+            """
+            try:
+                await self.database.execute(
+                    legacy_query,
+                    command_id,
+                    context.tenant_id,
+                    context.user_id,
+                    context.session_id,
+                    self._safe_uuid(context.run_id),
+                    command_key,
+                    tool_name,
+                    json.dumps(arguments or {}),
+                    status,
+                )
+            except Exception:
+                logger.warning("Failed to persist command queue item: %s", exc)
 
     async def _update_command(
         self,
@@ -690,6 +822,28 @@ class AssistantExecutionGateway:
             if item.get("status") in {"queued", "running", "awaiting_approval"}:
                 return command_id
         return None
+
+    @staticmethod
+    def _resolve_priority(queue_mode: str) -> int:
+        mapping = {
+            "collect": 0,
+            "followup": 1,
+            "steer": 2,
+            "interrupt": 3,
+        }
+        return mapping.get(str(queue_mode or "collect"), 0)
+
+    def _resolve_lane(self, queue_mode: str, tool_name: str) -> str:
+        mode = str(queue_mode or "collect")
+        if mode == "interrupt":
+            return "main"
+        if mode == "followup":
+            return "subagent"
+        if mode == "steer":
+            return "main"
+        if tool_name in {"system_run_lite", "browser_action_lite"}:
+            return "subagent"
+        return "main"
 
     @staticmethod
     def _build_command_key(

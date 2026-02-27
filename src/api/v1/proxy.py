@@ -275,6 +275,50 @@ def _should_apply_quota_policy(method: str, operation: str, path: str) -> bool:
     return "/runs" in normalized_path
 
 
+def _inject_gateway_domain_policy_metadata(
+    *,
+    body: bytes | None,
+    method: str,
+    path: str,
+    service_config: ProxyServiceConfig | None,
+) -> bytes | None:
+    """Inject service-level domain policy into LangGraph run metadata when configured."""
+    if method.upper() not in {"POST", "PUT", "PATCH"} or not body or not service_config:
+        return body
+
+    normalized_path = "/" + str(path or "").strip().lstrip("/").lower()
+    if "/runs" not in normalized_path:
+        return body
+
+    service_meta = service_config.metadata if isinstance(service_config.metadata, dict) else {}
+    domain_policy = str(service_meta.get("domain_policy") or "").strip().lower()
+    if domain_policy != "imam":
+        return body
+
+    adapter_type = str(service_meta.get("adapter_type") or "").strip().lower()
+    is_langgraph_service = (
+        adapter_type == "langgraph"
+        or bool((service_config.assistant_id or "").strip())
+        or bool((service_config.graph_id or "").strip())
+    )
+    if not is_langgraph_service:
+        return body
+
+    payload = _decode_json_body(body)
+    if not isinstance(payload, dict):
+        return body
+
+    updated_payload = dict(payload)
+    run_metadata = updated_payload.get("metadata")
+    metadata_dict = dict(run_metadata) if isinstance(run_metadata, dict) else {}
+    gateway_meta = metadata_dict.get("gateway")
+    gateway_dict = dict(gateway_meta) if isinstance(gateway_meta, dict) else {}
+    gateway_dict.setdefault("domain_policy", "imam")
+    metadata_dict["gateway"] = gateway_dict
+    updated_payload["metadata"] = metadata_dict
+    return _encode_json_body(updated_payload)
+
+
 async def _enforce_model_allowlist(
     request: Request,
     service_name: str,
@@ -922,6 +966,12 @@ async def transparent_proxy_handler(
 
     # 6. 读取请求体
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
+    body = _inject_gateway_domain_policy_metadata(
+        body=body,
+        method=request.method,
+        path=path,
+        service_config=service_config,
+    )
     t_body = time.perf_counter()
 
     # 7. 解析请求模型并应用服务默认值
@@ -1132,6 +1182,9 @@ async def list_proxy_services(
             proxy_mode = "transparent"
         if proxy_mode:
             safe_metadata["proxy_mode"] = proxy_mode
+        domain_policy = str(raw_metadata.get("domain_policy") or "").strip().lower()
+        if domain_policy in {"none", "imam"}:
+            safe_metadata["domain_policy"] = domain_policy
         ui_preferences = raw_metadata.get("ui_preferences")
         if isinstance(ui_preferences, dict):
             safe_metadata["ui_preferences"] = dict(ui_preferences)

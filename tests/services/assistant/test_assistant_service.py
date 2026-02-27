@@ -88,6 +88,29 @@ class TestAssistantServiceInit:
 
         assert service.context_manager is not None
 
+    def test_builtin_domain_policy_disabled_by_default(self):
+        """Built-in domain policy should be off for generic assistant by default."""
+        from src.services.assistant.assistant_service import AssistantService
+        from src.services.assistant.model_registry import ModelRegistry
+
+        mock_registry = MagicMock(spec=ModelRegistry)
+        service = AssistantService(model_registry=mock_registry)
+
+        assert service.builtin_domain_policy_enabled is False
+        assert service.domain_policy_resolver is None
+
+    def test_builtin_domain_policy_can_be_enabled_by_env(self, monkeypatch):
+        """Emergency rollback switch can re-enable built-in domain policy."""
+        from src.services.assistant.assistant_service import AssistantService
+        from src.services.assistant.model_registry import ModelRegistry
+
+        monkeypatch.setenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "true")
+        mock_registry = MagicMock(spec=ModelRegistry)
+        service = AssistantService(model_registry=mock_registry)
+
+        assert service.builtin_domain_policy_enabled is True
+        assert service.domain_policy_resolver is not None
+
 
 class TestAssistantConfig:
     """Tests for AssistantConfig dataclass."""

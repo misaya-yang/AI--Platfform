@@ -129,10 +129,18 @@ class StreamEventType(str, Enum):
     RAG_EVALUATION = "rag_evaluation"  # RAG quality evaluation result
     CONTEXT_BUDGET = "context_budget"  # Context budget usage snapshot
     CONTEXT_COMPACTED = "context_compacted"  # Context compaction details
+    CONTEXT_DETAIL = "context_detail"  # Context cost contributor detail
+    MEMORY_RETRIEVED = "memory_retrieved"  # Hybrid memory retrieval summary
+    MEMORY_REFLECTION_SCHEDULED = "memory_reflection_scheduled"  # Reflection job scheduled
     QUEUE_STATE = "queue_state"  # Assistant command queue state
+    QUEUE_STEERED = "queue_steered"  # Queue steering mode update
     APPROVAL_REQUIRED = "approval_required"  # Tool call requires approval
     APPROVAL_RESULT = "approval_result"  # Approval accepted/rejected
     GATEWAY_DECISION = "gateway_decision"  # Gateway policy decision
+    SANDBOX_DECISION = "sandbox_decision"  # Sandbox policy result
+    SKILL_SELECTED = "skill_selected"  # Skill selected for request
+    SKILL_LOADED = "skill_loaded"  # Skill metadata loaded
+    SKILL_CREATE_PENDING_APPROVAL = "skill_create_pending_approval"  # Skill proposal pending
     MEMORY_LOADED = "memory_loaded"  # Memory loading completed
     DONE = "done"  # Execution complete
 

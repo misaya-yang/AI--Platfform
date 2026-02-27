@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from .memory_service import MemoryService
 
 from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError
 from ..knowledge.knowledge_service import KnowledgeService
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..metrics.usage_recorder import get_usage_recorder
@@ -122,6 +124,14 @@ class StreamEventType(str, Enum):
     RAG_EVALUATION = "rag_evaluation"
     CONTEXT_BUDGET = "context_budget"
     CONTEXT_COMPACTED = "context_compacted"
+    CONTEXT_DETAIL = "context_detail"
+    MEMORY_RETRIEVED = "memory_retrieved"
+    MEMORY_REFLECTION_SCHEDULED = "memory_reflection_scheduled"
+    QUEUE_STEERED = "queue_steered"
+    SKILL_SELECTED = "skill_selected"
+    SKILL_LOADED = "skill_loaded"
+    SKILL_CREATE_PENDING_APPROVAL = "skill_create_pending_approval"
+    SANDBOX_DECISION = "sandbox_decision"
 
     # Gateway / queue / approvals
     QUEUE_STATE = "queue_state"
@@ -247,6 +257,11 @@ class AssistantConfig:
     execution_profile: str = "safe"  # safe | balanced | power
     memory_mode: str = "auto"  # auto | strict | off
     os_agent_enabled: bool = False  # gated by policy engine + tenant/user permissions
+    openclaw_mode: str = "compat"  # off | compat | full
+    queue_mode: str = "collect"  # collect | followup | steer | interrupt
+    context_detail: bool = False  # emit detailed context cost breakdown
+    skills_enabled: bool | None = None  # per-request skill toggle
+    memory_profile: str | None = None  # off | basic | hybrid
 
 
 @dataclass
@@ -574,8 +589,17 @@ Please use this web search context to inform your response when relevant."""
         # This enables "Manus-like" expert analysis capabilities
         self.scenario_analyzer = create_scenario_analyzer()
 
-        # Domain policies (e.g., Imam assistant)
-        self.domain_policy_resolver = DomainPolicyResolver()
+        # Built-in domain policy is disabled by default for generic assistant behavior.
+        self.builtin_domain_policy_enabled = (
+            os.getenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "false").strip().lower() == "true"
+        )
+        self.domain_policy_resolver = (
+            DomainPolicyResolver() if self.builtin_domain_policy_enabled else None
+        )
+        if self.builtin_domain_policy_enabled:
+            logger.warning(
+                "ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED=true: built-in domain policy is active."
+            )
 
         # Assistant Gateway (policy routing + queue/approval/run lifecycle)
         # Keep this configurable to avoid hard-coded behavior.
@@ -584,8 +608,6 @@ Please use this web search context to inform your response when relevant."""
 
         gateway_enabled = True
         with contextlib.suppress(Exception):
-            import os
-
             gateway_enabled = os.getenv("ASSISTANT_GATEWAY_ENABLED", "false").lower() == "true"
 
         self.request_router = request_router or AssistantRequestRouter()
@@ -618,7 +640,12 @@ Please use this web search context to inform your response when relevant."""
         dataset_ids: list[str],
     ) -> tuple[ImamPolicy | None, list[dict[str, Any]]]:
         """Resolve domain policy based on dataset metadata."""
-        if not dataset_ids or not self.kb_service:
+        if (
+            not self.builtin_domain_policy_enabled
+            or not self.domain_policy_resolver
+            or not dataset_ids
+            or not self.kb_service
+        ):
             return None, []
 
         async def _load_dataset(ds_id: str) -> dict[str, Any] | None:
@@ -719,6 +746,40 @@ Please use this web search context to inform your response when relevant."""
             source=source,
         )
 
+    async def _ensure_session_exists(
+        self,
+        user: UserContext,
+        session_id: str,
+    ) -> None:
+        """Ensure the assistant session exists before message persistence."""
+        if not self.session_manager or not session_id:
+            return
+
+        existing = await self.session_manager.get(session_id)
+        if existing:
+            if existing.user_id != user.user_id or existing.tenant_id != user.tenant_id:
+                raise PermissionDeniedError("Session does not belong to current user")
+            if existing.service_id and existing.service_id != "__builtin_assistant__":
+                raise PermissionDeniedError("Session is bound to a different service")
+            return
+
+        try:
+            await self.session_manager.create(
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                service_id="__builtin_assistant__",
+                session_id=session_id,
+            )
+        except Exception:
+            # Handle concurrent creates for the same session_id.
+            existing = await self.session_manager.get(session_id)
+            if not existing:
+                raise
+            if existing.user_id != user.user_id or existing.tenant_id != user.tenant_id:
+                raise PermissionDeniedError("Session does not belong to current user")
+            if existing.service_id and existing.service_id != "__builtin_assistant__":
+                raise PermissionDeniedError("Session is bound to a different service")
+
     async def chat_stream(
         self,
         user: UserContext,
@@ -758,6 +819,8 @@ Please use this web search context to inform your response when relevant."""
         # ========== LATENCY DEBUG: Track timing for each step ==========
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
 
+        await self._ensure_session_exists(user=user, session_id=session_id)
+
         domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
 
         # IMPORTANT: Keep streaming for AgentLoop mode.
@@ -795,6 +858,7 @@ Please use this web search context to inform your response when relevant."""
                 message=message,
                 config=config,
                 history=history,
+                persist_messages=False,
             )
             if persist_messages and self.session_manager:
                 try:
@@ -2432,6 +2496,7 @@ Please use this web search context to inform your response when relevant."""
         message: str,
         config: AssistantConfig,
         history: list[dict[str, str]] | None = None,
+        persist_messages: bool = True,
     ) -> dict[str, Any]:
         """
         Non-streaming chat completion.
@@ -2443,12 +2508,57 @@ Please use this web search context to inform your response when relevant."""
             - duration_ms: Total time
         """
         start_time = time.time()
-        history = history or []
+        await self._ensure_session_exists(user=user, session_id=session_id)
+
+        if history is None and self.session_manager:
+            try:
+                session = await self.session_manager.get(session_id)
+                if session and session.history:
+                    history = [{"role": m.role, "content": m.content} for m in session.history]
+                else:
+                    history = []
+            except Exception as exc:
+                logger.warning(f"Failed to load session history (chat): {exc}")
+                history = []
+        else:
+            history = history or []
+
+        if persist_messages and self.session_manager:
+            try:
+                await self.session_manager.add_message(
+                    session_id=session_id,
+                    role="user",
+                    content=message,
+                    metadata={"timestamp": datetime.utcnow().isoformat()},
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to persist user message (chat): {exc}")
+
+        async def _persist_assistant_chat_message(
+            content_text: str,
+            contexts: list[dict[str, Any]] | None = None,
+        ) -> None:
+            if not (persist_messages and self.session_manager):
+                return
+            try:
+                await self.session_manager.add_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=content_text,
+                    metadata={
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "model_id": config.model_id,
+                        "contexts": contexts or [],
+                    },
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to persist assistant message (chat): {exc}")
 
         domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
         if domain_policy:
             decision = domain_policy.precheck_query(message)
             if decision and decision.action == "decline":
+                await _persist_assistant_chat_message(decision.response or "")
                 return {
                     "content": decision.response or "",
                     "usage": {},
@@ -2481,6 +2591,7 @@ Please use this web search context to inform your response when relevant."""
             ]
             decision = domain_policy.precheck_context(message, ctx_payload)
             if decision and decision.action == "decline":
+                await _persist_assistant_chat_message(decision.response or "", contexts=ctx_payload)
                 return {
                     "content": decision.response or "",
                     "usage": {},
@@ -2570,6 +2681,17 @@ Please use this web search context to inform your response when relevant."""
                     )
             except Exception as e:
                 logger.warning(f"Failed to update realtime metrics: {e}")
+
+        await _persist_assistant_chat_message(
+            content,
+            contexts=[
+                {
+                    "dataset_id": ctx.dataset_id,
+                    "dataset_name": ctx.dataset_name,
+                }
+                for ctx in retrieved_contexts
+            ],
+        )
 
         return {
             "content": content,
@@ -2850,6 +2972,11 @@ Please use this web search context to inform your response when relevant."""
             execution_profile=config.execution_profile,
             memory_mode=config.memory_mode,
             os_agent_enabled=config.os_agent_enabled,
+            openclaw_mode=config.openclaw_mode,
+            queue_mode=config.queue_mode,
+            context_detail=config.context_detail,
+            skills_enabled=config.skills_enabled,
+            memory_profile=config.memory_profile,
         )
 
         logger.info(
@@ -2867,6 +2994,7 @@ Please use this web search context to inform your response when relevant."""
             file_processor=self.file_processor,
             execution_gateway=self.execution_gateway,
             request_router=self.request_router,
+            database=self.db,
         )
 
         # Load history if not provided
@@ -3005,10 +3133,18 @@ Please use this web search context to inform your response when relevant."""
             "rag_evaluation": StreamEventType.RAG_EVALUATION,
             "context_budget": StreamEventType.CONTEXT_BUDGET,
             "context_compacted": StreamEventType.CONTEXT_COMPACTED,
+            "context_detail": StreamEventType.CONTEXT_DETAIL,
+            "memory_retrieved": StreamEventType.MEMORY_RETRIEVED,
+            "memory_reflection_scheduled": StreamEventType.MEMORY_REFLECTION_SCHEDULED,
             "queue_state": StreamEventType.QUEUE_STATE,
+            "queue_steered": StreamEventType.QUEUE_STEERED,
             "approval_required": StreamEventType.APPROVAL_REQUIRED,
             "approval_result": StreamEventType.APPROVAL_RESULT,
             "gateway_decision": StreamEventType.GATEWAY_DECISION,
+            "skill_selected": StreamEventType.SKILL_SELECTED,
+            "skill_loaded": StreamEventType.SKILL_LOADED,
+            "skill_create_pending_approval": StreamEventType.SKILL_CREATE_PENDING_APPROVAL,
+            "sandbox_decision": StreamEventType.SANDBOX_DECISION,
             "complete": StreamEventType.DONE,
             "error": StreamEventType.ERROR,
             # ReAct thinking events (Phase 3: Agent Intelligence)

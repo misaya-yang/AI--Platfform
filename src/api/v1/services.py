@@ -210,6 +210,8 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
         return
 
     metadata["adapter_type"] = "langgraph"
+    domain_policy = str(metadata.get("domain_policy") or "").strip().lower()
+    metadata["domain_policy"] = domain_policy if domain_policy in {"none", "imam"} else "none"
     if proxy_mode:
         metadata["proxy_mode"] = proxy_mode
 

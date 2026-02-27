@@ -397,6 +397,7 @@ async def stream_run(
                 assistant_id=data.assistant_id,
                 input_data=data.input,
                 config=data.config,
+                metadata=data.metadata,
                 stream_mode=data.stream_mode,
             ):
                 yield {
@@ -488,6 +489,7 @@ async def stream_stateless_run(
                 assistant_id=data.assistant_id,
                 input_data=data.input,
                 config=data.config,
+                metadata=data.metadata,
                 stream_mode=data.stream_mode,
             ):
                 yield {
@@ -524,6 +526,7 @@ async def create_stateless_run(
             assistant_id=data.assistant_id,
             input_data=data.input,
             config=data.config,
+            metadata=data.metadata,
         )
     except Exception as e:
         handle_proxy_error(e)

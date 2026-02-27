@@ -176,6 +176,26 @@ class AssistantChatRequest(BaseModel):
     os_agent_enabled: bool = Field(
         default=False, description="Enable OS-Agent Lite tools for this request"
     )
+    openclaw_mode: Literal["off", "compat", "full"] = Field(
+        default="compat",
+        description="OpenClaw runtime mode: off, compat, full",
+    )
+    queue_mode: Literal["collect", "followup", "steer", "interrupt"] = Field(
+        default="collect",
+        description="Queue mode: collect, followup, steer, interrupt",
+    )
+    context_detail: bool = Field(
+        default=False,
+        description="Return detailed context token contributors for this run",
+    )
+    skills_enabled: bool | None = Field(
+        default=None,
+        description="Override dynamic skill injection behavior for this request",
+    )
+    memory_profile: Literal["off", "basic", "hybrid"] | None = Field(
+        default=None,
+        description="Memory profile override: off, basic, hybrid",
+    )
 
 
 class AssistantChatResponse(BaseModel):
@@ -254,15 +274,23 @@ class SSEEventType:
     WEB_SEARCH_RESULTS = "web_search_results"  # Web search results
     CONTEXT_BUDGET = "context_budget"  # Context token budget and usage
     CONTEXT_COMPACTED = "context_compacted"  # Context compaction executed
+    CONTEXT_DETAIL = "context_detail"  # Detailed token/cost breakdown by contributor
+    MEMORY_RETRIEVED = "memory_retrieved"  # Hybrid memory retrieval summary
+    MEMORY_REFLECTION_SCHEDULED = "memory_reflection_scheduled"  # Reflection job created
 
     # Phase 3: RAG evaluation
     RAG_EVALUATION = "rag_evaluation"  # RAG quality metrics and citations
 
     # Gateway / queue / approval
     QUEUE_STATE = "queue_state"  # Command queue state update
+    QUEUE_STEERED = "queue_steered"  # Queue steering update
     APPROVAL_REQUIRED = "approval_required"  # Tool call needs approval
     APPROVAL_RESULT = "approval_result"  # Approval decision applied
     GATEWAY_DECISION = "gateway_decision"  # Gateway policy decision
+    SANDBOX_DECISION = "sandbox_decision"  # Sandbox policy decision
+    SKILL_SELECTED = "skill_selected"  # Skill selected for current query
+    SKILL_LOADED = "skill_loaded"  # Skill metadata loaded
+    SKILL_CREATE_PENDING_APPROVAL = "skill_create_pending_approval"  # Skill proposal pending
 
     # KV-Cache metrics
     CACHE_METRICS = "cache_metrics"  # Cache performance metrics

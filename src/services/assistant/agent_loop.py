@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -77,6 +78,7 @@ from .error_recovery import (
 )
 from .gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
 from .memory.compressor import CompressedContext, ContextCompressor
+from .openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
 from .query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from .rag_metrics import (
     RAGMetrics,
@@ -309,6 +311,11 @@ class AgentLoopConfig:
     execution_profile: str = "safe"
     memory_mode: str = "auto"
     os_agent_enabled: bool = False
+    openclaw_mode: str = "compat"  # off | compat | full
+    queue_mode: str = "collect"  # collect | followup | steer | interrupt
+    context_detail: bool = False
+    skills_enabled: bool | None = None
+    memory_profile: str | None = None  # off | basic | hybrid
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -328,6 +335,11 @@ class AgentLoopConfig:
             "execution_profile": self.execution_profile,
             "memory_mode": self.memory_mode,
             "os_agent_enabled": self.os_agent_enabled,
+            "openclaw_mode": self.openclaw_mode,
+            "queue_mode": self.queue_mode,
+            "context_detail": self.context_detail,
+            "skills_enabled": self.skills_enabled,
+            "memory_profile": self.memory_profile,
         }
 
 
@@ -356,6 +368,7 @@ class AgentLoopContext:
     user_preferences: dict[str, Any] | None = None
     session_memory: dict[str, Any] | None = None
     long_term_memory: dict[str, Any] | None = None
+    openclaw_memory_snippets: list[str] = field(default_factory=list)
 
     # Step 2: Scenario
     scenario: ScenarioDetectionResult | None = None
@@ -372,6 +385,7 @@ class AgentLoopContext:
     # Step 5: Context
     context_structure: ContextStructure | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
+    openclaw_skills_metadata: list[dict[str, Any]] = field(default_factory=list)
 
     # Step 6: Execution
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
@@ -426,6 +440,8 @@ class AgentLoop:
         metrics_collector: RAGMetricsCollector | None = None,
         execution_gateway: AssistantExecutionGateway | None = None,
         request_router: AssistantRequestRouter | None = None,
+        database: Any | None = None,
+        runtime_adapter: OpenClawRuntimeAdapter | None = None,
         # System prompt
         system_prompt: str = "",
         # Optional persistence / artifact / file-processing dependencies
@@ -466,6 +482,11 @@ class AgentLoop:
         self.execution_gateway = execution_gateway
         self.request_router = request_router or AssistantRequestRouter()
         self.context_budget_manager = ContextBudgetManager()
+        self.database = database
+        self.openclaw_runtime = runtime_adapter
+        if self.openclaw_runtime is None and self.database is not None:
+            with contextlib.suppress(Exception):
+                self.openclaw_runtime = OpenClawRuntimeAdapter.from_env(database=self.database)
 
         self.system_prompt = system_prompt
 
@@ -519,6 +540,17 @@ class AgentLoop:
             ),
             kb_dataset_ids=ctx.config.kb_dataset_ids or [],
             user=effective_user,
+            metadata={
+                "queue_mode": ctx.routed_request.queue_mode
+                if ctx.routed_request
+                else ctx.config.queue_mode,
+                "openclaw_mode": ctx.routed_request.openclaw_mode
+                if ctx.routed_request
+                else ctx.config.openclaw_mode,
+                "memory_profile": ctx.routed_request.memory_profile
+                if ctx.routed_request
+                else ctx.config.memory_profile,
+            },
         )
 
     async def _invoke_tool(
@@ -593,6 +625,11 @@ class AgentLoop:
         config.execution_profile = ctx.routed_request.execution_profile
         config.memory_mode = ctx.routed_request.memory_mode
         config.os_agent_enabled = ctx.routed_request.os_agent_enabled
+        config.openclaw_mode = ctx.routed_request.openclaw_mode
+        config.queue_mode = ctx.routed_request.queue_mode
+        config.context_detail = ctx.routed_request.context_detail
+        config.skills_enabled = ctx.routed_request.skills_enabled
+        config.memory_profile = ctx.routed_request.memory_profile
 
         history = history or []
 
@@ -638,6 +675,10 @@ class AgentLoop:
                         os_agent_enabled=ctx.routed_request.os_agent_enabled
                         if ctx.routed_request
                         else config.os_agent_enabled,
+                        queue_mode=ctx.routed_request.queue_mode if ctx.routed_request else None,
+                        openclaw_mode=ctx.routed_request.openclaw_mode
+                        if ctx.routed_request
+                        else None,
                         request_preview=ctx.message[:500],
                     )
 
@@ -651,6 +692,9 @@ class AgentLoop:
                             "memory_mode": ctx.routed_request.memory_mode,
                             "os_agent_enabled": ctx.routed_request.os_agent_enabled,
                             "policy_profile": ctx.routed_request.policy_profile,
+                            "openclaw_mode": ctx.routed_request.openclaw_mode,
+                            "queue_mode": ctx.routed_request.queue_mode,
+                            "context_detail": ctx.routed_request.context_detail,
                         },
                     )
 
@@ -668,6 +712,16 @@ class AgentLoop:
                         "mode": "streaming_first" if config.streaming_first_mode else "legacy",
                     },
                 )
+                if config.queue_mode != "collect":
+                    yield AgentLoopEvent(
+                        phase=AgentLoopPhase.MEMORY_LOADING,
+                        event_type="queue_steered",
+                        data={
+                            "mode": config.queue_mode,
+                            "session_id": ctx.session_id,
+                            "run_id": ctx.run_id,
+                        },
+                    )
 
                 # ============================================================
                 # STREAMING-FIRST MODE (Manus-style architecture)
@@ -1111,6 +1165,63 @@ class AgentLoop:
             logger.warning(f"Summarization failed: {e}")
             return None
 
+    async def _persist_context_detail(
+        self,
+        ctx: AgentLoopContext,
+        detail: dict[str, Any],
+    ) -> None:
+        """Persist context-detail metrics for observability when DB is available."""
+        if not self.database:
+            return
+
+        try:
+            await self.database.execute(
+                """
+                INSERT INTO assistant_context_breakdown (
+                    breakdown_id, request_id, run_id, tenant_id, user_id, session_id,
+                    model_id, total_tokens, total_chars, tokens_by_category,
+                    top_contributors, created_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $9, $10, $11, NOW()
+                )
+                """,
+                str(uuid.uuid4()),
+                ctx.request_id,
+                ctx.run_id,
+                ctx.tenant_id,
+                ctx.user_id,
+                ctx.session_id,
+                ctx.config.model_id,
+                int(detail.get("total_tokens") or 0),
+                int(detail.get("total_chars") or 0),
+                json.dumps(detail.get("tokens_by_category") or {}),
+                json.dumps((detail.get("contributors") or [])[:20]),
+            )
+        except Exception as exc:
+            try:
+                await self.database.execute(
+                    """
+                    INSERT INTO assistant_context_breakdown (
+                        request_id, run_id, tenant_id, user_id, session_id,
+                        model_id, total_tokens, detail, created_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5,
+                        $6, $7, $8, NOW()
+                    )
+                    """,
+                    ctx.request_id,
+                    ctx.run_id,
+                    ctx.tenant_id,
+                    ctx.user_id,
+                    ctx.session_id,
+                    ctx.config.model_id,
+                    int(detail.get("total_tokens") or 0),
+                    json.dumps(detail),
+                )
+            except Exception:
+                logger.debug("Failed to persist context detail: %s", exc)
+
     # =========================================================================
     # Streaming-First Mode Implementation (Manus-style)
     # =========================================================================
@@ -1139,8 +1250,6 @@ class AgentLoop:
 
         This achieves TTFT similar to Manus (~1-2s) vs legacy mode (~10s).
         """
-        import json
-
         from .prompts.system_prompt_v2 import get_streaming_first_prompt
 
         phase = AgentLoopPhase.GENERATION_STORAGE  # Use generation phase for streaming
@@ -1339,6 +1448,89 @@ class AgentLoop:
                         return "\n".join(lines)
 
                 return _truncate_text(text_result, 3000)
+
+            def _tool_schema_name(schema: Any) -> str:
+                if not isinstance(schema, dict):
+                    return ""
+                function_block = schema.get("function")
+                if isinstance(function_block, dict):
+                    return str(function_block.get("name") or "").strip()
+                return str(schema.get("name") or "").strip()
+
+            def _kb_query_fingerprint(arguments: dict[str, Any]) -> str:
+                query = " ".join(str(arguments.get("query") or "").split()).lower()
+                if not query:
+                    return ""
+                intent = str(arguments.get("intent") or "general").strip().lower()
+                dataset_ids = arguments.get("dataset_ids")
+                if isinstance(dataset_ids, list):
+                    normalized_ids = sorted(
+                        str(dataset_id).strip()
+                        for dataset_id in dataset_ids
+                        if str(dataset_id).strip()
+                    )
+                elif dataset_ids is None:
+                    normalized_ids = []
+                else:
+                    normalized_ids = [str(dataset_ids).strip()]
+                return f"q={query}|intent={intent}|datasets={','.join(normalized_ids)}"
+
+            def _merge_stream_tool_calls(
+                chunks: list[dict[str, Any]],
+                accumulator: dict[str, dict[str, Any]],
+                order: list[str],
+                anonymous_counter: int,
+            ) -> int:
+                """Merge provider tool-call delta chunks into complete tool calls."""
+                for chunk in chunks:
+                    if not isinstance(chunk, dict):
+                        continue
+
+                    raw_index = chunk.get("index")
+                    tool_id = str(chunk.get("id") or "").strip()
+                    if raw_index is not None:
+                        try:
+                            key = f"idx:{int(raw_index)}"
+                        except (TypeError, ValueError):
+                            key = f"id:{tool_id}" if tool_id else f"anon:{anonymous_counter}"
+                    elif tool_id:
+                        key = f"id:{tool_id}"
+                    else:
+                        key = f"anon:{anonymous_counter}"
+
+                    if key.startswith("anon:"):
+                        anonymous_counter += 1
+
+                    if key not in accumulator:
+                        accumulator[key] = {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                        order.append(key)
+
+                    merged = accumulator[key]
+                    if tool_id:
+                        merged["id"] = tool_id
+                    chunk_type = chunk.get("type")
+                    if chunk_type:
+                        merged["type"] = str(chunk_type)
+
+                    function_data = (
+                        chunk.get("function") if isinstance(chunk.get("function"), dict) else {}
+                    )
+                    fn_name = function_data.get("name")
+                    if fn_name:
+                        merged["function"]["name"] = str(fn_name)
+                    fn_args = function_data.get("arguments")
+                    if fn_args:
+                        merged["function"]["arguments"] += str(fn_args)
+
+                    # Gemini 3 thoughtSignature passthrough.
+                    if chunk.get("thoughtSignature"):
+                        merged["thoughtSignature"] = chunk["thoughtSignature"]
+
+                return anonymous_counter
 
             def _select_tools_for_request(
                 all_defs: list[Any],
@@ -1586,6 +1778,48 @@ class AgentLoop:
                 except Exception:
                     dataset_name_map = None
 
+            # OpenClaw skill metadata: load dynamically and inject only compact metadata.
+            if self.openclaw_runtime:
+                should_use_skills = (
+                    bool(ctx.config.skills_enabled)
+                    if ctx.config.skills_enabled is not None
+                    else bool(self.openclaw_runtime.features.skills)
+                )
+                if should_use_skills:
+                    with contextlib.suppress(Exception):
+                        loaded = await self.openclaw_runtime.skill_registry.load_from_database(
+                            tenant_id=ctx.tenant_id,
+                            user_id=ctx.user_id,
+                        )
+                        if loaded > 0:
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="skill_loaded",
+                                data={"loaded_count": loaded},
+                            )
+                    selected_skills = self.openclaw_runtime.skill_registry.select_for_query(
+                        ctx.message,
+                        max_skills=3,
+                    )
+                    if selected_skills:
+                        ctx.openclaw_skills_metadata = [
+                            selection.skill.to_dict() for selection in selected_skills
+                        ]
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="skill_selected",
+                            data={
+                                "skills": [
+                                    {
+                                        "name": selection.skill.name,
+                                        "version": selection.skill.version,
+                                        "score": selection.score,
+                                    }
+                                    for selection in selected_skills
+                                ]
+                            },
+                        )
+
             # System prompt - ALWAYS include the streaming-first base prompt so the model
             # receives consistent tool/RAG instructions even when the frontend provides a
             # style-only system prompt (common in the assistant UI).
@@ -1603,8 +1837,69 @@ class AgentLoop:
                 )
             else:
                 system_prompt = base_prompt
+            if ctx.openclaw_skills_metadata:
+                skill_lines = []
+                for skill in ctx.openclaw_skills_metadata[:5]:
+                    skill_lines.append(
+                        f"- {skill.get('name')}@{skill.get('version', '1.0.0')}: "
+                        f"{str(skill.get('summary') or skill.get('description') or '')[:180]}"
+                    )
+                skills_block = "\n".join(skill_lines)
+                system_prompt = f"{system_prompt}\n\n## Available Skills Metadata\n{skills_block}"
 
             messages.append({"role": "system", "content": system_prompt})
+
+            # OpenClaw memory retrieval for request-time grounding.
+            if self.openclaw_runtime:
+                try:
+                    memory_result = await self.openclaw_runtime.load_memory_context(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        query=ctx.message,
+                        openclaw_mode=ctx.config.openclaw_mode,
+                        memory_profile=ctx.config.memory_profile,
+                        max_results=6,
+                    )
+                    if memory_result.snippets:
+                        ctx.openclaw_memory_snippets = [
+                            snippet.content for snippet in memory_result.snippets
+                        ]
+                        memory_block_lines = ["## Retrieved Memory Snippets"]
+                        for idx, snippet in enumerate(memory_result.snippets[:6], 1):
+                            memory_block_lines.append(
+                                f"[{idx}] ({snippet.source_type}) {snippet.content[:240]}"
+                            )
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": "\n".join(memory_block_lines),
+                            }
+                        )
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="memory_retrieved",
+                        data={
+                            "loaded_sources": memory_result.loaded_sources,
+                            "snippet_count": len(memory_result.snippets),
+                            "fallback_used": memory_result.fallback_used,
+                            "fallback_reason": memory_result.fallback_reason,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("OpenClaw memory retrieval failed: %s", exc)
+
+                with contextlib.suppress(Exception):
+                    scheduled_job_id = await self.openclaw_runtime.schedule_daily_reflection(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        payload={"run_id": ctx.run_id, "session_id": ctx.session_id},
+                    )
+                    if scheduled_job_id:
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="memory_reflection_scheduled",
+                            data={"job_id": scheduled_job_id},
+                        )
 
             # Add conversation history (already trimmed if needed)
             trimmed_history = _trim_history_for_streaming(history or [])
@@ -1657,6 +1952,30 @@ class AgentLoop:
                 user_msg["images"] = user_images
             messages.append(user_msg)
 
+            if (
+                ctx.config.context_detail
+                and self.openclaw_runtime
+                and self.openclaw_runtime.features.context_v2
+            ):
+                detail = self.openclaw_runtime.build_context_assembler(
+                    provider="openai"
+                ).cost_breakdown.analyze(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tool_definitions=tools,
+                    injected_files=getattr(processed_files, "file_metadata", [])
+                    if processed_files
+                    else [],
+                    skills_metadata=ctx.openclaw_skills_metadata,
+                    memory_snippets=ctx.openclaw_memory_snippets,
+                )
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type="context_detail",
+                    data=detail,
+                )
+                await self._persist_context_detail(ctx, detail)
+
             t1 = time.time()
             logger.info(
                 f"[STREAMING-FIRST] Context build: {(t1 - t0) * 1000:.0f}ms, "
@@ -1674,6 +1993,8 @@ class AgentLoop:
             accumulated_content = ""
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
+            kb_query_fingerprints_seen: set[str] = set()
+            kb_search_completed = False
             force_answer_without_tools = False
 
             while iteration < max_iterations:
@@ -1693,7 +2014,20 @@ class AgentLoop:
                 logger.info(
                     f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start - t0) * 1000:.0f}ms"
                 )
-                tools_for_call = tools if tools else None
+                tools_for_iteration = tools if tools else None
+                if tools_for_iteration and kb_search_completed:
+                    filtered_tools = [
+                        schema
+                        for schema in tools_for_iteration
+                        if _tool_schema_name(schema) != "search_knowledge_base"
+                    ]
+                    if len(filtered_tools) != len(tools_for_iteration):
+                        tools_for_iteration = filtered_tools
+                        logger.debug(
+                            "[STREAMING-FIRST] Removed search_knowledge_base from remaining "
+                            "toolset after first KB completion."
+                        )
+                tools_for_call = tools_for_iteration
                 if force_answer_without_tools:
                     tools_for_call = None
                     force_answer_without_tools = False
@@ -1701,7 +2035,9 @@ class AgentLoop:
                         "[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once)."
                     )
 
-                tool_calls_batch = []
+                tool_calls_accumulated: dict[str, dict[str, Any]] = {}
+                tool_call_order: list[str] = []
+                anonymous_tool_counter = 0
                 call_usage: dict[str, int] = {}
                 async for delta in self.model_registry.chat_stream(
                     model_id=ctx.config.model_id,
@@ -1735,7 +2071,12 @@ class AgentLoop:
 
                     # Collect tool calls
                     if delta.tool_calls:
-                        tool_calls_batch.extend(delta.tool_calls)
+                        anonymous_tool_counter = _merge_stream_tool_calls(
+                            delta.tool_calls,
+                            tool_calls_accumulated,
+                            tool_call_order,
+                            anonymous_tool_counter,
+                        )
 
                     # Track usage
                     if delta.usage:
@@ -1754,6 +2095,8 @@ class AgentLoop:
                     # Keep latest model-call usage for UI consistency (legacy behavior).
                     ctx.usage[key] = int(value)
 
+                tool_calls_batch = [tool_calls_accumulated[k] for k in tool_call_order]
+
                 # If no tool calls, we're done
                 if not tool_calls_batch:
                     break
@@ -1771,8 +2114,8 @@ class AgentLoop:
                 accumulated_content = ""  # Reset for next iteration
 
                 # Execute each tool call
-                for tool_call in tool_calls_batch:
-                    tool_id = tool_call.get("id", f"call_{iteration}")
+                for tool_index, tool_call in enumerate(tool_calls_batch, start=1):
+                    tool_id = str(tool_call.get("id") or "").strip() or f"call_{iteration}_{tool_index}"
                     func_info = tool_call.get("function", {})
                     tool_name = func_info.get("name", "unknown")
                     tool_args_str = func_info.get("arguments", "{}")
@@ -1784,6 +2127,46 @@ class AgentLoop:
                     except Exception:
                         parsed_args = {}
                     tool_args = parsed_args if isinstance(parsed_args, dict) else {}
+                    kb_reuse_result_for_model = (
+                        "Knowledge base has already been searched in this turn. "
+                        "Use the previously retrieved evidence to answer now; "
+                        "only call KB again if the user asks about a different topic."
+                    )
+                    kb_query_fp = (
+                        _kb_query_fingerprint(tool_args)
+                        if tool_name == "search_knowledge_base"
+                        else ""
+                    )
+                    if tool_name == "search_knowledge_base":
+                        if kb_query_fp and kb_query_fp in kb_query_fingerprints_seen:
+                            logger.info(
+                                "[STREAMING-FIRST] Skipping duplicate KB call by query fingerprint: %s",
+                                kb_query_fp[:160],
+                            )
+                            force_answer_without_tools = True
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                    "content": kb_reuse_result_for_model,
+                                }
+                            )
+                            continue
+                        if kb_search_completed:
+                            logger.info(
+                                "[STREAMING-FIRST] Skipping additional KB call after first completion."
+                            )
+                            force_answer_without_tools = True
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                    "content": kb_reuse_result_for_model,
+                                }
+                            )
+                            continue
 
                     # Manus-style step card (parent) for this tool call
                     step_id = f"step_{tool_id}"
@@ -1932,11 +2315,7 @@ class AgentLoop:
                                 "short_circuit": True,
                                 "message": "KB already searched in this turn; reuse prior evidence.",
                             }
-                            tool_result_text = (
-                                "Knowledge base has already been searched in this turn. "
-                                "Use the previously retrieved evidence to answer now; "
-                                "only call KB again if the user asks about a different topic."
-                            )
+                            tool_result_text = kb_reuse_result_for_model
                             tool_result = tool_result_text
                             tool_result_for_model = tool_result_text
                         elif self.tool_invoker:
@@ -1956,6 +2335,9 @@ class AgentLoop:
 
                             queue_state = tool_metadata.get("queue_state")
                             if queue_state:
+                                queue_mode = (
+                                    tool_metadata.get("queue_mode") or ctx.config.queue_mode
+                                )
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="queue_state",
@@ -1964,8 +2346,21 @@ class AgentLoop:
                                         "tool_name": tool_name,
                                         "state": queue_state,
                                         "command_id": tool_metadata.get("command_id"),
+                                        "lane": tool_metadata.get("lane"),
+                                        "queue_mode": queue_mode,
                                     },
                                 )
+                                if queue_mode != "collect":
+                                    yield AgentLoopEvent(
+                                        phase=phase,
+                                        event_type="queue_steered",
+                                        data={
+                                            "tool_id": tool_id,
+                                            "tool_name": tool_name,
+                                            "mode": queue_mode,
+                                            "lane": tool_metadata.get("lane"),
+                                        },
+                                    )
 
                             gateway_decision = tool_metadata.get("gateway_decision")
                             if isinstance(gateway_decision, dict):
@@ -1976,6 +2371,18 @@ class AgentLoop:
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
                                         **gateway_decision,
+                                    },
+                                )
+
+                            sandbox_decision = tool_metadata.get("sandbox_decision")
+                            if isinstance(sandbox_decision, dict):
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="sandbox_decision",
+                                    data={
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        **sandbox_decision,
                                     },
                                 )
 
@@ -2258,6 +2665,11 @@ class AgentLoop:
                             timestamp=step_finished_at,
                         )
 
+                    if tool_name == "search_knowledge_base":
+                        kb_search_completed = True
+                        if kb_query_fp:
+                            kb_query_fingerprints_seen.add(kb_query_fp)
+
                     # Add tool result to messages
                     messages.append(
                         {
@@ -2274,6 +2686,76 @@ class AgentLoop:
                     )
 
                 # Continue loop to get LLM's response to tool results
+
+            # If the loop hit limits without yielding a natural answer, force one
+            # final synthesis pass (tools disabled) based on collected observations.
+            if not ctx.generated_content.strip():
+                logger.warning(
+                    "[STREAMING-FIRST] No final content after %s iterations. "
+                    "Running a forced synthesis pass without tools.",
+                    iteration,
+                )
+                forced_call_usage: dict[str, int] = {}
+                async for delta in self.model_registry.chat_stream(
+                    model_id=ctx.config.model_id,
+                    messages=messages,
+                    temperature=min(ctx.config.temperature, 0.3),
+                    max_tokens=ctx.config.max_tokens,
+                    tools=None,
+                ):
+                    if delta.content:
+                        for text_chunk in _split_text_for_stream(delta.content):
+                            ctx.generated_content += text_chunk
+
+                            if not first_token_emitted:
+                                ttft_ms = (time.time() - ttft_start) * 1000
+                                first_token_emitted = True
+                                logger.info("[STREAMING-FIRST] TTFT: %.0fms", ttft_ms)
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="ttft",
+                                    data={"ttft_ms": round(ttft_ms, 2)},
+                                )
+
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="text_delta",
+                                data=text_chunk,
+                            )
+
+                    if delta.usage:
+                        for key, value in delta.usage.items():
+                            if isinstance(value, (int, float)):
+                                ivalue = int(value)
+                                forced_call_usage[key] = max(forced_call_usage.get(key, 0), ivalue)
+                            elif value is not None:
+                                with contextlib.suppress(Exception):
+                                    forced_call_usage[key] = int(value)
+
+                for key, value in forced_call_usage.items():
+                    ctx.usage[key] = int(value)
+
+            if not ctx.generated_content.strip():
+                logger.warning(
+                    "[STREAMING-FIRST] Forced synthesis still returned empty content; "
+                    "using deterministic tool-summary fallback."
+                )
+                fallback_lines = ["我已完成工具执行，但模型未返回最终文本。以下是关键结果："]
+                for result in ctx.tool_results[-3:]:
+                    preview = (
+                        str(result.result)[:180]
+                        if result.result is not None
+                        else (result.error or "No result")
+                    )
+                    fallback_lines.append(f"- {result.tool}: {preview}")
+                fallback_text = "\n".join(fallback_lines)
+                ctx.generated_content = fallback_text
+                for text_chunk in _split_text_for_stream(fallback_text):
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="text_delta",
+                        data=text_chunk,
+                    )
 
             # Emit completion event
             total_time_ms = (time.time() - start_time) * 1000
@@ -2309,6 +2791,44 @@ class AgentLoop:
                     )
                 except Exception as e:
                     logger.warning("Failed to persist assistant message (streaming-first): %s", e)
+
+            if (
+                self.openclaw_runtime
+                and self.openclaw_runtime.features.memory_v2
+                and str(ctx.config.openclaw_mode or "compat").lower() != "off"
+                and str(ctx.config.memory_profile or "basic").lower() != "off"
+            ):
+                try:
+                    conversation_snapshot = (
+                        f"User: {ctx.message.strip()}\n\nAssistant: {ctx.generated_content.strip()}"
+                    )
+                    if len(conversation_snapshot) > 6000:
+                        conversation_snapshot = conversation_snapshot[:6000]
+                    redacted_text, findings = self.openclaw_runtime.pii_filter.redact(
+                        conversation_snapshot
+                    )
+                    source_path = self.openclaw_runtime.memory_store.append_daily_entry(
+                        ctx.tenant_id,
+                        ctx.user_id,
+                        redacted_text,
+                    )
+                    source_content = ""
+                    with open(source_path, encoding="utf-8") as file_obj:
+                        source_content = file_obj.read()
+                    await self.openclaw_runtime.memory_indexer.index_source(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        source_path=source_path,
+                        source_type="daily",
+                        content=source_content,
+                        metadata={
+                            "run_id": ctx.run_id,
+                            "session_id": ctx.session_id,
+                            "pii_findings": [finding.pattern for finding in findings],
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to persist OpenClaw daily memory: %s", exc)
 
             yield AgentLoopEvent(
                 phase=phase,
@@ -2450,6 +2970,29 @@ class AgentLoop:
                         "working_restored": working_memory_restored,
                     },
                 )
+
+                if self.openclaw_runtime and self.openclaw_runtime.features.memory_v2:
+                    memory_result = await self.openclaw_runtime.load_memory_context(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        query=ctx.message,
+                        openclaw_mode=ctx.config.openclaw_mode,
+                        memory_profile=ctx.config.memory_profile,
+                        max_results=6,
+                    )
+                    ctx.openclaw_memory_snippets = [
+                        snippet.content for snippet in memory_result.snippets
+                    ]
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="memory_retrieved",
+                        data={
+                            "snippet_count": len(memory_result.snippets),
+                            "loaded_sources": memory_result.loaded_sources,
+                            "fallback_used": memory_result.fallback_used,
+                            "fallback_reason": memory_result.fallback_reason,
+                        },
+                    )
 
             except Exception as e:
                 logger.warning(f"Failed to load memory: {e}")
@@ -2929,6 +3472,12 @@ class AgentLoop:
             if ctx.session_memory and ctx.session_memory.get("compressed_context"):
                 compressed_ctx = ctx.session_memory["compressed_context"]
 
+            memory_context = ""
+            if ctx.openclaw_memory_snippets:
+                memory_context = "\n".join(
+                    f"- {snippet[:280]}" for snippet in ctx.openclaw_memory_snippets[:6]
+                )
+
             # Build context structure with all layers
             ctx.context_structure = ContextStructure(
                 system_prompt=self.system_prompt,
@@ -2937,11 +3486,19 @@ class AgentLoop:
                 long_term_memory=long_term_str if long_term_str else None,
                 task_state=task_state if task_state else None,
                 conversation_history=history,
-                current_context=rag_context
-                if rag_context
-                else compressed_ctx
-                if compressed_ctx
-                else None,
+                current_context=(
+                    f"{rag_context}\n\n## Retrieved Memory\n{memory_context}"
+                    if rag_context and memory_context
+                    else rag_context
+                    if rag_context
+                    else f"{compressed_ctx}\n\n## Retrieved Memory\n{memory_context}"
+                    if compressed_ctx and memory_context
+                    else compressed_ctx
+                    if compressed_ctx
+                    else f"## Retrieved Memory\n{memory_context}"
+                    if memory_context
+                    else None
+                ),
                 current_query=ctx.message,
             )
 
@@ -2984,6 +3541,27 @@ class AgentLoop:
                     "dropped_history_messages": assembly_plan.dropped_history_messages,
                 },
             )
+
+            if (
+                ctx.config.context_detail
+                and self.openclaw_runtime
+                and self.openclaw_runtime.features.context_v2
+            ):
+                detail = self.openclaw_runtime.build_context_assembler(
+                    provider="openai"
+                ).cost_breakdown.analyze(
+                    system_prompt=ctx.context_structure.system_prompt,
+                    messages=ctx.messages,
+                    tool_definitions=ctx.context_structure.tool_definitions,
+                    skills_metadata=ctx.openclaw_skills_metadata,
+                    memory_snippets=ctx.openclaw_memory_snippets,
+                )
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type="context_detail",
+                    data=detail,
+                )
+                await self._persist_context_detail(ctx, detail)
 
         except Exception as e:
             logger.error(f"Context building failed: {e}")

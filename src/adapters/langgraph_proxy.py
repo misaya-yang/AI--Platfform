@@ -784,9 +784,14 @@ class LangGraphProxy:
         import asyncio
 
         # 性能优化：并发执行验证调用
-        await asyncio.gather(
+        validation_results = await asyncio.gather(
             self.get_thread(user, thread_id),
             self.get_assistant(user, assistant_id),
+        )
+        assistant_payload = (
+            validation_results[1]
+            if len(validation_results) > 1 and isinstance(validation_results[1], dict)
+            else None
         )
 
         instance = await self.lb.select_instance()
@@ -807,8 +812,12 @@ class LangGraphProxy:
                 "config": run_config,
             }
 
-            if metadata:
-                payload["metadata"] = metadata
+            effective_metadata = self._inject_gateway_domain_policy_metadata(
+                metadata=metadata,
+                assistant_payload=assistant_payload,
+            )
+            if effective_metadata:
+                payload["metadata"] = effective_metadata
             if webhook:
                 payload["webhook"] = webhook
             if interrupt_before:
@@ -870,9 +879,14 @@ class LangGraphProxy:
         import asyncio
 
         # 性能优化：并发执行验证调用
-        await asyncio.gather(
+        validation_results = await asyncio.gather(
             self.get_thread(user, thread_id),
             self.get_assistant(user, assistant_id),
+        )
+        assistant_payload = (
+            validation_results[1]
+            if len(validation_results) > 1 and isinstance(validation_results[1], dict)
+            else None
         )
 
         instance = await self.lb.select_instance()
@@ -892,8 +906,12 @@ class LangGraphProxy:
                 "input": input_data,
                 "config": run_config,
             }
-            if metadata:
-                payload["metadata"] = metadata
+            effective_metadata = self._inject_gateway_domain_policy_metadata(
+                metadata=metadata,
+                assistant_payload=assistant_payload,
+            )
+            if effective_metadata:
+                payload["metadata"] = effective_metadata
 
             response = await client.post(
                 f"/threads/{thread_id}/runs/wait", json=payload, headers=headers
@@ -966,6 +984,7 @@ class LangGraphProxy:
         assistant_id: str,
         input_data: dict[str, Any],
         config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
         stream_mode: list[str] | None = None,
         skip_thread_validation: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -986,7 +1005,12 @@ class LangGraphProxy:
             validation_tasks.append(self.get_thread(user, thread_id))
 
         # 并发执行所有验证
-        await asyncio.gather(*validation_tasks)
+        validation_results = await asyncio.gather(*validation_tasks)
+        assistant_payload = (
+            validation_results[0]
+            if validation_results and isinstance(validation_results[0], dict)
+            else None
+        )
 
         validation_ms = (time.time() - validation_start) * 1000
         logger.debug(f"[TIMING] stream_run validation: {validation_ms:.2f}ms (concurrent)")
@@ -1013,6 +1037,12 @@ class LangGraphProxy:
                 "config": run_config,
                 "stream_mode": stream_mode or ["messages", "updates"],
             }
+            effective_metadata = self._inject_gateway_domain_policy_metadata(
+                metadata=metadata,
+                assistant_payload=assistant_payload,
+            )
+            if effective_metadata:
+                payload["metadata"] = effective_metadata
 
             async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
                 response.raise_for_status()
@@ -1211,10 +1241,11 @@ class LangGraphProxy:
         assistant_id: str,
         input_data: dict[str, Any],
         config: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """创建无状态 Run（一次性对话）"""
         # 验证 Assistant 访问权限（关键！防止未授权访问任意 assistant）
-        await self.get_assistant(user, assistant_id)
+        assistant_payload = await self.get_assistant(user, assistant_id)
 
         instance = await self.lb.select_instance()
         instance.active_connections += 1
@@ -1233,6 +1264,14 @@ class LangGraphProxy:
                 "input": input_data,
                 "config": run_config,
             }
+            effective_metadata = self._inject_gateway_domain_policy_metadata(
+                metadata=metadata,
+                assistant_payload=assistant_payload
+                if isinstance(assistant_payload, dict)
+                else None,
+            )
+            if effective_metadata:
+                payload["metadata"] = effective_metadata
 
             response = await client.post("/runs/wait", json=payload, headers=headers)
             response.raise_for_status()
@@ -1551,6 +1590,43 @@ class LangGraphProxy:
         """异步失效 Redis 中的 Assistant 缓存"""
         with contextlib.suppress(Exception):
             await self.redis.delete(f"lg:assistant:{assistant_id}")
+
+    @staticmethod
+    def _inject_gateway_domain_policy_metadata(
+        *,
+        metadata: dict[str, Any] | None,
+        assistant_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """
+        Inject domain policy metadata for downstream runtimes.
+
+        Contract:
+        - If assistant metadata explicitly declares `domain_policy=imam`,
+          ensure run payload includes `metadata.gateway.domain_policy=imam`.
+        - Do not overwrite caller-provided gateway domain policy.
+        """
+        merged_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+
+        existing_gateway = merged_metadata.get("gateway")
+        if isinstance(existing_gateway, dict):
+            existing_policy = str(existing_gateway.get("domain_policy") or "").strip().lower()
+            if existing_policy:
+                return merged_metadata
+
+        assistant_meta = (
+            assistant_payload.get("metadata") if isinstance(assistant_payload, dict) else None
+        )
+        if not isinstance(assistant_meta, dict):
+            return merged_metadata or None
+
+        assistant_domain_policy = str(assistant_meta.get("domain_policy") or "").strip().lower()
+        if assistant_domain_policy != "imam":
+            return merged_metadata or None
+
+        gateway_payload = dict(existing_gateway) if isinstance(existing_gateway, dict) else {}
+        gateway_payload["domain_policy"] = "imam"
+        merged_metadata["gateway"] = gateway_payload
+        return merged_metadata
 
     def _build_run_config(
         self, user: UserContext, config: dict[str, Any] | None = None

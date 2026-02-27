@@ -289,6 +289,11 @@ class DatabaseStorage:
             await self._auto_apply_openai_embedding_migration()
             await self._auto_apply_observability_governance_migration()
             await self._auto_apply_assistant_gateway_migration()
+            await self._auto_apply_openclaw_memory_sot_migration()
+            await self._auto_apply_openclaw_queue_lane_migration()
+            await self._auto_apply_openclaw_skills_migration()
+            await self._auto_apply_openclaw_scheduler_audit_migration()
+            await self._auto_apply_openclaw_context_metrics_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -323,6 +328,13 @@ class DatabaseStorage:
             return ""
         async with self._pool.acquire() as conn:
             return await conn.execute(query, *args)
+
+    async def executemany(self, query: str, args_list: list[tuple[Any, ...]]) -> None:
+        """Batch execute statements with different parameter tuples."""
+        if not self._pool or not args_list:
+            return
+        async with self._pool.acquire() as conn:
+            await conn.executemany(query, args_list)
 
     async def execute_schema(self, schema_path: str) -> None:
         """执行 SQL 建表脚本"""
@@ -789,6 +801,235 @@ class DatabaseStorage:
                 logger.info("Migration 034 already applied")
             else:
                 logger.error(f"Failed to apply migration 034: {e}")
+
+    async def _openclaw_memory_sot_needs_migration(self) -> bool:
+        """Check whether OpenClaw memory source-of-truth tables are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            sources = await conn.fetchval("SELECT to_regclass('public.assistant_memory_sources')")
+            chunks = await conn.fetchval("SELECT to_regclass('public.assistant_memory_chunks')")
+            reflections = await conn.fetchval(
+                "SELECT to_regclass('public.assistant_memory_reflections')"
+            )
+            return sources is None or chunks is None or reflections is None
+
+    async def _auto_apply_openclaw_memory_sot_migration(self) -> None:
+        """Apply migration 035 for OpenClaw memory SoT/index tables."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openclaw_memory_sot_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenClaw memory SoT migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "035_openclaw_memory_sot.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 035 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 035_openclaw_memory_sot.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 035 already applied")
+            else:
+                logger.error(f"Failed to apply migration 035: {e}")
+
+    async def _openclaw_queue_lane_needs_migration(self) -> bool:
+        """Check whether command queue lane columns are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            lane_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'assistant_command_queue' AND column_name = 'lane'
+                """
+            )
+            mode_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'assistant_command_queue' AND column_name = 'queue_mode'
+                """
+            )
+            priority_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'assistant_command_queue' AND column_name = 'priority'
+                """
+            )
+            steer_col = await conn.fetchval(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'assistant_command_queue' AND column_name = 'steer_payload'
+                """
+            )
+            return lane_col is None or mode_col is None or priority_col is None or steer_col is None
+
+    async def _auto_apply_openclaw_queue_lane_migration(self) -> None:
+        """Apply migration 036 for queue lane/mode/priority columns."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openclaw_queue_lane_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenClaw queue lane migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "036_openclaw_queue_lanes.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 036 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 036_openclaw_queue_lanes.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 036 already applied")
+            else:
+                logger.error(f"Failed to apply migration 036: {e}")
+
+    async def _openclaw_skills_needs_migration(self) -> bool:
+        """Check whether skill registry tables are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            skills = await conn.fetchval("SELECT to_regclass('public.assistant_skills')")
+            versions = await conn.fetchval("SELECT to_regclass('public.assistant_skill_versions')")
+            runs = await conn.fetchval("SELECT to_regclass('public.assistant_skill_runs')")
+            return skills is None or versions is None or runs is None
+
+    async def _auto_apply_openclaw_skills_migration(self) -> None:
+        """Apply migration 037 for dynamic skills."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openclaw_skills_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenClaw skills migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "037_openclaw_skills.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 037 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 037_openclaw_skills.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 037 already applied")
+            else:
+                logger.error(f"Failed to apply migration 037: {e}")
+
+    async def _openclaw_scheduler_audit_needs_migration(self) -> bool:
+        """Check whether scheduler and audit tables are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            jobs = await conn.fetchval("SELECT to_regclass('public.assistant_scheduler_jobs')")
+            audit = await conn.fetchval("SELECT to_regclass('public.assistant_audit_events')")
+            return jobs is None or audit is None
+
+    async def _auto_apply_openclaw_scheduler_audit_migration(self) -> None:
+        """Apply migration 038 for scheduler/audit tables."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openclaw_scheduler_audit_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenClaw scheduler/audit migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "038_openclaw_scheduler_audit.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 038 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 038_openclaw_scheduler_audit.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 038 already applied")
+            else:
+                logger.error(f"Failed to apply migration 038: {e}")
+
+    async def _openclaw_context_metrics_needs_migration(self) -> bool:
+        """Check whether context breakdown table is missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            table = await conn.fetchval("SELECT to_regclass('public.assistant_context_breakdown')")
+            return table is None
+
+    async def _auto_apply_openclaw_context_metrics_migration(self) -> None:
+        """Apply migration 039 for context detail metrics."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._openclaw_context_metrics_needs_migration()
+        except Exception as e:
+            logger.warning(f"Could not check OpenClaw context metrics migration: {e}")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "039_openclaw_context_metrics.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 039 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 039_openclaw_context_metrics.sql")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 039 already applied")
+            else:
+                logger.error(f"Failed to apply migration 039: {e}")
 
     # =========================================================================
     # 服务定义表 (services)

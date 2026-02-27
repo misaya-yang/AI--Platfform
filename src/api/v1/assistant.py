@@ -31,6 +31,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
+from ...core.exceptions import PermissionDeniedError
 from ...services.assistant import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
 from ...services.assistant.assistant_service import RAGMode
 from ...services.knowledge.embedding import is_multimodal_embedding_model
@@ -419,6 +420,27 @@ def _check_model_permission(
         )
 
 
+async def _validate_chat_session_access(
+    request: Request,
+    user: UserContext,
+    session_id: str,
+) -> None:
+    """Return 404 when client-provided session is not accessible by current user."""
+    if not session_id:
+        return
+
+    session_manager = get_session_manager(request)
+    session = await session_manager.get(session_id)
+    if not session:
+        return
+
+    if session.user_id != user.user_id or session.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.service_id and session.service_id not in {"__builtin_assistant__", "assistant"}:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
 @router.post("/chat", response_model=AssistantChatResponse)
 async def chat(
     body: AssistantChatRequest,
@@ -438,6 +460,8 @@ async def chat(
         _check_model_permission(user, body.model_id, model_registry)
 
     session_id = body.session_id or str(uuid.uuid4())
+    if body.session_id:
+        await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
     # Map string mode to enum
     kb_mode = RAGMode.AUTO
@@ -472,6 +496,11 @@ async def chat(
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,
         os_agent_enabled=body.os_agent_enabled,
+        openclaw_mode=body.openclaw_mode,
+        queue_mode=body.queue_mode,
+        context_detail=body.context_detail,
+        skills_enabled=body.skills_enabled,
+        memory_profile=body.memory_profile,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
@@ -498,6 +527,8 @@ async def chat(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionDeniedError:
+        raise HTTPException(status_code=404, detail="Session not found")
     except Exception as e:
         logger.error(f"Chat failed: {e}")
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
@@ -528,6 +559,8 @@ async def chat_stream(
         _check_model_permission(user, body.model_id, model_registry)
 
     session_id = body.session_id or str(uuid.uuid4())
+    if body.session_id:
+        await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
     # Debug: Log incoming request parameters
     system_prompt_len = len(body.system_prompt) if body.system_prompt else 0
@@ -570,6 +603,11 @@ async def chat_stream(
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,
         os_agent_enabled=body.os_agent_enabled,
+        openclaw_mode=body.openclaw_mode,
+        queue_mode=body.queue_mode,
+        context_detail=body.context_detail,
+        skills_enabled=body.skills_enabled,
+        memory_profile=body.memory_profile,
     )
 
     # Convert history to dict format, or None to trigger auto-load from session
