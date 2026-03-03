@@ -10,6 +10,54 @@ import { login } from "@/api/auth";
 import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { Eye, EyeOff } from "lucide-react";
 import { Modal } from "antd";
+import type { AxiosError } from "axios";
+
+type ApiValidationIssue = {
+  msg?: unknown;
+  message?: unknown;
+};
+
+type ApiErrorPayload = {
+  detail?: unknown;
+  message?: unknown;
+  error?: unknown;
+};
+
+function sanitizeMessage(value: string): string {
+  return value.replace(/^Value error,\s*/i, "").trim();
+}
+
+function extractErrorText(payload: unknown): string | null {
+  if (!payload) return null;
+
+  if (typeof payload === "string") {
+    const text = sanitizeMessage(payload);
+    return text || null;
+  }
+
+  if (Array.isArray(payload)) {
+    const messages = payload
+      .map((item) => {
+        if (typeof item === "string") return sanitizeMessage(item);
+        if (!item || typeof item !== "object") return "";
+        const issue = item as ApiValidationIssue;
+        if (typeof issue.msg === "string") return sanitizeMessage(issue.msg);
+        if (typeof issue.message === "string") return sanitizeMessage(issue.message);
+        return "";
+      })
+      .filter(Boolean);
+
+    return messages.length > 0 ? messages.join("; ") : null;
+  }
+
+  if (typeof payload === "object") {
+    const obj = payload as ApiValidationIssue;
+    if (typeof obj.msg === "string") return sanitizeMessage(obj.msg);
+    if (typeof obj.message === "string") return sanitizeMessage(obj.message);
+  }
+
+  return null;
+}
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -54,16 +102,21 @@ export function LoginPage() {
         navigate("/");
       }
     } catch (err: unknown) {
-      const axiosError = err as { response?: { data?: { detail?: string }; status?: number } };
-      if (axiosError.response?.status === 423) {
-        setError(axiosError.response.data?.detail || t("login.errors.accountLocked"));
-      } else if (axiosError.response?.status === 401) {
+      const axiosError = err as AxiosError<ApiErrorPayload>;
+      const status = axiosError.response?.status;
+      const errorPayload = axiosError.response?.data;
+      const parsedMessage = extractErrorText(errorPayload?.detail ?? errorPayload);
+
+      if (status === 423) {
+        setError(parsedMessage || t("login.errors.accountLocked"));
+      } else if (status === 401) {
         setError(t("login.errors.invalidCredentials"));
-      } else if (axiosError.response?.status === 403) {
+      } else if (status === 403) {
         setError(t("login.errors.accountDisabled"));
       } else {
-        setError(axiosError.response?.data?.detail || t("login.errors.loginFailed"));
+        setError(parsedMessage || t("login.errors.loginFailed"));
       }
+    } finally {
       setLoading(false);
     }
   };

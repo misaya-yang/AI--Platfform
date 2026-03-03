@@ -81,8 +81,19 @@ interface PopoverTriggerProps {
 }
 
 const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
-  ({ children, asChild }) => {
+  ({ children, asChild }, ref) => {
     const { open, setOpen, triggerRef } = usePopoverContext();
+    const setTriggerNode = React.useCallback(
+      (node: HTMLButtonElement | null) => {
+        triggerRef.current = node;
+        if (typeof ref === "function") {
+          ref(node);
+        } else if (ref) {
+          ref.current = node;
+        }
+      },
+      [ref, triggerRef]
+    );
 
     if (asChild && React.isValidElement(children)) {
       const childProps = children.props as {
@@ -90,7 +101,7 @@ const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
       };
       // eslint-disable-next-line react-hooks/refs
       return React.cloneElement(children as React.ReactElement<typeof childProps>, {
-        ref: triggerRef,
+        ref: setTriggerNode,
         onClick: (e: React.MouseEvent) => {
           childProps.onClick?.(e);
           setOpen(!open);
@@ -99,7 +110,7 @@ const PopoverTrigger = React.forwardRef<HTMLButtonElement, PopoverTriggerProps>(
     }
 
     return (
-      <button ref={triggerRef} onClick={() => setOpen(!open)}>
+      <button ref={setTriggerNode} onClick={() => setOpen(!open)}>
         {children}
       </button>
     );
