@@ -289,11 +289,9 @@ function convertToolCallsFromMetadata(toolCalls?: SessionMessageToolCall[]): Too
 export function PlaygroundPage() {
   const { t, i18n } = useTranslation();
   const servicesQuery = usePlaygroundServices();
-  // 过滤掉内置的 "AI助手" 服务 (service_id: "assistant")
-  // 该服务应该只在 AI助手 页面使用，不应该出现在智能对话的服务选择器中
-  const services = (servicesQuery.data || []).filter(
-    (s) => s.service_id !== "assistant"
-  );
+  // Keep legacy assistant service visible for backward compatibility so
+  // existing playground histories remain accessible.
+  const services = servicesQuery.data || [];
 
   const {
     selectedServiceId: serviceId,
@@ -1603,7 +1601,7 @@ export function PlaygroundPage() {
   return (
     <div className="flex overflow-hidden bg-card -m-6" style={{ height: 'calc(100vh - 64px)', width: 'calc(100% + 48px)' }}>
       {/* Sessions Sidebar */}
-      <aside className="hidden lg:flex w-[280px] flex-col border-r border-border/40 bg-gradient-to-b from-muted/30 to-muted/10">
+      <aside className="hidden md:flex w-[280px] flex-col border-r border-border/40 bg-gradient-to-b from-muted/30 to-muted/10">
         <div className="h-14 flex items-center px-4 border-b border-border/40">
           <Button
             size="sm"
