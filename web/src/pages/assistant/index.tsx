@@ -50,8 +50,10 @@ import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
 import i18n from "@/i18n";
+import { useChatShortcuts } from "@/features/chat/shortcuts";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
+const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
 
 // Error Boundary for ChatMessage rendering failures
 interface ErrorBoundaryProps {
@@ -241,6 +243,13 @@ export function AssistantPage() {
     // Keep model and temperature as user preferences
   }, [handleNewChat, cancelImageMode]);
 
+  useChatShortcuts({
+    surface: "assistant",
+    composerId: ASSISTANT_COMPOSER_ID,
+    onNewChat,
+    onStop: isStreaming ? stopStreaming : undefined,
+  });
+
   // Handle Send
   const handleSend = useCallback(() => {
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
@@ -389,7 +398,13 @@ export function AssistantPage() {
                 {messages.length === 0 ? (
                   <WelcomeScreen />
                 ) : (
-                  <div className="space-y-6">
+                  <div
+                    className="space-y-6"
+                    role="log"
+                    aria-live="polite"
+                    aria-relevant="additions text"
+                    aria-label={t("assistant.chatLog", "Assistant conversation log")}
+                  >
                     {/* Manus-style task timeline for agentic workflows */}
                     {!ASSISTANT_UI_V2 && showTaskPanel && workingMemory && workingMemory.tasks?.length > 0 && (
                       <AgentTaskTimeline
@@ -475,7 +490,8 @@ export function AssistantPage() {
             </AnimatePresence>
 
             {/* Input Area */}
-            <ChatInputArea 
+            <ChatInputArea
+              composerId={ASSISTANT_COMPOSER_ID}
               input={input}
               setInput={setInput}
               files={files}

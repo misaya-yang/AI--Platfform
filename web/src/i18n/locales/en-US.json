@@ -122,7 +122,8 @@
     "users": "Users",
     "settings": "Settings",
     "collapseSidebar": "Collapse sidebar",
-    "expandSidebar": "Expand sidebar"
+    "expandSidebar": "Expand sidebar",
+    "toggleSidebar": "Toggle sidebar"
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -137,7 +138,6 @@
     "costBreakdown": "Cost Breakdown",
     "tokenUsage": "Token Usage by Day",
     "usageDetails": "Usage Details",
-    "noData": "No data available",
     "byModel": "Model",
     "byUser": "User",
     "byAssistant": "Assistant",
@@ -147,10 +147,9 @@
     "outputTokens": "Output Tokens",
     "cost": "Cost",
     "percentage": "%",
-    "dateRange": "Date Range",
+    "noData": "No data available",
     "export": "Export",
-    "exportCsv": "Export CSV",
-    "exportJson": "Export JSON"
+    "dateRange": "Date Range"
   },
   "monitoring": {
     "title": "Monitoring Dashboard",
@@ -181,10 +180,16 @@
     "noData": "No usage data available"
   },
   "theme": {
+    "title": "Theme",
     "light": "Light Mode",
     "dark": "Dark Mode",
     "switchToLight": "Switch to light mode",
-    "switchToDark": "Switch to dark mode"
+    "switchToDark": "Switch to dark mode",
+    "mode": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    }
   },
   "user": {
     "profile": "Profile",
@@ -1705,6 +1710,11 @@
     "selectOrStartChat": "Select a chat on the left, or start a new one.",
     "typeToStart": "Type a message to start.",
     "showToolCalls": "Show tool calls",
+    "toolCallsCollapsed": "Tool calls",
+    "collapse": "Collapse",
+    "expand": "Expand",
+    "scrollToBottom": "Scroll to bottom",
+    "chatLog": "Conversation log",
     "disclaimer": "AI responses may be inaccurate",
     "errors": {
       "cancelled": "Request was cancelled.",
@@ -1736,7 +1746,8 @@
       "result": "Result",
       "unknownTool": "Unknown tool",
       "paramsPending": "Parameters pending..."
-    }
+    },
+    "composerAriaLabel": "Playground message composer"
   },
   "help": {
     "title": "Help",
@@ -1872,7 +1883,10 @@
     "noBindingsHint": "Click \"Bind Space\" on a connection card to add",
     "noSearchResults": "No connections match your search",
     "lastSync": "Last sync",
-    "pages": "pages",
+    "pages": {
+      "count": "{{synced}}/{{total}} pages",
+      "lastSync": "Last sync: {{time}}"
+    },
     "sync": "Sync",
     "status": {
       "connected": "Connected",
@@ -2123,10 +2137,6 @@
         "unknown": "An error occurred while creating the binding, please try again"
       }
     },
-    "pages": {
-      "count": "{{synced}}/{{total}} pages",
-      "lastSync": "Last sync: {{time}}"
-    },
     "pagesLabel": "pages",
     "spaceType": {
       "global": "Global Space",
@@ -2228,6 +2238,7 @@
     "deleteConfirm": "Are you sure you want to delete this conversation?",
     "noHistory": "No conversation history",
     "startNewChat": "Start a new chat",
+    "chatFallback": "Chat",
     "uploadFiles": "Upload files",
     "webResults": "Web search results",
     "searchingWeb": "Searching the web...",
@@ -2245,7 +2256,38 @@
     "analyzeFiles": "Please analyze these uploaded files.",
     "selected": "selected",
     "tipText": "Select knowledge bases to enable RAG. Enable web search for real-time information.",
-    "suggestions": "Suggestions",
+    "suggestions": {
+      "category": {
+        "learning": "Learning",
+        "development": "Development",
+        "analysis": "Analysis",
+        "creative": "Creative"
+      },
+      "explain": {
+        "title": "Explain a concept",
+        "prompt": "Explain a complex concept in simple terms with an example."
+      },
+      "code": {
+        "title": "Refactor code",
+        "prompt": "Help me refactor this code for readability and maintainability."
+      },
+      "doc": {
+        "title": "Summarize a document",
+        "prompt": "Summarize the key points from this document."
+      },
+      "insights": {
+        "title": "Find insights",
+        "prompt": "Analyze this data and highlight notable trends or insights."
+      },
+      "brainstorm": {
+        "title": "Brainstorm ideas",
+        "prompt": "Brainstorm 10 creative ideas for this topic."
+      },
+      "solve": {
+        "title": "Solve a problem",
+        "prompt": "Help me solve this problem step by step."
+      }
+    },
     "uploadFilesDesc": "Images, PDFs, documents",
     "kbDesc": "Search internal documents",
     "knowledgeBase": "Knowledge Base",
@@ -2266,7 +2308,6 @@
       "error": "Failed",
       "pending": "Pending"
     },
-
     "citationsTitle": "{{count}} Sources",
     "citedCount": "{{count}} cited",
     "citationUsed": "Cited",
@@ -2283,7 +2324,6 @@
     "ragCitations": "Citations",
     "ragGrounding": "{{percent}}% grounded",
     "ragChunksUsed": "{{used}}/{{total}} chunks used",
-
     "styleTitle": "Customize Response Style",
     "styleHint": "Select a style above to customize how AI responds.",
     "kb": "Knowledge Base",
@@ -2400,38 +2440,8 @@
         "prompt": "Provide detailed, comprehensive answers with context, steps, and examples when helpful."
       }
     },
-    "suggestions": {
-      "category": {
-        "learning": "Learning",
-        "development": "Development",
-        "analysis": "Analysis",
-        "creative": "Creative"
-      },
-      "explain": {
-        "title": "Explain a concept",
-        "prompt": "Explain a complex concept in simple terms with an example."
-      },
-      "code": {
-        "title": "Refactor code",
-        "prompt": "Help me refactor this code for readability and maintainability."
-      },
-      "doc": {
-        "title": "Summarize a document",
-        "prompt": "Summarize the key points from this document."
-      },
-      "insights": {
-        "title": "Find insights",
-        "prompt": "Analyze this data and highlight notable trends or insights."
-      },
-      "brainstorm": {
-        "title": "Brainstorm ideas",
-        "prompt": "Brainstorm 10 creative ideas for this topic."
-      },
-      "solve": {
-        "title": "Solve a problem",
-        "prompt": "Help me solve this problem step by step."
-      }
-    }
+    "composerAriaLabel": "Assistant message composer",
+    "chatLog": "Assistant conversation log"
   },
   "agent": {
     "status": {
@@ -2482,36 +2492,11 @@
     "openInNewTab": "Open in new tab",
     "preview": "Preview"
   },
-  "analytics": {
-    "title": "Usage Analytics",
-    "subtitle": "Track token usage, costs, and performance",
-    "totalRequests": "Total Requests",
-    "totalTokens": "Total Tokens",
-    "totalCost": "Total Cost",
-    "avgLatency": "Avg Latency",
-    "successRate": "Success Rate",
-    "inputOutput": "In/Out",
-    "costTrend": "Cost Trend",
-    "costBreakdown": "Cost Breakdown",
-    "tokenUsage": "Token Usage by Day",
-    "usageDetails": "Usage Details",
-    "byModel": "Model",
-    "byUser": "User",
-    "byAssistant": "Assistant",
-    "byService": "Service",
-    "requests": "Requests",
-    "inputTokens": "Input Tokens",
-    "outputTokens": "Output Tokens",
-    "cost": "Cost",
-    "percentage": "%",
-    "noData": "No data available",
-    "export": "Export",
-    "dateRange": "Date Range"
-  },
   "services": {
     "title": "Services",
     "addService": "Add Service",
     "registerService": "Register Service",
+    "noDescription": "No description",
     "tabs": {
       "simple": "Quick Setup",
       "advanced": "Advanced (YAML)"

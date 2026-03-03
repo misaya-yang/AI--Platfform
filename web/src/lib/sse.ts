@@ -277,7 +277,6 @@ export async function* sseFetchEvents<T>(
   const reader = resp.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
-  let chunkCount = 0;
   let firstChunkTime: number | null = null;
   let yieldedCount = 0;
 
@@ -401,7 +400,6 @@ export async function* sseFetchAGUI(
   const reader = resp.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
-  let chunkCount = 0;
   let firstChunkTime: number | null = null;
   let yieldedCount = 0;
 
@@ -485,7 +483,6 @@ export async function* sseFetchAGUI(
         const evt = parseAGUIPart(part);
         if (!evt) continue;
         yieldedCount++;
-        chunkCount++;
         if (debug && (yieldedCount <= 3 || yieldedCount % 50 === 0)) {
           console.log(`[SSE-AGUI] Yielding #${yieldedCount} event='${evt.event}' at ${(performance.now() - startTime).toFixed(0)}ms`);
         }

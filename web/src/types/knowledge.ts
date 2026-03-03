@@ -575,19 +575,20 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
 // instead of these deprecated helpers. They will be removed in a future release.
 
 /** @deprecated Use i18n key knowledge.chunkModeLabels instead */
-export function getChunkingModeLabel(_mode: ChunkingMode): string {
+export function getChunkingModeLabel(mode: ChunkingMode): string {
   // Deprecated: use t("knowledge.chunkModeLabels.<mode>") from i18n
-  return _mode;
+  return mode;
 }
 
 /** @deprecated Use i18n key knowledge.chunkModeDescriptions instead */
-export function getChunkingModeDescription(_mode: ChunkingMode): string {
+export function getChunkingModeDescription(mode: ChunkingMode): string {
   // Deprecated: use t("knowledge.chunkModeDescriptions.<mode>") from i18n
+  void mode;
   return "";
 }
 
 /** @deprecated Use i18n key knowledge.retrieveModeLabels instead */
-export function getRetrievalModeLabel(_mode: RetrieveMode): string {
+export function getRetrievalModeLabel(mode: RetrieveMode): string {
   // Deprecated: use t("knowledge.retrieveModeLabels.<mode>") from i18n
-  return _mode;
+  return mode;
 }

@@ -59,6 +59,7 @@ export function BindingSyncConfigDialog({
 
   // Reset form when binding changes or dialog opens
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSyncMode(binding.sync_mode || "manual");
     setPollingInterval(binding.polling_interval_minutes || 60);
     setError(null);

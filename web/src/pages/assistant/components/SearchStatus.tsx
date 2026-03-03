@@ -211,6 +211,7 @@ export function SearchStatus({ items, className }: SearchStatusProps) {
 /**
  * Hook to manage search status state
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function useSearchStatus() {
   const [items, setItems] = useState<SearchStatusItem[]>([]);
 

@@ -153,6 +153,7 @@ function TaskTimelineItem({ task, isLast }: { task: AgentTask; isLast: boolean }
   // Auto-expand when task starts
   useEffect(() => {
     if (task.status === "in_progress") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsExpanded(true);
     }
   }, [task.status]);

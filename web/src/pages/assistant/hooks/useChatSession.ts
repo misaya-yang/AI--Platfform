@@ -1,3 +1,5 @@
+/* eslint-disable no-case-declarations, @typescript-eslint/no-explicit-any */
+
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -21,6 +23,16 @@ import {
 } from "@/api/sessions";
 import { useAppStore } from "@/store/useAppStore";
 import { generateUUID } from "@/lib/utils";
+import {
+  applyUsageToTurnState,
+  cancelStreamTurn,
+  completeStreamTurn,
+  createStreamReducerContext,
+  createStreamTurnState,
+  failStreamTurn,
+  reduceLegacyStreamChunk,
+  type StreamTurnState,
+} from "@/features/chat/stream";
 import type {
   ChatMessage as ChatMessageType,
   RetrievedContext,
@@ -45,13 +57,79 @@ import type {
 } from "../types";
 import { getStyleSystemPrompt } from "../styles";
 import type { Artifact } from "@/components/artifacts";
+import {
+  finishChatStreamTrace,
+  markChatStreamFirstToken,
+  startChatStreamTrace,
+} from "@/features/chat/telemetry";
+
+function buildTextParts(messageId: string, content: string, createdAt: string) {
+  if (!content) return [];
+  return [{ id: `${messageId}-part-0`, type: "text" as const, content, createdAt }];
+}
+
+function normalizeUnknownToString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function parseToolArguments(value: string): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through to raw payload wrapper
+  }
+  return { raw: value };
+}
+
+function mapStreamToolCallsToAssistant(turnState: StreamTurnState) {
+  return turnState.toolCalls.map((toolCall) => ({
+    id: toolCall.id,
+    name: toolCall.name,
+    arguments: parseToolArguments(toolCall.arguments),
+    status: toolCall.status,
+  }));
+}
+
+function mergeUsageWithTurnState(
+  usage: Record<string, unknown>,
+  turnState: StreamTurnState
+): Record<string, unknown> {
+  return {
+    ...usage,
+    ...(turnState.usage.inputTokens != null
+      ? { input_tokens: turnState.usage.inputTokens }
+      : {}),
+    ...(turnState.usage.outputTokens != null
+      ? { output_tokens: turnState.usage.outputTokens }
+      : {}),
+    ...(turnState.usage.totalTokens != null
+      ? { total_tokens: turnState.usage.totalTokens }
+      : {}),
+  };
+}
 
 // Helper to restore message metadata
 const restoreMessageMetadata = (msg: any, index: number, sessionId: string): ChatMessageType => {
+  const createdAt = msg.timestamp || new Date().toISOString();
+  const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+  const messageId = `${sessionId}-${index}`;
   const baseMessage: ChatMessageType = {
-    id: `${sessionId}-${index}`,
+    id: messageId,
     role: msg.role as "user" | "assistant",
-    content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+    content,
+    createdAt,
+    parts: buildTextParts(messageId, content, createdAt),
+    status: "completed",
   };
 
   // Restore attachments
@@ -433,12 +511,17 @@ export function useChatSession() {
     datasets: any[];
   }) => {
     const { messageContent, filePaths, attachments, config, selectedDatasets, datasets } = params;
+    const createdAt = new Date().toISOString();
+    const userMessageId = generateUUID();
     
     // 1. Setup UI for new message
     const userMessage: ChatMessageType = {
-      id: generateUUID(),
+      id: userMessageId,
       role: "user",
       content: messageContent,
+      createdAt,
+      parts: buildTextParts(userMessageId, messageContent, createdAt),
+      status: "completed",
       attachments: attachments.length > 0 ? attachments : undefined,
     };
 
@@ -464,6 +547,9 @@ export function useChatSession() {
       id: generateUUID(),
       role: "assistant",
       content: "",
+      createdAt,
+      parts: [],
+      status: "streaming",
       isStreaming: true,
       searchStatus: initialSearchStatus.length > 0 ? initialSearchStatus : undefined,
     };
@@ -501,9 +587,24 @@ export function useChatSession() {
     // 3. Start Stream
     abortControllerRef.current = new AbortController();
     const startTime = Date.now();
+    const streamTrace = startChatStreamTrace("assistant", {
+      sessionId: sessionId || null,
+      modelId: config.selected_model || "gpt-4o",
+    });
+    let streamTraceClosed = false;
+    const closeStreamTrace = (
+      outcome: "completed" | "cancelled" | "failed",
+      payload?: Record<string, unknown>
+    ) => {
+      if (streamTraceClosed) return;
+      streamTraceClosed = true;
+      finishChatStreamTrace(streamTrace, outcome, payload);
+    };
+    let streamTurnState = createStreamTurnState(startTime);
+    const streamReducerContext = createStreamReducerContext();
     let firstTokenMs: number | undefined;
     let content = "";
-    let contexts: RetrievedContext[] = [];
+    const contexts: RetrievedContext[] = [];
     let webSearchResults: WebSearchResult[] = [];
     let usage: any = {};
     let durationMs: number | undefined;
@@ -524,6 +625,37 @@ export function useChatSession() {
     const updateAssistantMessage = (updater: (m: ChatMessageType) => ChatMessageType) => {
       setMessages((prev) =>
         prev.map((m) => (m.id === assistantMessage.id ? updater(m) : m))
+      );
+    };
+
+    const syncTurnStateToMessage = () => {
+      content = streamTurnState.content;
+      firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
+      durationMs = streamTurnState.durationMs ?? durationMs;
+      if (streamTurnState.firstTokenMs != null) {
+        markChatStreamFirstToken(streamTrace, streamTurnState.firstTokenMs);
+      }
+      usage = mergeUsageWithTurnState(usage, streamTurnState);
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMessage.id
+            ? {
+                ...m,
+                content,
+                parts: buildTextParts(assistantMessage.id, content, createdAt),
+                firstTokenMs,
+                durationMs,
+                usage,
+                toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
+                status:
+                  streamTurnState.status === "idle"
+                    ? "streaming"
+                    : streamTurnState.status,
+                isStreaming: streamTurnState.status === "streaming",
+              }
+            : m
+        )
       );
     };
 
@@ -552,6 +684,68 @@ export function useChatSession() {
 
       for await (const event of stream) {
         const now = Date.now();
+        const eventPayload =
+          typeof event.data === "object" && event.data !== null
+            ? (event.data as Record<string, unknown>)
+            : undefined;
+        const toolCallForReducer = (() => {
+          if (
+            event.event_type !== SSEEventType.TOOL_CALL_START &&
+            event.event_type !== "tool_call_delta" &&
+            event.event_type !== SSEEventType.TOOL_CALL_END &&
+            event.event_type !== SSEEventType.TOOL_CALL_RESULT
+          ) {
+            return undefined;
+          }
+          if (!eventPayload) return undefined;
+          const toolCallId =
+            (typeof eventPayload.tool_call_id === "string" &&
+              eventPayload.tool_call_id) ||
+            (typeof eventPayload.id === "string" ? eventPayload.id : "");
+          if (!toolCallId) return undefined;
+          return {
+            tool_call_id: toolCallId,
+            name:
+              (typeof eventPayload.tool_name === "string" &&
+                eventPayload.tool_name) ||
+              (typeof eventPayload.name === "string" ? eventPayload.name : "tool"),
+            arguments: normalizeUnknownToString(eventPayload.arguments),
+            status:
+              event.event_type === SSEEventType.TOOL_CALL_END ||
+              event.event_type === SSEEventType.TOOL_CALL_RESULT
+                ? ("completed" as const)
+                : ("running" as const),
+          };
+        })();
+        const reducerContent =
+          typeof event.data === "string"
+            ? { type: "text" as const, data: event.data }
+            : event.event_type === SSEEventType.TOOL_CALL_RESULT
+              ? {
+                  type: "tool_result" as const,
+                  data: normalizeUnknownToString(eventPayload?.result),
+                }
+              : event.event_type === "error"
+                ? {
+                    type: "text" as const,
+                    data: normalizeUnknownToString(eventPayload?.message),
+                  }
+                : undefined;
+        const reduced = reduceLegacyStreamChunk(
+          streamTurnState,
+          {
+            event_type: event.event_type,
+            content: reducerContent,
+            metadata: eventPayload,
+            tool_call: toolCallForReducer,
+          },
+          streamReducerContext,
+          now
+        );
+        streamTurnState = reduced.state;
+        if (reduced.changed) {
+          syncTurnStateToMessage();
+        }
 
         // Event Handling
         switch (event.event_type) {
@@ -560,11 +754,6 @@ export function useChatSession() {
             break;
 
           case "text_delta":
-            if (typeof event.data === "string") {
-              markFirstResponse(now);
-              content += event.data;
-              setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content, firstTokenMs } : m));
-            }
             break;
 
           case SSEEventType.STATUS:
@@ -1050,38 +1239,6 @@ export function useChatSession() {
                 ),
               } : null);
             }
-            // Always update message.toolCalls to display tool call cards (Manus style)
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantMessage.id
-                  ? {
-                      ...m,
-                      toolCalls: (m.toolCalls || []).some(
-                        (tc) => tc.id === toolStartData.tool_call_id
-                      )
-                        ? (m.toolCalls || []).map((tc) =>
-                            tc.id === toolStartData.tool_call_id
-                              ? {
-                                  ...tc,
-                                  name: toolStartData.tool_name,
-                                  arguments: toolStartData.arguments || tc.arguments || {},
-                                  status: "running" as const,
-                                }
-                              : tc
-                          )
-                        : [
-                            ...(m.toolCalls || []),
-                            {
-                              id: toolStartData.tool_call_id,
-                              name: toolStartData.tool_name,
-                              arguments: toolStartData.arguments || {},
-                              status: "running" as const,
-                            },
-                          ],
-                    }
-                  : m
-              )
-            );
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
               return {
@@ -1165,24 +1322,6 @@ export function useChatSession() {
                 ),
               })),
             } : null);
-            // Also update message.toolCalls status (Manus style)
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantMessage.id
-                  ? {
-                      ...m,
-                      toolCalls: (m.toolCalls || []).map((tc) =>
-                        tc.id === toolResultData.tool_call_id
-                          ? {
-                              ...tc,
-                              status: toolResultData.success ? "completed" : "error",
-                            }
-                          : tc
-                      ),
-                    }
-                  : m
-              )
-            );
             // Update searchStatus when KB/Web search tool completes
             // Use tool_name from result data directly (more reliable)
             {
@@ -1550,32 +1689,60 @@ export function useChatSession() {
           // Do not duplicate handlers here
 
           case "usage":
-            usage = event.data;
+            if (event.data && typeof event.data === "object") {
+              streamTurnState = applyUsageToTurnState(
+                streamTurnState,
+                event.data as Record<string, unknown>
+              );
+              syncTurnStateToMessage();
+            }
             break;
             
           case "done":
-            durationMs = (event.data as any).duration_ms;
+            streamTurnState = completeStreamTurn(streamTurnState, now);
+            if (event.data && typeof event.data === "object") {
+              streamTurnState = applyUsageToTurnState(
+                streamTurnState,
+                event.data as Record<string, unknown>
+              );
+            }
+            syncTurnStateToMessage();
             break;
             
           case "error":
             const errData = event.data as any;
-            content += `\n\n**Error:** ${errData?.message || "Unknown error"}`;
-            setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { ...m, content } : m));
+            streamTurnState = failStreamTurn(
+              streamTurnState,
+              errData?.message || "Unknown error",
+              now
+            );
+            syncTurnStateToMessage();
             break;
         }
       }
 
       // Final update
       const finishedAtMs = Date.now();
+      streamTurnState = completeStreamTurn(streamTurnState, finishedAtMs);
+      content = streamTurnState.content;
+      firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
+      durationMs = streamTurnState.durationMs ?? durationMs;
+      usage = mergeUsageWithTurnState(usage, streamTurnState);
       setMessages(prev => prev.map(m => m.id === assistantMessage.id ? {
         ...m,
         content,
+        parts: buildTextParts(assistantMessage.id, content, createdAt),
         contexts,
         webSearchResults,
         usage,
         durationMs,
         firstTokenMs,
         isStreaming: false,
+        status:
+          streamTurnState.status === "failed" || streamTurnState.status === "cancelled"
+            ? streamTurnState.status
+            : "completed",
+        toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
         processSummary: finalizeProcessSummary(
           m.processSummary,
           "succeeded",
@@ -1583,28 +1750,61 @@ export function useChatSession() {
           true
         ),
       } : m));
+      const finalOutcome =
+        streamTurnState.status === "failed"
+          ? "failed"
+          : streamTurnState.status === "cancelled"
+            ? "cancelled"
+            : "completed";
+      closeStreamTrace(finalOutcome, {
+        durationMs,
+        firstTokenMs,
+        totalTokens:
+          typeof usage?.total_tokens === "number" ? usage.total_tokens : undefined,
+        toolCalls: streamTurnState.toolCalls.length,
+        ...(streamTurnState.error ? { error: streamTurnState.error } : {}),
+      });
 
     } catch (error: any) {
       if (error.name !== "AbortError") {
         const finishedAtMs = Date.now();
+        streamTurnState = failStreamTurn(
+          streamTurnState,
+          error.message || "Unknown error",
+          finishedAtMs
+        );
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
           ...m,
-          content: `**Error:** ${error.message}`,
+          content: `**Error:** ${streamTurnState.error || error.message}`,
+          parts: buildTextParts(
+            assistantMessage.id,
+            `**Error:** ${streamTurnState.error || error.message}`,
+            createdAt
+          ),
           isStreaming: false,
-          firstTokenMs,
+          status: "failed",
+          firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+          toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
           processSummary: finalizeProcessSummary(
             m.processSummary,
             "failed",
             finishedAtMs
           ),
         } : m));
+        closeStreamTrace("failed", {
+          error: streamTurnState.error || error.message,
+        });
       } else {
         const finishedAtMs = Date.now();
+        streamTurnState = cancelStreamTurn(streamTurnState, finishedAtMs);
         setMessages(prev => prev.map(m => m.id === assistantMessage.id ? { 
           ...m,
           content: content || "(Cancelled)",
+          parts: buildTextParts(assistantMessage.id, content || "(Cancelled)", createdAt),
           isStreaming: false,
-          firstTokenMs,
+          status: "cancelled",
+          firstTokenMs: streamTurnState.firstTokenMs ?? firstTokenMs,
+          toolCalls: mapStreamToolCallsToAssistant(streamTurnState),
           processSummary: finalizeProcessSummary(
             m.processSummary,
             "succeeded",
@@ -1612,8 +1812,12 @@ export function useChatSession() {
             true
           ),
         } : m));
+        closeStreamTrace("cancelled", { reason: "abort_signal" });
       }
     } finally {
+      if (!streamTraceClosed) {
+        closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
+      }
       setIsStreaming(false);
       abortControllerRef.current = null;
     }

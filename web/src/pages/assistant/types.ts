@@ -8,6 +8,7 @@
 
 import type { FileUploadResponse } from "@/api/files";
 import { SSEEventType, type SSEEventTypeValue } from "./sse-events";
+import type { ChatTurnState } from "@/features/chat/stream";
 
 export { SSEEventType };
 export type { SSEEventTypeValue };
@@ -241,6 +242,15 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  createdAt?: string;
+  parts?: Array<{
+    id: string;
+    type: "text" | "tool_call" | "tool_result";
+    content: string;
+    createdAt: string;
+  }>;
+  status?: ChatTurnState;
+  meta?: Record<string, unknown>;
 
   // Streaming state
   isStreaming?: boolean;

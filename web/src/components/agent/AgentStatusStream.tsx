@@ -319,20 +319,22 @@ function ExecutionContent({ state }: { state: AgentStatusStreamState }) {
   const { toolExecution } = state;
 
   if (!toolExecution) return null;
-
-  const getToolIcon = (name: string) => {
-    if (name.includes("code") || name.includes("execute")) return Code2;
-    if (name.includes("web") || name.includes("search")) return Globe;
-    if (name.includes("file") || name.includes("document")) return FileText;
-    return Wrench;
-  };
-
-  const ToolIcon = getToolIcon(toolExecution.name);
+  const toolName = toolExecution.name.toLowerCase();
+  const toolIcon =
+    toolName.includes("code") || toolName.includes("execute") ? (
+      <Code2 className="h-4 w-4 text-amber-500" />
+    ) : toolName.includes("web") || toolName.includes("search") ? (
+      <Globe className="h-4 w-4 text-amber-500" />
+    ) : toolName.includes("file") || toolName.includes("document") ? (
+      <FileText className="h-4 w-4 text-amber-500" />
+    ) : (
+      <Wrench className="h-4 w-4 text-amber-500" />
+    );
 
   return (
     <div className="flex-1 min-w-0 space-y-2">
       <div className="flex items-center gap-2">
-        <ToolIcon className="h-4 w-4 text-amber-500" />
+        {toolIcon}
         <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
           {toolExecution.status === "running"
             ? t("agent.status.executingTool", "Executing tool: {{name}}", { name: toolExecution.displayName || toolExecution.name })

@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+export type ThemeMode = "light" | "dark" | "system";
+export type ResolvedTheme = "light" | "dark";
+
+function getSystemTheme(): ResolvedTheme {
+  if (typeof window === "undefined") return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
 type AppState = {
   // === Playground (智能对话) 状态 ===
   selectedServiceId?: string;
@@ -17,7 +27,11 @@ type AppState = {
   setAssistantLocalTitles: (titles: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
   
   // === 全局状态 ===
+  themeMode: ThemeMode;
+  resolvedTheme: ResolvedTheme;
   darkMode: boolean;
+  setThemeMode: (mode: ThemeMode) => void;
+  setResolvedTheme: (theme: ResolvedTheme) => void;
   toggleDarkMode: () => void;
 };
 
@@ -45,15 +59,55 @@ export const useAppStore = create<AppState>()(
         })),
       
       // 全局
-      darkMode: false,
+      themeMode: "system",
+      resolvedTheme: getSystemTheme(),
+      darkMode: getSystemTheme() === "dark",
+      setThemeMode: (mode) =>
+        set((state) => {
+          if (mode === "system") {
+            const systemTheme = getSystemTheme();
+            return {
+              themeMode: mode,
+              resolvedTheme: systemTheme,
+              darkMode: systemTheme === "dark",
+            };
+          }
+          const resolvedTheme = mode;
+          return {
+            ...state,
+            themeMode: mode,
+            resolvedTheme,
+            darkMode: resolvedTheme === "dark",
+          };
+        }),
+      setResolvedTheme: (theme) =>
+        set((state) => ({
+          ...state,
+          resolvedTheme: theme,
+          darkMode: theme === "dark",
+        })),
       toggleDarkMode: () =>
         set((s) => ({
-          darkMode: !s.darkMode,
+          themeMode: s.resolvedTheme === "dark" ? "light" : "dark",
+          resolvedTheme: s.resolvedTheme === "dark" ? "light" : "dark",
+          darkMode: s.resolvedTheme !== "dark",
         })),
     }),
     {
       name: "agent-gateway-storage",
+      version: 2,
+      migrate: (persistedState: unknown, version: number) => {
+        const state = (persistedState || {}) as Partial<AppState>;
+        if (version < 2 && typeof state.darkMode === "boolean" && !state.themeMode) {
+          const nextTheme = state.darkMode ? "dark" : "light";
+          return {
+            ...state,
+            themeMode: nextTheme,
+            resolvedTheme: nextTheme,
+          };
+        }
+        return state as AppState;
+      },
     }
   )
 );
-

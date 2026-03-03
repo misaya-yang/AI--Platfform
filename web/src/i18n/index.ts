@@ -5,6 +5,25 @@ import LanguageDetector from "i18next-browser-languagedetector";
 import zhCN from "./locales/zh-CN.json";
 import enUS from "./locales/en-US.json";
 
+export const APP_LOCALES = ["zh-CN", "en-US"] as const;
+export type AppLocale = (typeof APP_LOCALES)[number];
+
+const DEFAULT_LOCALE: AppLocale = "zh-CN";
+const APP_LOCALE_SET = new Set<string>(APP_LOCALES);
+
+export function resolveAppLocale(input?: string): AppLocale {
+  if (!input) return DEFAULT_LOCALE;
+  if (APP_LOCALE_SET.has(input)) return input as AppLocale;
+
+  const normalized = input.replace("_", "-");
+  if (APP_LOCALE_SET.has(normalized)) return normalized as AppLocale;
+
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("zh")) return "zh-CN";
+  if (lower.startsWith("en")) return "en-US";
+  return DEFAULT_LOCALE;
+}
+
 const resources = {
   "zh-CN": {
     translation: zhCN,
@@ -19,13 +38,23 @@ i18n
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: "zh-CN",
+    fallbackLng: DEFAULT_LOCALE,
+    supportedLngs: [...APP_LOCALES],
+    nonExplicitSupportedLngs: false,
+    load: "currentOnly",
+    cleanCode: true,
+    returnNull: false,
+    returnEmptyString: false,
+    appendNamespaceToMissingKey: false,
+    saveMissing: false,
     interpolation: {
       escapeValue: false,
     },
     detection: {
-      order: ["localStorage", "navigator"],
+      order: ["localStorage", "htmlTag", "navigator"],
       caches: ["localStorage"],
+      lookupLocalStorage: "i18nextLng",
+      convertDetectedLanguage: (lng) => resolveAppLocale(lng),
     },
   });
 

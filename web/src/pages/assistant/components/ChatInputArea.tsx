@@ -14,6 +14,7 @@ import type { DatasetInfo, AssistantConfig, ModelInfo } from "@/api/assistant";
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 
 interface ChatInputAreaProps {
+  composerId?: string;
   input: string;
   setInput: (val: string) => void;
   files: UploadedFile[];
@@ -40,6 +41,7 @@ interface ChatInputAreaProps {
 }
 
 export function ChatInputArea({
+  composerId,
   input,
   setInput,
   files,
@@ -84,12 +86,20 @@ export function ChatInputArea({
       if (e.nativeEvent.isComposing || e.keyCode === 229) {
         return;
       }
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Escape" && isStreaming) {
+        e.preventDefault();
+        onStop();
+        return;
+      }
+      const isSubmitShortcut =
+        (e.key === "Enter" && !e.shiftKey) ||
+        (e.key === "Enter" && (e.metaKey || e.ctrlKey));
+      if (isSubmitShortcut) {
         e.preventDefault();
         onSend();
       }
     },
-    [onSend]
+    [isStreaming, onSend, onStop]
   );
 
   // Check if can send
@@ -201,11 +211,13 @@ export function ChatInputArea({
 
             {/* Text input */}
             <Textarea
+              id={composerId}
               ref={textareaRef}
               value={input}
               onChange={handleTextareaChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              aria-label={t("assistant.composerAriaLabel", "Assistant message composer")}
               placeholder={
                 models.length === 0
                   ? t("assistant.noModelsPlaceholder", "No models available")
@@ -229,6 +241,7 @@ export function ChatInputArea({
                 size="icon"
                 className="h-10 w-10 shrink-0 rounded-xl bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/20"
                 onClick={onStop}
+                aria-keyshortcuts="Escape"
               >
                 <X className="h-5 w-5" />
               </Button>
@@ -245,6 +258,7 @@ export function ChatInputArea({
                 )}
                 onClick={onSend}
                 disabled={!canSend}
+                aria-keyshortcuts="Enter,Control+Enter,Meta+Enter"
               >
                 {isUploading || isGeneratingImage ? (
                   <Loader2 className="h-5 w-5 animate-spin" />

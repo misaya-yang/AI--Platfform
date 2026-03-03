@@ -66,11 +66,16 @@ const CollapsibleTrigger = React.forwardRef<HTMLButtonElement, CollapsibleTrigge
     };
 
     if (asChild && React.isValidElement(children)) {
-      return React.cloneElement(children as React.ReactElement<any>, {
-        ref,
-        onClick: handleClick,
-        "data-state": open ? "open" : "closed",
-      });
+      return React.cloneElement(
+        children as React.ReactElement<{
+          onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+          "data-state"?: "open" | "closed";
+        }>,
+        {
+          onClick: handleClick,
+          "data-state": open ? "open" : "closed",
+        }
+      );
     }
 
     return (
@@ -88,7 +93,7 @@ const CollapsibleTrigger = React.forwardRef<HTMLButtonElement, CollapsibleTrigge
 );
 CollapsibleTrigger.displayName = "CollapsibleTrigger";
 
-interface CollapsibleContentProps extends React.HTMLAttributes<HTMLDivElement> {}
+type CollapsibleContentProps = React.HTMLAttributes<HTMLDivElement>;
 
 const CollapsibleContent = React.forwardRef<HTMLDivElement, CollapsibleContentProps>(
   ({ className, children, ...props }, ref) => {

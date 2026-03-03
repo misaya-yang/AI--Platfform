@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Card, Col, Empty, Row, Select, Spin, Statistic, Tabs } from "antd";
@@ -101,108 +101,102 @@ export function UserServiceUsageAnalytics({
   const [selectedService, setSelectedService] = useState<string>();
   const [selectedProvider, setSelectedProvider] = useState<string>();
 
-  useEffect(() => {
-    if (!userOptions.length) {
-      setSelectedUser(undefined);
-      return;
+  const effectiveSelectedUser = useMemo(() => {
+    if (!userOptions.length) return undefined;
+    if (selectedUser && userOptions.some((opt) => opt.value === selectedUser)) {
+      return selectedUser;
     }
-    if (!selectedUser || !userOptions.some((opt) => opt.value === selectedUser)) {
-      setSelectedUser(userOptions[0].value);
-    }
-  }, [userOptions, selectedUser]);
+    return userOptions[0].value;
+  }, [selectedUser, userOptions]);
 
-  useEffect(() => {
-    if (!serviceOptions.length) {
-      setSelectedService(undefined);
-      return;
+  const effectiveSelectedService = useMemo(() => {
+    if (!serviceOptions.length) return undefined;
+    if (selectedService && serviceOptions.some((opt) => opt.value === selectedService)) {
+      return selectedService;
     }
-    if (!selectedService || !serviceOptions.some((opt) => opt.value === selectedService)) {
-      setSelectedService(serviceOptions[0].value);
-    }
-  }, [serviceOptions, selectedService]);
+    return serviceOptions[0].value;
+  }, [selectedService, serviceOptions]);
 
-  useEffect(() => {
-    if (!providerOptions.length) {
-      setSelectedProvider(undefined);
-      return;
+  const effectiveSelectedProvider = useMemo(() => {
+    if (!providerOptions.length) return undefined;
+    if (selectedProvider && providerOptions.some((opt) => opt.value === selectedProvider)) {
+      return selectedProvider;
     }
-    if (!selectedProvider || !providerOptions.some((opt) => opt.value === selectedProvider)) {
-      setSelectedProvider(providerOptions[0].value);
-    }
-  }, [providerOptions, selectedProvider]);
+    return providerOptions[0].value;
+  }, [selectedProvider, providerOptions]);
 
   const userSummaryQuery = useQuery({
-    queryKey: ["usage-summary-user", startDate, endDate, selectedUser, granularity],
+    queryKey: ["usage-summary-user", startDate, endDate, effectiveSelectedUser, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
         end_date: endDate,
-        user_id: selectedUser,
+        user_id: effectiveSelectedUser,
       }),
-    enabled: !!selectedUser,
+    enabled: !!effectiveSelectedUser,
     staleTime: 60000,
   });
 
   const serviceSummaryQuery = useQuery({
-    queryKey: ["usage-summary-service", startDate, endDate, selectedService, granularity],
+    queryKey: ["usage-summary-service", startDate, endDate, effectiveSelectedService, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
         end_date: endDate,
-        service_id: selectedService,
+        service_id: effectiveSelectedService,
       }),
-    enabled: !!selectedService,
+    enabled: !!effectiveSelectedService,
     staleTime: 60000,
   });
 
   const userTimeSeriesQuery = useQuery({
-    queryKey: ["usage-timeseries-user", startDate, endDate, selectedUser, granularity],
+    queryKey: ["usage-timeseries-user", startDate, endDate, effectiveSelectedUser, granularity],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: startDate,
         end_date: endDate,
-        user_id: selectedUser,
+        user_id: effectiveSelectedUser,
         granularity,
       }),
-    enabled: !!selectedUser,
+    enabled: !!effectiveSelectedUser,
     staleTime: 60000,
   });
 
   const serviceTimeSeriesQuery = useQuery({
-    queryKey: ["usage-timeseries-service", startDate, endDate, selectedService, granularity],
+    queryKey: ["usage-timeseries-service", startDate, endDate, effectiveSelectedService, granularity],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: startDate,
         end_date: endDate,
-        service_id: selectedService,
+        service_id: effectiveSelectedService,
         granularity,
       }),
-    enabled: !!selectedService,
+    enabled: !!effectiveSelectedService,
     staleTime: 60000,
   });
 
   const providerSummaryQuery = useQuery({
-    queryKey: ["usage-summary-provider", startDate, endDate, selectedProvider, granularity],
+    queryKey: ["usage-summary-provider", startDate, endDate, effectiveSelectedProvider, granularity],
     queryFn: () =>
       getUsageSummary({
         start_date: startDate,
         end_date: endDate,
-        provider: selectedProvider,
+        provider: effectiveSelectedProvider,
       }),
-    enabled: !!selectedProvider,
+    enabled: !!effectiveSelectedProvider,
     staleTime: 60000,
   });
 
   const providerTimeSeriesQuery = useQuery({
-    queryKey: ["usage-timeseries-provider", startDate, endDate, selectedProvider, granularity],
+    queryKey: ["usage-timeseries-provider", startDate, endDate, effectiveSelectedProvider, granularity],
     queryFn: () =>
       getUsageTimeSeries({
         start_date: startDate,
         end_date: endDate,
-        provider: selectedProvider,
+        provider: effectiveSelectedProvider,
         granularity,
       }),
-    enabled: !!selectedProvider,
+    enabled: !!effectiveSelectedProvider,
     staleTime: 60000,
   });
 
@@ -382,7 +376,7 @@ export function UserServiceUsageAnalytics({
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <Select
-                    value={selectedUser}
+                    value={effectiveSelectedUser}
                     options={userOptions}
                     placeholder={t("dashboard.usageAnalytics.selectUser", "Select user")}
                     onChange={(value) => setSelectedUser(value)}
@@ -410,7 +404,7 @@ export function UserServiceUsageAnalytics({
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <Select
-                    value={selectedService}
+                    value={effectiveSelectedService}
                     options={serviceOptions}
                     placeholder={t("dashboard.usageAnalytics.selectService", "Select service")}
                     onChange={(value) => setSelectedService(value)}
@@ -438,7 +432,7 @@ export function UserServiceUsageAnalytics({
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <Select
-                    value={selectedProvider}
+                    value={effectiveSelectedProvider}
                     options={providerOptions}
                     placeholder={t("dashboard.usageAnalytics.selectProvider", "Select vendor")}
                     onChange={(value) => setSelectedProvider(value)}

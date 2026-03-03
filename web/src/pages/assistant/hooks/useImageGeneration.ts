@@ -6,6 +6,7 @@ import {
   createArtifact
 } from "@/api/assistant";
 import { addSessionMessage } from "@/api/sessions";
+import type { SessionConfig, SessionSummary } from "@/api/sessions";
 import { generateUUID } from "@/lib/utils";
 import type { ChatMessage } from "../types";
 import type { Artifact } from "@/components/artifacts";
@@ -16,10 +17,14 @@ export function useImageGeneration(
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
   setArtifacts: React.Dispatch<React.SetStateAction<Artifact[]>>,
   setActiveSessionId: (id: string) => void,
-  createSession: (params: any) => Promise<any>,
-  listSessions: (params: any) => Promise<any>,
-  setSessions: (sessions: any[]) => void,
-  config: any
+  createSession: (params?: {
+    service_id?: string;
+    metadata?: Record<string, unknown>;
+    config?: SessionConfig;
+  }) => Promise<{ session_id: string }>,
+  listSessions: (params?: { service_id?: string; limit?: number }) => Promise<SessionSummary[]>,
+  setSessions: (sessions: SessionSummary[]) => void,
+  config: SessionConfig
 ) {
   const { t } = useTranslation();
   const [isImageMode, setIsImageMode] = useState(false);
@@ -155,8 +160,9 @@ export function useImageGeneration(
       } else {
         throw new Error(result.error || "Unknown error");
       }
-    } catch (error: any) {
-      const errorContent = `**${t("assistant.error", "Error")}:** ${error.message}`;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorContent = `**${t("assistant.error", "Error")}:** ${errorMessage}`;
       setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { 
         ...m, content: errorContent, isGeneratingImage: false, imageGenerationPrompt: undefined 
       } : m));

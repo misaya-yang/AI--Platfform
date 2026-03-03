@@ -35,10 +35,16 @@ interface UploadedFile {
 
 export function MultimodalInput({
   onSend,
+  onStop,
+  isStreaming = false,
+  composerId,
   disabled,
   includeFiles = true,
 }: {
   onSend: (inputs: ContentItem[], filePaths?: string[]) => void;
+  onStop?: () => void;
+  isStreaming?: boolean;
+  composerId?: string;
   disabled?: boolean;
   includeFiles?: boolean;
 }) {
@@ -234,8 +240,9 @@ export function MultimodalInput({
     (f) => f.status === "success" && f.response
   );
   const hasFailedUploads = files.some((f) => f.status === "error");
+  const canStop = isStreaming && typeof onStop === "function";
   const canSend =
-    !disabled && !isUploading && (text.trim() || hasUploadedFiles);
+    !disabled && !isUploading && !isStreaming && (text.trim() || hasUploadedFiles);
 
   return (
     <div className="w-full">
@@ -356,16 +363,26 @@ export function MultimodalInput({
 
         {/* Text Input */}
         <Textarea
+          id={composerId}
           placeholder={
             files.length > 0 ? t("assistant.attachments.placeholder") : t("assistant.inputPlaceholder")
           }
+          aria-label={t("playground.composerAriaLabel", "Playground message composer")}
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={1}
           disabled={disabled}
           className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-base placeholder:text-muted-foreground/60"
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && canSend) {
+            if (e.key === "Escape" && canStop) {
+              e.preventDefault();
+              onStop?.();
+              return;
+            }
+            const isSubmitShortcut =
+              (e.key === "Enter" && !e.shiftKey) ||
+              (e.key === "Enter" && (e.metaKey || e.ctrlKey));
+            if (isSubmitShortcut && canSend) {
               e.preventDefault();
               handleSend();
             }
@@ -374,25 +391,39 @@ export function MultimodalInput({
         />
 
         {/* Send Button */}
-        <Button
-          size="icon"
-          type="button"
-          disabled={!canSend}
-          onClick={handleSend}
-          aria-label={t("common.send")}
-          className={cn(
-            "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
-            canSend
-              ? "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:from-violet-600 hover:via-purple-600 hover:to-fuchsia-600 shadow-purple-500/30 hover:shadow-purple-500/40 hover:scale-105"
-              : "bg-muted text-muted-foreground opacity-50"
-          )}
-        >
-          {isUploading ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <Send className="h-5 w-5" />
-          )}
-        </Button>
+        {canStop ? (
+          <Button
+            size="icon"
+            type="button"
+            onClick={() => onStop?.()}
+            aria-label={t("assistant.stopGenerating", "Stop generating")}
+            aria-keyshortcuts="Escape"
+            className="h-10 w-10 shrink-0 rounded-xl bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/20 transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            type="button"
+            disabled={!canSend}
+            onClick={handleSend}
+            aria-label={t("common.send")}
+            aria-keyshortcuts="Enter,Control+Enter,Meta+Enter"
+            className={cn(
+              "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
+              canSend
+                ? "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:from-violet-600 hover:via-purple-600 hover:to-fuchsia-600 shadow-purple-500/30 hover:shadow-purple-500/40 hover:scale-105"
+                : "bg-muted text-muted-foreground opacity-50"
+            )}
+          >
+            {isUploading ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <Send className="h-5 w-5" />
+            )}
+          </Button>
+        )}
       </div>
     </div>
   );

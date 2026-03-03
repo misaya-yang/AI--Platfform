@@ -57,14 +57,14 @@ export function useDashboardEntityLabels() {
         dimension: "user",
         start_date: dateRange[0],
         end_date: dateRange[1],
-        limit: 200,
+        limit: 100,
       }),
     staleTime: 60_000,
   });
 
   const usersQuery = useQuery({
     queryKey: ["dashboard-user-directory"],
-    queryFn: () => listUsers({ page: 1, page_size: 200 }),
+    queryFn: () => listUsers({ page: 1, page_size: 100 }),
     staleTime: 120_000,
     enabled: canReadUserDirectory,
   });

@@ -41,8 +41,13 @@ export interface ToolCallWithResult {
 }
 
 export type ChatMessage = {
+  id?: string;
   role: "user" | "assistant";
   content: string;
+  createdAt?: string;
+  parts?: Array<{ id: string; type: "text" | "tool_call" | "tool_result"; content: string; createdAt: string }>;
+  status?: "idle" | "streaming" | "completed" | "cancelled" | "failed";
+  meta?: Record<string, unknown>;
   toolCalls?: ToolCallWithResult[];
   isThinking?: boolean;
   isStreaming?: boolean;
@@ -131,18 +136,18 @@ function TimelineSection({
         className={cn(
           "flex items-center gap-3 w-full px-4 py-2.5 rounded-xl transition-all duration-200",
           "text-left text-xs font-medium",
-          "bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5",
-          "hover:from-violet-500/10 hover:via-purple-500/10 hover:to-fuchsia-500/10",
-          "border border-violet-500/20 dark:border-violet-400/20",
+          "bg-gradient-to-r from-blue-500/5 via-cyan-500/5 to-sky-500/5",
+          "hover:from-blue-500/10 hover:via-cyan-500/10 hover:to-sky-500/10",
+          "border border-blue-500/20 dark:border-blue-400/20",
           "backdrop-blur-sm",
-          isRunning && "border-violet-500/40 shadow-[0_0_15px_-3px] shadow-violet-500/20"
+          isRunning && "border-blue-500/40 shadow-[0_0_15px_-3px] shadow-blue-500/20"
         )}
       >
         <div className={cn(
           "flex items-center justify-center h-6 w-6 rounded-lg transition-all duration-200",
           isRunning
-            ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg shadow-violet-500/30"
-            : "bg-violet-500/10 text-violet-600 dark:text-violet-400"
+            ? "bg-gradient-to-br from-blue-500 to-cyan-600 text-white shadow-lg shadow-blue-500/30"
+            : "bg-blue-500/10 text-blue-600 dark:text-blue-400"
         )}>
           <Activity className={cn("h-3.5 w-3.5", isRunning && "animate-pulse")} />
         </div>
@@ -155,7 +160,7 @@ function TimelineSection({
           animate={{ rotate: isExpanded ? 180 : 0 }}
           transition={{ duration: 0.2 }}
         >
-          <ChevronDown className="h-4 w-4 text-violet-500/60" />
+          <ChevronDown className="h-4 w-4 text-blue-500/60" />
         </motion.div>
       </button>
 
@@ -225,8 +230,8 @@ function Avatar({ isUser }: { isUser: boolean }) {
       <div className={cn(
         "absolute inset-0 rounded-xl blur-lg opacity-40",
         isUser
-          ? "bg-gradient-to-br from-emerald-400 to-teal-500"
-          : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500"
+            ? "bg-gradient-to-br from-emerald-400 to-teal-500"
+          : "bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500"
       )} />
 
       {/* Avatar */}
@@ -235,7 +240,7 @@ function Avatar({ isUser }: { isUser: boolean }) {
         "shadow-lg transition-transform duration-200 hover:scale-105",
         isUser
           ? "bg-gradient-to-br from-emerald-500 via-emerald-500 to-teal-600 text-white shadow-emerald-500/25"
-          : "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-600 text-white shadow-violet-500/25"
+          : "bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-600 text-white shadow-blue-500/25"
       )}>
         {isUser ? (
           <User className="h-5 w-5" strokeWidth={2.5} />
@@ -325,13 +330,15 @@ const ChatMessageItem = memo(
           {/* Name Label */}
           <span className={cn(
             "text-xs font-medium px-1",
-            isUser ? "text-emerald-600 dark:text-emerald-400" : "text-violet-600 dark:text-violet-400"
+            isUser ? "text-emerald-600 dark:text-emerald-400" : "text-blue-600 dark:text-blue-400"
           )}>
             {isUser ? t("playground.you", "You") : t("playground.assistant", "AI Assistant")}
           </span>
 
           {/* Message Bubble */}
           <div
+            role={!isUser && message.status === "failed" ? "alert" : undefined}
+            aria-live={!isUser && message.status === "failed" ? "assertive" : undefined}
             className={cn(
               "relative min-w-0 transition-all duration-200",
               isUser
@@ -377,12 +384,12 @@ const ChatMessageItem = memo(
                   onClick={() => setToolCallsExpanded(true)}
                   className={cn(
                     "flex w-full items-center justify-between rounded-xl border",
-                    "bg-violet-500/8 dark:bg-violet-500/10 px-4 py-3",
-                    "text-[13px] font-medium text-violet-700 dark:text-violet-300",
-                    "border-violet-500/20 dark:border-violet-400/20",
-                    "transition-colors hover:bg-violet-500/12 dark:hover:bg-violet-500/15"
-                  )}
-                >
+                  "bg-blue-500/8 dark:bg-blue-500/10 px-4 py-3",
+                  "text-[13px] font-medium text-blue-700 dark:text-blue-300",
+                  "border-blue-500/20 dark:border-blue-400/20",
+                  "transition-colors hover:bg-blue-500/12 dark:hover:bg-blue-500/15"
+                )}
+              >
                   <span>{t("playground.toolCallsCollapsed", "Tool calls")} ({toolCallsCount})</span>
                   <span className="text-[11px] font-semibold uppercase tracking-wider opacity-70">
                     {t("playground.expand", "Expand")}
@@ -392,14 +399,14 @@ const ChatMessageItem = memo(
             )}
             {!isUser && shouldShowToolCallsList && !hasTimeline && (
               <div className="mb-5 space-y-3 w-full min-w-0">
-                <div className="flex items-center gap-2.5 text-[12px] font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-400">
-                  <span className="h-2 w-2 rounded-full bg-gradient-to-br from-violet-500 to-purple-600" />
+                <div className="flex items-center gap-2.5 text-[12px] font-semibold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                  <span className="h-2 w-2 rounded-full bg-gradient-to-br from-blue-500 to-cyan-600" />
                   {t("playground.toolCalls", "Tool Calls")}
                   {toolCallsMode === "collapsed" && (
                     <button
                       type="button"
                       onClick={() => setToolCallsExpanded(false)}
-                      className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-violet-500 hover:text-violet-600 dark:text-violet-400 dark:hover:text-violet-300 transition-colors"
+                      className="ml-auto text-[11px] font-semibold uppercase tracking-wider text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
                     >
                       {t("playground.collapse", "Collapse")}
                     </button>
@@ -428,12 +435,12 @@ const ChatMessageItem = memo(
                 {isUser ? (
                   <div className="whitespace-pre-wrap">{message.content}</div>
                 ) : (
-                  <StreamOutput
-                    text={stripProcessSectionForDisplay(message.content)}
-                    isStreaming={!!message.isStreaming}
-                    id={`msg-${index}`}
-                  />
-                )}
+                    <StreamOutput
+                      text={stripProcessSectionForDisplay(message.content)}
+                      isStreaming={!!message.isStreaming}
+                      id={message.id || `msg-${index}`}
+                    />
+                  )}
               </div>
             ) : null}
 
@@ -474,12 +481,19 @@ export function ChatWindow({
   showTimeline = true,
   showThinkingIndicator = true,
 }: ChatWindowProps) {
+  const { t } = useTranslation();
   return (
-    <div className="mx-auto w-full max-w-4xl space-y-8 px-4 py-10">
+    <div
+      className="mx-auto w-full max-w-4xl space-y-8 px-4 py-10"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions text"
+      aria-label={t("playground.chatLog", "Conversation log")}
+    >
       <AnimatePresence mode="popLayout">
         {messages.map((message, i) => (
           <ChatMessageItem
-            key={`${message.role}-${i}`}
+            key={message.id || `${message.role}-${i}`}
             message={message}
             showToolCalls={showToolCalls}
             toolCallsMode={toolCallsMode}

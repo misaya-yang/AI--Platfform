@@ -1,17 +1,64 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN" dir="ltr">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>web</title>
-    <!-- Inter font for better English typography -->
+    <meta name="color-scheme" content="light dark" />
+    <!-- Industrial editorial typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    >
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function applyInitialThemeAndLocale() {
+        var params = new URLSearchParams(window.location.search);
+        if (params.get("reset") === "true") {
+          localStorage.removeItem("agent-gateway-storage");
+        }
+
+        var storageRaw = localStorage.getItem("agent-gateway-storage");
+        var i18nLng = localStorage.getItem("i18nextLng") || "zh-CN";
+        var locale = /^en/i.test(i18nLng) ? "en-US" : "zh-CN";
+        document.documentElement.lang = locale;
+        document.documentElement.dir = "ltr";
+
+        var mode = "system";
+        var resolved = null;
+        var legacyDarkMode = null;
+        try {
+          var parsed = storageRaw ? JSON.parse(storageRaw) : null;
+          var state = parsed && parsed.state ? parsed.state : {};
+          mode = state.themeMode || mode;
+          resolved = state.resolvedTheme || null;
+          legacyDarkMode = typeof state.darkMode === "boolean" ? state.darkMode : null;
+        } catch (_e) {
+          mode = "system";
+        }
+
+        if (mode === "system") {
+          var systemDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          resolved = systemDark ? "dark" : "light";
+        } else if (mode === "dark" || mode === "light") {
+          resolved = mode;
+        } else if (legacyDarkMode !== null) {
+          resolved = legacyDarkMode ? "dark" : "light";
+        } else {
+          resolved = "light";
+        }
+
+        var isDark = resolved === "dark";
+        document.documentElement.classList.toggle("dark", isDark);
+        document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+        document.documentElement.dataset.theme = isDark ? "dark" : "light";
+      })();
+    </script>
     <!-- Emergency reset script: runs BEFORE any modules load -->
     <script>
       (function() {

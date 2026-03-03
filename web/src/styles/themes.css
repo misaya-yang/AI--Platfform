@@ -1,0 +1,22 @@
+:root {
+  color-scheme: light;
+  --surface-canvas: 214 36% 96%;
+  --surface-panel: 210 30% 99%;
+  --surface-elevated: 0 0% 100%;
+  --ink-strong: 219 26% 16%;
+  --ink-muted: 215 16% 42%;
+  --line-subtle: 214 22% 86%;
+  --accent-strong: 215 78% 46%;
+}
+
+.dark {
+  color-scheme: dark;
+  --surface-canvas: 220 26% 10%;
+  --surface-panel: 221 22% 13%;
+  --surface-elevated: 220 20% 16%;
+  --ink-strong: 210 28% 95%;
+  --ink-muted: 215 16% 70%;
+  --line-subtle: 218 16% 28%;
+  --accent-strong: 213 88% 63%;
+}
+

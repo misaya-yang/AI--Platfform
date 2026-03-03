@@ -613,6 +613,7 @@ export interface UseCitationDrawerOptions {
   evaluation?: RAGEvaluation;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useCitationDrawer({ citations, evaluation }: UseCitationDrawerOptions) {
   const [isOpen, setIsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState<number | undefined>();

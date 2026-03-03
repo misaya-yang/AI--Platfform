@@ -66,6 +66,7 @@ export function PageSyncConfigDialog({
 
   // Reset form when page changes or dialog opens
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSyncMode(page.sync_mode);
     setPollingInterval(page.polling_interval_minutes || 60);
     setSyncEnabled(page.sync_enabled);

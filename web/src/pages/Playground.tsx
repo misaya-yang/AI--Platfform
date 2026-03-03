@@ -20,7 +20,7 @@ import type { ArtifactData } from "@/components/agent/ArtifactCard";
 import { buildHttpFailureError, cn, getPlaygroundErrorMessage } from "@/lib/utils";
 import { ChatWindow, type ChatMessage, type ToolCallWithResult } from "@/components/ChatWindow";
 import { MultimodalInput } from "@/components/MultimodalInput";
-import type { ContentItem, StreamChunk, ToolCall, ServiceUiPreferences } from "@/types/gateway";
+import type { ContentItem, StreamChunk, ServiceUiPreferences } from "@/types/gateway";
 import {
   Select,
   SelectContent,
@@ -33,17 +33,25 @@ import { Switch } from "@/components/ui/switch";
 import { MessageSquarePlus, Trash2, ArrowDown } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
 import { useAuthStore } from "@/store/useAuthStore";
-
-type UsageStats = {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-};
-
-type ToolCallState = ToolCallWithResult & {
-  argsText: string;
-  argsValid: boolean;
-};
+import {
+  applyUsageToTurnState,
+  cancelStreamTurn,
+  completeStreamTurn,
+  createMessageId,
+  createStreamReducerContext,
+  createStreamTurnState,
+  failStreamTurn,
+  reduceLegacyStreamChunk,
+  setStreamTurnContent,
+  type StreamTurnState,
+} from "@/features/chat/stream";
+import { useChatShortcuts } from "@/features/chat/shortcuts";
+import {
+  finishChatStreamTrace,
+  markChatStreamFirstToken,
+  startChatStreamTrace,
+} from "@/features/chat/telemetry";
+import { formatDateTime } from "@/utils/intl";
 
 type LangGraphStreamEvent = { event: string; data: unknown };
 
@@ -53,35 +61,11 @@ type ToolCallUpdate = {
   args: string;
 };
 
-function toNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
-}
+const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
 
-function normalizeUsage(usage?: Record<string, unknown>): UsageStats | null {
-  if (!usage) return null;
-  const input = toNumber(usage.input_tokens ?? usage.prompt_tokens);
-  const output = toNumber(usage.output_tokens ?? usage.completion_tokens);
-  const total = toNumber(usage.total_tokens);
-  if (input == null && output == null && total == null) return null;
-  const resolvedTotal = total ?? (input ?? 0) + (output ?? 0);
-  return {
-    inputTokens: input,
-    outputTokens: output,
-    totalTokens: resolvedTotal,
-  };
-}
-
-function extractTimingStats(usage?: Record<string, unknown>): { durationMs?: number; firstTokenMs?: number } {
-  if (!usage) return {};
-  return {
-    durationMs: toNumber(usage.duration_ms),
-    firstTokenMs: toNumber(usage.first_token_ms),
-  };
+function buildTextParts(messageId: string, content: string, createdAt: string) {
+  if (!content) return [];
+  return [{ id: `${messageId}-part-0`, type: "text" as const, content, createdAt }];
 }
 
 function estimateTokens(text: string): number {
@@ -89,113 +73,6 @@ function estimateTokens(text: string): number {
   const cjkCount = text.match(/[\u4E00-\u9FFF]/g)?.length ?? 0;
   const nonCjkCount = Math.max(text.length - cjkCount, 0);
   return Math.max(1, Math.ceil(cjkCount / 2) + Math.ceil(nonCjkCount / 4));
-}
-
-function mergeToolArguments(current: string, incoming: string): string {
-  if (!current) return incoming;
-  if (!incoming) return current;
-
-  // If incoming is a complete superset, use it directly
-  if (incoming.startsWith(current)) return incoming;
-  if (current.startsWith(incoming)) return current;
-
-  const currentTrimmed = current.trim();
-  const incomingTrimmed = incoming.trim();
-
-  // Detect if values look like JSON objects
-  const currentLooksLikeJson = currentTrimmed.startsWith("{") && currentTrimmed.endsWith("}");
-  const incomingLooksLikeJson = incomingTrimmed.startsWith("{") && incomingTrimmed.endsWith("}");
-
-  // Both look like complete JSON objects - these are accumulated values
-  // Use the longer one (which should have more complete data)
-  if (currentLooksLikeJson && incomingLooksLikeJson) {
-    return incoming.length >= current.length ? incoming : current;
-  }
-
-  // If incoming starts with '{' - it's likely a new accumulated value
-  // Don't try to merge JSON structure with existing content
-  if (incomingTrimmed.startsWith("{")) {
-    return incoming;
-  }
-
-  // If current is complete JSON and incoming is not, incoming is likely a delta
-  // that should extend the JSON content - simply concatenate
-  if (currentLooksLikeJson && !incomingLooksLikeJson) {
-    return current + incoming;
-  }
-
-  // For true deltas, use conservative overlap detection
-  // Limit overlap search to avoid false positives
-  const maxOverlap = Math.min(current.length, incoming.length, 10);
-  for (let size = maxOverlap; size > 0; size -= 1) {
-    const suffix = current.slice(-size);
-    const prefix = incoming.slice(0, size);
-    if (suffix === prefix) {
-      // Avoid false positives with JSON structural characters
-      if (size <= 2 && /^[{}[\]:,"]+$/.test(suffix)) {
-        continue;
-      }
-      return current + incoming.slice(size);
-    }
-  }
-
-  // Default: simple concatenation
-  return current + incoming;
-}
-
-function tryParseJson(text: string): unknown | null {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function resolveToolArguments(current: string, incoming: string, currentValid: boolean): { text: string; isValid: boolean } {
-  if (!incoming) return { text: current, isValid: currentValid };
-
-  // If incoming is valid JSON, use it directly (accumulated value from backend)
-  const incomingParsed = tryParseJson(incoming);
-  if (incomingParsed !== null) {
-    // Check if incoming is an empty placeholder like {"query": ""}
-    const isEmptyPlaceholder = typeof incomingParsed === 'object' && incomingParsed !== null &&
-      Object.values(incomingParsed).every(v => v === "" || v === null || (Array.isArray(v) && v.length === 0));
-
-    // If current is valid and has content, and incoming is empty placeholder, keep current
-    if (isEmptyPlaceholder && currentValid) {
-      const currentParsed = tryParseJson(current);
-      if (currentParsed !== null && typeof currentParsed === 'object') {
-        const currentHasContent = Object.values(currentParsed).some(v => v !== "" && v !== null && !(Array.isArray(v) && v.length === 0));
-        if (currentHasContent) {
-          return { text: current, isValid: true };
-        }
-      }
-    }
-
-    return { text: incoming, isValid: true };
-  }
-
-  // Incoming is NOT valid JSON - it's a fragment like "hicle"}"
-  // Only try to merge if we have no valid current value
-  if (!current) {
-    // No current value, just store the fragment (marked as invalid)
-    return { text: incoming, isValid: false };
-  }
-
-  // If current is valid JSON, DON'T corrupt it with invalid fragments
-  if (currentValid) {
-    return { text: current, isValid: true };
-  }
-
-  // Both are invalid, try merging (for true delta streaming scenarios)
-  const merged = mergeToolArguments(current, incoming);
-  const mergedParsed = tryParseJson(merged);
-  if (mergedParsed !== null) {
-    return { text: merged, isValid: true };
-  }
-
-  // Fallback: return merged text but mark as invalid
-  return { text: merged, isValid: false };
 }
 
 function normalizeLangGraphEvent(raw: LangGraphStreamEvent): LangGraphStreamEvent {
@@ -410,7 +287,7 @@ function convertToolCallsFromMetadata(toolCalls?: SessionMessageToolCall[]): Too
 }
 
 export function PlaygroundPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const servicesQuery = usePlaygroundServices();
   // 过滤掉内置的 "AI助手" 服务 (service_id: "assistant")
   // 该服务应该只在 AI助手 页面使用，不应该出现在智能对话的服务选择器中
@@ -547,9 +424,12 @@ export function PlaygroundPage() {
 
       const normalizedHistory = dedupeHistory(history);
 
-      const nextMessages: ChatMessage[] = normalizedHistory.map((m) => {
+      const nextMessages: ChatMessage[] = normalizedHistory.map((m, idx) => {
         const role = m.role === "user" ? "user" : "assistant";
         const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+        const createdAt = m.timestamp || new Date().toISOString();
+        const messageId = `${id}-${m.timestamp || "history"}-${role}-${idx}`;
+        const parts = buildTextParts(messageId, content, createdAt);
 
         // Extract tool calls and stats from metadata for assistant messages
         if (role === "assistant" && m.metadata) {
@@ -563,14 +443,25 @@ export function PlaygroundPage() {
           } : undefined;
 
           return {
+            id: messageId,
             role,
             content,
+            createdAt,
+            parts,
+            status: "completed",
             toolCalls,
             stats,
           };
         }
 
-        return { role, content };
+        return {
+          id: messageId,
+          role,
+          content,
+          createdAt,
+          parts,
+          status: "completed",
+        };
       });
       setMessages(nextMessages);
     } catch (err) {
@@ -612,6 +503,13 @@ export function PlaygroundPage() {
     setMessages([]);
     await refreshSessions();
   }, [serviceId, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
+
+  const handleStopStreaming = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }, []);
 
   const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior) => {
     const el = scrollRef.current;
@@ -670,6 +568,14 @@ export function PlaygroundPage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("showToolCalls", showToolCalls ? "true" : "false");
   }, [showToolCalls]);
+
+  useChatShortcuts({
+    surface: "playground",
+    composerId: PLAYGROUND_COMPOSER_ID,
+    enabled: Boolean(serviceId),
+    onNewChat: serviceId ? () => void handleNewSession() : undefined,
+    onStop: loading ? handleStopStreaming : undefined,
+  });
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
@@ -813,6 +719,19 @@ export function PlaygroundPage() {
     // 缁熻杩借釜
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
+    const streamTrace = startChatStreamTrace("playground", {
+      serviceId,
+      transparentProxy: useTransparentProxy,
+    });
+    let streamTraceClosed = false;
+    const closeStreamTrace = (
+      outcome: "completed" | "cancelled" | "failed",
+      payload?: Record<string, unknown>
+    ) => {
+      if (streamTraceClosed) return;
+      streamTraceClosed = true;
+      finishChatStreamTrace(streamTrace, outcome, payload);
+    };
     // 用于生成唯一的 tool_call_id（当上游未提供时）
     let toolCallIdCounter = 0;
 
@@ -823,12 +742,26 @@ export function PlaygroundPage() {
     artifactsRef.current = [];
 
     setMessages((prev) => {
+      const userMsgId = createMessageId("user");
+      const assistantMsgId = createMessageId("assistant");
+      const nowIso = new Date().toISOString();
       const next = [
         ...prev,
-        { role: "user" as const, content: inputText },
         {
+          id: userMsgId,
+          role: "user" as const,
+          content: inputText,
+          createdAt: nowIso,
+          parts: buildTextParts(userMsgId, inputText, nowIso),
+          status: "completed" as const,
+        },
+        {
+          id: assistantMsgId,
           role: "assistant" as const,
           content: "",
+          createdAt: nowIso,
+          parts: [],
+          status: "streaming" as const,
           toolCalls: [],
           isThinking: true,
           isStreaming: true,
@@ -928,11 +861,9 @@ export function PlaygroundPage() {
         session_id: effectiveSessionId,
       };
 
-      let acc = "";
+      let streamState = createStreamTurnState(startTime);
+      const streamReducerContext = createStreamReducerContext();
       let streamed = false;
-      const toolCallsMap = new Map<string, ToolCallState>();
-      let usageStats: UsageStats | null = null;
-      let streamEndTiming: { durationMs?: number; firstTokenMs?: number } | null = null as { durationMs?: number; firstTokenMs?: number } | null;
       let rafId: number | null = null;
 
       const isRequestValid = () => {
@@ -940,17 +871,23 @@ export function PlaygroundPage() {
           currentRequestSessionRef.current === effectiveSessionId;
       };
 
+      const mapToolCalls = (state: StreamTurnState): ToolCallWithResult[] =>
+        state.toolCalls.map((toolCall) => ({
+          toolCall: {
+            tool_call_id: toolCall.id,
+            name: toolCall.name,
+            arguments: toolCall.arguments,
+            status: toolCall.status,
+          },
+          result: toolCall.result,
+          argsText: toolCall.arguments,
+          argsValid: toolCall.argsValid,
+        }));
+
       const flushAssistant = (overrides?: Partial<ChatMessage>) => {
         if (!isRequestValid()) return;
-        const toolCalls = Array.from(toolCallsMap.values()).map((tc) => ({
-          toolCall: {
-            ...tc.toolCall,
-            arguments: tc.argsText,
-          },
-          result: tc.result,
-          argsText: tc.argsText,
-          argsValid: tc.argsValid,
-        }));
+        const toolCalls = mapToolCalls(streamState);
+        const content = streamState.content;
 
         // Include AG-UI timeline state and artifacts
         const currentTimeline = timelineState.steps.length > 0 ? { ...timelineState } : undefined;
@@ -960,12 +897,28 @@ export function PlaygroundPage() {
           setMessages((m) => {
             const next = [...m];
             if (next[assistantIndex]) {
+              const messageId = next[assistantIndex].id || createMessageId("assistant");
+              const createdAt = next[assistantIndex].createdAt || new Date().toISOString();
+              const textParts = buildTextParts(messageId, content, createdAt);
               next[assistantIndex] = {
                 ...next[assistantIndex],
-                content: acc,
+                id: messageId,
+                content,
+                createdAt,
+                parts: textParts,
+                status:
+                  overrides?.status ??
+                  (streamState.status === "failed"
+                    ? "failed"
+                    : streamState.status === "cancelled"
+                      ? "cancelled"
+                      : overrides?.isStreaming === false
+                        ? "completed"
+                        : "streaming"),
                 toolCalls,
                 isThinking: false,
-                isStreaming: true,
+                isStreaming:
+                  overrides?.isStreaming ?? streamState.status === "streaming",
                 timeline: currentTimeline,
                 artifacts: currentArtifacts,
                 ...overrides,
@@ -1043,187 +996,30 @@ export function PlaygroundPage() {
       };
 
       const processStreamChunk = (chunk: StreamChunk): boolean => {
-        const eventType = chunk?.event_type || "text_delta";
-
         // Convert legacy chunk to AG-UI event and process
         const aguiEvent = streamChunkToAGUIEvent(chunk);
         processAGUIEvent(aguiEvent);
 
-        const usage = chunk?.metadata?.usage;
-        if (usage && typeof usage === "object" && !Array.isArray(usage)) {
-          const normalized = normalizeUsage(usage as Record<string, unknown>);
-          if (normalized) {
-            usageStats = normalized;
-          }
+        const now = performance.now();
+        const reduced = reduceLegacyStreamChunk(
+          streamState,
+          chunk,
+          streamReducerContext,
+          now
+        );
+        streamState = reduced.state;
+
+        if (streamState.firstTokenMs != null && firstTokenTime === null) {
+          firstTokenTime = startTime + streamState.firstTokenMs;
+          markChatStreamFirstToken(streamTrace, streamState.firstTokenMs);
         }
 
-        if (eventType === "thinking") {
-          return false;
-        }
-
-        if (eventType === "text_delta") {
-          const delta = chunk?.content?.data;
-          if (typeof delta === "string" && delta) {
-            if (firstTokenTime === null) {
-              firstTokenTime = performance.now();
-            }
-            streamed = true;
-            acc += delta;
-            scheduleFlush();
-          }
-        }
-
-        if (eventType === "tool_call_start" || eventType === "tool_call_delta") {
-          // 工具调用也算"首次响应"，因为用户能看到有事情在发生
-          if (firstTokenTime === null) {
-            firstTokenTime = performance.now();
-          }
+        if (reduced.changed) {
           streamed = true;
-          const tc = chunk?.tool_call;
-          if (tc) {
-            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
-            const existingTc = toolCallsMap.get(tcId);
-            const incomingArgs = tc.arguments || "";
-            if (existingTc) {
-              const resolvedArgs = resolveToolArguments(
-                existingTc.argsText,
-                incomingArgs,
-                existingTc.argsValid
-              );
-              const updatedTc: ToolCall = {
-                ...existingTc.toolCall,
-                name: tc.name || existingTc.toolCall.name,
-                arguments: resolvedArgs.text,
-                status: tc.status || existingTc.toolCall.status,
-              };
-              toolCallsMap.set(tcId, {
-                toolCall: updatedTc,
-                result: existingTc.result,
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            } else {
-              const resolvedArgs = resolveToolArguments("", incomingArgs, false);
-              toolCallsMap.set(tcId, {
-                toolCall: {
-                  tool_call_id: tcId,
-                  name: tc.name || "",
-                  arguments: resolvedArgs.text,
-                  status: tc.status || "running",
-                },
-                result: undefined,
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            }
-            scheduleFlush();
-          }
+          scheduleFlush();
         }
 
-        if (eventType === "tool_call_end") {
-          streamed = true;
-          const tc = chunk?.tool_call;
-          if (tc) {
-            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
-            const existingTc = toolCallsMap.get(tcId);
-            const incomingArgs = tc.arguments || "";
-            if (existingTc) {
-              const resolvedArgs = resolveToolArguments(
-                existingTc.argsText,
-                incomingArgs,
-                existingTc.argsValid
-              );
-              toolCallsMap.set(tcId, {
-                toolCall: {
-                  ...existingTc.toolCall,
-                  arguments: resolvedArgs.text,
-                  status: "completed",
-                },
-                result: existingTc.result,
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            } else {
-              const resolvedArgs = resolveToolArguments("", incomingArgs, false);
-              toolCallsMap.set(tcId, {
-                toolCall: {
-                  tool_call_id: tcId,
-                  name: tc.name || "",
-                  arguments: resolvedArgs.text,
-                  status: "completed",
-                },
-                result: undefined,
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            }
-            scheduleFlush();
-          }
-        }
-
-        if (eventType === "tool_result") {
-          streamed = true;
-          const tc = chunk?.tool_call;
-          const resultText = chunk?.content?.data;
-
-          if (tc) {
-            const tcId = tc.tool_call_id || `auto-${++toolCallIdCounter}`;
-            const existingTc = toolCallsMap.get(tcId);
-            const incomingArgs = tc.arguments || "";
-            if (existingTc) {
-              const resolvedArgs = resolveToolArguments(
-                existingTc.argsText,
-                incomingArgs,
-                existingTc.argsValid
-              );
-              toolCallsMap.set(tcId, {
-                toolCall: {
-                  ...existingTc.toolCall,
-                  arguments: resolvedArgs.text,
-                  status: "completed",
-                },
-                result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            } else {
-              const resolvedArgs = resolveToolArguments("", tc.arguments || "", false);
-              toolCallsMap.set(tcId, {
-                toolCall: {
-                  tool_call_id: tcId,
-                  name: tc.name || "",
-                  arguments: resolvedArgs.text,
-                  status: "completed",
-                },
-                result: typeof resultText === "string" ? resultText : JSON.stringify(resultText),
-                argsText: resolvedArgs.text,
-                argsValid: resolvedArgs.isValid,
-              });
-            }
-            scheduleFlush();
-          }
-        }
-
-        if (eventType === "stream_end") {
-          const streamEndUsage = chunk?.metadata?.usage;
-          if (streamEndUsage && typeof streamEndUsage === "object") {
-            const normalized = normalizeUsage(streamEndUsage as Record<string, unknown>);
-            if (normalized) {
-              usageStats = normalized;
-            }
-            const timing = extractTimingStats(streamEndUsage as Record<string, unknown>);
-            if (timing.durationMs != null) {
-              const finalFirstTokenMs = timing.firstTokenMs ?? (firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined);
-              streamEndTiming = {
-                durationMs: timing.durationMs,
-                firstTokenMs: finalFirstTokenMs,
-              };
-            }
-          }
-          return true;
-        }
-
-        return false;
+        return reduced.terminal;
       };
 
 
@@ -1266,10 +1062,10 @@ export function PlaygroundPage() {
             if (eventName === "metadata" && eventData && typeof eventData === "object") {
               const usage = (eventData as Record<string, unknown>).usage;
               if (usage && typeof usage === "object" && !Array.isArray(usage)) {
-                const normalizedUsage = normalizeUsage(usage as Record<string, unknown>);
-                if (normalizedUsage) {
-                  usageStats = normalizedUsage;
-                }
+                streamState = applyUsageToTurnState(
+                  streamState,
+                  usage as Record<string, unknown>
+                );
               }
               continue;
             }
@@ -1291,17 +1087,16 @@ export function PlaygroundPage() {
                       // Extract usage_metadata from LangGraph updates messages
                       const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
                       if (usageMeta) {
-                        const normalized = normalizeUsage(usageMeta);
-                        if (normalized) {
-                          usageStats = normalized;
-                        }
+                        streamState = applyUsageToTurnState(streamState, usageMeta);
                       }
 
                       // Extract tool calls
                       const toolUpdates = extractToolCallUpdates(message);
                       for (const update of toolUpdates) {
                         const tcId = update.id || `tc-${Date.now()}`;
-                        const eventType = toolCallsMap.has(tcId) ? "tool_call_delta" : "tool_call_start";
+                        const eventType = streamState.toolCalls.some((tc) => tc.id === tcId)
+                          ? "tool_call_delta"
+                          : "tool_call_start";
                         processStreamChunk({
                           request_id: "",
                           chunk_index: 0,
@@ -1320,7 +1115,9 @@ export function PlaygroundPage() {
                       // Extract tool results
                       const toolResult = extractToolResult(message);
                       if (toolResult) {
-                        const existingArgs = toolCallsMap.get(toolResult.id)?.argsText || "";
+                        const existingArgs =
+                          streamState.toolCalls.find((tc) => tc.id === toolResult.id)
+                            ?.arguments || "";
                         processStreamChunk({
                           request_id: "",
                           chunk_index: 0,
@@ -1375,7 +1172,7 @@ export function PlaygroundPage() {
                             // New content is different but longer/equal - use it (likely middleware output)
                             // Replace accumulated content with new content
                             lastCumulativeContent = content;
-                            acc = "";
+                            streamState = setStreamTurnContent(streamState, "");
                             processStreamChunk({
                               request_id: "",
                               chunk_index: 0,
@@ -1408,10 +1205,7 @@ export function PlaygroundPage() {
                 // Extract usage_metadata from LangGraph messages
                 const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
                 if (usageMeta) {
-                  const normalized = normalizeUsage(usageMeta);
-                  if (normalized) {
-                    usageStats = normalized;
-                  }
+                  streamState = applyUsageToTurnState(streamState, usageMeta);
                 }
                 
                 // Accept AI messages with various type formats (ai, AIMessage, aimessage, etc.)
@@ -1427,11 +1221,12 @@ export function PlaygroundPage() {
                   if (content && content.length > 0) {
                     // messages/complete - simple strategy: use if longer or first content
                     
-                    if (content === acc || content === lastCumulativeContent) {
+                    const currentContent = streamState.content;
+                    if (content === currentContent || content === lastCumulativeContent) {
                       // Exact duplicate - skip
-                    } else if (content.startsWith(acc) && acc.length > 0) {
-                      // Extension of acc - extract delta
-                      const delta = content.slice(acc.length);
+                    } else if (content.startsWith(currentContent) && currentContent.length > 0) {
+                      // Extension of existing streamed content - extract delta
+                      const delta = content.slice(currentContent.length);
                       if (delta) {
                         lastCumulativeContent = content;
                         processStreamChunk({
@@ -1442,12 +1237,12 @@ export function PlaygroundPage() {
                           content: { type: "text", data: delta },
                         });
                       }
-                    } else if (acc.startsWith(content)) {
-                      // acc already has this content - skip
-                    } else if (content.length >= acc.length) {
+                    } else if (currentContent.startsWith(content)) {
+                      // Current stream state already has this content - skip
+                    } else if (content.length >= currentContent.length) {
                       // New content is longer/equal - use it as replacement
                       lastCumulativeContent = content;
-                      acc = "";
+                      streamState = setStreamTurnContent(streamState, "");
                       processStreamChunk({
                         request_id: "",
                         chunk_index: 0,
@@ -1476,16 +1271,15 @@ export function PlaygroundPage() {
               // Extract usage_metadata from LangGraph messages/partial
               const usageMeta = message.usage_metadata as Record<string, unknown> | undefined;
               if (usageMeta) {
-                const normalized = normalizeUsage(usageMeta);
-                if (normalized) {
-                  usageStats = normalized;
-                }
+                streamState = applyUsageToTurnState(streamState, usageMeta);
               }
 
               const toolUpdates = extractToolCallUpdates(message);
               for (const update of toolUpdates) {
                 const tcId = update.id || `auto-${++toolCallIdCounter}`;
-                const eventType = toolCallsMap.has(tcId) ? "tool_call_delta" : "tool_call_start";
+                const eventType = streamState.toolCalls.some((tc) => tc.id === tcId)
+                  ? "tool_call_delta"
+                  : "tool_call_start";
                 const shouldStop = processStreamChunk({
                   request_id: "",
                   chunk_index: 0,
@@ -1504,7 +1298,9 @@ export function PlaygroundPage() {
 
               const toolResult = extractToolResult(message);
               if (toolResult) {
-                const existingArgs = toolCallsMap.get(toolResult.id)?.argsText || "";
+                const existingArgs =
+                  streamState.toolCalls.find((tc) => tc.id === toolResult.id)
+                    ?.arguments || "";
                 processStreamChunk({
                   request_id: "",
                   chunk_index: 0,
@@ -1546,7 +1342,7 @@ export function PlaygroundPage() {
                   } else if (cumulativeContent.length >= lastCumulativeContent.length) {
                     // New content is different but longer/equal - use it
                     lastCumulativeContent = cumulativeContent;
-                    acc = "";
+                    streamState = setStreamTurnContent(streamState, "");
                     processStreamChunk({
                       request_id: "",
                       chunk_index: 0,
@@ -1579,10 +1375,15 @@ export function PlaygroundPage() {
       } catch (streamErr) {
         // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
         if (streamErr instanceof Error && streamErr.name === 'AbortError') {
+          streamState = cancelStreamTurn(streamState, performance.now());
+          flushAssistant({ status: "cancelled", isStreaming: false });
+          closeStreamTrace("cancelled", {
+            reason: "abort_signal",
+          });
           cancelFlush();
           return;
         }
-        if (!acc && !toolCallsMap.size) {
+        if (!streamState.content && streamState.toolCalls.length === 0) {
           streamed = false;
         }
       }
@@ -1590,18 +1391,25 @@ export function PlaygroundPage() {
       cancelFlush();
 
       // 妫€鏌ヨ姹傛槸鍚︿粛鏈夋晥
-      if (!isRequestValid()) return;
+      if (!isRequestValid()) {
+        closeStreamTrace("cancelled", { reason: "request_invalidated" });
+        return;
+      }
 
       // 鏇存柊鏈€缁堢粺璁′俊鎭?
       const endTime = performance.now();
-      let durationMs = streamEndTiming?.durationMs ?? Math.round(endTime - startTime);
-      let firstTokenMs = streamEndTiming?.firstTokenMs ?? (firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined);
-      let estimatedOutputTokens = estimateTokens(acc);
-      let inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
-      let outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
-      let totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
+      streamState = completeStreamTurn(streamState, endTime);
+      let durationMs = streamState.durationMs ?? Math.round(endTime - startTime);
+      let firstTokenMs =
+        streamState.firstTokenMs ??
+        (firstTokenTime ? Math.round(firstTokenTime - startTime) : undefined);
+      let estimatedOutputTokens = estimateTokens(streamState.content);
+      let inputTokens = streamState.usage.inputTokens ?? estimatedInputTokens;
+      let outputTokens = streamState.usage.outputTokens ?? estimatedOutputTokens;
+      let totalTokens = streamState.usage.totalTokens ?? (inputTokens + outputTokens);
 
       flushAssistant({
+        status: streamState.status,
         isStreaming: false,
         stats: {
           durationMs,
@@ -1612,10 +1420,12 @@ export function PlaygroundPage() {
         },
       });
 
-      // Fallback: If streaming didn't capture text content (acc is empty),
+      // Fallback: If streaming didn't capture text content,
       // but we had tool calls, try to get the final response via wait endpoint.
       // This handles cases where LangGraph doesn't stream the final text after tool calls.
-      const needsFallback = !acc && (toolCallsMap.size > 0 || !streamed);
+      const needsFallback =
+        !streamState.content &&
+        (streamState.toolCalls.length > 0 || !streamed);
       
       if (needsFallback) {
         try {
@@ -1640,31 +1450,38 @@ export function PlaygroundPage() {
               throw buildHttpFailureError("Run wait failed", resp.status, errorText);
             }
             const data = await resp.json();
-            acc = extractRunWaitContent(data);
+            streamState = setStreamTurnContent(
+              streamState,
+              extractRunWaitContent(data)
+            );
           } else {
             const resp = await invokeService(req);
-            acc = String(resp.outputs?.[0]?.data ?? "");
-            const usage = normalizeUsage(resp.usage as Record<string, unknown> | undefined);
-            if (usage) {
-              usageStats = usage;
-            }
+            streamState = setStreamTurnContent(
+              streamState,
+              String(resp.outputs?.[0]?.data ?? "")
+            );
+            streamState = applyUsageToTurnState(
+              streamState,
+              (resp.usage as Record<string, unknown> | undefined) ?? undefined
+            );
           }
 
           if (!isRequestValid()) return;
 
-          estimatedOutputTokens = estimateTokens(acc);
-          inputTokens = usageStats?.inputTokens ?? estimatedInputTokens;
-          outputTokens = usageStats?.outputTokens ?? estimatedOutputTokens;
-          totalTokens = usageStats?.totalTokens ?? (inputTokens + outputTokens);
+          estimatedOutputTokens = estimateTokens(streamState.content);
+          inputTokens = streamState.usage.inputTokens ?? estimatedInputTokens;
+          outputTokens = streamState.usage.outputTokens ?? estimatedOutputTokens;
+          totalTokens = streamState.usage.totalTokens ?? (inputTokens + outputTokens);
           const syncEndTime = performance.now();
           durationMs = Math.round(syncEndTime - startTime);
           firstTokenMs = undefined;
+          streamState = completeStreamTurn(streamState, syncEndTime);
           setMessages((m) => {
             const next = [...m];
             if (next[assistantIndex]) {
               next[assistantIndex] = {
                 ...next[assistantIndex],
-                content: acc,
+                content: streamState.content,
                 isThinking: false,
                 isStreaming: false,
                 stats: {
@@ -1683,16 +1500,20 @@ export function PlaygroundPage() {
         }
       }
 
-      if (shouldPersistManually && effectiveSessionId && (acc || toolCallsMap.size)) {
-        const toolCalls = Array.from(toolCallsMap.values()).map((tc) => ({
-          tool_call_id: tc.toolCall.tool_call_id,
-          name: tc.toolCall.name,
-          arguments: tc.argsText,
-          result: tc.result ?? null,
+      if (
+        shouldPersistManually &&
+        effectiveSessionId &&
+        (streamState.content || streamState.toolCalls.length > 0)
+      ) {
+        const toolCalls = streamState.toolCalls.map((toolCall) => ({
+          tool_call_id: toolCall.id,
+          name: toolCall.name,
+          arguments: toolCall.arguments,
+          result: toolCall.result ?? null,
         }));
         addSessionMessage(effectiveSessionId, {
           role: "assistant",
-          content: acc,
+          content: streamState.content,
           metadata: {
             tool_calls: toolCalls,
             stats: {
@@ -1705,27 +1526,69 @@ export function PlaygroundPage() {
           },
         }).catch((err) => console.error("Failed to persist assistant message:", err));
       }
+      const finalOutcome =
+        streamState.status === "failed"
+          ? "failed"
+          : streamState.status === "cancelled"
+            ? "cancelled"
+            : "completed";
+      closeStreamTrace(finalOutcome, {
+        durationMs,
+        firstTokenMs,
+        totalTokens,
+        toolCalls: streamState.toolCalls.length,
+        ...(streamState.error ? { error: streamState.error } : {}),
+      });
     } catch (err) {
       // 蹇界暐鍙栨秷瀵艰嚧鐨勯敊璇?
-      if (err instanceof Error && err.name === 'AbortError') return;
+      if (err instanceof Error && err.name === 'AbortError') {
+        streamState = cancelStreamTurn(streamState, performance.now());
+        flushAssistant({ status: "cancelled", isStreaming: false });
+        closeStreamTrace("cancelled", {
+          reason: "abort_signal_outer",
+        });
+        return;
+      }
 
       console.error("[Playground] request failed:", err);
       const message = getPlaygroundErrorMessage(err, t);
+      streamState = failStreamTurn(streamState, message, performance.now());
+      closeStreamTrace("failed", {
+        error: streamState.error || message,
+      });
       setMessages((m) => {
         const next = [...m];
         if (next[assistantIndex]) {
+          const messageId = next[assistantIndex].id || createMessageId("assistant");
+          const createdAt = next[assistantIndex].createdAt || new Date().toISOString();
           next[assistantIndex] = {
             ...next[assistantIndex],
-            content: message,
+            id: messageId,
+            content: streamState.error || message,
+            createdAt,
+            parts: buildTextParts(messageId, streamState.error || message, createdAt),
+            status: "failed",
             isThinking: false,
             isStreaming: false,
           };
         } else {
-          next.push({ role: "assistant", content: message });
+          const messageId = createMessageId("assistant");
+          const createdAt = new Date().toISOString();
+          next.push({
+            id: messageId,
+            role: "assistant",
+            content: message,
+            createdAt,
+            parts: buildTextParts(messageId, message, createdAt),
+            status: "failed",
+          });
         }
         return next;
       });
     } finally {
+      if (!streamTraceClosed) {
+        closeStreamTrace("cancelled", { reason: "finalized_without_outcome" });
+      }
       // 鍙湁褰撳墠璇锋眰瀹屾垚鏃舵墠娓呴櫎 loading 鐘舵€?
       if (abortControllerRef.current === abortController) {
         setLoading(false);
@@ -1748,7 +1611,7 @@ export function PlaygroundPage() {
             disabled={!serviceId || loading}
             className="w-full gap-2.5 h-10 bg-foreground/5 hover:bg-foreground/10 text-foreground border border-border/50 hover:border-border transition-all duration-200 rounded-xl font-medium"
           >
-            <div className="flex h-5 w-5 items-center justify-center rounded-md bg-gradient-to-br from-violet-500 to-fuchsia-500">
+            <div className="flex h-5 w-5 items-center justify-center rounded-md bg-gradient-to-br from-blue-500 to-cyan-500">
               <MessageSquarePlus className="h-3 w-3 text-white" />
             </div>
             {t("playground.newChat", "New chat")}
@@ -1790,11 +1653,11 @@ export function PlaygroundPage() {
                 const active = activeSessionId === s.session_id;
                 // Color variants for visual variety
                 const colorVariants = [
-                  { bg: "bg-violet-500/10", border: "border-l-violet-500", accent: "text-violet-600 dark:text-violet-400" },
+                  { bg: "bg-blue-500/10", border: "border-l-blue-500", accent: "text-blue-600 dark:text-blue-400" },
                   { bg: "bg-emerald-500/10", border: "border-l-emerald-500", accent: "text-emerald-600 dark:text-emerald-400" },
                   { bg: "bg-amber-500/10", border: "border-l-amber-500", accent: "text-amber-600 dark:text-amber-400" },
-                  { bg: "bg-rose-500/10", border: "border-l-rose-500", accent: "text-rose-600 dark:text-rose-400" },
                   { bg: "bg-cyan-500/10", border: "border-l-cyan-500", accent: "text-cyan-600 dark:text-cyan-400" },
+                  { bg: "bg-slate-500/10", border: "border-l-slate-500", accent: "text-slate-600 dark:text-slate-400" },
                 ];
                 const variant = colorVariants[index % colorVariants.length];
                 return (
@@ -1828,7 +1691,7 @@ export function PlaygroundPage() {
                           "text-[11px] mt-0.5 transition-colors",
                           active ? variant.accent : "text-muted-foreground group-hover:text-muted-foreground/80"
                         )}>
-                          {new Date(ts).toLocaleString()}
+                          {formatDateTime(ts, i18n.language)}
                         </div>
                       </div>
                       <button
@@ -1861,7 +1724,7 @@ export function PlaygroundPage() {
       <div className="h-14 flex items-center border-b border-border/60 bg-background px-6">
         <div className="flex items-center justify-between gap-4 w-full max-w-4xl mx-auto">
           <div className="flex items-center gap-3 flex-1">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 text-white shadow-lg shadow-purple-500/30">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 text-white shadow-lg shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <div className="flex flex-col -space-y-0.5">
@@ -1917,7 +1780,7 @@ export function PlaygroundPage() {
       <div ref={scrollRef} className="flex-1 overflow-y-auto pb-48 min-h-0 bg-background">
         {!serviceId ? (
           <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-            <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 flex items-center justify-center shadow-xl shadow-purple-500/30">
+            <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <h2 className="text-xl font-semibold tracking-tight">{t("playground.welcomeTitle", "How can I help you today?")}</h2>
@@ -1961,7 +1824,7 @@ export function PlaygroundPage() {
             "transition-all duration-200 hover:scale-105",
             "ring-1 ring-black/5 dark:ring-white/5"
           )}
-          aria-label="Scroll to bottom"
+          aria-label={t("playground.scrollToBottom", "Scroll to bottom")}
         >
           <ArrowDown className="h-4 w-4" />
         </button>
@@ -1973,6 +1836,9 @@ export function PlaygroundPage() {
           <div className="rounded-2xl border border-border/60 bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ring-1 ring-black/5 dark:ring-white/5">
             <MultimodalInput
               onSend={handleSend}
+              onStop={handleStopStreaming}
+              isStreaming={loading}
+              composerId={PLAYGROUND_COMPOSER_ID}
               disabled={!serviceId || loading}
               includeFiles={true}
             />

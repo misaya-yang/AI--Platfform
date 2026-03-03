@@ -49,12 +49,10 @@
     "chart": "图表",
     "code": "代码",
     "collapse": "收起",
-    "configure": "配置",
     "description": "描述",
     "details": "详情",
     "download": "下载",
     "downloadImage": "下载图片",
-    "enabled": "已启用",
     "expand": "展开",
     "export": "导出",
     "failed": "失败",
@@ -124,13 +122,14 @@
     "users": "用户管理",
     "settings": "系统设置",
     "collapseSidebar": "收起侧栏",
-    "expandSidebar": "展开侧栏"
+    "expandSidebar": "展开侧栏",
+    "toggleSidebar": "切换侧栏"
   },
   "analytics": {
     "title": "使用量分析",
     "subtitle": "追踪 Token 使用量、成本和性能",
     "totalRequests": "总请求数",
-    "totalTokens": "Token 总量",
+    "totalTokens": "总 Token 数",
     "totalCost": "总成本",
     "avgLatency": "平均延迟",
     "successRate": "成功率",
@@ -139,20 +138,18 @@
     "costBreakdown": "成本分布",
     "tokenUsage": "每日 Token 使用量",
     "usageDetails": "使用详情",
-    "noData": "暂无数据",
-    "byModel": "按模型",
-    "byUser": "按用户",
-    "byAssistant": "按助手",
-    "byService": "按服务",
+    "byModel": "模型",
+    "byUser": "用户",
+    "byAssistant": "助手",
+    "byService": "服务",
     "requests": "请求数",
     "inputTokens": "输入 Token",
     "outputTokens": "输出 Token",
     "cost": "成本",
     "percentage": "占比",
-    "dateRange": "日期范围",
+    "noData": "暂无数据",
     "export": "导出",
-    "exportCsv": "导出 CSV",
-    "exportJson": "导出 JSON"
+    "dateRange": "日期范围"
   },
   "monitoring": {
     "title": "监控面板",
@@ -183,10 +180,16 @@
     "noData": "暂无用量数据"
   },
   "theme": {
+    "title": "主题",
     "light": "浅色模式",
     "dark": "深色模式",
     "switchToLight": "切换到浅色模式",
-    "switchToDark": "切换到深色模式"
+    "switchToDark": "切换到深色模式",
+    "mode": {
+      "light": "浅色",
+      "dark": "深色",
+      "system": "跟随系统"
+    }
   },
   "user": {
     "profile": "个人资料",
@@ -956,7 +959,8 @@
       "embeddingBgeM3Pro": "SiliconFlow BGE-M3 Pro (1024维)",
       "embeddingBgeLargeZh15": "SiliconFlow BGE-Large-ZH v1.5 (1024维)",
       "embeddingBgeLargeEn15": "SiliconFlow BGE-Large-EN v1.5 (1024维)",
-      "embeddingBceBase": "SiliconFlow BCE-Embedding-Base (512维)"
+      "embeddingBceBase": "SiliconFlow BCE-Embedding-Base (512维)",
+      "rerankDefault": "默认（不重排）"
     },
     "status": {
       "completed": "已完成",
@@ -1706,6 +1710,11 @@
     "selectOrStartChat": "从左侧选择一个对话，或开始新对话。",
     "typeToStart": "输入消息开始对话。",
     "showToolCalls": "显示工具调用",
+    "toolCallsCollapsed": "工具调用",
+    "collapse": "收起",
+    "expand": "展开",
+    "scrollToBottom": "滚动到底部",
+    "chatLog": "对话记录",
     "disclaimer": "AI 回答可能不准确",
     "errors": {
       "cancelled": "请求已取消。",
@@ -1737,7 +1746,8 @@
       "result": "结果",
       "unknownTool": "未知工具",
       "paramsPending": "参数等待中..."
-    }
+    },
+    "composerAriaLabel": "Playground 消息输入框"
   },
   "help": {
     "title": "帮助",
@@ -1873,7 +1883,10 @@
     "noBindingsHint": "在连接卡片上点击「绑定空间」添加",
     "noSearchResults": "没有匹配的连接",
     "lastSync": "最后同步",
-    "pages": "页面",
+    "pages": {
+      "count": "{{synced}}/{{total}} 页",
+      "lastSync": "上次同步: {{time}}"
+    },
     "sync": "同步",
     "status": {
       "connected": "已连接",
@@ -2124,10 +2137,6 @@
         "unknown": "创建绑定时发生错误，请稍后重试"
       }
     },
-    "pages": {
-      "count": "{{synced}}/{{total}} 页",
-      "lastSync": "上次同步: {{time}}"
-    },
     "pagesLabel": "页",
     "spaceType": {
       "global": "团队空间",
@@ -2229,6 +2238,7 @@
     "deleteConfirm": "确定要删除此对话吗？",
     "noHistory": "暂无对话记录",
     "startNewChat": "开始新对话",
+    "chatFallback": "会话",
     "uploadFiles": "上传文件",
     "webResults": "网络搜索结果",
     "searchingWeb": "正在搜索网络...",
@@ -2246,7 +2256,38 @@
     "analyzeFiles": "请分析这些上传的文件。",
     "selected": "已选择",
     "tipText": "选择知识库启用 RAG 增强检索。启用联网搜索获取实时信息。",
-    "suggestions": "建议提示",
+    "suggestions": {
+      "category": {
+        "learning": "学习",
+        "development": "开发",
+        "analysis": "分析",
+        "creative": "创意"
+      },
+      "explain": {
+        "title": "解释概念",
+        "prompt": "用简单语言解释一个复杂概念，并给出例子。"
+      },
+      "code": {
+        "title": "重构代码",
+        "prompt": "帮我重构这段代码，提升可读性和可维护性。"
+      },
+      "doc": {
+        "title": "总结文档",
+        "prompt": "总结这份文档的关键要点。"
+      },
+      "insights": {
+        "title": "分析洞察",
+        "prompt": "分析这份数据并指出关键趋势或洞察。"
+      },
+      "brainstorm": {
+        "title": "头脑风暴",
+        "prompt": "为这个主题头脑风暴 10 个创意想法。"
+      },
+      "solve": {
+        "title": "解决问题",
+        "prompt": "一步步帮我解决这个问题。"
+      }
+    },
     "uploadFilesDesc": "图片、PDF、文档",
     "kbDesc": "搜索内部文档",
     "knowledgeBase": "知识库",
@@ -2267,7 +2308,6 @@
       "error": "失败",
       "pending": "等待中"
     },
-
     "citationsTitle": "{{count}} 个来源",
     "citedCount": "{{count}} 个已引用",
     "citationUsed": "已引用",
@@ -2284,7 +2324,6 @@
     "ragCitations": "引用",
     "ragGrounding": "{{percent}}% 有据可依",
     "ragChunksUsed": "使用了 {{used}}/{{total}} 个片段",
-
     "styleTitle": "自定义回复风格",
     "styleHint": "从上面选择一个风格，定制 AI 的回复风格。",
     "kb": "知识库",
@@ -2401,38 +2440,8 @@
         "prompt": "提供详细而全面的回答，必要时给出背景、步骤和示例。"
       }
     },
-    "suggestions": {
-      "category": {
-        "learning": "学习",
-        "development": "开发",
-        "analysis": "分析",
-        "creative": "创意"
-      },
-      "explain": {
-        "title": "解释概念",
-        "prompt": "用简单语言解释一个复杂概念，并给出例子。"
-      },
-      "code": {
-        "title": "重构代码",
-        "prompt": "帮我重构这段代码，提升可读性和可维护性。"
-      },
-      "doc": {
-        "title": "总结文档",
-        "prompt": "总结这份文档的关键要点。"
-      },
-      "insights": {
-        "title": "分析洞察",
-        "prompt": "分析这份数据并指出关键趋势或洞察。"
-      },
-      "brainstorm": {
-        "title": "头脑风暴",
-        "prompt": "为这个主题头脑风暴 10 个创意想法。"
-      },
-      "solve": {
-        "title": "解决问题",
-        "prompt": "一步步帮我解决这个问题。"
-      }
-    }
+    "composerAriaLabel": "助手消息输入框",
+    "chatLog": "助手对话日志"
   },
   "agent": {
     "status": {
@@ -2483,49 +2492,23 @@
     "openInNewTab": "新标签页打开",
     "preview": "预览"
   },
-  "analytics": {
-    "title": "使用量分析",
-    "subtitle": "追踪 Token 使用量、成本和性能",
-    "totalRequests": "总请求数",
-    "totalTokens": "总 Token 数",
-    "totalCost": "总成本",
-    "avgLatency": "平均延迟",
-    "successRate": "成功率",
-    "inputOutput": "输入/输出",
-    "costTrend": "成本趋势",
-    "costBreakdown": "成本分布",
-    "tokenUsage": "每日 Token 使用量",
-    "usageDetails": "使用详情",
-    "byModel": "模型",
-    "byUser": "用户",
-    "byAssistant": "助手",
-    "byService": "服务",
-    "requests": "请求数",
-    "inputTokens": "输入 Token",
-    "outputTokens": "输出 Token",
-    "cost": "成本",
-    "percentage": "占比",
-    "noData": "暂无数据",
-    "export": "导出",
-    "dateRange": "日期范围"
-  },
   "services": {
     "title": "服务管理",
     "addService": "添加服务",
     "registerService": "注册服务",
     "status": {
-      "active": "运行中",
-      "inactive": "已停止"
+      "active": "启用",
+      "inactive": "停用"
     },
     "noDescription": "暂无描述",
     "badge": {
-      "core": "内置"
+      "core": "核心"
     },
     "search": {
       "noResults": "没有匹配的服务"
     },
     "empty": {
-      "hint": "开始注册您的第一个服务"
+      "hint": "从注册第一个服务开始"
     },
     "selected": "已选择",
     "tabs": {
@@ -2554,10 +2537,6 @@
         "loadStrategy": "负载均衡策略"
       }
     },
-    "status": {
-      "active": "启用",
-      "inactive": "停用"
-    },
     "types": {
       "assistant": "AI 助手",
       "langgraph": "LangGraph",
@@ -2568,15 +2547,6 @@
       "conversational": "对话",
       "processing": "处理",
       "custom": "自定义"
-    },
-    "badge": {
-      "core": "核心"
-    },
-    "search": {
-      "noResults": "没有匹配的服务"
-    },
-    "empty": {
-      "hint": "从注册第一个服务开始"
     },
     "providersStatus": {
       "title": "厂商状态",

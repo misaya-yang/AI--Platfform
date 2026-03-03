@@ -18,6 +18,8 @@ import {
   TeamOutlined,
   LogoutOutlined,
   GlobalOutlined,
+  DesktopOutlined,
+  MenuOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
@@ -92,9 +94,16 @@ const navItems = [
 export function AppLayout() {
   const { t, i18n } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
-  const { darkMode, toggleDarkMode } = useAppStore();
+  const {
+    themeMode,
+    resolvedTheme,
+    darkMode,
+    setThemeMode,
+    toggleDarkMode,
+  } = useAppStore();
   const { user, clearAuth, hasPermission, forcePasswordChange, setForcePasswordChange } = useAuthStore();
   const location = useLocation();
   const navigate = useNavigate();
@@ -107,6 +116,18 @@ export function AppLayout() {
     i18n.changeLanguage(langCode);
   };
 
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 1024px)");
+    const sync = () => {
+      const mobile = mediaQuery.matches;
+      setIsMobile(mobile);
+      if (mobile) setCollapsed(true);
+    };
+    sync();
+    mediaQuery.addEventListener("change", sync);
+    return () => mediaQuery.removeEventListener("change", sync);
+  }, []);
+
   // 语言子菜单
   const languageMenuItems: MenuProps['items'] = languages.map(lang => ({
     key: lang.code,
@@ -114,10 +135,37 @@ export function AppLayout() {
     onClick: () => handleLanguageChange(lang.code),
   }));
 
+  const themeMenuItems: MenuProps["items"] = [
+    {
+      key: "light",
+      icon: <SunOutlined />,
+      label: t("theme.mode.light", "Light"),
+      onClick: () => setThemeMode("light"),
+    },
+    {
+      key: "dark",
+      icon: <MoonOutlined />,
+      label: t("theme.mode.dark", "Dark"),
+      onClick: () => setThemeMode("dark"),
+    },
+    {
+      key: "system",
+      icon: <DesktopOutlined />,
+      label: t("theme.mode.system", "System"),
+      onClick: () => setThemeMode("system"),
+    },
+  ];
+
   // 用户下拉菜单
   const userMenuItems: MenuProps['items'] = [
     { key: 'profile', label: t('user.profile'), icon: <UserOutlined /> },
     { key: 'change-password', label: t('user.changePassword'), icon: <SettingOutlined /> },
+    {
+      key: "theme",
+      label: t("theme.title", "Theme"),
+      icon: <DesktopOutlined />,
+      children: themeMenuItems,
+    },
     {
       key: 'language',
       label: t('user.language'),
@@ -156,39 +204,42 @@ export function AppLayout() {
     }
   }, [forcePasswordChange]);
 
-  // 同步 dark mode 到 HTML
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", darkMode);
-    document.body.style.colorScheme = darkMode ? 'dark' : 'light';
-  }, [darkMode]);
-
   // 生成菜单项 - 根据权限过滤
   const filteredNavItems = navItems.filter(item =>
     item.permission === null || hasPermission(item.permission)
   );
 
+  const currentThemeLabel =
+    themeMode === "system"
+      ? `${t("theme.mode.system", "System")} · ${resolvedTheme === "dark" ? t("theme.mode.dark", "Dark") : t("theme.mode.light", "Light")}`
+      : themeMode === "dark"
+        ? t("theme.mode.dark", "Dark")
+        : t("theme.mode.light", "Light");
+
+  const siderOffset = isMobile ? (collapsed ? -260 : 0) : 0;
+  const contentMarginLeft = isMobile ? 0 : collapsed ? 80 : 260;
 
 
   return (
-    <Layout className="app-layout" style={{ minHeight: '100vh', minWidth: 1200 }}>
+    <Layout className="app-layout" style={{ minHeight: '100vh' }}>
       <Sider
         collapsible
         collapsed={collapsed}
         onCollapse={setCollapsed}
         trigger={null}
         width={260}
-        collapsedWidth={80}
+        collapsedWidth={isMobile ? 0 : 80}
         className="app-sider border-r border-border bg-card/50 backdrop-blur-xl"
         style={{
           position: 'fixed',
-          left: 0,
+          left: isMobile ? siderOffset : 0,
           top: 0,
           bottom: 0,
           zIndex: 100,
           borderRight: '1px solid var(--border)',
           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
-        theme={darkMode ? 'dark' : 'light'}
+        theme={resolvedTheme}
       >
         <div className="flex flex-col h-full bg-sidebar/50">
           {/* Logo area */}
@@ -253,7 +304,7 @@ export function AppLayout() {
             `}>
               {!collapsed && (
                 <span className="text-xs font-medium text-muted-foreground ml-1">
-                  {darkMode ? t('theme.dark') : t('theme.light')}
+                  {currentThemeLabel}
                 </span>
               )}
               <button
@@ -292,15 +343,15 @@ export function AppLayout() {
 
       {/* Main content area */}
       <Layout style={{
-        marginLeft: collapsed ? 80 : 260,
+        marginLeft: contentMarginLeft,
         transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         background: 'transparent',
         minHeight: '100vh',
       }}>
         {/* 顶部导航栏 */}
         <Header style={{
-          padding: '0 32px',
-          background: darkMode ? 'rgba(17, 24, 39, 0.8)' : 'rgba(255, 255, 255, 0.8)',
+          padding: isMobile ? '0 16px' : '0 32px',
+          background: darkMode ? 'rgba(15, 23, 42, 0.84)' : 'rgba(255, 255, 255, 0.8)',
           backdropFilter: 'blur(12px)',
           borderBottom: '1px solid var(--border)',
           display: 'flex',
@@ -312,7 +363,17 @@ export function AppLayout() {
           height: 52,
         }}>
           {/* 左侧 - 面包屑/标题 */}
-          <div>
+          <div className="flex items-center gap-3">
+            {isMobile && (
+              <button
+                type="button"
+                onClick={() => setCollapsed((prev) => !prev)}
+                className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border/70 bg-background/80"
+                aria-label={t("nav.toggleSidebar", "Toggle sidebar")}
+              >
+                <MenuOutlined />
+              </button>
+            )}
             <Text strong style={{ fontSize: 16, fontWeight: 600 }}>
               {(() => {
                 const item = filteredNavItems.find(item => location.pathname.startsWith(item.key));
@@ -339,7 +400,7 @@ export function AppLayout() {
 
         {/* Main content */}
         <Content style={{
-          padding: '24px',
+          padding: isMobile ? '16px' : '24px',
           minHeight: 'calc(100vh - 64px)',
           overflow: 'auto',
         }}>

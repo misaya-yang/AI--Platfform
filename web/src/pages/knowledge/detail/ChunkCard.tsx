@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
-import type { Segment } from "@/types/knowledge";
 
 interface Chunk {
   segment_id: string;

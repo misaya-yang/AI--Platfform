@@ -5,32 +5,34 @@ import enUS from 'antd/locale/en_US';
 import { useTranslation } from 'react-i18next';
 import { AppRouter } from "@/router";
 import { useAppStore } from "@/store/useAppStore";
+import { useThemeSync } from "@/hooks/useThemeSync";
+import { resolveAppLocale } from "@/i18n";
 import { lightTheme, darkTheme } from "@/theme/themeConfig";
 import { Toaster } from "@/components/ui/toaster";
 
 export default function App() {
-  const { darkMode } = useAppStore();
+  const resolvedTheme = useThemeSync();
+  const darkMode = useAppStore((s) => s.darkMode);
   const { i18n } = useTranslation();
   const currentTheme = darkMode ? darkTheme : lightTheme;
 
-  // Sync Tailwind dark mode class with app state
+  // Keep document language in sync with app locale
   useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-  }, [darkMode]);
+    const locale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
+    document.documentElement.lang = locale;
+    document.documentElement.dir = "ltr";
+  }, [i18n.language, i18n.resolvedLanguage]);
 
   // Select Ant Design locale based on current i18n language
-  const antdLocale = i18n.language === 'en-US' ? enUS : zhCN;
+  const locale = resolveAppLocale(i18n.resolvedLanguage || i18n.language);
+  const antdLocale = locale === 'en-US' ? enUS : zhCN;
 
   return (
     <ConfigProvider
       locale={antdLocale}
       theme={{
         ...currentTheme,
-        algorithm: darkMode ? theme.darkAlgorithm : theme.defaultAlgorithm,
+        algorithm: resolvedTheme === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
       }}
     >
       <AntApp>

@@ -40,13 +40,13 @@ interface GroupedSessions {
   older: SessionSummary[];
 }
 
-function getSessionTitle(session: SessionSummary): string {
+function getSessionTitle(session: SessionSummary, fallbackLabel: string): string {
   const metadata = session.metadata as Record<string, unknown> | undefined;
   if (metadata?.title && typeof metadata.title === "string") {
     return metadata.title;
   }
   // Fallback to session ID prefix
-  return `Chat ${session.session_id.slice(0, 8)}...`;
+  return `${fallbackLabel} ${session.session_id.slice(0, 8)}...`;
 }
 
 function groupSessionsByDate(sessions: SessionSummary[]): GroupedSessions {
@@ -102,14 +102,16 @@ function SessionItem({
   isActive,
   onSelect,
   onDelete,
+  fallbackLabel,
 }: {
   session: SessionSummary;
   isActive: boolean;
   onSelect: () => void;
   onDelete: () => void;
+  fallbackLabel: string;
 }) {
   const [showDelete, setShowDelete] = useState(false);
-  const title = getSessionTitle(session);
+  const title = getSessionTitle(session, fallbackLabel);
 
   return (
     <motion.div
@@ -155,12 +157,14 @@ function SessionGroup({
   activeSessionId,
   onSelectSession,
   onDeleteSession,
+  fallbackLabel,
 }: {
   label: string;
   sessions: SessionSummary[];
   activeSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  fallbackLabel: string;
 }) {
   if (sessions.length === 0) return null;
 
@@ -177,6 +181,7 @@ function SessionGroup({
             isActive={session.session_id === activeSessionId}
             onSelect={() => onSelectSession(session.session_id)}
             onDelete={() => onDeleteSession(session.session_id)}
+            fallbackLabel={fallbackLabel}
           />
         ))}
       </div>
@@ -194,6 +199,7 @@ export function ConversationSidebar({
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const [searchQuery, setSearchQuery] = useState("");
+  const fallbackChatLabel = t("assistant.chatFallback", "Chat");
 
   // Filter sessions by search query
   const filteredSessions = useMemo(() => {
@@ -201,10 +207,10 @@ export function ConversationSidebar({
     if (!searchQuery.trim()) return sessions;
     const query = searchQuery.toLowerCase();
     return sessions.filter((session) => {
-      const title = getSessionTitle(session).toLowerCase();
+      const title = getSessionTitle(session, fallbackChatLabel).toLowerCase();
       return title.includes(query);
     });
-  }, [sessions, searchQuery]);
+  }, [sessions, searchQuery, fallbackChatLabel]);
 
   // Group filtered sessions by date
   const groupedSessions = useMemo(
@@ -278,6 +284,7 @@ export function ConversationSidebar({
               activeSessionId={activeSessionId}
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
+              fallbackLabel={fallbackChatLabel}
             />
             <SessionGroup
               label={t("assistant.yesterday")}
@@ -285,6 +292,7 @@ export function ConversationSidebar({
               activeSessionId={activeSessionId}
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
+              fallbackLabel={fallbackChatLabel}
             />
             <SessionGroup
               label={t("assistant.lastWeek")}
@@ -292,6 +300,7 @@ export function ConversationSidebar({
               activeSessionId={activeSessionId}
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
+              fallbackLabel={fallbackChatLabel}
             />
             <SessionGroup
               label={t("assistant.older")}
@@ -299,6 +308,7 @@ export function ConversationSidebar({
               activeSessionId={activeSessionId}
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
+              fallbackLabel={fallbackChatLabel}
             />
           </>
         )}

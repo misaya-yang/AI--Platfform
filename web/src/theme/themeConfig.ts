@@ -1,21 +1,20 @@
 import type { ThemeConfig } from 'antd';
 
-// Simplified Indigo-based Theme
-// Design principle: Clean, solid colors, no gradients or heavy shadows
+// Industrial editorial theme tokens
 
 export const colors = {
-  // Primary - Indigo
+  // Primary - Blue
   primary: {
-    50: '#EEF2FF',
-    100: '#E0E7FF',
-    200: '#C7D2FE',
-    300: '#A5B4FC',
-    400: '#818CF8',
-    500: '#6366F1', // Main primary
-    600: '#4F46E5',
-    700: '#4338CA',
-    800: '#3730A3',
-    900: '#312E81',
+    50: '#EFF6FF',
+    100: '#DBEAFE',
+    200: '#BFDBFE',
+    300: '#93C5FD',
+    400: '#60A5FA',
+    500: '#3B82F6',
+    600: '#2563EB',
+    700: '#1D4ED8',
+    800: '#1E40AF',
+    900: '#1E3A8A',
   },
   // Neutral - Gray
   neutral: {
@@ -36,22 +35,24 @@ export const colors = {
 // Light theme configuration
 export const lightTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#6366F1',
+    colorPrimary: '#2563EB',
     colorInfo: '#3B82F6',
     colorSuccess: '#22C55E',
-    colorWarning: '#F59E0B',
+    colorWarning: '#D97706',
     colorError: '#EF4444',
+    fontFamily: '"IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+    fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
 
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBgLayout: '#F9FAFB',
+    colorBgLayout: '#F1F5F9',
 
-    colorText: '#111827',
-    colorTextSecondary: '#6B7280',
-    colorTextTertiary: '#9CA3AF',
+    colorText: '#1E293B',
+    colorTextSecondary: '#475569',
+    colorTextTertiary: '#64748B',
 
-    colorBorder: '#E5E7EB',
-    colorBorderSecondary: '#F3F4F6',
+    colorBorder: '#CBD5E1',
+    colorBorderSecondary: '#E2E8F0',
 
     borderRadius: 8,
     borderRadiusLG: 8,
@@ -71,9 +72,9 @@ export const lightTheme: ThemeConfig = {
     },
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: '#EEF2FF',
-      itemSelectedColor: '#6366F1',
-      itemHoverBg: '#F3F4F6',
+      itemSelectedBg: '#EFF6FF',
+      itemSelectedColor: '#1D4ED8',
+      itemHoverBg: '#F1F5F9',
       itemBorderRadius: 6,
     },
   },
@@ -82,22 +83,24 @@ export const lightTheme: ThemeConfig = {
 // Dark theme configuration
 export const darkTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#6366F1',
-    colorInfo: '#3B82F6',
+    colorPrimary: '#60A5FA',
+    colorInfo: '#60A5FA',
     colorSuccess: '#22C55E',
     colorWarning: '#F59E0B',
     colorError: '#EF4444',
+    fontFamily: '"IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+    fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
 
-    colorBgContainer: '#1F2937',
-    colorBgElevated: '#374151',
-    colorBgLayout: '#111827',
+    colorBgContainer: '#1E293B',
+    colorBgElevated: '#273449',
+    colorBgLayout: '#0F172A',
 
-    colorText: '#F9FAFB',
-    colorTextSecondary: '#9CA3AF',
-    colorTextTertiary: '#6B7280',
+    colorText: '#E2E8F0',
+    colorTextSecondary: '#94A3B8',
+    colorTextTertiary: '#64748B',
 
-    colorBorder: '#374151',
-    colorBorderSecondary: '#1F2937',
+    colorBorder: '#334155',
+    colorBorderSecondary: '#1E293B',
 
     borderRadius: 8,
     borderRadiusLG: 8,
@@ -117,9 +120,9 @@ export const darkTheme: ThemeConfig = {
     },
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(99, 102, 241, 0.2)',
-      itemSelectedColor: '#818CF8',
-      itemHoverBg: '#374151',
+      itemSelectedBg: 'rgba(59, 130, 246, 0.22)',
+      itemSelectedColor: '#93C5FD',
+      itemHoverBg: '#334155',
       itemBorderRadius: 6,
     },
   },

@@ -293,20 +293,14 @@ function ArtifactChip({
   artifact: TimelineArtifact;
   onClick?: () => void;
 }) {
-  const getIcon = () => {
-    switch (artifact.type) {
-      case "image":
-        return ImageIcon;
-      case "code":
-        return Code2;
-      case "document":
-        return FileText;
-      default:
-        return FileText;
-    }
-  };
-
-  const Icon = getIcon();
+  const icon =
+    artifact.type === "image" ? (
+      <ImageIcon className="h-3 w-3" />
+    ) : artifact.type === "code" ? (
+      <Code2 className="h-3 w-3" />
+    ) : (
+      <FileText className="h-3 w-3" />
+    );
 
   return (
     <motion.button
@@ -320,7 +314,7 @@ function ArtifactChip({
         onClick && "cursor-pointer hover:ring-2 hover:ring-blue-500/30"
       )}
     >
-      <Icon className="h-3 w-3" />
+      {icon}
       <span className="truncate max-w-[120px]">{artifact.name}</span>
     </motion.button>
   );

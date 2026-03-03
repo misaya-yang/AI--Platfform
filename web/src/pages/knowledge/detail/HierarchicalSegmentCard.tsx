@@ -212,12 +212,10 @@ export function HierarchicalSegmentCard({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showAllChildren, setShowAllChildren] = useState(false);
   
-  const isParent = segment.level === 2 || (segment.children && segment.children.length > 0);
   const children = segment.children || [];
   
   // Calculate statistics
   const parentCharCount = getCharCount(segment.text);
-  const parentTokenCount = estimateTokens(parentCharCount);
   const totalChildChars = children.reduce((sum, child) => sum + getCharCount(child.text), 0);
   const totalChars = parentCharCount + totalChildChars;
   

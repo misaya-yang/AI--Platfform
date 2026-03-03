@@ -499,7 +499,7 @@ function TableCard({ data, className }: TableCardProps) {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [data]);
+  }, [data, t]);
 
   return (
     <motion.div
@@ -601,16 +601,18 @@ function FileCard({ data, className }: FileCardProps) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const getFileIcon = (mimeType?: string) => {
-    if (!mimeType) return FileText;
-    if (mimeType.startsWith("image/")) return ImageIcon;
-    if (mimeType.includes("pdf")) return FileText;
-    if (mimeType.includes("spreadsheet") || mimeType.includes("csv")) return Table;
-    if (mimeType.includes("presentation") || mimeType.includes("ppt")) return BarChart3;
-    return FileText;
-  };
-
-  const FileIcon = getFileIcon(data.mimeType);
+  const fileIcon =
+    !data.mimeType ? (
+      <FileText className="h-6 w-6 text-slate-500" />
+    ) : data.mimeType.startsWith("image/") ? (
+      <ImageIcon className="h-6 w-6 text-slate-500" />
+    ) : data.mimeType.includes("spreadsheet") || data.mimeType.includes("csv") ? (
+      <Table className="h-6 w-6 text-slate-500" />
+    ) : data.mimeType.includes("presentation") || data.mimeType.includes("ppt") ? (
+      <BarChart3 className="h-6 w-6 text-slate-500" />
+    ) : (
+      <FileText className="h-6 w-6 text-slate-500" />
+    );
 
   return (
     <motion.div
@@ -627,7 +629,7 @@ function FileCard({ data, className }: FileCardProps) {
     >
       {/* File icon */}
       <div className="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
-        <FileIcon className="h-6 w-6 text-slate-500" />
+        {fileIcon}
       </div>
 
       {/* File info */}
