@@ -61,6 +61,7 @@ import {
   finishChatStreamTrace,
   markChatStreamFirstToken,
   startChatStreamTrace,
+  trackChatHistoryRestored,
 } from "@/features/chat/telemetry";
 
 function buildTextParts(messageId: string, content: string, createdAt: string) {
@@ -312,6 +313,10 @@ export function useChatSession() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [historyRestoreState, setHistoryRestoreState] = useState<
+    "idle" | "loading" | "ready" | "failed"
+  >("idle");
+  const [historyRestoreError, setHistoryRestoreError] = useState<string | null>(null);
   
   // Artifacts & Agent State (Managed here as they are tied to session)
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -373,6 +378,8 @@ export function useChatSession() {
           if (sessionExists) {
             // 加载会话历史记录
             try {
+              setHistoryRestoreState("loading");
+              setHistoryRestoreError(null);
               const [, history, sessionArtifacts] = await Promise.all([
                 getSession(savedSessionId),
                 getSessionHistory(savedSessionId, { limit: 200 }),
@@ -383,6 +390,12 @@ export function useChatSession() {
                 restoreMessageMetadata(msg, index, savedSessionId)
               );
               setMessages(chatMessages);
+              setHistoryRestoreState("ready");
+              trackChatHistoryRestored("assistant", {
+                sessionId: savedSessionId,
+                messageCount: chatMessages.length,
+                restored: true,
+              });
               
               // Restore artifacts
               const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
@@ -401,12 +414,22 @@ export function useChatSession() {
               setShowArtifacts(loadedArtifacts.length > 0);
             } catch (err) {
               console.error("Failed to restore active session:", err);
-              // 如果加载失败，清除活动会话
-              setActiveSessionId(undefined);
+              const reason =
+                err instanceof Error ? err.message : "restore_failed";
+              setHistoryRestoreState("failed");
+              setHistoryRestoreError(reason);
+              trackChatHistoryRestored("assistant", {
+                sessionId: savedSessionId,
+                messageCount: 0,
+                restored: false,
+                reason,
+              });
             }
           } else {
             // 会话不存在于列表中（可能已被删除），清除它
             setActiveSessionId(undefined);
+            setHistoryRestoreState("idle");
+            setHistoryRestoreError(null);
           }
         }
       } catch (error) {
@@ -423,6 +446,8 @@ export function useChatSession() {
   const handleNewChat = useCallback(() => {
     setMessages([]);
     setActiveSessionId(undefined);  // 清除 AI助手 的活动会话
+    setHistoryRestoreState("idle");
+    setHistoryRestoreError(null);
     setArtifacts([]);
     setShowArtifacts(false);
     setWorkingMemory(null);
@@ -451,9 +476,18 @@ export function useChatSession() {
   }, [activeSessionId, handleNewChat]);
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
-    if (sessionId === activeSessionId) return;
+    if (
+      sessionId === activeSessionId &&
+      messages.length > 0 &&
+      historyRestoreState !== "failed"
+    ) {
+      return;
+    }
 
     try {
+      setHistoryRestoreState("loading");
+      setHistoryRestoreError(null);
+      setMessages([]);
       const [sessionDetails, history, sessionArtifacts] = await Promise.all([
         getSession(sessionId),
         getSessionHistory(sessionId, { limit: 200 }),
@@ -461,14 +495,17 @@ export function useChatSession() {
       ]);
 
       // Restore messages
-      console.log("[DEBUG] Session history loaded:", history.length, "messages");
-      console.log("[DEBUG] History roles:", history.map(m => m.role));
       const chatMessages = history.map((msg, index) => 
         restoreMessageMetadata(msg, index, sessionId)
       );
-      console.log("[DEBUG] Restored messages:", chatMessages.length, chatMessages.map(m => ({ id: m.id, role: m.role, content: m.content?.slice(0, 50) })));
       setMessages(chatMessages);
       setActiveSessionId(sessionId);
+      setHistoryRestoreState("ready");
+      trackChatHistoryRestored("assistant", {
+        sessionId,
+        messageCount: chatMessages.length,
+        restored: true,
+      });
 
       // Restore artifacts
       const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
@@ -493,8 +530,18 @@ export function useChatSession() {
       return sessionDetails.config; // Return config for parent to update settings
     } catch (error) {
       console.error("Failed to load session:", error);
+      const reason =
+        error instanceof Error ? error.message : "load_session_failed";
+      setHistoryRestoreState("failed");
+      setHistoryRestoreError(reason);
+      trackChatHistoryRestored("assistant", {
+        sessionId,
+        messageCount: 0,
+        restored: false,
+        reason,
+      });
     }
-  }, [activeSessionId, setActiveSessionId]);
+  }, [activeSessionId, historyRestoreState, messages.length, setActiveSessionId]);
 
   // Streaming Logic
   const stopStreaming = useCallback(() => {
@@ -1830,6 +1877,8 @@ export function useChatSession() {
     setMessages,
     isStreaming,
     sessionsLoading,
+    historyRestoreState,
+    historyRestoreError,
     handleNewChat,
     handleSelectSession,
     handleDeleteSession,

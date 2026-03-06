@@ -11,6 +11,8 @@ export interface User {
   tier: string;
 }
 
+export type SessionValidationState = "idle" | "checking" | "validated";
+
 export interface AuthState {
   // State
   token: string | null;
@@ -19,6 +21,8 @@ export interface AuthState {
   forcePasswordChange: boolean;
   isLoading: boolean;
   rememberMe: boolean;  // 30天免登录
+  hydrated: boolean;
+  sessionValidation: SessionValidationState;
 
   // Actions
   setAuth: (token: string, user: User, forcePasswordChange: boolean, rememberMe?: boolean) => void;
@@ -26,6 +30,8 @@ export interface AuthState {
   setLoading: (loading: boolean) => void;
   updateUser: (user: Partial<User>) => void;
   setForcePasswordChange: (force: boolean) => void;
+  setHydrated: (hydrated: boolean) => void;
+  setSessionValidation: (state: SessionValidationState) => void;
 
   // Permission helpers
   hasPermission: (permission: string) => boolean;
@@ -35,6 +41,19 @@ export interface AuthState {
 }
 
 const STORAGE_KEY = "agent-gateway-auth";
+
+function normalizeUser(user: User | Partial<User> | null | undefined): User | null {
+  if (!user) return null;
+  return {
+    user_id: String(user.user_id || ""),
+    email: user.email ?? null,
+    display_name: user.display_name ?? null,
+    department: user.department ?? null,
+    roles: Array.isArray(user.roles) ? user.roles : [],
+    permissions: Array.isArray(user.permissions) ? user.permissions : [],
+    tier: typeof user.tier === "string" && user.tier ? user.tier : "normal",
+  };
+}
 
 // Custom storage that switches between localStorage and sessionStorage
 const createDynamicStorage = () => {
@@ -110,20 +129,19 @@ export const useAuthStore = create<AuthState>()(
       forcePasswordChange: false,
       isLoading: false,
       rememberMe: false,
+      hydrated: false,
+      sessionValidation: "idle",
 
       // Set authentication data after successful login
       setAuth: (token, user, forcePasswordChange, rememberMe = false) =>
         set({
           token,
-          user: {
-            ...user,
-            roles: Array.isArray(user.roles) ? user.roles : [],
-            permissions: Array.isArray(user.permissions) ? user.permissions : [],
-          },
+          user: normalizeUser(user),
           isAuthenticated: true,
           forcePasswordChange,
           isLoading: false,
           rememberMe,
+          sessionValidation: "validated",
         }),
 
       // Clear authentication data on logout
@@ -138,6 +156,7 @@ export const useAuthStore = create<AuthState>()(
           forcePasswordChange: false,
           isLoading: false,
           rememberMe: false,
+          sessionValidation: "validated",
         });
       },
 
@@ -147,11 +166,13 @@ export const useAuthStore = create<AuthState>()(
       // Update user data
       updateUser: (userData) =>
         set((state) => ({
-          user: state.user ? { ...state.user, ...userData } : null,
+          user: normalizeUser(state.user ? { ...state.user, ...userData } : null),
         })),
 
       // Update force password change flag
       setForcePasswordChange: (force) => set({ forcePasswordChange: force }),
+      setHydrated: (hydrated) => set({ hydrated }),
+      setSessionValidation: (sessionValidation) => set({ sessionValidation }),
 
       // Check if user has a specific permission
       hasPermission: (permission: string) => {
@@ -210,21 +231,17 @@ export const useAuthStore = create<AuthState>()(
         const persisted = persistedState as Partial<AuthState> | undefined;
         if (!persisted) return currentState;
 
-        // Normalize user data to ensure arrays exist
-        let normalizedUser = persisted.user;
-        if (normalizedUser) {
-          normalizedUser = {
-            ...normalizedUser,
-            roles: Array.isArray(normalizedUser.roles) ? normalizedUser.roles : [],
-            permissions: Array.isArray(normalizedUser.permissions) ? normalizedUser.permissions : [],
-          };
-        }
-
         return {
           ...currentState,
           ...persisted,
-          user: normalizedUser ?? null,
+          user: normalizeUser(persisted.user),
+          hydrated: true,
+          sessionValidation: persisted.token ? "idle" : "validated",
         };
+      },
+      onRehydrateStorage: () => (state) => {
+        state?.setHydrated(true);
+        state?.setSessionValidation(state.token ? "idle" : "validated");
       },
     }
   )

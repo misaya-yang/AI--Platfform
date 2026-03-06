@@ -17,12 +17,16 @@ type AppState = {
   setSelectedServiceId: (id?: string) => void;
   activeSessionId?: string;  // Playground 的活动会话
   setActiveSessionId: (id?: string) => void;
+  playgroundSidebarOpen: boolean;
+  setPlaygroundSidebarOpen: (open: boolean) => void;
   localTitles: Record<string, string>;  // Playground 的会话标题缓存
   setLocalTitles: (titles: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
   
   // === Assistant (AI助手) 独立状态 ===
   assistantActiveSessionId?: string;  // AI助手 的活动会话（与 Playground 完全分离）
   setAssistantActiveSessionId: (id?: string) => void;
+  assistantSidebarOpen: boolean;
+  setAssistantSidebarOpen: (open: boolean) => void;
   assistantLocalTitles: Record<string, string>;  // AI助手 的会话标题缓存
   setAssistantLocalTitles: (titles: Record<string, string> | ((prev: Record<string, string>) => Record<string, string>)) => void;
   
@@ -43,6 +47,8 @@ export const useAppStore = create<AppState>()(
       setSelectedServiceId: (id) => set({ selectedServiceId: id }),
       activeSessionId: undefined,
       setActiveSessionId: (id) => set({ activeSessionId: id }),
+      playgroundSidebarOpen: true,
+      setPlaygroundSidebarOpen: (open) => set({ playgroundSidebarOpen: open }),
       localTitles: {},
       setLocalTitles: (updater) => 
         set((state) => ({
@@ -52,6 +58,8 @@ export const useAppStore = create<AppState>()(
       // Assistant (AI助手) - 完全独立的状态
       assistantActiveSessionId: undefined,
       setAssistantActiveSessionId: (id) => set({ assistantActiveSessionId: id }),
+      assistantSidebarOpen: true,
+      setAssistantSidebarOpen: (open) => set({ assistantSidebarOpen: open }),
       assistantLocalTitles: {},
       setAssistantLocalTitles: (updater) =>
         set((state) => ({
@@ -95,7 +103,7 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "agent-gateway-storage",
-      version: 2,
+      version: 3,
       migrate: (persistedState: unknown, version: number) => {
         const state = (persistedState || {}) as Partial<AppState>;
         if (version < 2 && typeof state.darkMode === "boolean" && !state.themeMode) {
@@ -105,6 +113,19 @@ export const useAppStore = create<AppState>()(
             themeMode: nextTheme,
             resolvedTheme: nextTheme,
           };
+        }
+        if (version < 3) {
+          return {
+            ...state,
+            playgroundSidebarOpen:
+              typeof state.playgroundSidebarOpen === "boolean"
+                ? state.playgroundSidebarOpen
+                : true,
+            assistantSidebarOpen:
+              typeof state.assistantSidebarOpen === "boolean"
+                ? state.assistantSidebarOpen
+                : true,
+          } as AppState;
         }
         return state as AppState;
       },

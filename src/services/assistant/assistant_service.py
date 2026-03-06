@@ -2360,16 +2360,36 @@ Please use this web search context to inform your response when relevant."""
         # Step 6.6: Extract user preferences for memory
         if self.memory_service and message:
             try:
-                from .memory.preference_extractor import extract_preferences
+                from .memory.preference_extractor import (
+                    extract_preferences,
+                    merge_preferences,
+                    split_memory_updates,
+                )
 
-                prefs = extract_preferences(message)
-                for key, value in prefs.items():
+                extracted = extract_preferences(message)
+                preference_updates, fact_updates = split_memory_updates(extracted)
+
+                if preference_updates:
+                    existing_preferences = await self.memory_service.get_user_memory(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        key="preferences",
+                    )
                     await self.memory_service.set_user_memory(
                         tenant_id=user.tenant_id,
                         user_id=user.user_id,
-                        key=f"preference:{key}",
+                        key="preferences",
+                        value=merge_preferences(existing_preferences, preference_updates),
+                        metadata={"source": "auto_extract", "namespace": "preferences"},
+                    )
+
+                for key, value in fact_updates.items():
+                    await self.memory_service.set_user_memory(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        key=key,
                         value=value,
-                        metadata={"source": "auto_extract"},
+                        metadata={"source": "auto_extract", "namespace": "profile"},
                     )
             except Exception as e:
                 logger.debug(f"Preference extraction failed: {e}")

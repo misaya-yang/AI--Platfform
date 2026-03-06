@@ -40,6 +40,13 @@ class MemoryProviderResult:
     fallback_reason: str | None = None
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class OpenClawRuntimeAdapter:
     """Bridge OpenClaw components into existing assistant runtime."""
 
@@ -77,13 +84,12 @@ class OpenClawRuntimeAdapter:
     ) -> OpenClawRuntimeAdapter:
         """Build runtime adapter with env-driven feature flags."""
         features = OpenClawFeatures(
-            memory_v2=os.getenv("ASSISTANT_OPENCLAW_MEMORY_V2", "false").lower() == "true",
-            context_v2=os.getenv("ASSISTANT_OPENCLAW_CONTEXT_V2", "false").lower() == "true",
-            tool_policy_v2=os.getenv("ASSISTANT_OPENCLAW_TOOL_POLICY_V2", "false").lower()
-            == "true",
-            skills=os.getenv("ASSISTANT_OPENCLAW_SKILLS", "false").lower() == "true",
-            scheduler=os.getenv("ASSISTANT_OPENCLAW_SCHEDULER", "false").lower() == "true",
-            failover_v2=os.getenv("ASSISTANT_OPENCLAW_FAILOVER_V2", "false").lower() == "true",
+            memory_v2=_env_flag("ASSISTANT_OPENCLAW_MEMORY_V2", True),
+            context_v2=_env_flag("ASSISTANT_OPENCLAW_CONTEXT_V2", False),
+            tool_policy_v2=_env_flag("ASSISTANT_OPENCLAW_TOOL_POLICY_V2", False),
+            skills=_env_flag("ASSISTANT_OPENCLAW_SKILLS", False),
+            scheduler=_env_flag("ASSISTANT_OPENCLAW_SCHEDULER", False),
+            failover_v2=_env_flag("ASSISTANT_OPENCLAW_FAILOVER_V2", False),
         )
 
         memory_store = MemorySourceStore(base_memory_dir)
@@ -127,8 +133,27 @@ class OpenClawRuntimeAdapter:
         """Load hybrid memory snippets for request-time context injection."""
         mode = self.normalize_mode(openclaw_mode)
         profile = (memory_profile or "basic").strip().lower()
-        if mode == "off" or profile == "off" or not self.features.memory_v2:
-            return MemoryProviderResult(snippets=[], loaded_sources=0, fallback_used=True)
+        if mode == "off":
+            return MemoryProviderResult(
+                snippets=[],
+                loaded_sources=0,
+                fallback_used=True,
+                fallback_reason="openclaw_mode_off",
+            )
+        if profile == "off":
+            return MemoryProviderResult(
+                snippets=[],
+                loaded_sources=0,
+                fallback_used=True,
+                fallback_reason="memory_profile_off",
+            )
+        if not self.features.memory_v2:
+            return MemoryProviderResult(
+                snippets=[],
+                loaded_sources=0,
+                fallback_used=True,
+                fallback_reason="memory_v2_disabled",
+            )
 
         docs = self.memory_store.read_recent_sources(
             tenant_id=tenant_id,

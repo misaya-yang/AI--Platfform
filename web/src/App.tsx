@@ -6,12 +6,14 @@ import { useTranslation } from 'react-i18next';
 import { AppRouter } from "@/router";
 import { useAppStore } from "@/store/useAppStore";
 import { useThemeSync } from "@/hooks/useThemeSync";
+import { useAuthSessionGuard } from "@/hooks/useAuthSessionGuard";
 import { resolveAppLocale } from "@/i18n";
 import { lightTheme, darkTheme } from "@/theme/themeConfig";
 import { Toaster } from "@/components/ui/toaster";
 
 export default function App() {
   const resolvedTheme = useThemeSync();
+  useAuthSessionGuard();
   const darkMode = useAppStore((s) => s.darkMode);
   const { i18n } = useTranslation();
   const currentTheme = darkMode ? darkTheme : lightTheme;

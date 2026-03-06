@@ -1820,6 +1820,27 @@ class AgentLoop:
                             },
                         )
 
+            if self.memory_service:
+                try:
+                    long_term_ctx = await self.memory_service.get_long_term_context(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                    )
+                    ctx.long_term_memory = long_term_ctx
+                    ctx.user_preferences = long_term_ctx.get("preferences") if long_term_ctx else None
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="long_term_loaded",
+                        data={
+                            "preferences_loaded": bool(ctx.user_preferences),
+                            "frequent_memories_count": len(
+                                (long_term_ctx or {}).get("frequent_memories", [])
+                            ),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to load long-term memory in streaming-first mode: %s", exc)
+
             # System prompt - ALWAYS include the streaming-first base prompt so the model
             # receives consistent tool/RAG instructions even when the frontend provides a
             # style-only system prompt (common in the assistant UI).
@@ -1846,6 +1867,10 @@ class AgentLoop:
                     )
                 skills_block = "\n".join(skill_lines)
                 system_prompt = f"{system_prompt}\n\n## Available Skills Metadata\n{skills_block}"
+
+            long_term_memory_prompt = format_long_term_memory(ctx.long_term_memory or {})
+            if long_term_memory_prompt:
+                system_prompt = f"{system_prompt}\n\n## User Memory\n{long_term_memory_prompt}"
 
             messages.append({"role": "system", "content": system_prompt})
 
@@ -2791,6 +2816,42 @@ class AgentLoop:
                     )
                 except Exception as e:
                     logger.warning("Failed to persist assistant message (streaming-first): %s", e)
+
+            if self.memory_service and ctx.message:
+                try:
+                    from .memory.preference_extractor import (
+                        extract_preferences,
+                        merge_preferences,
+                        split_memory_updates,
+                    )
+
+                    extracted = extract_preferences(ctx.message)
+                    preference_updates, fact_updates = split_memory_updates(extracted)
+
+                    if preference_updates:
+                        existing_preferences = await self.memory_service.get_user_memory(
+                            tenant_id=ctx.tenant_id,
+                            user_id=ctx.user_id,
+                            key="preferences",
+                        )
+                        await self.memory_service.set_user_memory(
+                            tenant_id=ctx.tenant_id,
+                            user_id=ctx.user_id,
+                            key="preferences",
+                            value=merge_preferences(existing_preferences, preference_updates),
+                            metadata={"source": "auto_extract", "namespace": "preferences"},
+                        )
+
+                    for key, value in fact_updates.items():
+                        await self.memory_service.set_user_memory(
+                            tenant_id=ctx.tenant_id,
+                            user_id=ctx.user_id,
+                            key=key,
+                            value=value,
+                            metadata={"source": "auto_extract", "namespace": "profile"},
+                        )
+                except Exception as exc:
+                    logger.warning("Failed to persist structured user memory: %s", exc)
 
             if (
                 self.openclaw_runtime

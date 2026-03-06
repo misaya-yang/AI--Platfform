@@ -19,6 +19,20 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+PREFERENCE_KEYS = frozenset({"language", "verbosity", "format", "tone"})
+
+
+def _extract_first_match(text: str, patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        value = (match.group(1) or "").strip()
+        value = re.sub(r"^[\"'“”‘’]+|[\"'“”‘’]+$", "", value).strip()
+        if value:
+            return value
+    return None
+
 
 def extract_preferences(text: str) -> dict[str, Any]:
     """
@@ -89,7 +103,42 @@ def extract_preferences(text: str) -> dict[str, Any]:
     elif any(kw in text for kw in ["轻松", "随意", "casual", "friendly", "口语"]):
         prefs["tone"] = "casual"
 
+    preferred_name = _extract_first_match(
+        text,
+        [
+            r"(?:我的名字是|你可以叫我|叫我)\s*([^\s，。！？,.!?:：；;]{1,24})",
+            r"我叫(?!什么)\s*([^\s，。！？,.!?:：；;]{1,24})",
+            r"(?:my name is|call me|you can call me)\s+([A-Za-z][A-Za-z0-9_\\- ]{0,31})",
+        ],
+    )
+    if preferred_name:
+        prefs["preferred_name"] = preferred_name
+
+    location = _extract_first_match(
+        text,
+        [
+            r"我来自(?!哪里)\s*([^\s，。！？,.!?:：；;]{1,32})",
+            r"(?:我住在|我人在)\s*([^\s，。！？,.!?:：；;]{1,32})",
+            r"(?:i am from|i'm from|i live in)\s+([A-Za-z][A-Za-z0-9_\\- ,]{0,47})",
+        ],
+    )
+    if location:
+        prefs["location"] = location
+
     return prefs
+
+
+def split_memory_updates(extracted: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split extracted data into structured preferences and user profile facts."""
+    preference_updates = {
+        key: value for key, value in extracted.items() if key in PREFERENCE_KEYS and value is not None
+    }
+    fact_updates = {
+        f"profile:{key}": value
+        for key, value in extracted.items()
+        if key not in PREFERENCE_KEYS and value is not None
+    }
+    return preference_updates, fact_updates
 
 
 def merge_preferences(

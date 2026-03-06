@@ -454,7 +454,7 @@ class MemoryService:
             SELECT key, value, metadata, access_count
             FROM user_memory
             WHERE tenant_id = $1 AND user_id = $2
-            ORDER BY access_count DESC, last_accessed_at DESC NULLS LAST
+            ORDER BY access_count DESC, last_accessed_at DESC NULLS LAST, updated_at DESC
             LIMIT $3
         """
         rows = await self.database.fetch(query, tenant_id, user_id, limit)

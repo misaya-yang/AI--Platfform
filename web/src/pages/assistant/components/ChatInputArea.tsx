@@ -9,7 +9,7 @@ import { QuickActionsMenu } from "../components/QuickActionsMenu"; // Assume thi
 import { StyleSelector } from "../components/StyleSelector";
 import type { UploadedFile } from "../hooks/useFileHandler";
 import { isImageFile, formatFileSize } from "@/api/files";
-import type { DatasetInfo, AssistantConfig, ModelInfo } from "@/api/assistant";
+import type { DatasetInfo, AssistantConfig } from "@/api/assistant";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 
@@ -28,7 +28,6 @@ interface ChatInputAreaProps {
   onStop: () => void;
   handlePaste: (e: React.ClipboardEvent) => void;
   fileInputRef: React.RefObject<HTMLInputElement>;
-  models: ModelInfo[];
   config: AssistantConfig | null;
   datasets: DatasetInfo[];
   selectedDatasets: string[];
@@ -55,7 +54,6 @@ export function ChatInputArea({
   onStop,
   handlePaste,
   fileInputRef,
-  models,
   config,
   datasets,
   selectedDatasets,
@@ -104,7 +102,11 @@ export function ChatInputArea({
 
   // Check if can send
   const hasUploadedFiles = files.some((f) => f.status === "success" && f.response);
-  const canSend = !isStreaming && !isUploading && !isGeneratingImage && (input.trim() || hasUploadedFiles) && models.length > 0;
+  const canSend =
+    !isStreaming &&
+    !isUploading &&
+    !isGeneratingImage &&
+    Boolean(input.trim() || hasUploadedFiles);
 
   // Reset height when input clears
   useEffect(() => {
@@ -219,11 +221,15 @@ export function ChatInputArea({
               onPaste={handlePaste}
               aria-label={t("assistant.composerAriaLabel", "Assistant message composer")}
               placeholder={
-                models.length === 0
-                  ? t("assistant.noModelsPlaceholder", "No models available")
-                  : isImageMode
-                    ? t("assistant.imagePlaceholder", "Describe the image you want to create... (ESC to cancel)")
-                    : t("assistant.placeholder", "Type your message... (Ctrl+V to paste images)")
+                isImageMode
+                  ? t(
+                      "assistant.imagePlaceholder",
+                      "Describe the image you want to create... (ESC to cancel)"
+                    )
+                  : t(
+                      "assistant.placeholder",
+                      "Type your message... (Ctrl+V to paste images)"
+                    )
               }
               className={cn(
                 "flex-1 min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-sm text-slate-700 dark:text-slate-200",
@@ -231,7 +237,7 @@ export function ChatInputArea({
                   ? "placeholder:text-violet-500 dark:placeholder:text-violet-400"
                   : "placeholder:text-slate-400 dark:placeholder:text-slate-500"
               )}
-              disabled={isStreaming || isGeneratingImage || models.length === 0}
+              disabled={isStreaming || isGeneratingImage}
               rows={1}
             />
 

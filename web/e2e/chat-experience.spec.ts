@@ -1,164 +1,369 @@
+import { expect, test, type Page, type Route } from "@playwright/test";
 import {
-  expect,
-  test,
-  type APIRequestContext,
-  type Page,
-  type Route,
-} from "@playwright/test";
-import AxeBuilder from "@axe-core/playwright";
+  assertInpBudget,
+  assertNoBlockingA11yIssues,
+  ensureAuthenticatedPage,
+  installTelemetryCollector,
+  modKey,
+  readTelemetryEvents,
+  seedClientPrefs,
+  toSseBody,
+} from "./support/helpers";
 
-const AUTH_STORAGE_KEY = "agent-gateway-auth";
-const LOGIN_USERNAME = process.env.E2E_USERNAME || "admin";
-const LOGIN_PASSWORD = process.env.E2E_PASSWORD || "123456.dc";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
 const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
-const APP_STORAGE_KEY = "agent-gateway-storage";
+const MOCK_ASSISTANT_SERVICE_ID = "__builtin_assistant__";
+const MOCK_ASSISTANT_MODEL_ID = "gpt-4o";
+const MOCK_PLAYGROUND_SERVICE_ID = "e2e-mock-playground";
+const MOCK_PLAYGROUND_THREAD_ID = "e2e-mock-thread";
+const MOCK_PLAYGROUND_TOOL_ID = "pg-tool-1";
 
-function modKey(): "Meta" | "Control" {
-  return process.platform === "darwin" ? "Meta" : "Control";
-}
+type MockAssistantSession = {
+  session_id: string;
+  service_id: string;
+  user_id: string;
+  tenant_id: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown>;
+  config?: Record<string, unknown>;
+};
 
-async function seedAuth(page: Page, payload: Record<string, unknown>) {
-  await page.addInitScript(
-    ({ key, payload }) => {
-      const serialized = JSON.stringify(payload);
-      localStorage.setItem(key, serialized);
-      sessionStorage.setItem(key, serialized);
-    },
-    { key: AUTH_STORAGE_KEY, payload }
-  );
-}
+type MockPlaygroundSession = {
+  session_id: string;
+  service_id: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown>;
+};
 
-async function seedClientPrefs(
-  page: Page,
-  prefs: {
-    locale?: "zh-CN" | "en-US";
-    themeMode?: "light" | "dark" | "system";
-    resolvedTheme?: "light" | "dark";
-    darkMode?: boolean;
-  }
-) {
-  await page.addInitScript(
-    ({ appStorageKey, locale, themeMode, resolvedTheme, darkMode }) => {
-      if (locale) {
-        localStorage.setItem("i18nextLng", locale);
-      }
-      if (themeMode && resolvedTheme) {
-        localStorage.setItem(
-          appStorageKey,
-          JSON.stringify({
-            state: {
-              themeMode,
-              resolvedTheme,
-              darkMode:
-                typeof darkMode === "boolean"
-                  ? darkMode
-                  : resolvedTheme === "dark",
-            },
-            version: 2,
-          })
-        );
-      }
-    },
-    {
-      appStorageKey: APP_STORAGE_KEY,
-      locale: prefs.locale,
-      themeMode: prefs.themeMode,
-      resolvedTheme: prefs.resolvedTheme,
-      darkMode: prefs.darkMode,
-    }
-  );
-}
-
-async function buildAuthPayload(
-  request: APIRequestContext,
-  baseURL: string
-): Promise<Record<string, unknown>> {
-  const loginResponse = await request.post(`${baseURL}/api/v1/auth/login`, {
-    data: {
-      email: `${LOGIN_USERNAME}@hejazfs.com.au`,
-      password: LOGIN_PASSWORD,
-    },
-  });
-  if (!loginResponse.ok()) {
-    const body = await loginResponse.text();
-    throw new Error(`E2E login failed (${loginResponse.status()}): ${body}`);
-  }
-  const data = (await loginResponse.json()) as Record<string, unknown>;
-  const accessToken = data.access_token as string;
-  const user = data.user as Record<string, unknown>;
+function jsonResponse(body: unknown) {
   return {
-    state: {
-      token: accessToken,
-      user,
-      isAuthenticated: true,
-      forcePasswordChange: Boolean(data.force_password_change),
-      rememberMe: true,
-    },
-    version: 0,
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(body),
   };
 }
 
-async function assertNoBlockingA11yIssues(page: Page, include: string[]) {
-  const scanner = include.reduce(
-    (builder, selector) => builder.include(selector),
-    new AxeBuilder({ page })
-  );
-  const result = await scanner.analyze();
-  const violations = result.violations.filter((v) =>
-    ["serious", "critical"].includes(v.impact || "")
-  );
-  expect(violations).toEqual([]);
+function buildMockPlaygroundSession(
+  sessionId: string,
+  metadata?: Record<string, unknown>
+): MockPlaygroundSession {
+  const now = new Date().toISOString();
+  return {
+    session_id: sessionId,
+    service_id: MOCK_PLAYGROUND_SERVICE_ID,
+    created_at: now,
+    updated_at: now,
+    metadata,
+  };
 }
 
-async function assertInpBudget(page: Page, p75ThresholdMs = 200) {
-  const p75 = await page.evaluate(
-    () => window.__AI_GATEWAY_PERF__?.getInteractionP75?.() ?? 0
-  );
-  expect(p75).toBeLessThan(p75ThresholdMs);
+function buildMockAssistantSession(
+  sessionId: string,
+  metadata?: Record<string, unknown>,
+  config?: Record<string, unknown>
+): MockAssistantSession {
+  const now = new Date().toISOString();
+  return {
+    session_id: sessionId,
+    service_id: MOCK_ASSISTANT_SERVICE_ID,
+    user_id: "e2e-user",
+    tenant_id: "default",
+    created_at: now,
+    updated_at: now,
+    metadata,
+    config,
+  };
 }
 
-async function installTelemetryCollector(page: Page) {
-  await page.evaluate(() => {
-    const key = "__E2E_TELEMETRY_EVENTS__";
-    (window as Window & { __E2E_TELEMETRY_EVENTS__?: unknown[] })[key] = [];
-    window.addEventListener("ai-gateway:telemetry", (event) => {
-      const detail = (event as CustomEvent).detail;
-      (
-        window as Window & { __E2E_TELEMETRY_EVENTS__?: unknown[] }
-      ).__E2E_TELEMETRY_EVENTS__?.push(detail);
-    });
+async function installAssistantHarness(
+  page: Page,
+  fulfillStream: (route: Route) => Promise<void>
+) {
+  let sessionCounter = 0;
+  const sessions = new Map<string, MockAssistantSession>();
+
+  await page.route("**/api/v1/assistant/models", async (route) => {
+    await route.fulfill(
+      jsonResponse({
+        models: [
+          {
+            id: MOCK_ASSISTANT_MODEL_ID,
+            name: "GPT-4o",
+            provider: "openai",
+            context_window: 128000,
+            max_output_tokens: 4096,
+            supports_vision: true,
+            supports_tools: true,
+          },
+        ],
+      })
+    );
   });
-}
 
-async function readTelemetryEvents(page: Page): Promise<
-  Array<{ event: string; payload?: Record<string, unknown> }>
-> {
-  return page.evaluate(() => {
-    const events =
-      (
-        window as Window & {
-          __E2E_TELEMETRY_EVENTS__?: Array<{
-            event: string;
-            payload?: Record<string, unknown>;
-          }>;
-        }
-      ).__E2E_TELEMETRY_EVENTS__ || [];
-    return events;
+  await page.route("**/api/v1/assistant/datasets", async (route) => {
+    await route.fulfill(jsonResponse({ datasets: [] }));
   });
+
+  await page.route("**/api/v1/assistant/config", async (route) => {
+    await route.fulfill(
+      jsonResponse({
+        default_model_id: MOCK_ASSISTANT_MODEL_ID,
+        available_providers: ["openai"],
+        kb_enabled: false,
+        web_search_enabled: true,
+      })
+    );
+  });
+
+  await page.route("**/api/v1/assistant/sessions/*/artifacts", async (route) => {
+    await route.fulfill(jsonResponse({ artifacts: [], total: 0 }));
+  });
+
+  const listAssistantSessions = async (route: Route) => {
+    await route.fulfill(jsonResponse(Array.from(sessions.values())));
+  };
+
+  await page.route("**/api/v1/sessions?*", async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (requestUrl.searchParams.get("service_id") !== MOCK_ASSISTANT_SERVICE_ID) {
+      await route.fallback();
+      return;
+    }
+    await listAssistantSessions(route);
+  });
+
+  await page.route("**/api/v1/sessions", async (route) => {
+    if (route.request().method() === "GET") {
+      await listAssistantSessions(route);
+      return;
+    }
+
+    const payload =
+      (route.request().postDataJSON() as {
+        metadata?: Record<string, unknown>;
+        config?: Record<string, unknown>;
+      } | null) || null;
+    const sessionId = `e2e-assistant-session-${++sessionCounter}`;
+    const session = buildMockAssistantSession(sessionId, payload?.metadata, payload?.config);
+    sessions.set(sessionId, session);
+    await route.fulfill(jsonResponse({ session_id: sessionId }));
+  });
+
+  await page.route("**/api/v1/sessions/*/history?*", async (route) => {
+    await route.fulfill(jsonResponse([]));
+  });
+
+  await page.route("**/api/v1/sessions/*", async (route) => {
+    const request = route.request();
+    const sessionId = request.url().split("/").pop() || "";
+
+    if (request.method() === "GET") {
+      const session = sessions.get(sessionId);
+      await route.fulfill(jsonResponse(session || {}));
+      return;
+    }
+
+    const existing = sessions.get(sessionId);
+    if (!existing) {
+      await route.fulfill(jsonResponse({}));
+      return;
+    }
+
+    const payload =
+      (request.postDataJSON() as {
+        metadata?: Record<string, unknown>;
+        config?: Record<string, unknown>;
+      } | null) || null;
+    const nextSession: MockAssistantSession = {
+      ...existing,
+      updated_at: new Date().toISOString(),
+      metadata: {
+        ...(existing.metadata || {}),
+        ...(payload?.metadata || {}),
+      },
+      config: {
+        ...(existing.config || {}),
+        ...(payload?.config || {}),
+      },
+    };
+    sessions.set(sessionId, nextSession);
+    await route.fulfill(jsonResponse(nextSession));
+  });
+
+  await page.route("**/api/v1/assistant/chat/stream", fulfillStream);
 }
 
-function toSseBody(events: Array<Record<string, unknown>>): string {
-  return `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+async function installPlaygroundHarness(page: Page) {
+  let sessionCounter = 0;
+  let streamHits = 0;
+  const sessions = new Map<string, MockPlaygroundSession>();
+
+  const listSessions = async (route: Route) => {
+    const requestUrl = new URL(route.request().url());
+    const requestedServiceId = requestUrl.searchParams.get("service_id");
+    const items = Array.from(sessions.values()).filter((session) =>
+      requestedServiceId ? session.service_id === requestedServiceId : true
+    );
+    await route.fulfill(jsonResponse(items));
+  };
+
+  await page.route("**/api/v1/proxy", async (route) => {
+    await route.fulfill(
+      jsonResponse({
+        services: [
+          {
+            service_id: MOCK_PLAYGROUND_SERVICE_ID,
+            service_name: "Playwright Mock Agent",
+            enabled: true,
+            service_type: "langgraph",
+            metadata: {
+              adapter_type: "langgraph",
+              proxy_mode: "transparent",
+            },
+          },
+        ],
+      })
+    );
+  });
+
+  await page.route("**/api/v1/sessions?*", listSessions);
+  await page.route("**/api/v1/sessions", async (route) => {
+    if (route.request().method() === "GET") {
+      await listSessions(route);
+      return;
+    }
+
+    const payload =
+      (route.request().postDataJSON() as { metadata?: Record<string, unknown> } | null) || null;
+    const sessionId = `e2e-playground-session-${++sessionCounter}`;
+    const session = buildMockPlaygroundSession(sessionId, payload?.metadata);
+    sessions.set(sessionId, session);
+    await route.fulfill(jsonResponse(session));
+  });
+
+  await page.route("**/api/v1/sessions/*", async (route) => {
+    const sessionId = route.request().url().split("/").pop() || "";
+    const existing = sessions.get(sessionId);
+    const payload =
+      (route.request().postDataJSON() as { metadata?: Record<string, unknown> } | null) || null;
+
+    if (!existing) {
+      await route.fulfill(jsonResponse({}));
+      return;
+    }
+
+    const nextSession: MockPlaygroundSession = {
+      ...existing,
+      updated_at: new Date().toISOString(),
+      metadata: {
+        ...(existing.metadata || {}),
+        ...(payload?.metadata || {}),
+      },
+    };
+    sessions.set(sessionId, nextSession);
+    await route.fulfill(jsonResponse(nextSession));
+  });
+
+  await page.route("**/api/v1/sessions/*/messages", async (route) => {
+    await route.fulfill(jsonResponse({ ok: true }));
+  });
+
+  await page.route(
+    `**/api/v1/proxy/${MOCK_PLAYGROUND_SERVICE_ID}/threads`,
+    async (route) => {
+      await route.fulfill(jsonResponse({ thread_id: MOCK_PLAYGROUND_THREAD_ID }));
+    }
+  );
+
+  await page.route(
+    `**/api/v1/proxy/${MOCK_PLAYGROUND_SERVICE_ID}/runs/wait`,
+    async (route) => {
+      await route.fulfill(
+        jsonResponse({
+          messages: [
+            {
+              type: "tool",
+              role: "tool",
+              tool_call_id: MOCK_PLAYGROUND_TOOL_ID,
+              name: "web_search",
+              content: "ok",
+            },
+            {
+              type: "AIMessage",
+              role: "assistant",
+              content: "Playground mock response",
+              tool_calls: [
+                {
+                  id: MOCK_PLAYGROUND_TOOL_ID,
+                  name: "web_search",
+                  args: { query: "playwright" },
+                },
+              ],
+            },
+          ],
+        })
+      );
+    }
+  );
+
+  await page.route(
+    `**/api/v1/proxy/${MOCK_PLAYGROUND_SERVICE_ID}/threads/${MOCK_PLAYGROUND_THREAD_ID}/runs/wait`,
+    async (route) => {
+      await route.fulfill(
+        jsonResponse({
+          messages: [
+            {
+              type: "tool",
+              role: "tool",
+              tool_call_id: MOCK_PLAYGROUND_TOOL_ID,
+              name: "web_search",
+              content: "ok",
+            },
+            {
+              type: "AIMessage",
+              role: "assistant",
+              content: "Playground mock response",
+              tool_calls: [
+                {
+                  id: MOCK_PLAYGROUND_TOOL_ID,
+                  name: "web_search",
+                  args: { query: "playwright" },
+                },
+              ],
+            },
+          ],
+        })
+      );
+    }
+  );
+
+  return {
+    recordStreamHit() {
+      streamHits += 1;
+    },
+    getStreamHits() {
+      return streamHits;
+    },
+  };
 }
 
-test.beforeEach(async ({ page, request, baseURL }) => {
-  const payload = await buildAuthPayload(request, baseURL || "http://127.0.0.1:5173");
-  await seedAuth(page, payload);
-});
+async function selectFirstPlaygroundService(page: Page) {
+  const serviceSelect = page.locator('button[role="combobox"]').first();
+  await expect(serviceSelect).toBeVisible();
+  await serviceSelect.click();
+  const firstOption = page.locator('[role="option"]').first();
+  const hasOptions = await firstOption
+    .waitFor({ state: "visible", timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
+  test.skip(!hasOptions, "No playground services configured");
+  await firstOption.click();
+}
 
 test("assistant stream path keeps a11y and performance budget", async ({ page }) => {
-  await page.goto("/assistant");
+  await ensureAuthenticatedPage(page, "/assistant");
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
   await expect(composer).toBeVisible();
 
@@ -179,9 +384,7 @@ test("assistant stream path keeps a11y and performance budget", async ({ page })
   await assertInpBudget(page);
 });
 
-test("assistant applies persisted locale + theme before interaction", async ({
-  page,
-}) => {
+test("assistant applies persisted locale + theme before interaction", async ({ page }) => {
   await seedClientPrefs(page, {
     locale: "en-US",
     themeMode: "dark",
@@ -189,20 +392,16 @@ test("assistant applies persisted locale + theme before interaction", async ({
     darkMode: true,
   });
 
-  await page.goto("/assistant");
+  await ensureAuthenticatedPage(page, "/assistant");
 
   await expect(page.locator("html")).toHaveAttribute("lang", "en-US");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  const colorScheme = await page.evaluate(
-    () => document.documentElement.style.colorScheme
-  );
+  const colorScheme = await page.evaluate(() => document.documentElement.style.colorScheme);
   expect(colorScheme).toBe("dark");
 });
 
-test("assistant emits stream telemetry lifecycle on mocked stream", async ({
-  page,
-}) => {
-  await page.route("**/api/v1/assistant/chat/stream", async (route) => {
+test("assistant emits stream telemetry lifecycle on mocked stream", async ({ page }) => {
+  await installAssistantHarness(page, async (route) => {
     const body = toSseBody([
       { event_type: "started", data: { request_id: "e2e-mock" } },
       { event_type: "text_delta", data: "Mocked " },
@@ -211,7 +410,7 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({
         data: {
           tool_call_id: "tool-1",
           tool_name: "search_docs",
-          arguments: "{\"query\":\"mock\"}",
+          arguments: '{"query":"mock"}',
         },
       },
       {
@@ -233,7 +432,7 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({
     });
   });
 
-  await page.goto("/assistant");
+  await ensureAuthenticatedPage(page, "/assistant");
   await installTelemetryCollector(page);
 
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
@@ -253,7 +452,7 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({
 });
 
 test("assistant escape cancels delayed stream", async ({ page }) => {
-  await page.route("**/api/v1/assistant/chat/stream", async (route) => {
+  await installAssistantHarness(page, async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 2500));
     try {
       await route.fulfill({
@@ -270,7 +469,7 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
     }
   });
 
-  await page.goto("/assistant");
+  await ensureAuthenticatedPage(page, "/assistant");
   await installTelemetryCollector(page);
 
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
@@ -292,26 +491,21 @@ test("assistant escape cancels delayed stream", async ({ page }) => {
         event.payload?.action === "stop_stream"
     )
   ).toBeTruthy();
-  const finishedEvents = events.filter((event) => event.event === "chat.stream.finished");
-  expect(finishedEvents.length).toBeGreaterThan(0);
   expect(
-    finishedEvents.some((event) =>
-      ["cancelled", "completed"].includes(String(event.payload?.outcome))
+    events.some(
+      (event) =>
+        event.event === "chat.stream.finished" &&
+        ["cancelled", "completed"].includes(String(event.payload?.outcome))
     )
   ).toBeTruthy();
 });
 
 test("playground stream path keeps a11y and performance budget", async ({ page }) => {
-  await page.goto("/playground");
+  await ensureAuthenticatedPage(page, "/playground");
+  await selectFirstPlaygroundService(page);
+
   const composer = page.locator(`#${PLAYGROUND_COMPOSER_ID}`);
   await expect(composer).toBeVisible();
-
-  const serviceSelect = page.locator('button[role="combobox"]').first();
-  await serviceSelect.click();
-  const options = page.locator('[role="option"]');
-  const optionCount = await options.count();
-  test.skip(optionCount === 0, "No playground services configured");
-  await options.first().click();
 
   await page.keyboard.press(`${modKey()}+K`);
   await expect(composer).toBeFocused();
@@ -330,10 +524,10 @@ test("playground stream path keeps a11y and performance budget", async ({ page }
   await assertInpBudget(page);
 });
 
-test("playground handles mocked stream with tool call lifecycle", async ({
-  page,
-}) => {
+test("playground handles mocked stream with tool call lifecycle", async ({ page }) => {
+  const harness = await installPlaygroundHarness(page);
   const mockPlaygroundStream = async (route: Route) => {
+    harness.recordStreamHit();
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
@@ -348,10 +542,10 @@ test("playground handles mocked stream with tool call lifecycle", async ({
           request_id: "pg-e2e",
           chunk_index: 2,
           event_type: "tool_call_start",
-          tool_call: {
-            tool_call_id: "pg-tool-1",
+            tool_call: {
+            tool_call_id: MOCK_PLAYGROUND_TOOL_ID,
             name: "web_search",
-            arguments: "{\"query\":\"playwright\"}",
+            arguments: '{"query":"playwright"}',
             status: "running",
           },
           content: { type: "tool_call", data: "" },
@@ -361,9 +555,9 @@ test("playground handles mocked stream with tool call lifecycle", async ({
           chunk_index: 3,
           event_type: "tool_result",
           tool_call: {
-            tool_call_id: "pg-tool-1",
+            tool_call_id: MOCK_PLAYGROUND_TOOL_ID,
             name: "web_search",
-            arguments: "{\"query\":\"playwright\"}",
+            arguments: '{"query":"playwright"}',
             status: "completed",
           },
           content: { type: "tool_result", data: "ok" },
@@ -384,24 +578,101 @@ test("playground handles mocked stream with tool call lifecycle", async ({
       ]),
     });
   };
+
   await page.route("**/api/v1/stream", mockPlaygroundStream);
   await page.route("**/api/v1/proxy/**/runs/stream", mockPlaygroundStream);
   await page.route("**/api/v1/proxy/**/threads/**/runs/stream", mockPlaygroundStream);
 
-  await page.goto("/playground");
+  await ensureAuthenticatedPage(page, "/playground");
+  await selectFirstPlaygroundService(page);
+
   const composer = page.locator(`#${PLAYGROUND_COMPOSER_ID}`);
-  await expect(composer).toBeVisible();
-
-  const serviceSelect = page.locator('button[role="combobox"]').first();
-  await serviceSelect.click();
-  const options = page.locator('[role="option"]');
-  const optionCount = await options.count();
-  test.skip(optionCount === 0, "No playground services configured");
-  await options.first().click();
-
   await composer.fill(`e2e-pg-mock-${Date.now()}`);
   await composer.press("Enter");
 
   await expect(page.getByText("Playground mock response")).toBeVisible();
-  await expect(page.getByText("Tool calls")).toBeVisible();
+  await expect(page.getByText("web_search")).toBeVisible();
+  expect(harness.getStreamHits()).toBeGreaterThan(0);
+});
+
+test("playground renders native langgraph tool events without heavy assistant card", async ({ page }) => {
+  const harness = await installPlaygroundHarness(page);
+  await seedClientPrefs(page, {
+    locale: "zh-CN",
+    themeMode: "dark",
+    resolvedTheme: "dark",
+    darkMode: true,
+  });
+
+  const nativeLangGraphStream = async (route: Route) => {
+    harness.recordStreamHit();
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: [
+        'event: metadata\ndata: {"run_id":"pg-native-e2e"}\n\n',
+        `event: messages/partial\ndata: [{"content":[],"type":"ai","tool_calls":[{"id":"${MOCK_PLAYGROUND_TOOL_ID}","name":"classify_query","args":{"query":"imam"}}],"usage_metadata":{"input_tokens":21,"output_tokens":4,"total_tokens":25}}]\n\n`,
+        `event: messages/complete\ndata: [{"content":"router: imam","type":"tool","role":"tool","tool_call_id":"${MOCK_PLAYGROUND_TOOL_ID}","name":"classify_query","status":"success"}]\n\n`,
+        'event: messages/complete\ndata: [{"content":"Imam native response","type":"ai","role":"assistant"}]\n\n',
+        "event: end\ndata: {}\n\n",
+      ].join(""),
+    });
+  };
+  const nativeWaitResponse = {
+    messages: [
+      {
+        type: "tool",
+        role: "tool",
+        tool_call_id: MOCK_PLAYGROUND_TOOL_ID,
+        name: "classify_query",
+        content: "router: imam",
+      },
+      {
+        type: "AIMessage",
+        role: "assistant",
+        content: "Imam native response",
+        tool_calls: [
+          {
+            id: MOCK_PLAYGROUND_TOOL_ID,
+            name: "classify_query",
+            args: { query: "imam" },
+          },
+        ],
+      },
+    ],
+  };
+
+  await page.route("**/api/v1/proxy/**/runs/stream", nativeLangGraphStream);
+  await page.route("**/api/v1/proxy/**/threads/**/runs/stream", nativeLangGraphStream);
+  await page.route("**/api/v1/proxy/**/runs/wait", async (route) => {
+    await route.fulfill(jsonResponse(nativeWaitResponse));
+  });
+  await page.route("**/api/v1/proxy/**/threads/**/runs/wait", async (route) => {
+    await route.fulfill(jsonResponse(nativeWaitResponse));
+  });
+
+  await ensureAuthenticatedPage(page, "/playground");
+  await selectFirstPlaygroundService(page);
+
+  const composer = page.locator(`#${PLAYGROUND_COMPOSER_ID}`);
+  await composer.fill(`e2e-pg-native-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Imam native response")).toBeVisible();
+  await expect(page.getByText("classify_query")).toBeVisible();
+
+  const assistantSurface = page
+    .locator('[data-message-role="assistant"] [data-message-surface="assistant"]')
+    .last();
+  const surfaceStyles = await assistantSurface.evaluate((node) => {
+    const styles = window.getComputedStyle(node);
+    return {
+      backgroundColor: styles.backgroundColor,
+      boxShadow: styles.boxShadow,
+    };
+  });
+
+  expect(surfaceStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+  expect(surfaceStyles.boxShadow).toBe("none");
+  expect(harness.getStreamHits()).toBeGreaterThan(0);
 });

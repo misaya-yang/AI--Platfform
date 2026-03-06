@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/useAuthStore";
 
@@ -16,22 +15,14 @@ export function ProtectedRoute({
   requireAll = false,
 }: ProtectedRouteProps) {
   const location = useLocation();
+  const hydrated = useAuthStore((state) => state.hydrated);
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const sessionValidation = useAuthStore((state) => state.sessionValidation);
   const hasAnyPermission = useAuthStore((state) => state.hasAnyPermission);
   const hasAllPermissions = useAuthStore((state) => state.hasAllPermissions);
 
-  // Wait for Zustand persist to hydrate from storage
-  const [isHydrated, setIsHydrated] = useState(false);
-
-  useEffect(() => {
-    // Zustand persist hydration happens synchronously on first render
-    // but we need to wait for the next tick to ensure state is updated
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: hydration state
-    setIsHydrated(true);
-  }, []);
-
   // Show loading while waiting for hydration
-  if (!isHydrated) {
+  if (!hydrated || sessionValidation === "checking") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-gray-500">Loading...</div>

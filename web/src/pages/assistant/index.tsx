@@ -8,7 +8,6 @@ import { useEffect, useState, useRef, useCallback, Component, type ErrorInfo, ty
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Sparkles,
   ArrowDown,
   PanelLeftClose,
   PanelLeft,
@@ -51,6 +50,8 @@ import { useImageGeneration } from "./hooks/useImageGeneration";
 import { DEFAULT_STYLE_ID } from "./styles";
 import i18n from "@/i18n";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
+import { useAppStore } from "@/store/useAppStore";
+import { trackChatHistoryEmptyState } from "@/features/chat/telemetry";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
@@ -105,7 +106,6 @@ export function AssistantPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [config, setConfig] = useState<AssistantConfig | null>(null);
-  const [loading, setLoading] = useState(true);
 
   // 2. Settings State
   const [selectedModel, setSelectedModel] = useState<string>("");
@@ -116,10 +116,11 @@ export function AssistantPage() {
   
   // 3. UI State
   const [input, setInput] = useState("");
-  const [showLeftPanel, setShowLeftPanel] = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
+  const setShowLeftPanel = useAppStore((state) => state.setAssistantSidebarOpen);
   
   // 4. Complex Logic Hooks
   const {
@@ -129,6 +130,8 @@ export function AssistantPage() {
     setMessages,
     isStreaming,
     sessionsLoading,
+    historyRestoreState,
+    historyRestoreError,
     handleNewChat,
     handleSelectSession,
     handleDeleteSession,
@@ -203,8 +206,6 @@ export function AssistantPage() {
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
-      } finally {
-        setLoading(false);
       }
     }
     loadData();
@@ -217,6 +218,35 @@ export function AssistantPage() {
     mediaQuery.addEventListener("change", sync);
     return () => mediaQuery.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    if (sessionsLoading || messages.length > 0) return;
+    if (historyRestoreState === "loading" || historyRestoreState === "failed") return;
+
+    if (!showLeftPanel && sessions.length > 0) {
+      trackChatHistoryEmptyState("assistant", {
+        state: "history_hidden",
+        sessionCount: sessions.length,
+        activeSessionId,
+      });
+      return;
+    }
+
+    if (activeSessionId) {
+      trackChatHistoryEmptyState("assistant", {
+        state: "selected_session_empty",
+        sessionCount: sessions.length,
+        activeSessionId,
+      });
+      return;
+    }
+
+    trackChatHistoryEmptyState("assistant", {
+      state: "no_sessions",
+      sessionCount: sessions.length,
+      activeSessionId: null,
+    });
+  }, [activeSessionId, historyRestoreState, messages.length, sessions.length, sessionsLoading, showLeftPanel]);
 
   // Sync settings when session changes
   const onSessionSelect = useCallback(async (sessionId: string) => {
@@ -308,40 +338,38 @@ export function AssistantPage() {
   }, [input, selectedStyle, sendImageGeneration]);
 
   // Auto-scroll
-  const scrollToBottom = useCallback(() => {
-    scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: "smooth" });
-    setShowScrollButton(false);
+  const scrollToBottomDom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    scrollContainerRef.current?.scrollTo({
+      top: scrollContainerRef.current.scrollHeight,
+      behavior,
+    });
   }, []);
 
-  useEffect(() => {
-    if (scrollContainerRef.current) {
-      const container = scrollContainerRef.current;
-      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
-      if (isNearBottom || messages[messages.length - 1]?.isStreaming) {
-        scrollToBottom();
-      }
-    }
-  }, [messages, scrollToBottom]);
+  const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
 
-  // Loading Screen
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-[calc(100vh-4rem)] bg-slate-50 dark:bg-slate-900">
-        <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="flex flex-col items-center gap-4">
-          <div className="relative">
-             <motion.div 
-               className="h-20 w-20 rounded-3xl bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 flex items-center justify-center shadow-2xl shadow-violet-500/30"
-               animate={{ rotate: [0, 5, -5, 0] }}
-               transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-             >
-               <Sparkles className="h-10 w-10 text-white" />
-             </motion.div>
-          </div>
-          <p className="text-slate-500 dark:text-slate-400 font-medium">{t("assistant.loading", "Loading assistant...")}</p>
-        </motion.div>
-      </div>
-    );
-  }
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    setShowScrollButton(distanceFromBottom >= 150);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    scrollToBottomDom();
+    setShowScrollButton(false);
+  }, [scrollToBottomDom]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const isNearBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+
+    if (isNearBottom || messages[messages.length - 1]?.isStreaming) {
+      scrollToBottomDom();
+    }
+  }, [messages, scrollToBottomDom]);
 
   return (
     <TooltipProvider>
@@ -383,7 +411,17 @@ export function AssistantPage() {
             <div className="flex items-center gap-2 py-3 px-4 shrink-0">
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => setShowLeftPanel(!showLeftPanel)}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                    onClick={() => setShowLeftPanel(!showLeftPanel)}
+                    aria-label={
+                      showLeftPanel
+                        ? t("assistant.hideHistory", "Hide history")
+                        : t("assistant.showHistory", "Show history")
+                    }
+                  >
                     {showLeftPanel ? <PanelLeftClose className="h-4 w-4 text-slate-500" /> : <PanelLeft className="h-4 w-4 text-slate-500" />}
                   </Button>
                 </TooltipTrigger>
@@ -393,10 +431,95 @@ export function AssistantPage() {
             </div>
 
             {/* Messages Area */}
-            <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+            <div
+              ref={scrollContainerRef}
+              className="flex-1 overflow-y-auto"
+              onScroll={handleScroll}
+            >
               <div className={cn("mx-auto px-6 py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
                 {messages.length === 0 ? (
-                  <WelcomeScreen />
+                  <div className="space-y-5">
+                    {!showLeftPanel && sessions.length > 0 && (
+                      <div className="rounded-2xl border border-amber-200/70 bg-amber-50/80 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium">
+                              {t("assistant.historyHiddenTitle", "History is hidden")}
+                            </div>
+                            <div className="mt-1 text-amber-800/80 dark:text-amber-100/80">
+                              {t("assistant.historyHiddenDescription", "Your previous chats are still available in the left sidebar.")}
+                            </div>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setShowLeftPanel(true)}
+                            className="shrink-0 border-amber-300/80 bg-white/80 text-amber-900 hover:bg-white dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100"
+                          >
+                            {t("assistant.showHistory", "Show history")}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                    {activeSessionId && !sessionsLoading && (
+                      historyRestoreState === "loading" ? (
+                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-sm dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
+                          <div className="font-medium">
+                            {t("assistant.restoringSessionTitle", "Restoring selected conversation")}
+                          </div>
+                          <div className="mt-1 text-slate-500 dark:text-slate-400">
+                            {t("assistant.restoringSessionDescription", "We are loading the latest messages and files for this conversation.")}
+                          </div>
+                        </div>
+                      ) : historyRestoreState === "failed" ? (
+                        <div className="rounded-2xl border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-900 shadow-sm dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-100">
+                          <div className="font-medium">
+                            {t("assistant.restoreFailedTitle", "Couldn't restore the selected conversation")}
+                          </div>
+                          <div className="mt-1 text-red-800/80 dark:text-red-100/80">
+                            {t("assistant.restoreFailedDescription", "The conversation still exists, but the last restore attempt did not finish. You can retry or start a new chat.")}
+                          </div>
+                          {historyRestoreError && (
+                            <div className="mt-2 truncate text-xs text-red-700/80 dark:text-red-200/80">
+                              {historyRestoreError}
+                            </div>
+                          )}
+                          <div className="mt-3 flex gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                if (activeSessionId) {
+                                  void onSessionSelect(activeSessionId);
+                                }
+                              }}
+                              className="border-red-300/80 bg-white/90 text-red-900 hover:bg-white dark:border-red-400/30 dark:bg-red-500/10 dark:text-red-100"
+                            >
+                              {t("common.retry", "Retry")}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={onNewChat}
+                              className="text-red-900 hover:bg-red-100 dark:text-red-100 dark:hover:bg-red-500/10"
+                            >
+                              {t("assistant.newChat", "New chat")}
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-sm dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
+                          <div className="font-medium">
+                            {t("assistant.selectedSessionEmptyTitle", "Selected conversation has no restored messages")}
+                          </div>
+                          <div className="mt-1 text-slate-500 dark:text-slate-400">
+                            {t("assistant.selectedSessionEmptyDescription", "This can happen when the conversation is empty or the last restore failed.")}
+                          </div>
+                        </div>
+                      )
+                    )}
+                    <WelcomeScreen />
+                  </div>
                 ) : (
                   <div
                     className="space-y-6"
@@ -505,7 +628,6 @@ export function AssistantPage() {
               onStop={stopStreaming}
               handlePaste={handlePaste}
               fileInputRef={fileInputRef}
-              models={models}
               config={config}
               datasets={datasets}
               selectedDatasets={selectedDatasets}

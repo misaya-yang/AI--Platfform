@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, startTransition } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 
 import { usePlaygroundServices } from "@/hooks/useServices";
@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { MessageSquarePlus, Trash2, ArrowDown } from "lucide-react";
+import { MessageSquarePlus, Trash2, ArrowDown, PanelLeft, X } from "lucide-react";
 import { useAppStore } from "@/store/useAppStore";
 import { useAuthStore } from "@/store/useAuthStore";
 import {
@@ -50,6 +50,8 @@ import {
   finishChatStreamTrace,
   markChatStreamFirstToken,
   startChatStreamTrace,
+  trackChatHistoryEmptyState,
+  trackChatHistoryRestored,
 } from "@/features/chat/telemetry";
 import { formatDateTime } from "@/utils/intl";
 
@@ -59,6 +61,13 @@ type ToolCallUpdate = {
   id: string;
   name: string;
   args: string;
+};
+
+type ToolResultUpdate = {
+  id: string;
+  name: string;
+  content: string;
+  status: "completed" | "error";
 };
 
 const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
@@ -177,10 +186,23 @@ function extractToolCallUpdates(message: Record<string, unknown>): ToolCallUpdat
     }
   }
 
+  if (updates.length === 0) {
+    const additional = message.additional_kwargs as Record<string, unknown> | undefined;
+    const functionCall = additional?.function_call;
+    if (functionCall && typeof functionCall === "object") {
+      const record = functionCall as Record<string, unknown>;
+      updates.push({
+        id: (message.id as string) || "",
+        name: (record.name as string) || "",
+        args: normalizeToolArgs(record.arguments),
+      });
+    }
+  }
+
   return updates.filter((u) => u.id || u.name || u.args);
 }
 
-function extractToolResult(message: Record<string, unknown>): { id: string; name: string; content: string } | null {
+function extractToolResult(message: Record<string, unknown>): ToolResultUpdate | null {
   const msgType = (message.type as string) || "";
   const role = (message.role as string) || "";
   const isToolMessage = msgType === "tool" || msgType === "ToolMessage" || role === "tool";
@@ -192,10 +214,15 @@ function extractToolResult(message: Record<string, unknown>): { id: string; name
     "";
   const name = (message.name as string) || "";
   let content = message.content as unknown;
+  if ((content == null || content === "") && message.artifact != null) {
+    content = message.artifact;
+  }
   if (typeof content !== "string") {
     content = normalizeToolArgs(content);
   }
-  return { id: toolCallId, name, content: String(content) };
+  const rawStatus = String(message.status || "").toLowerCase();
+  const status = rawStatus === "error" || rawStatus === "failed" ? "error" : "completed";
+  return { id: toolCallId, name, content: String(content), status };
 }
 
 function normalizeHistoryContent(value: unknown): string {
@@ -245,6 +272,105 @@ function extractRunWaitContent(result: unknown): string {
   return normalizeHistoryContent(record);
 }
 
+function isValidToolArgs(value: string): boolean {
+  if (!value) return false;
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractRunWaitToolCalls(result: unknown): ToolCallWithResult[] | undefined {
+  if (!result || typeof result !== "object") return undefined;
+
+  const messages = (result as Record<string, unknown>).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+
+  const collected = new Map<string, ToolCallWithResult>();
+  let autoId = 0;
+
+  for (const rawMessage of messages) {
+    if (!rawMessage || typeof rawMessage !== "object") continue;
+    const message = rawMessage as Record<string, unknown>;
+
+    for (const update of extractToolCallUpdates(message)) {
+      const toolCallId = update.id || `wait-tool-${++autoId}`;
+      const existing = collected.get(toolCallId);
+      const argsText = update.args || existing?.argsText || "";
+      collected.set(toolCallId, {
+        toolCall: {
+          tool_call_id: toolCallId,
+          name: update.name || existing?.toolCall.name || "tool",
+          arguments: argsText,
+          status: existing?.toolCall.status || "running",
+        },
+        result: existing?.result,
+        argsText,
+        argsValid: argsText ? isValidToolArgs(argsText) : Boolean(existing?.argsValid),
+      });
+    }
+
+    const toolResult = extractToolResult(message);
+    if (!toolResult) continue;
+
+    const toolCallId = toolResult.id || `wait-tool-${++autoId}`;
+    const existing = collected.get(toolCallId);
+    const argsText = existing?.argsText || "";
+    collected.set(toolCallId, {
+      toolCall: {
+        tool_call_id: toolCallId,
+        name: toolResult.name || existing?.toolCall.name || "tool",
+        arguments: argsText,
+        status: "completed",
+      },
+      result: toolResult.content,
+      argsText,
+      argsValid: argsText ? isValidToolArgs(argsText) : Boolean(existing?.argsValid),
+    });
+  }
+
+  return collected.size > 0 ? Array.from(collected.values()) : undefined;
+}
+
+function mergeFallbackToolCalls(
+  state: StreamTurnState,
+  toolCalls?: ToolCallWithResult[]
+): StreamTurnState {
+  if (!toolCalls?.length) return state;
+
+  const nextToolCalls = [...state.toolCalls];
+  for (const item of toolCalls) {
+    const toolCallId = item.toolCall.tool_call_id || `wait-tool-${nextToolCalls.length + 1}`;
+    const index = nextToolCalls.findIndex((toolCall) => toolCall.id === toolCallId);
+    const nextValue = {
+      id: toolCallId,
+      name: item.toolCall.name || "tool",
+      arguments: item.argsText || item.toolCall.arguments || "",
+      argsValid: Boolean(item.argsValid),
+      status: item.result ? "completed" : item.toolCall.status || "running",
+      result: item.result,
+      startedAt: index >= 0 ? nextToolCalls[index].startedAt : undefined,
+      endedAt: item.result ? performance.now() : nextToolCalls[index]?.endedAt,
+    } as StreamTurnState["toolCalls"][number];
+
+    if (index === -1) {
+      nextToolCalls.push(nextValue);
+      continue;
+    }
+    nextToolCalls[index] = {
+      ...nextToolCalls[index],
+      ...nextValue,
+    };
+  }
+
+  return {
+    ...state,
+    toolCalls: nextToolCalls,
+  };
+}
+
 function dedupeHistory(history: SessionMessage[]): SessionMessage[] {
   const next: SessionMessage[] = [];
   for (const msg of history) {
@@ -291,13 +417,15 @@ export function PlaygroundPage() {
   const servicesQuery = usePlaygroundServices();
   // Keep legacy assistant service visible for backward compatibility so
   // existing playground histories remain accessible.
-  const services = servicesQuery.data || [];
+  const services = useMemo(() => servicesQuery.data ?? [], [servicesQuery.data]);
 
   const {
     selectedServiceId: serviceId,
     setSelectedServiceId: setServiceId,
     activeSessionId,
     setActiveSessionId,
+    playgroundSidebarOpen,
+    setPlaygroundSidebarOpen,
     localTitles,
     setLocalTitles
   } = useAppStore();
@@ -305,6 +433,7 @@ export function PlaygroundPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const messagesRef = useRef<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -318,10 +447,22 @@ export function PlaygroundPage() {
   const activeService = services.find((s) => s.service_id === serviceId);
   const uiPreferences = (activeService?.metadata?.ui_preferences || {}) as ServiceUiPreferences;
   const toolCallsMode = uiPreferences.tool_calls_mode ?? "full";
-  const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? true;  // Default to expanded
+  const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? true;
   const showTimeline = !uiPreferences.hide_timeline;
   const showThinkingIndicator = true;  // Always show thinking indicator
-  const effectiveShowToolCalls = showToolCalls && toolCallsMode !== "hidden";
+  const forceVisibleToolCalls =
+    activeService?.service_type === "langgraph" && !showTimeline;
+  const resolvedToolCallsMode =
+    toolCallsMode === "hidden"
+      ? "hidden"
+      : forceVisibleToolCalls
+        ? "full"
+        : toolCallsMode;
+  const resolvedToolCallsDefaultOpen =
+    forceVisibleToolCalls ? true : toolCallsDefaultOpen;
+  const effectiveShowToolCalls =
+    resolvedToolCallsMode !== "hidden" &&
+    (showToolCalls || forceVisibleToolCalls);
 
   // AG-UI Timeline state management
   const {
@@ -337,6 +478,10 @@ export function PlaygroundPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyRestoreState, setHistoryRestoreState] = useState<
+    "idle" | "loading" | "ready" | "failed"
+  >("idle");
+  const [historyRestoreError, setHistoryRestoreError] = useState<string | null>(null);
   const [sessionEnabled, setSessionEnabled] = useState(true);
 
   const isInitialMount = useRef(true);
@@ -353,6 +498,14 @@ export function PlaygroundPage() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const sync = () => setIsMobile(mediaQuery.matches);
+    sync();
+    mediaQuery.addEventListener("change", sync);
+    return () => mediaQuery.removeEventListener("change", sync);
+  }, []);
 
 
   const refreshSessions = useCallback(async () => {
@@ -388,9 +541,26 @@ export function PlaygroundPage() {
     }
   }, [serviceId, setLocalTitles]);
 
+  useEffect(() => {
+    if (services.length === 0) return;
+    const currentIsValid = serviceId ? services.some((service) => service.service_id === serviceId) : false;
+    if (currentIsValid) return;
+
+    const fallbackService =
+      services.find((service) => service.service_id === "assistant") ||
+      services.find((service) => service.service_type === "assistant") ||
+      services[0];
+
+    if (fallbackService && fallbackService.service_id !== serviceId) {
+      setServiceId(fallbackService.service_id);
+    }
+  }, [serviceId, services, setServiceId]);
+
   const invalidatePendingHistoryLoad = useCallback(() => {
     loadingHistorySessionRef.current = null;
     setHistoryLoading(false);
+    setHistoryRestoreState("idle");
+    setHistoryRestoreError(null);
   }, []);
 
   const handleSelectSession = useCallback(async (id: string) => {
@@ -405,6 +575,9 @@ export function PlaygroundPage() {
     loadingHistorySessionRef.current = id;
     setActiveSessionId(id);
     setHistoryLoading(true);
+    setHistoryRestoreState("loading");
+    setHistoryRestoreError(null);
+    setMessages([]);
 
     try {
       // Add timeout to prevent infinite waits on problematic sessions
@@ -462,17 +635,25 @@ export function PlaygroundPage() {
         };
       });
       setMessages(nextMessages);
+      setHistoryRestoreState("ready");
+      trackChatHistoryRestored("playground", {
+        sessionId: id,
+        messageCount: nextMessages.length,
+        restored: true,
+      });
     } catch (err) {
       // 鍙湁褰撲粛鏄綋鍓嶄細璇濇椂鎵嶆樉绀洪敊璇?
       if (loadingHistorySessionRef.current === id) {
         console.error("Failed to load session history:", err);
-        // On timeout or error, clear the problematic session to recover
         const errorMessage = err instanceof Error ? err.message : String(err);
-        if (errorMessage.includes("timeout") || errorMessage.includes("Timeout")) {
-          console.warn("[Playground] Session load timed out, clearing session to recover");
-          setActiveSessionId(undefined);
-          setMessages([]);
-        }
+        setHistoryRestoreState("failed");
+        setHistoryRestoreError(errorMessage);
+        trackChatHistoryRestored("playground", {
+          sessionId: id,
+          messageCount: 0,
+          restored: false,
+          reason: errorMessage,
+        });
       }
     } finally {
       // 鍙湁褰撲粛鏄綋鍓嶄細璇濇椂鎵嶆竻闄ゅ姞杞界姸鎬?
@@ -498,6 +679,8 @@ export function PlaygroundPage() {
     loadingHistorySessionRef.current = created.session_id;
     currentRequestSessionRef.current = created.session_id;
     setActiveSessionId(created.session_id);
+    setHistoryRestoreState("idle");
+    setHistoryRestoreError(null);
     setMessages([]);
     await refreshSessions();
   }, [serviceId, refreshSessions, setActiveSessionId, invalidatePendingHistoryLoad]);
@@ -575,6 +758,52 @@ export function PlaygroundPage() {
     onStop: loading ? handleStopStreaming : undefined,
   });
 
+  useEffect(() => {
+    if (historyLoading || messages.length > 0) return;
+    if (historyRestoreState === "loading" || historyRestoreState === "failed") return;
+
+    if (!serviceId) {
+      trackChatHistoryEmptyState("playground", {
+        state: "service_unselected",
+        sessionCount: sessions.length,
+        activeSessionId,
+      });
+      return;
+    }
+
+    if (!playgroundSidebarOpen && sessions.length > 0) {
+      trackChatHistoryEmptyState("playground", {
+        state: "history_hidden",
+        sessionCount: sessions.length,
+        activeSessionId,
+      });
+      return;
+    }
+
+    if (activeSessionId) {
+      trackChatHistoryEmptyState("playground", {
+        state: "selected_session_empty",
+        sessionCount: sessions.length,
+        activeSessionId,
+      });
+      return;
+    }
+
+    trackChatHistoryEmptyState("playground", {
+      state: "no_sessions",
+      sessionCount: sessions.length,
+      activeSessionId,
+    });
+  }, [
+    activeSessionId,
+    historyLoading,
+    historyRestoreState,
+    messages.length,
+    playgroundSidebarOpen,
+    serviceId,
+    sessions.length,
+  ]);
+
   const handleDeleteSession = useCallback(
     async (id: string) => {
       await deleteSession(id);
@@ -584,6 +813,8 @@ export function PlaygroundPage() {
       if (activeSessionId === id) {
         setActiveSessionId(undefined);
         setMessages([]);
+        setHistoryRestoreState("idle");
+        setHistoryRestoreError(null);
       }
       // 浠庢湰鍦版爣棰樼紦瀛樹腑绉婚櫎
       setLocalTitles(prev => {
@@ -606,6 +837,8 @@ export function PlaygroundPage() {
       if (urlParams.get("reset") === "true") {
         setActiveSessionId(undefined);
         setMessages([]);
+        setHistoryRestoreState("idle");
+        setHistoryRestoreError(null);
         // Remove the reset param from URL without reload
         const newUrl = window.location.pathname;
         window.history.replaceState({}, "", newUrl);
@@ -649,6 +882,8 @@ export function PlaygroundPage() {
           console.warn("[Playground] activeSessionId doesn't belong to current service, clearing");
           setActiveSessionId(undefined);
           setMessages([]);
+          setHistoryRestoreState("idle");
+          setHistoryRestoreError(null);
         }
       }
       isInitialMount.current = false;
@@ -677,6 +912,8 @@ export function PlaygroundPage() {
 
       setMessages([]);
       setActiveSessionId(undefined);
+      setHistoryRestoreState("idle");
+      setHistoryRestoreError(null);
       void refreshSessions();
     }
     prevServiceId.current = serviceId;
@@ -1049,6 +1286,18 @@ export function PlaygroundPage() {
             const eventName = normalized.event || "";
             const eventData = normalized.data;
 
+            if (
+              !eventName &&
+              eventData &&
+              typeof eventData === "object" &&
+              "event_type" in (eventData as Record<string, unknown>)
+            ) {
+              if (processStreamChunk(eventData as StreamChunk)) {
+                break;
+              }
+              continue;
+            }
+
             if (eventName === "error") {
               throw new Error(typeof eventData === "string" ? eventData : "LangGraph stream error");
             }
@@ -1125,7 +1374,7 @@ export function PlaygroundPage() {
                             tool_call_id: toolResult.id || `auto-${++toolCallIdCounter}`,
                             name: toolResult.name || "",
                             arguments: existingArgs,
-                            status: "completed",
+                            status: toolResult.status,
                           },
                           content: { type: "tool_result", data: toolResult.content },
                         });
@@ -1308,7 +1557,7 @@ export function PlaygroundPage() {
                     tool_call_id: toolResult.id || `auto-${++toolCallIdCounter}`,
                     name: toolResult.name || "",
                     arguments: existingArgs,
-                    status: "completed",
+                    status: toolResult.status,
                   },
                   content: { type: "tool_result", data: toolResult.content },
                 });
@@ -1448,6 +1697,10 @@ export function PlaygroundPage() {
               throw buildHttpFailureError("Run wait failed", resp.status, errorText);
             }
             const data = await resp.json();
+            streamState = mergeFallbackToolCalls(
+              streamState,
+              extractRunWaitToolCalls(data)
+            );
             streamState = setStreamTurnContent(
               streamState,
               extractRunWaitContent(data)
@@ -1474,12 +1727,15 @@ export function PlaygroundPage() {
           durationMs = Math.round(syncEndTime - startTime);
           firstTokenMs = undefined;
           streamState = completeStreamTurn(streamState, syncEndTime);
+          const fallbackToolCalls = mapToolCalls(streamState);
           setMessages((m) => {
             const next = [...m];
             if (next[assistantIndex]) {
               next[assistantIndex] = {
                 ...next[assistantIndex],
                 content: streamState.content,
+                toolCalls: fallbackToolCalls,
+                status: streamState.status,
                 isThinking: false,
                 isStreaming: false,
                 stats: {
@@ -1601,7 +1857,15 @@ export function PlaygroundPage() {
   return (
     <div className="flex overflow-hidden bg-card -m-6" style={{ height: 'calc(100vh - 64px)', width: 'calc(100% + 48px)' }}>
       {/* Sessions Sidebar */}
-      <aside className="hidden md:flex w-[280px] flex-col border-r border-border/40 bg-gradient-to-b from-muted/30 to-muted/10">
+      {playgroundSidebarOpen && (
+        <aside
+          className={cn(
+            "w-[280px] flex-col border-r border-border/40 bg-gradient-to-b from-muted/30 to-muted/10",
+            isMobile
+              ? "absolute inset-y-0 left-0 z-30 flex shadow-2xl"
+              : "hidden md:flex"
+          )}
+        >
         <div className="h-14 flex items-center px-4 border-b border-border/40">
           <Button
             size="sm"
@@ -1614,6 +1878,18 @@ export function PlaygroundPage() {
             </div>
             {t("playground.newChat", "New chat")}
           </Button>
+          {isMobile && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="ml-2 shrink-0"
+              onClick={() => setPlaygroundSidebarOpen(false)}
+              aria-label={t("playground.hideHistory", "Hide history")}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">
@@ -1703,7 +1979,7 @@ export function PlaygroundPage() {
                           "rounded-md p-1.5 opacity-0 group-hover:opacity-70 hover:!opacity-100 transition-all",
                           "hover:bg-destructive/10 hover:text-destructive"
                         )}
-                        aria-label={t("playground.deleteChat", "Delete chat")}
+                        aria-label={`${t("playground.deleteChat", "Delete chat")}: ${title}`}
                         title={t("common.delete", "Delete")}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -1715,13 +1991,37 @@ export function PlaygroundPage() {
             </div>
           )}
         </div>
-      </aside>
+        </aside>
+      )}
+
+      {isMobile && playgroundSidebarOpen && (
+        <button
+          type="button"
+          className="absolute inset-0 z-20 bg-black/40"
+          aria-label={t("playground.hideHistory", "Hide history")}
+          onClick={() => setPlaygroundSidebarOpen(false)}
+        />
+      )}
 
       <div className="flex-1 flex flex-col relative overflow-hidden min-h-0">
       {/* Header / Config Bar */}
       <div className="h-14 flex items-center border-b border-border/60 bg-background px-6">
         <div className="flex items-center justify-between gap-4 w-full max-w-4xl mx-auto">
           <div className="flex items-center gap-3 flex-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 rounded-xl border border-border/50"
+              onClick={() => setPlaygroundSidebarOpen(!playgroundSidebarOpen)}
+              aria-label={
+                playgroundSidebarOpen
+                  ? t("playground.hideHistory", "Hide history")
+                  : t("playground.showHistory", "Show history")
+              }
+            >
+              <PanelLeft className="h-4 w-4" />
+            </Button>
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 text-white shadow-lg shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
@@ -1789,17 +2089,76 @@ export function PlaygroundPage() {
             {t("playground.loadingHistory", "Loading chat history...")}
           </div>
         ) : messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
-            {sessionEnabled
-              ? t("playground.selectOrStartChat", "Select a chat on the left or start a new one.")
-              : t("playground.typeToStart", "Type a message to start.")}
+          <div className="flex h-full items-center justify-center p-8">
+            <div className="max-w-md rounded-3xl border border-border/60 bg-card/70 px-6 py-5 text-sm shadow-sm">
+              <div className="font-medium text-foreground">
+                {historyRestoreState === "loading" && activeSessionId
+                  ? t("playground.restoringSessionTitle", "Restoring selected conversation")
+                  : historyRestoreState === "failed" && activeSessionId
+                    ? t("playground.restoreFailedTitle", "Couldn't restore the selected conversation")
+                  : !playgroundSidebarOpen && sessions.length > 0
+                  ? t("playground.historyHiddenTitle", "History is hidden")
+                  : activeSessionId
+                    ? t("playground.selectedSessionEmptyTitle", "Selected conversation has no restored messages")
+                    : sessionEnabled
+                      ? t("playground.selectOrStartChat", "Select a chat on the left or start a new one.")
+                      : t("playground.typeToStart", "Type a message to start.")}
+              </div>
+              <div className="mt-2 text-muted-foreground">
+                {historyRestoreState === "loading" && activeSessionId
+                  ? t("playground.restoringSessionDescription", "We are loading the latest messages and tool activity for this conversation.")
+                  : historyRestoreState === "failed" && activeSessionId
+                    ? t("playground.restoreFailedDescription", "The conversation still exists, but the last restore attempt did not finish. Retry it or start a fresh chat.")
+                  : !playgroundSidebarOpen && sessions.length > 0
+                  ? t("playground.historyHiddenDescription", "Your earlier chats are still available in the history panel.")
+                  : activeSessionId
+                    ? t("playground.selectedSessionEmptyDescription", "This conversation is empty or the last restore did not complete.")
+                    : t("playground.emptyStateHint", "Conversation history and draft state will stay in sync after refresh.")}
+              </div>
+              {historyRestoreState === "failed" && activeSessionId && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleSelectSession(activeSessionId)}
+                  >
+                    {t("common.retry", "Retry")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleNewSession()}
+                  >
+                    {t("playground.newChat", "New chat")}
+                  </Button>
+                </div>
+              )}
+              {historyRestoreState === "failed" && historyRestoreError && (
+                <div className="mt-3 truncate text-xs text-muted-foreground">
+                  {historyRestoreError}
+                </div>
+              )}
+              {!playgroundSidebarOpen && sessions.length > 0 && historyRestoreState !== "failed" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-4"
+                  onClick={() => setPlaygroundSidebarOpen(true)}
+                >
+                  {t("playground.showHistory", "Show history")}
+                </Button>
+              )}
+            </div>
           </div>
         ) : (
           <ChatWindow
             messages={messages}
             showToolCalls={effectiveShowToolCalls}
-            toolCallsMode={toolCallsMode}
-            toolCallsDefaultOpen={toolCallsDefaultOpen}
+            toolCallsMode={resolvedToolCallsMode}
+            toolCallsDefaultOpen={resolvedToolCallsDefaultOpen}
             showTimeline={showTimeline}
             showThinkingIndicator={showThinkingIndicator}
           />
@@ -1845,9 +2204,9 @@ export function PlaygroundPage() {
             <label className="flex items-center gap-2 cursor-pointer select-none hover:text-foreground transition-colors">
               <Switch
                 id="toggle-tool-calls"
-                checked={showToolCalls}
+                checked={forceVisibleToolCalls ? true : showToolCalls}
                 onCheckedChange={setShowToolCalls}
-                disabled={toolCallsMode === "hidden"}
+                disabled={resolvedToolCallsMode === "hidden" || forceVisibleToolCalls}
               />
               {t("playground.showToolCalls", "Show tool calls")}
             </label>

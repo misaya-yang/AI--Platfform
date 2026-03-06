@@ -269,6 +269,7 @@ const ChatMessageItem = memo(
         message,
         showToolCalls,
         toolCallsMode = "full",
+        toolCallsDefaultOpen = true,
         showTimeline = true,
         showThinkingIndicator = true,
         index,
@@ -282,19 +283,31 @@ const ChatMessageItem = memo(
       const canShowToolCalls = showToolCalls && toolCallsMode !== "hidden" && !isUser && hasToolCalls;
       const hasTimeline = showTimeline && !isUser && message.timeline && message.timeline.steps.length > 0;
       const hasArtifacts = !isUser && message.artifacts && message.artifacts.length > 0;
+      const assistantDisplayContent = isUser
+        ? message.content
+        : stripProcessSectionForDisplay(message.content || "");
+      const hasVisibleAssistantText = assistantDisplayContent.trim().length > 0;
+      const hasRunningToolCalls = message.toolCalls?.some(tc => tc.toolCall.status === "running") ?? false;
 
       // Timeline expansion state - auto-expand when running
       const [isTimelineExpanded, setIsTimelineExpanded] = useState(
         message.timeline?.status === "running"
       );
-      // Tool calls - ALWAYS default to expanded for better UX
-      const [toolCallsExpanded, setToolCallsExpanded] = useState(true);
+      const initialToolCallExpand =
+        toolCallsMode === "full" || toolCallsDefaultOpen || hasRunningToolCalls;
+      const [toolCallsExpanded, setToolCallsExpanded] = useState(
+        initialToolCallExpand
+      );
+      const toolCallsAreForcedOpen = toolCallsMode === "full" || hasRunningToolCalls;
       // Show tool calls list: either in full mode OR when expanded (regardless of toolCallsMode)
-      const shouldShowToolCallsList = canShowToolCalls && (toolCallsMode === "full" || toolCallsExpanded);
-      const shouldShowToolCallsSummary = canShowToolCalls && toolCallsMode === "collapsed" && !toolCallsExpanded;
-      
-      // Check if any tool is still running
-      const hasRunningToolCalls = message.toolCalls?.some(tc => tc.toolCall.status === "running") ?? false;
+      const shouldShowToolCallsList =
+        canShowToolCalls && (toolCallsAreForcedOpen || toolCallsExpanded);
+      const shouldShowToolCallsSummary =
+        canShowToolCalls &&
+        toolCallsMode === "collapsed" &&
+        !toolCallsAreForcedOpen &&
+        !toolCallsExpanded;
+
       // Content that will likely be filtered out (internal prompts, JSON blobs)
       // Be conservative - only match specific internal patterns, not general phrases
       const contentLikelyFiltered = message.content && message.content.length < 50 && (
@@ -311,6 +324,7 @@ const ChatMessageItem = memo(
       return (
         <motion.div
           ref={ref}
+          data-message-role={message.role}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, ease: "easeOut", delay: index * 0.05 }}
@@ -337,6 +351,7 @@ const ChatMessageItem = memo(
 
           {/* Message Bubble */}
           <div
+            data-message-surface={isUser ? "user" : "assistant"}
             role={!isUser && message.status === "failed" ? "alert" : undefined}
             aria-live={!isUser && message.status === "failed" ? "assertive" : undefined}
             className={cn(
@@ -351,20 +366,20 @@ const ChatMessageItem = memo(
                     "shadow-md shadow-emerald-500/20",
                   ]
                 : [
-                    // Assistant message - refined, spacious
+                    // Assistant message - editor-like, no heavy card frame
                     "w-full",
-                    "px-5 py-4",
-                    "bg-white dark:bg-zinc-900/95",
-                    "text-slate-800 dark:text-zinc-100 text-[15px] leading-[1.7]",
-                    "rounded-2xl rounded-tl-sm",
-                    "border border-slate-200/60 dark:border-zinc-800/80",
-                    "shadow-xl shadow-slate-200/40 dark:shadow-black/25",
+                    "space-y-4",
+                    message.status === "failed"
+                      ? "rounded-2xl rounded-tl-sm border border-rose-500/25 bg-rose-500/8 px-4 py-3"
+                      : "px-1 py-1",
                   ]
             )}
           >
             {/* AI Thinking Indicator - show when streaming with no content OR with running tool calls */}
             {shouldShowThinking && (
-              <ThinkingIndicator />
+              <div className="rounded-2xl border border-slate-200/60 bg-white/65 px-4 py-3 shadow-sm shadow-slate-200/30 dark:border-white/8 dark:bg-white/[0.03] dark:shadow-none">
+                <ThinkingIndicator />
+              </div>
             )}
 
             {/* AG-UI Timeline Section */}
@@ -427,16 +442,18 @@ const ChatMessageItem = memo(
             )}
 
             {/* Message Content */}
-            {message.content ? (
+            {(isUser ? message.content : hasVisibleAssistantText) ? (
               <div className={cn(
                 "leading-[1.75]",
-                isUser ? "text-white text-[15px]" : "text-slate-800 dark:text-zinc-100 text-[15px]"
+                isUser
+                  ? "text-white text-[15px]"
+                  : "max-w-none px-1 text-[15px] text-slate-800 dark:text-zinc-100"
               )}>
                 {isUser ? (
                   <div className="whitespace-pre-wrap">{message.content}</div>
                 ) : (
                     <StreamOutput
-                      text={stripProcessSectionForDisplay(message.content)}
+                      text={assistantDisplayContent}
                       isStreaming={!!message.isStreaming}
                       id={message.id || `msg-${index}`}
                     />

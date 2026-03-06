@@ -1,7 +1,10 @@
 import axios, { AxiosError } from "axios";
 import { toast } from "@/hooks/use-toast";
 import i18n from "@/i18n";
+import { useAuthStore } from "@/store/useAuthStore";
 
+// Keep browser requests same-origin by default so local dev and E2E use Vite proxy
+// instead of relying on backend CORS for ephemeral frontend ports.
 const baseURL = import.meta.env.VITE_API_BASE_URL || "";
 const AUTH_STORAGE_KEY = "agent-gateway-auth";
 
@@ -25,7 +28,12 @@ export function getApiBaseUrl(): string {
  * Get auth data from storage (checks both localStorage and sessionStorage)
  * localStorage is used when rememberMe=true, sessionStorage when rememberMe=false
  */
-function getAuthFromStorage(): { token: string | null } {
+function getAuthToken(): string | null {
+  const storeToken = useAuthStore.getState().token;
+  if (storeToken) {
+    return storeToken;
+  }
+
   // First check localStorage (for rememberMe=true)
   let authStorage = localStorage.getItem(AUTH_STORAGE_KEY);
 
@@ -37,13 +45,13 @@ function getAuthFromStorage(): { token: string | null } {
   if (authStorage) {
     try {
       const authState = JSON.parse(authStorage);
-      return { token: authState?.state?.token || null };
+      return authState?.state?.token || null;
     } catch {
       // Ignore parse errors
     }
   }
 
-  return { token: null };
+  return null;
 }
 
 /**
@@ -57,7 +65,7 @@ function clearAuthStorage(): void {
 // Request interceptor to add JWT token
 api.interceptors.request.use(
   (config) => {
-    const { token } = getAuthFromStorage();
+    const token = getAuthToken();
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -73,6 +81,7 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       // Clear auth from BOTH storages on 401
       clearAuthStorage();
+      useAuthStore.getState().clearAuth();
       // Redirect to login if not already there
       if (!window.location.pathname.includes("/login")) {
         window.location.href = "/login";

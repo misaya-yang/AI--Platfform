@@ -181,3 +181,32 @@ export function finishChatStreamTrace(
     ...(payload || {}),
   });
 }
+
+export function trackChatHistoryRestored(
+  surface: ChatSurface,
+  payload: {
+    sessionId?: string | null;
+    messageCount: number;
+    restored: boolean;
+    reason?: string;
+  }
+) {
+  emitTelemetry("chat.history.restored", {
+    surface,
+    ...payload,
+  });
+}
+
+export function trackChatHistoryEmptyState(
+  surface: ChatSurface,
+  payload: {
+    state: "no_sessions" | "history_hidden" | "service_unselected" | "selected_session_empty";
+    sessionCount?: number;
+    activeSessionId?: string | null;
+  }
+) {
+  emitTelemetry("chat.history.empty_state_viewed", {
+    surface,
+    ...payload,
+  });
+}

@@ -532,13 +532,30 @@ def format_long_term_memory(memory_context: dict[str, Any]) -> str:
     frequent = memory_context.get("frequent_memories", [])
     if frequent:
         memory_items = []
-        for mem in frequent[:5]:  # Top 5 only
+        preferred_name_present = any(
+            str(mem.get("key", "")) == "profile:preferred_name" for mem in frequent
+        )
+        ordered_memories = sorted(
+            frequent,
+            key=lambda mem: (
+                0 if str(mem.get("key", "")).startswith("profile:") else 1,
+                str(mem.get("key", "")),
+            ),
+        )
+        for mem in ordered_memories[:5]:  # Top 5 only
             key = mem.get("key", "")
             value = mem.get("value", "")
             if key and value and key != "preferences":
+                if preferred_name_present and key == "user_name":
+                    continue
                 # Truncate long values
                 val_str = str(value)[:100] if len(str(value)) > 100 else str(value)
-                memory_items.append(f"- {key}: {val_str}")
+                display_key = {
+                    "profile:preferred_name": "preferred_name",
+                    "profile:location": "location",
+                    "user_name": "preferred_name",
+                }.get(str(key), str(key))
+                memory_items.append(f"- {display_key}: {val_str}")
         if memory_items:
             parts.append("### Learned Context\n" + "\n".join(memory_items))
 

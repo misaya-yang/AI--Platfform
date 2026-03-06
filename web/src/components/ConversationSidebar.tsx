@@ -10,7 +10,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import {
   MessageSquare,
@@ -103,15 +103,17 @@ function SessionItem({
   onSelect,
   onDelete,
   fallbackLabel,
+  deleteLabel,
 }: {
   session: SessionSummary;
   isActive: boolean;
   onSelect: () => void;
   onDelete: () => void;
   fallbackLabel: string;
+  deleteLabel: string;
 }) {
-  const [showDelete, setShowDelete] = useState(false);
   const title = getSessionTitle(session, fallbackLabel);
+  const sessionLabel = `${title} · ${new Date(session.updated_at || session.created_at).toLocaleString()}`;
 
   return (
     <motion.div
@@ -119,34 +121,32 @@ function SessionItem({
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: -10 }}
-      className={cn(
-        "group relative flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-all",
-        isActive
-          ? "bg-primary/10 text-primary"
-          : "hover:bg-muted/50 text-muted-foreground hover:text-foreground"
-      )}
-      onMouseEnter={() => setShowDelete(true)}
-      onMouseLeave={() => setShowDelete(false)}
-      onClick={onSelect}
+      className="group relative"
     >
-      <MessageSquare className="h-4 w-4 shrink-0" />
-      <span className="flex-1 truncate text-sm">{title}</span>
-      <AnimatePresence>
-        {showDelete && (
-          <motion.button
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            className="shrink-0 p-1 rounded hover:bg-destructive/10 hover:text-destructive"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </motion.button>
+      <button
+        type="button"
+        className={cn(
+          "flex w-full items-center gap-2 rounded-lg px-3 py-2 pr-10 text-left transition-all",
+          isActive
+            ? "bg-primary/10 text-primary"
+            : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
         )}
-      </AnimatePresence>
+        aria-current={isActive ? "page" : undefined}
+        aria-label={sessionLabel}
+        onClick={onSelect}
+      >
+        <MessageSquare className="h-4 w-4 shrink-0" />
+        <span className="flex-1 truncate text-sm">{title}</span>
+      </button>
+      <button
+        type="button"
+        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+        onClick={onDelete}
+        aria-label={`${deleteLabel}: ${title}`}
+        title={title}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
     </motion.div>
   );
 }
@@ -158,6 +158,7 @@ function SessionGroup({
   onSelectSession,
   onDeleteSession,
   fallbackLabel,
+  deleteLabel,
 }: {
   label: string;
   sessions: SessionSummary[];
@@ -165,6 +166,7 @@ function SessionGroup({
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
   fallbackLabel: string;
+  deleteLabel: string;
 }) {
   if (sessions.length === 0) return null;
 
@@ -182,6 +184,7 @@ function SessionGroup({
             onSelect={() => onSelectSession(session.session_id)}
             onDelete={() => onDeleteSession(session.session_id)}
             fallbackLabel={fallbackLabel}
+            deleteLabel={deleteLabel}
           />
         ))}
       </div>
@@ -200,6 +203,7 @@ export function ConversationSidebar({
   const { t } = useTranslation();
   const [searchQuery, setSearchQuery] = useState("");
   const fallbackChatLabel = t("assistant.chatFallback", "Chat");
+  const deleteChatLabel = t("assistant.deleteChat", "Delete chat");
 
   // Filter sessions by search query
   const filteredSessions = useMemo(() => {
@@ -251,8 +255,10 @@ export function ConversationSidebar({
           />
           {searchQuery && (
             <button
+              type="button"
               className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-muted"
               onClick={() => setSearchQuery("")}
+              aria-label={t("common.clear", "Clear")}
             >
               <X className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
@@ -285,6 +291,7 @@ export function ConversationSidebar({
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
               fallbackLabel={fallbackChatLabel}
+              deleteLabel={deleteChatLabel}
             />
             <SessionGroup
               label={t("assistant.yesterday")}
@@ -293,6 +300,7 @@ export function ConversationSidebar({
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
               fallbackLabel={fallbackChatLabel}
+              deleteLabel={deleteChatLabel}
             />
             <SessionGroup
               label={t("assistant.lastWeek")}
@@ -301,6 +309,7 @@ export function ConversationSidebar({
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
               fallbackLabel={fallbackChatLabel}
+              deleteLabel={deleteChatLabel}
             />
             <SessionGroup
               label={t("assistant.older")}
@@ -309,6 +318,7 @@ export function ConversationSidebar({
               onSelectSession={onSelectSession}
               onDeleteSession={onDeleteSession}
               fallbackLabel={fallbackChatLabel}
+              deleteLabel={deleteChatLabel}
             />
           </>
         )}
