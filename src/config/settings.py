@@ -546,6 +546,34 @@ class StorageSettings(BaseModel):
     oss: StorageOSSSettings = Field(default_factory=StorageOSSSettings)
 
 
+class IslamicContentSettings(BaseModel):
+    """Islamic content source + cache settings for third-party delivery APIs."""
+
+    enabled: bool = True
+    cache_dir: str = "./data/islamic_content"
+    request_timeout_seconds: float = 30.0
+
+    quran_base_url: str = "https://apis.quran.foundation/content/api/v4"
+    quran_auth_url: str = "https://oauth2.quran.foundation"
+    quran_client_id: str = ""
+    quran_client_secret: str = ""
+    quran_access_token: str = ""
+    quran_scope: str = "content"
+    quran_default_translation_id: int = 20
+    quran_default_recitation_id: int = 7
+    quran_word_fields: str = "text_uthmani,text_uthmani_simple,text_imlaei"
+    quran_page_size: int = 50
+
+    sunnah_base_url: str = "https://api.sunnah.com/v1"
+    sunnah_api_key: str = ""
+    sunnah_page_size: int = 50
+
+    aladhan_base_url: str = "https://api.aladhan.com/v1"
+    aladhan_default_method: int = 2
+
+    duas_file_path: str = "./data/islamic_content/duas.json"
+
+
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
@@ -601,6 +629,9 @@ class Settings(BaseSettings):
 
     # 对象存储配置（用于 Confluence 图片等）
     storage: StorageSettings = Field(default_factory=StorageSettings)
+
+    # Islamic content aggregation APIs
+    islamic_content: IslamicContentSettings = Field(default_factory=IslamicContentSettings)
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

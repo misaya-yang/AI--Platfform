@@ -286,6 +286,7 @@ class DatabaseStorage:
             await self._auto_apply_assistant_memory_migration()
             await self._auto_apply_fts_migration()
             await self._auto_apply_islamic_metadata_migration()
+            await self._auto_apply_islamic_canonical_storage_migration()
             await self._auto_apply_openai_embedding_migration()
             await self._auto_apply_observability_governance_migration()
             await self._auto_apply_assistant_gateway_migration()
@@ -616,6 +617,46 @@ class DatabaseStorage:
                 logger.info("Islamic metadata migration already applied")
             else:
                 logger.error(f"Failed to apply Islamic metadata migration: {e}")
+
+    async def _islamic_canonical_storage_missing(self) -> bool:
+        """Check whether the canonical Islamic content tables are missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            quran_chapters = await conn.fetchval("SELECT to_regclass('public.quran_chapters')")
+            source_sync_runs = await conn.fetchval("SELECT to_regclass('public.source_sync_runs')")
+            return quran_chapters is None or source_sync_runs is None
+
+    async def _auto_apply_islamic_canonical_storage_migration(self) -> None:
+        """Apply canonical Islamic content storage migration (040) when required."""
+        if not self._pool:
+            return
+        try:
+            missing = await self._islamic_canonical_storage_missing()
+        except Exception as exc:
+            logger.warning("Could not check Islamic canonical storage schema: %s", exc)
+            return
+        if not missing:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "040_islamic_canonical_storage.sql"
+        )
+        if not migration_path.exists():
+            logger.warning("Migration 040 not found: %s", migration_path)
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 040_islamic_canonical_storage.sql")
+        except Exception as exc:
+            if "already exists" in str(exc).lower():
+                logger.info("Migration 040 already applied")
+            else:
+                logger.error("Failed to apply migration 040: %s", exc)
 
     async def _openai_embedding_needs_migration(self) -> bool:
         """Check whether OpenAI embedding migration is needed."""

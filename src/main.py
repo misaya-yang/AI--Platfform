@@ -60,6 +60,14 @@ from .services.metrics.realtime_metrics import init_realtime_metrics
 
 logger = get_logger(__name__)
 
+OPENAPI_TAGS = [
+    {
+        "name": "Islamic Content",
+        "description": "Quran / Hadith / Dua / Prayer / Qibla 对外内容接口，含 canonical 数据演示接口。",
+    },
+    {"name": "Health", "description": "服务健康检查与就绪状态。"},
+]
+
 
 def create_app() -> FastAPI:
     """
@@ -87,6 +95,7 @@ def create_app() -> FastAPI:
         title="AI Service Gateway",
         version="2.0.0",
         description="统一 AI 服务网关，支持多协议适配、限流、熔断、会话管理等功能",
+        openapi_tags=OPENAPI_TAGS,
     )
 
     # ========== 中间件配置 ==========
@@ -700,6 +709,10 @@ def create_app() -> FastAPI:
         assistant_service = getattr(app.state, "assistant_service", None)
         if assistant_service is not None:
             await assistant_service.close()
+
+        islamic_content_service = getattr(app.state, "islamic_content_service", None)
+        if islamic_content_service is not None:
+            await islamic_content_service.close()
 
         # Stop Assistant TaskManager lifecycle
         from .services.assistant.task_manager import shutdown_task_manager
