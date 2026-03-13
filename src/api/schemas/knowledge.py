@@ -227,6 +227,7 @@ class RetrieveRequestSchema(BaseModel):
     # Islamic knowledge traceability filters
     source_type_filter: str | None = None  # Filter by source: quran|hadith|fiqh|tafseer
     language_filter: str | None = None  # Filter by language: ar|en|ar_en
+    metadata_filter: dict[str, Any] | None = None  # Exact-match metadata filter
     multi_query: bool = False  # Enable Islamic multi-query expansion
     authority_sort: bool = False  # Sort results by Islamic authority (Quran > Hadith > Fiqh)
 
@@ -491,6 +492,39 @@ class QABatchTestResultSchema(BaseModel):
 # ============================================================
 
 
+class BatchRetrieveQuerySchema(BaseModel):
+    """Per-query overrides for batch retrieval."""
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str
+    document_id: str | None = None
+    mode: str | None = None
+    fusion_method: str | None = None
+    alpha: float | None = None
+    dense_weight: float | None = None
+    bm25_weight: float | None = None
+    rrf_k: int | None = None
+    vector_top_k: int | None = None
+    keyword_top_k: int | None = None
+    candidate_top_k: int | None = None
+    keyword_candidate_k: int | None = None
+    rerank: bool | None = None
+    rerank_model: str | None = None
+    rerank_top_n: int | None = None
+    mmr: bool | None = None
+    mmr_lambda: float | None = None
+    mmr_threshold: float | None = None
+    score_threshold: float | None = None
+    source_type_filter: str | None = None
+    language_filter: str | None = None
+    metadata_filter: dict[str, Any] | None = None
+    multi_query: bool | None = None
+    authority_sort: bool | None = None
+    include_images: bool | None = None
+    include_associated_images: bool | None = None
+
+
 class BatchRetrieveRequestSchema(BaseModel):
     """Batch retrieval request - parallel retrieval with multiple queries.
 
@@ -503,7 +537,7 @@ class BatchRetrieveRequestSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    queries: list[str] | None = None  # List of queries for batch retrieval
+    queries: list[str | BatchRetrieveQuerySchema] | None = None  # List of queries for batch retrieval
     query: str | None = None  # Single query or comma-separated queries
     top_k: int = 5  # Top-k per query
     mode: str = "hybrid"
@@ -515,6 +549,8 @@ class BatchRetrieveRequestSchema(BaseModel):
     fusion_method: str | None = None
     alpha: float | None = None
     score_threshold: float | None = None
+    source_type_filter: str | None = None
+    language_filter: str | None = None
 
     # Advanced options
     vector_top_k: int | None = None
@@ -532,6 +568,8 @@ class BatchRetrieveRequestSchema(BaseModel):
     mmr: bool | None = None
     mmr_lambda: float | None = None
     mmr_threshold: float | None = None
+    multi_query: bool | None = None
+    authority_sort: bool | None = None
 
     # Multimodal options
     include_images: bool = True

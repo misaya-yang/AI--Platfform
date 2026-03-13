@@ -1113,6 +1113,7 @@ async def transparent_proxy_root_handler(
 )
 async def list_proxy_services(
     request: Request,
+    proxy: TransparentProxy = Depends(get_transparent_proxy),
     config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
     user: UserContext = Depends(get_user_context),
     auth: AuthContext = Depends(get_auth_context),
@@ -1188,6 +1189,7 @@ async def list_proxy_services(
         ui_preferences = raw_metadata.get("ui_preferences")
         if isinstance(ui_preferences, dict):
             safe_metadata["ui_preferences"] = dict(ui_preferences)
+        availability = await proxy.get_service_availability(svc)
 
         visible_services.append(
             {
@@ -1199,6 +1201,9 @@ async def list_proxy_services(
                 "upstream_url": svc.upstream_url if is_admin else None,
                 "assistant_id": svc.assistant_id if is_admin else None,
                 "enabled": svc.enabled,
+                "availability_status": availability.get("availability_status", "unknown"),
+                "last_health_check_at": availability.get("last_health_check_at"),
+                "last_health_error": availability.get("last_health_error"),
             }
         )
 
@@ -1217,16 +1222,33 @@ async def list_proxy_services(
 async def proxy_service_health(
     service_name: str,
     proxy: TransparentProxy = Depends(get_transparent_proxy),
+    config_loader: ProxyConfigLoader = Depends(get_proxy_config_loader),
 ):
     """检查服务健康状态"""
     healthy, message = await proxy.health_check(service_name)
+    config = await config_loader.get_config(service_name)
+    snapshot = await proxy.get_service_availability(config) if config else {}
 
     if healthy:
-        return {"status": "healthy", "service": service_name, "message": message}
+        return {
+            "status": "healthy",
+            "service": service_name,
+            "message": message,
+            "availability_status": snapshot.get("availability_status"),
+            "last_health_check_at": snapshot.get("last_health_check_at"),
+            "last_health_error": snapshot.get("last_health_error"),
+        }
     else:
         raise HTTPException(
             status_code=503,
-            detail={"status": "unhealthy", "service": service_name, "message": message},
+            detail={
+                "status": "unhealthy",
+                "service": service_name,
+                "message": message,
+                "availability_status": snapshot.get("availability_status"),
+                "last_health_check_at": snapshot.get("last_health_check_at"),
+                "last_health_error": snapshot.get("last_health_error"),
+            },
         )
 
 

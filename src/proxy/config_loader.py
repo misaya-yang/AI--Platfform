@@ -70,12 +70,20 @@ class ProxyServiceConfig:
 
     # 负载均衡
     load_balance_strategy: str = "round_robin"  # round_robin | least_connections | random
+    concurrency_limit: int = 32
+    max_connections: int | None = None
+    max_keepalive_connections: int | None = None
+    keepalive_expiry: float | None = None
+    health_check_timeout: float = 5.0
 
     # 元数据
     metadata: dict[str, Any] = field(default_factory=dict)
 
     # 状态
     enabled: bool = True
+    availability_status: str = "unknown"
+    last_health_check_at: float | None = None
+    last_health_error: str | None = None
 
     def get_upstream_urls(self) -> list[str]:
         """获取所有上游 URL"""
@@ -238,6 +246,14 @@ class ProxyConfigLoader:
         # 提取限流配置
         rate_limit = service_config.get("rate_limit") or {}
         cache_config = service_config.get("cache") or {}
+        proxy_runtime = service_config.get("proxy_runtime") or {}
+
+        def _pick_numeric(default: Any, *values: Any) -> Any:
+            for value in values:
+                if value is None:
+                    continue
+                return value
+            return default
 
         def _pick_identity(*keys: str) -> str | None:
             for key in keys:
@@ -283,6 +299,18 @@ class ProxyConfigLoader:
             cache_enabled=cache_config.get("enabled", False),
             cache_ttl=cache_config.get("ttl", 300),
             load_balance_strategy=connector_config.get("load_balance_strategy", "round_robin"),
+            concurrency_limit=int(
+                _pick_numeric(32, proxy_runtime.get("concurrency_limit"), connector_config.get("concurrency_limit"))
+            ),
+            max_connections=proxy_runtime.get("max_connections", connector_config.get("max_connections")),
+            max_keepalive_connections=proxy_runtime.get(
+                "max_keepalive_connections",
+                connector_config.get("max_keepalive_connections"),
+            ),
+            keepalive_expiry=proxy_runtime.get("keepalive_expiry", connector_config.get("keepalive_expiry")),
+            health_check_timeout=float(
+                _pick_numeric(5.0, proxy_runtime.get("health_check_timeout"), connector_config.get("health_check_timeout"))
+            ),
             metadata=metadata,
             enabled=row_dict.get("status") == "active",
         )

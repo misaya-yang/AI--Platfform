@@ -491,6 +491,7 @@ export function PlaygroundPage() {
   const abortControllerRef = useRef<AbortController | null>(null);
   // 鐢ㄤ簬杩借釜褰撳墠璇锋眰鐨勪細璇滻D锛岄槻姝覆鍙?
   const currentRequestSessionRef = useRef<string | null>(null);
+  const currentRequestIdRef = useRef(0);
   // 鐢ㄤ簬杩借釬褰撳墠姝ｅ湪鍔犺浇鐨勫巻鍙蹭會璇滻D
   const loadingHistorySessionRef = useRef<string | null>(null);
   const sessionThreadIdRef = useRef<Record<string, string>>({});
@@ -570,6 +571,7 @@ export function PlaygroundPage() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    currentRequestIdRef.current += 1;
 
     // 璁板綍褰撳墠姝ｅ湪鍔犺浇鐨勪細璇滻D锛岀敤浜庨槻姝㈢珵鎬佹潯浠?
     loadingHistorySessionRef.current = id;
@@ -672,6 +674,7 @@ export function PlaygroundPage() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    currentRequestIdRef.current += 1;
     // 使任何进行中的历史加载结果失效，避免晚到覆盖新会话消息。
     invalidatePendingHistoryLoad();
 
@@ -690,6 +693,7 @@ export function PlaygroundPage() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    currentRequestIdRef.current += 1;
   }, []);
 
   const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior) => {
@@ -906,6 +910,7 @@ export function PlaygroundPage() {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      currentRequestIdRef.current += 1;
       // 娓呴櫎浼氳瘽杩借釜
       currentRequestSessionRef.current = null;
       invalidatePendingHistoryLoad();
@@ -948,6 +953,8 @@ export function PlaygroundPage() {
     // 鍒涘缓鏂扮殑 AbortController
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+    const requestId = currentRequestIdRef.current + 1;
+    currentRequestIdRef.current = requestId;
 
     setLoading(true);
 
@@ -1103,7 +1110,7 @@ export function PlaygroundPage() {
 
       const isRequestValid = () => {
         return !abortController.signal.aborted &&
-          currentRequestSessionRef.current === effectiveSessionId;
+          currentRequestIdRef.current === requestId;
       };
 
       const mapToolCalls = (state: StreamTurnState): ToolCallWithResult[] =>
@@ -1257,11 +1264,18 @@ export function PlaygroundPage() {
         return reduced.terminal;
       };
 
+      let syntheticChunkIndex = 0;
+      const nextSyntheticChunkIndex = () => {
+        syntheticChunkIndex += 1;
+        return syntheticChunkIndex;
+      };
+
 
       try {
         if (useTransparentProxy) {
           const payload = {
             input: { messages: [{ role: "user", content: inputText }] },
+            stream_mode: ["messages", "updates", "custom"],
           };
           const streamPath = threadId
             ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
@@ -1346,7 +1360,7 @@ export function PlaygroundPage() {
                           : "tool_call_start";
                         processStreamChunk({
                           request_id: "",
-                          chunk_index: 0,
+                          chunk_index: nextSyntheticChunkIndex(),
                           is_final: false,
                           event_type: eventType,
                           tool_call: {
@@ -1367,7 +1381,7 @@ export function PlaygroundPage() {
                             ?.arguments || "";
                         processStreamChunk({
                           request_id: "",
-                          chunk_index: 0,
+                          chunk_index: nextSyntheticChunkIndex(),
                           is_final: false,
                           event_type: "tool_result",
                           tool_call: {
@@ -1407,7 +1421,7 @@ export function PlaygroundPage() {
                             if (delta) {
                               processStreamChunk({
                                 request_id: "",
-                                chunk_index: 0,
+                                chunk_index: nextSyntheticChunkIndex(),
                                 is_final: false,
                                 event_type: "text_delta",
                                 content: { type: "text", data: delta },
@@ -1422,7 +1436,7 @@ export function PlaygroundPage() {
                             streamState = setStreamTurnContent(streamState, "");
                             processStreamChunk({
                               request_id: "",
-                              chunk_index: 0,
+                              chunk_index: nextSyntheticChunkIndex(),
                               is_final: false,
                               event_type: "text_delta",
                               content: { type: "text", data: content },
@@ -1478,7 +1492,7 @@ export function PlaygroundPage() {
                         lastCumulativeContent = content;
                         processStreamChunk({
                           request_id: "",
-                          chunk_index: 0,
+                          chunk_index: nextSyntheticChunkIndex(),
                           is_final: true,
                           event_type: "text_delta",
                           content: { type: "text", data: delta },
@@ -1492,7 +1506,7 @@ export function PlaygroundPage() {
                       streamState = setStreamTurnContent(streamState, "");
                       processStreamChunk({
                         request_id: "",
-                        chunk_index: 0,
+                        chunk_index: nextSyntheticChunkIndex(),
                         is_final: true,
                         event_type: "text_delta",
                         content: { type: "text", data: content },
@@ -1529,7 +1543,7 @@ export function PlaygroundPage() {
                   : "tool_call_start";
                 const shouldStop = processStreamChunk({
                   request_id: "",
-                  chunk_index: 0,
+                  chunk_index: nextSyntheticChunkIndex(),
                   is_final: false,
                   event_type: eventType,
                   tool_call: {
@@ -1550,7 +1564,7 @@ export function PlaygroundPage() {
                     ?.arguments || "";
                 processStreamChunk({
                   request_id: "",
-                  chunk_index: 0,
+                  chunk_index: nextSyntheticChunkIndex(),
                   is_final: false,
                   event_type: "tool_result",
                   tool_call: {
@@ -1578,7 +1592,7 @@ export function PlaygroundPage() {
                     if (actualDelta) {
                       processStreamChunk({
                         request_id: "",
-                        chunk_index: 0,
+                        chunk_index: nextSyntheticChunkIndex(),
                         is_final: false,
                         event_type: "text_delta",
                         content: { type: "text", data: actualDelta },
@@ -1592,7 +1606,7 @@ export function PlaygroundPage() {
                     streamState = setStreamTurnContent(streamState, "");
                     processStreamChunk({
                       request_id: "",
-                      chunk_index: 0,
+                      chunk_index: nextSyntheticChunkIndex(),
                       is_final: false,
                       event_type: "text_delta",
                       content: { type: "text", data: cumulativeContent },
@@ -1655,18 +1669,6 @@ export function PlaygroundPage() {
       let outputTokens = streamState.usage.outputTokens ?? estimatedOutputTokens;
       let totalTokens = streamState.usage.totalTokens ?? (inputTokens + outputTokens);
 
-      flushAssistant({
-        status: streamState.status,
-        isStreaming: false,
-        stats: {
-          durationMs,
-          firstTokenMs,
-          inputTokens,
-          outputTokens,
-          totalTokens,
-        },
-      });
-
       // Fallback: If streaming didn't capture text content,
       // but we had tool calls, try to get the final response via wait endpoint.
       // This handles cases where LangGraph doesn't stream the final text after tool calls.
@@ -1676,6 +1678,14 @@ export function PlaygroundPage() {
       
       if (needsFallback) {
         try {
+          streamState = {
+            ...streamState,
+            status: "streaming",
+          };
+          flushAssistant({
+            status: "streaming",
+            isStreaming: true,
+          });
           if (useTransparentProxy) {
             const waitPath = threadId
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/wait`
@@ -1752,6 +1762,18 @@ export function PlaygroundPage() {
           if (!isRequestValid()) return;
           throw syncErr;
         }
+      } else {
+        flushAssistant({
+          status: streamState.status,
+          isStreaming: false,
+          stats: {
+            durationMs,
+            firstTokenMs,
+            inputTokens,
+            outputTokens,
+            totalTokens,
+          },
+        });
       }
 
       if (

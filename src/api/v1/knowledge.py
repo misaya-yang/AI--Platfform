@@ -773,6 +773,7 @@ async def retrieve(
                 multimodal_rerank=payload.multimodal_rerank,
                 source_type_filter=payload.source_type_filter,
                 language_filter=payload.language_filter,
+                metadata_filter=payload.metadata_filter,
                 multi_query=payload.multi_query,
                 authority_sort=payload.authority_sort,
                 # Advanced multimodal parameters
@@ -810,6 +811,7 @@ async def retrieve(
                 mmr_threshold=payload.mmr_threshold,
                 source_type_filter=payload.source_type_filter,
                 language_filter=payload.language_filter,
+                metadata_filter=payload.metadata_filter,
                 multi_query=payload.multi_query,
                 authority_sort=payload.authority_sort,
             )
@@ -860,9 +862,12 @@ async def retrieve_batch(
     """
     try:
         # Parse queries from either format
-        queries: list[str] = []
+        queries: list[Any] = []
         if payload.queries:
-            queries = payload.queries
+            queries = [
+                item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
+                for item in payload.queries
+            ]
         elif payload.query:
             # Support comma-separated queries
             queries = [q.strip() for q in payload.query.split(",") if q.strip()]
@@ -897,6 +902,10 @@ async def retrieve_batch(
             mmr=payload.mmr,
             mmr_lambda=payload.mmr_lambda,
             mmr_threshold=payload.mmr_threshold,
+            source_type_filter=payload.source_type_filter,
+            language_filter=payload.language_filter,
+            multi_query=payload.multi_query,
+            authority_sort=payload.authority_sort,
             include_images=payload.include_images,
             include_associated_images=payload.include_associated_images,
             max_parallel=payload.max_parallel,

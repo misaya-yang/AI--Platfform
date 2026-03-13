@@ -492,6 +492,12 @@ class ProxySettings(BaseModel):
     timeout_read: float = 300.0
     timeout_write: float = 60.0
     timeout_pool: float = 60.0
+    health_check_timeout: float = 5.0
+    availability_cache_ttl_seconds: float = 15.0
+    default_concurrency_limit: int = 32
+    client_max_connections: int = 100
+    client_max_keepalive_connections: int = 20
+    client_keepalive_expiry: float = 30.0
 
     # 配置缓存 TTL（秒）
     config_cache_ttl: float = 60.0

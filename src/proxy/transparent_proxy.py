@@ -19,7 +19,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -161,6 +161,12 @@ class TransparentProxy:
         billing_interceptor: BillingInterceptor | None = None,
         response_cache: ResponseCache | None = None,
         default_timeout: float = 60.0,
+        health_check_timeout: float = 5.0,
+        availability_cache_ttl: float = 15.0,
+        default_concurrency_limit: int = 32,
+        client_max_connections: int = 100,
+        client_max_keepalive_connections: int = 20,
+        client_keepalive_expiry: float = 30.0,
     ):
         """
         初始化透明代理
@@ -176,6 +182,12 @@ class TransparentProxy:
         self.billing_interceptor = billing_interceptor
         self.response_cache = response_cache or ResponseCache(database=config_loader.database)
         self.default_timeout = default_timeout
+        self.health_check_timeout = health_check_timeout
+        self.availability_cache_ttl = availability_cache_ttl
+        self.default_concurrency_limit = default_concurrency_limit
+        self.client_max_connections = client_max_connections
+        self.client_max_keepalive_connections = client_max_keepalive_connections
+        self.client_keepalive_expiry = client_keepalive_expiry
 
         # HTTP 客户端池（按服务维护）
         self._clients: dict[str, httpx.AsyncClient] = {}
@@ -184,6 +196,9 @@ class TransparentProxy:
         # 负载均衡状态
         self._lb_counters: dict[str, int] = {}  # round-robin 计数器
         self._lb_connections: dict[str, dict[str, int]] = {}  # 连接计数
+        self._service_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._availability: dict[str, dict[str, Any]] = {}
+        self._availability_lock = asyncio.Lock()
 
     async def close(self) -> None:
         """关闭所有 HTTP 客户端"""
@@ -205,15 +220,144 @@ class TransparentProxy:
                         write=config.timeout_write,
                         pool=config.timeout_pool,
                     )
+                    limits = httpx.Limits(
+                        max_connections=config.max_connections or self.client_max_connections,
+                        max_keepalive_connections=(
+                            config.max_keepalive_connections
+                            or self.client_max_keepalive_connections
+                        ),
+                        keepalive_expiry=(
+                            config.keepalive_expiry
+                            if config.keepalive_expiry is not None
+                            else self.client_keepalive_expiry
+                        ),
+                    )
                     self._clients[client_key] = httpx.AsyncClient(
                         timeout=timeout,
                         follow_redirects=True,
                         http2=True,  # 启用 HTTP/2
+                        limits=limits,
                     )
 
         return self._clients[client_key]
 
-    def _select_upstream(self, config: ProxyServiceConfig) -> str:
+    def _get_service_semaphore(self, config: ProxyServiceConfig) -> asyncio.Semaphore:
+        service_id = config.service_id
+        limit = max(1, int(config.concurrency_limit or self.default_concurrency_limit))
+        semaphore = self._service_semaphores.get(service_id)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(limit)
+            self._service_semaphores[service_id] = semaphore
+        return semaphore
+
+    async def _acquire_request_slot(
+        self,
+        config: ProxyServiceConfig,
+        upstream_base: str,
+    ) -> tuple[Callable[[], Awaitable[None]], float]:
+        semaphore = self._get_service_semaphore(config)
+        wait_started = time.perf_counter()
+        await semaphore.acquire()
+        queue_wait_ms = (time.perf_counter() - wait_started) * 1000
+
+        service_connections = self._lb_connections.setdefault(config.service_id, {})
+        service_connections[upstream_base] = service_connections.get(upstream_base, 0) + 1
+        released = False
+
+        async def _release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            current = service_connections.get(upstream_base, 0)
+            if current <= 1:
+                service_connections.pop(upstream_base, None)
+            else:
+                service_connections[upstream_base] = current - 1
+            semaphore.release()
+
+        return _release, queue_wait_ms
+
+    async def _set_service_availability(
+        self,
+        config: ProxyServiceConfig,
+        *,
+        status: str,
+        healthy_urls: list[str] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        snapshot = {
+            "availability_status": status,
+            "available_upstreams": list(healthy_urls or []),
+            "last_health_check_at": time.time(),
+            "last_health_error": error,
+        }
+        config.availability_status = status
+        config.last_health_check_at = snapshot["last_health_check_at"]
+        config.last_health_error = error
+        async with self._availability_lock:
+            self._availability[config.service_id] = snapshot
+        return snapshot
+
+    async def get_service_availability(self, config: ProxyServiceConfig) -> dict[str, Any]:
+        async with self._availability_lock:
+            cached = self._availability.get(config.service_id)
+        if cached and (time.time() - float(cached.get("last_health_check_at") or 0.0)) <= self.availability_cache_ttl:
+            return cached
+        return await self._refresh_service_availability(config)
+
+    async def _refresh_service_availability(self, config: ProxyServiceConfig) -> dict[str, Any]:
+        client = await self._get_client(config)
+        healthy_urls: list[str] = []
+        failures: list[str] = []
+
+        for upstream_base in config.get_upstream_urls():
+            base = upstream_base.rstrip("/")
+            probes: list[tuple[str, str, dict[str, Any] | None]] = [
+                ("GET", f"{base}/health", None),
+                ("GET", f"{base}/docs", None),
+                ("POST", f"{base}/assistants/search", {}),
+            ]
+
+            upstream_ok = False
+            last_error = ""
+            for method, url, payload in probes:
+                try:
+                    if method == "POST":
+                        response = await client.post(url, json=payload, timeout=config.health_check_timeout or self.health_check_timeout)
+                    else:
+                        response = await client.get(url, timeout=config.health_check_timeout or self.health_check_timeout)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+
+                if response.status_code < 400:
+                    upstream_ok = True
+                    break
+                last_error = f"{response.status_code}"
+
+            if upstream_ok:
+                healthy_urls.append(upstream_base)
+            else:
+                failures.append(f"{upstream_base}: {last_error or 'unreachable'}")
+
+        if healthy_urls and not failures:
+            return await self._set_service_availability(config, status="available", healthy_urls=healthy_urls)
+        if healthy_urls:
+            return await self._set_service_availability(
+                config,
+                status="degraded",
+                healthy_urls=healthy_urls,
+                error="; ".join(failures),
+            )
+        return await self._set_service_availability(
+            config,
+            status="unavailable",
+            healthy_urls=[],
+            error="; ".join(failures) or "No healthy upstreams",
+        )
+
+    def _select_upstream(self, config: ProxyServiceConfig, urls: list[str] | None = None) -> str:
         """
         选择上游服务器（负载均衡）
 
@@ -223,7 +367,7 @@ class TransparentProxy:
         Returns:
             选中的上游 URL
         """
-        urls = config.get_upstream_urls()
+        urls = urls or config.get_upstream_urls()
         if not urls:
             raise ValueError(f"No upstream URLs configured for {config.service_name}")
 
@@ -317,9 +461,26 @@ class TransparentProxy:
                 error=f"Service disabled: {request.service_name}",
             )
 
+        availability = await self.get_service_availability(config)
+        available_urls = availability.get("available_upstreams") or []
+        availability_status = str(availability.get("availability_status") or "unknown")
+        if not available_urls:
+            error_message = str(availability.get("last_health_error") or "No healthy upstreams")
+            logger.warning(
+                "[Proxy] Fast-failing unavailable service %s status=%s error=%s",
+                config.service_id,
+                availability_status,
+                error_message,
+            )
+            return ProxyResponse(
+                status_code=503,
+                headers={},
+                error=f"Service unavailable: {error_message}",
+            )
+
         # 2. 选择上游服务器
         try:
-            upstream_base = self._select_upstream(config)
+            upstream_base = self._select_upstream(config, urls=available_urls)
         except ValueError as e:
             return ProxyResponse(
                 status_code=502,
@@ -341,6 +502,7 @@ class TransparentProxy:
         # 5. 获取 HTTP 客户端
         client = await self._get_client(config)
         t_client_done = time.perf_counter()
+        release_slot, queue_wait_ms = await self._acquire_request_slot(config, upstream_base)
 
         # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
@@ -358,6 +520,7 @@ class TransparentProxy:
             f"headers={((t_headers_done - t_config_done) * 1000):.1f}ms "
             f"client={((t_client_done - t_headers_done) * 1000):.1f}ms "
             f"body={((t_body_done - t_client_done) * 1000):.1f}ms "
+            f"queue_wait={queue_wait_ms:.1f}ms "
             f"total_prep={((t_body_done - start_time) * 1000):.1f}ms"
         )
 
@@ -378,23 +541,28 @@ class TransparentProxy:
                     config=config,
                     context=context,
                     path=request.path,
+                    release_slot=release_slot,
                 )
             else:
-                return await self._proxy_normal(
-                    client=client,
-                    method=request.method,
-                    url=upstream_url,
-                    upstream_base=upstream_base,
-                    headers=headers,
-                    body=body,
-                    params=request.query_params,
-                    path=request.path,
-                    config=config,
-                    context=context,
-                )
+                try:
+                    return await self._proxy_normal(
+                        client=client,
+                        method=request.method,
+                        url=upstream_url,
+                        upstream_base=upstream_base,
+                        headers=headers,
+                        body=body,
+                        params=request.query_params,
+                        path=request.path,
+                        config=config,
+                        context=context,
+                    )
+                finally:
+                    await release_slot()
         except httpx.TimeoutException as e:
             duration = (time.time() - start_time) * 1000
             logger.error(f"[Proxy] Timeout after {duration:.2f}ms: {e}")
+            await release_slot()
             return ProxyResponse(
                 status_code=504,
                 headers={},
@@ -403,11 +571,15 @@ class TransparentProxy:
         except httpx.RequestError as e:
             duration = (time.time() - start_time) * 1000
             logger.error(f"[Proxy] Request error after {duration:.2f}ms: {e}")
+            await release_slot()
             return ProxyResponse(
                 status_code=502,
                 headers={},
                 error=f"Upstream error: {e}",
             )
+        except Exception:
+            await release_slot()
+            raise
 
     def _inject_assistant_id(
         self,
@@ -1021,6 +1193,7 @@ class TransparentProxy:
         config: ProxyServiceConfig,
         context: RequestContext,
         path: str,
+        release_slot,
     ) -> ProxyResponse:
         """
         执行流式代理请求
@@ -1070,6 +1243,7 @@ class TransparentProxy:
             )
         except httpx.TimeoutException as e:
             logger.error(f"[Proxy] Streaming timeout: {e}")
+            await release_slot()
             return ProxyResponse(
                 status_code=504,
                 headers={},
@@ -1077,6 +1251,7 @@ class TransparentProxy:
             )
         except httpx.RequestError as e:
             logger.error(f"[Proxy] Streaming request error: {e}")
+            await release_slot()
             return ProxyResponse(
                 status_code=502,
                 headers={},
@@ -1103,6 +1278,7 @@ class TransparentProxy:
                 status_code=response.status_code,
             )
             await response.aclose()
+            await release_slot()
             logger.warning(
                 f"[Proxy] Upstream error {response.status_code}: {error_body[:200].decode('utf-8', errors='ignore')}"
             )
@@ -1121,6 +1297,7 @@ class TransparentProxy:
             # 非流式响应，读取完整内容
             body_content = await response.aread()
             await response.aclose()
+            await release_slot()
             logger.debug(f"[Proxy] Non-streaming response detected: {response_content_type}")
             duration_ms = (time.perf_counter() - request_started) * 1000
             await self._record_non_stream_usage(
@@ -1162,6 +1339,7 @@ class TransparentProxy:
                     except Exception as finalize_err:
                         logger.debug(f"[Proxy] Failed to finalize stream processor: {finalize_err}")
                 await response.aclose()
+                await release_slot()
 
         # 返回流式响应，保留原始状态码
         return ProxyResponse(
@@ -1280,30 +1458,14 @@ class TransparentProxy:
 
         if not config.enabled:
             return False, f"Service disabled: {service_name}"
+        snapshot = await self.get_service_availability(config)
+        status = str(snapshot.get("availability_status") or "unknown")
+        if status in {"available", "degraded"}:
+            return True, status.upper()
+        return False, str(snapshot.get("last_health_error") or "No healthy upstreams")
 
-        try:
-            upstream_base = self._select_upstream(config)
-            client = await self._get_client(config)
-
-            base = upstream_base.rstrip("/")
-            probes: list[tuple[str, str, dict[str, Any] | None]] = [
-                ("GET", f"{base}/health", None),
-                # LangGraph agent server commonly exposes /docs and assistants APIs.
-                ("GET", f"{base}/docs", None),
-                ("POST", f"{base}/assistants/search", {}),
-            ]
-
-            last_status: int | None = None
-            for method, url, payload in probes:
-                if method == "POST":
-                    response = await client.post(url, json=payload, timeout=5.0)
-                else:
-                    response = await client.get(url, timeout=5.0)
-                last_status = response.status_code
-                if response.status_code < 400:
-                    return True, "OK"
-
-            return False, f"Health check failed: {last_status}"
-
-        except Exception as e:
-            return False, f"Health check error: {e}"
+    async def refresh_all_service_health(self) -> dict[str, dict[str, Any]]:
+        snapshots: dict[str, dict[str, Any]] = {}
+        for config in await self.config_loader.list_services():
+            snapshots[config.service_id] = await self._refresh_service_availability(config)
+        return snapshots

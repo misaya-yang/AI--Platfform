@@ -67,12 +67,15 @@ plugins/frontend-design/
 # AI Agent Skills (local development only)
 .agents/
 
-# Documentation (managed separately)
+# Documentation (managed separately, except Islamic content handoff docs)
 docs/
+!apps/islamic-content-service/docs/
+!apps/islamic-content-service/docs/**
 
 # ======================== Data & Models ========================
 # Downloaded ML models (OCR, embeddings, etc.)
 data/models/
+data/islamic_content/
 *.pdmodel
 *.pdiparams
 *.pdiparams.info

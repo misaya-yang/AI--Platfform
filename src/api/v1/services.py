@@ -368,6 +368,7 @@ async def list_services(
 
     is_admin = "admin" in auth.roles
     allowed_sources, user_policy = await _load_access_constraints(request, user)
+    transparent_proxy = getattr(request.app.state, "transparent_proxy", None)
 
     # 构建虚拟服务列表（内置服务，不在数据库中）
     virtual_services = []
@@ -425,6 +426,30 @@ async def list_services(
         ):
             continue
 
+        availability: dict | None = None
+        connector_config = getattr(s, "connector_config", None) or {}
+        if (
+            transparent_proxy is not None
+            and str(getattr(s, "service_type", "")).lower() == "langgraph"
+            and str((connector_config or {}).get("proxy_mode") or (s.metadata or {}).get("proxy_mode") or "").lower() == "transparent"
+        ):
+            try:
+                from ...proxy.config_loader import ProxyServiceConfig
+
+                proxy_cfg = ProxyServiceConfig(
+                    service_id=s.service_id,
+                    service_name=s.name,
+                    upstream_url=str((connector_config or {}).get("upstream_url") or (connector_config or {}).get("base_url") or ""),
+                    upstream_urls=list((connector_config or {}).get("upstream_urls") or []),
+                    assistant_id=(connector_config or {}).get("assistant_id"),
+                    graph_id=(connector_config or {}).get("graph_id"),
+                    metadata=dict(s.metadata or {}),
+                    enabled=str(getattr(s, "status", "")).lower() == "active",
+                )
+                availability = await transparent_proxy.get_service_availability(proxy_cfg)
+            except Exception:
+                availability = None
+
         db_service_list.append(
             {
                 "service_id": s.service_id,
@@ -438,6 +463,9 @@ async def list_services(
                 "status": s.status,
                 "tags": s.tags,
                 "metadata": s.metadata,
+                "availability_status": availability.get("availability_status") if availability else None,
+                "last_health_check_at": availability.get("last_health_check_at") if availability else None,
+                "last_health_error": availability.get("last_health_error") if availability else None,
             }
         )
 

@@ -598,6 +598,12 @@ class Container:
             context_injector=context_injector,
             billing_interceptor=billing_interceptor,
             default_timeout=self.settings.proxy.timeout_read,
+            health_check_timeout=self.settings.proxy.health_check_timeout,
+            availability_cache_ttl=self.settings.proxy.availability_cache_ttl_seconds,
+            default_concurrency_limit=self.settings.proxy.default_concurrency_limit,
+            client_max_connections=self.settings.proxy.client_max_connections,
+            client_max_keepalive_connections=self.settings.proxy.client_max_keepalive_connections,
+            client_keepalive_expiry=self.settings.proxy.client_keepalive_expiry,
         )
 
         logger.info("透明代理已初始化")
@@ -636,6 +642,15 @@ class Container:
                     logger.warning("Redis 连接失败：ping 无响应")
             except Exception as e:
                 logger.error(f"Redis 连接失败: {e}")
+
+        if self.settings.proxy.enabled:
+            try:
+                transparent_proxy = await self._providers["transparent_proxy"].get()
+                if transparent_proxy:
+                    await transparent_proxy.refresh_all_service_health()
+                    logger.info("透明代理上游健康状态已预热")
+            except Exception as e:
+                logger.warning(f"透明代理健康预热失败: {e}")
 
         self._initialized = True
         logger.info("容器初始化完成")

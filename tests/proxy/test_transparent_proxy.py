@@ -196,6 +196,30 @@ class TestTransparentProxy:
             assert mock_request.called or response.status_code in (200, 502)
 
     @pytest.mark.asyncio
+    async def test_proxy_fast_fails_when_service_is_unavailable(
+        self, transparent_proxy, mock_config_loader, proxy_config
+    ):
+        mock_config_loader.get_config.return_value = proxy_config
+
+        with patch.object(
+            transparent_proxy,
+            "get_service_availability",
+            new=AsyncMock(
+                return_value={
+                    "availability_status": "unavailable",
+                    "available_upstreams": [],
+                    "last_health_error": "dial tcp 127.0.0.1:2025: connect: connection refused",
+                }
+            ),
+        ):
+            response = await transparent_proxy.proxy(
+                ProxyRequest(service_name="langgraph", path="/runs/wait", method="POST")
+            )
+
+        assert response.status_code == 503
+        assert "Service unavailable" in (response.error or "")
+
+    @pytest.mark.asyncio
     async def test_proxy_auto_heals_invalid_assistant(
         self, transparent_proxy, mock_config_loader, proxy_config
     ):
@@ -227,19 +251,30 @@ class TestTransparentProxy:
 
         with patch.object(httpx.AsyncClient, "request", new_callable=AsyncMock) as mock_request:
             with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
-                mock_request.side_effect = [invalid_resp, healed_resp]
-                mock_post.return_value = assistants_resp
+                with patch.object(
+                    transparent_proxy,
+                    "get_service_availability",
+                    new=AsyncMock(
+                        return_value={
+                            "availability_status": "available",
+                            "available_upstreams": [proxy_config.upstream_url],
+                            "last_health_error": None,
+                        }
+                    ),
+                ):
+                    mock_request.side_effect = [invalid_resp, healed_resp]
+                    mock_post.return_value = assistants_resp
 
-                request = ProxyRequest(
-                    service_name="local-2024-flash",
-                    path="/runs/wait",
-                    method="POST",
-                    body=json.dumps(
-                        {"input": {"messages": [{"role": "user", "content": "hello"}]}}
-                    ).encode("utf-8"),
-                    context=RequestContext(user_id="test-user", tenant_id="test-tenant"),
-                )
-                response = await transparent_proxy.proxy(request)
+                    request = ProxyRequest(
+                        service_name="local-2024-flash",
+                        path="/runs/wait",
+                        method="POST",
+                        body=json.dumps(
+                            {"input": {"messages": [{"role": "user", "content": "hello"}]}}
+                        ).encode("utf-8"),
+                        context=RequestContext(user_id="test-user", tenant_id="test-tenant"),
+                    )
+                    response = await transparent_proxy.proxy(request)
 
         assert response.status_code == 200
         assert proxy_config.assistant_id == "flash"
@@ -520,6 +555,38 @@ class TestTransparentProxy:
         """测试检测 assistant_list 操作"""
         op = TransparentProxy.detect_operation_type("GET", "/assistants")
         assert op == "assistant_list"
+
+    @pytest.mark.asyncio
+    async def test_acquire_request_slot_tracks_and_releases_connections(
+        self, transparent_proxy, proxy_config
+    ):
+        release, queue_wait_ms = await transparent_proxy._acquire_request_slot(
+            proxy_config, proxy_config.upstream_url
+        )
+
+        assert queue_wait_ms >= 0
+        assert transparent_proxy._lb_connections[proxy_config.service_id][proxy_config.upstream_url] == 1
+
+        await release()
+
+        assert transparent_proxy._lb_connections[proxy_config.service_id] == {}
+
+    def test_select_upstream_uses_least_connections_live_counters(
+        self, transparent_proxy, proxy_config
+    ):
+        proxy_config.upstream_urls = [
+            "http://langgraph:8123",
+            "http://langgraph:8124",
+        ]
+        proxy_config.load_balance_strategy = "least_connections"
+        transparent_proxy._lb_connections[proxy_config.service_id] = {
+            "http://langgraph:8123": 2,
+            "http://langgraph:8124": 1,
+        }
+
+        selected = transparent_proxy._select_upstream(proxy_config)
+
+        assert selected == "http://langgraph:8124"
 
     def test_detect_operation_type_unknown(self):
         """测试未知操作返回默认值"""

@@ -690,6 +690,7 @@ export function useAgentTimeline() {
       case "text_message_content":
       case "text_message_end":
       case "text_delta":
+      case "tool_call_args":
       case "stream_end":
       case "state_snapshot":
       case "state_delta":

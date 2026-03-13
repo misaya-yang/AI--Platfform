@@ -953,8 +953,9 @@ class KnowledgeService:
         candidates: list[dict[str, Any]],
         source_type: str | None,
         language: str | None,
+        metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        if not source_type and not language:
+        if not source_type and not language and not metadata_filter:
             return candidates
         filtered: list[dict[str, Any]] = []
         for c in candidates:
@@ -963,6 +964,14 @@ class KnowledgeService:
                 continue
             if language and str(meta.get("language")) != str(language):
                 continue
+            if metadata_filter:
+                matched = True
+                for key, expected in metadata_filter.items():
+                    if meta.get(key) != expected:
+                        matched = False
+                        break
+                if not matched:
+                    continue
             filtered.append(c)
         return filtered
 
@@ -3653,6 +3662,7 @@ class KnowledgeService:
         # Additional filters (not implemented in core retrieve, for API compatibility)
         source_type_filter: str | None = None,
         language_filter: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
     ) -> tuple[list[RetrieveResult], dict[str, Any]]:
         dataset = await self.require_dataset_access(user, dataset_id, required="viewer")
 
@@ -4659,10 +4669,10 @@ class KnowledgeService:
                     f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results"
                 )
 
-        if source_type_filter or language_filter:
+        if source_type_filter or language_filter or metadata_filter:
             original_count = len(final_sorted)
             final_sorted = self._filter_candidates_by_metadata(
-                final_sorted, source_type_filter, language_filter
+                final_sorted, source_type_filter, language_filter, metadata_filter
             )
             if len(final_sorted) < original_count:
                 meta["pipeline_stages"].append(
@@ -4672,6 +4682,8 @@ class KnowledgeService:
                 meta["source_type_filter"] = source_type_filter
             if language_filter:
                 meta["language_filter"] = language_filter
+            if metadata_filter:
+                meta["metadata_filter"] = dict(metadata_filter)
 
         # Hydrate missing metadata (citation/source_reference) from DB for dense-only payloads
         if final_sorted and (islamic_citation or islamic_authority_sort):
@@ -5569,7 +5581,7 @@ class KnowledgeService:
         self,
         user: UserContext,
         dataset_id: str,
-        queries: list[str],
+        queries: list[Any],
         top_k: int = 5,
         mode: str = "hybrid",
         document_id: str | None = None,
@@ -5620,43 +5632,97 @@ class KnowledgeService:
         # Validate dataset access once
         await self.require_dataset_access(user, dataset_id, required="viewer")
 
-        # Filter empty queries
-        valid_queries = [q.strip() for q in queries if q and q.strip()]
-        if not valid_queries:
+        def _normalize_query_spec(item: Any) -> dict[str, Any] | None:
+            if isinstance(item, str):
+                query_text = item.strip()
+                return {"query": query_text} if query_text else None
+            if isinstance(item, dict):
+                query_text = str(item.get("query") or "").strip()
+                if not query_text:
+                    return None
+                normalized = {"query": query_text}
+                for key in (
+                    "document_id",
+                    "mode",
+                    "dense_weight",
+                    "bm25_weight",
+                    "fusion_method",
+                    "alpha",
+                    "score_threshold",
+                    "source_type_filter",
+                    "language_filter",
+                    "multi_query",
+                    "authority_sort",
+                    "vector_top_k",
+                    "keyword_top_k",
+                    "candidate_top_k",
+                    "keyword_candidate_k",
+                    "fusion",
+                    "rrf_k",
+                    "rerank",
+                    "rerank_model",
+                    "rerank_top_n",
+                    "mmr",
+                    "mmr_lambda",
+                    "mmr_threshold",
+                    "include_images",
+                    "include_associated_images",
+                    "metadata_filter",
+                ):
+                    if item.get(key) is not None:
+                        normalized[key] = item[key]
+                return normalized
+            return None
+
+        valid_specs = [spec for spec in (_normalize_query_spec(q) for q in queries) if spec]
+        if not valid_specs:
             return [], {"error": "No valid queries provided"}
 
         # Limit concurrency
         semaphore = asyncio.Semaphore(max_parallel)
 
-        async def _retrieve_single(query: str) -> dict[str, Any]:
+        async def _retrieve_single(query_spec: dict[str, Any]) -> dict[str, Any]:
+            query = str(query_spec.get("query") or "").strip()
+            wait_started = time.perf_counter()
             async with semaphore:
+                queue_wait_ms = (time.perf_counter() - wait_started) * 1000
+                retrieve_started = time.perf_counter()
                 try:
                     results, meta = await self.retrieve(
                         user=user,
                         dataset_id=dataset_id,
                         query=query,
                         top_k=top_k,
-                        mode=mode,
-                        document_id=document_id,
-                        dense_weight=dense_weight,
-                        bm25_weight=bm25_weight,
-                        fusion_method=fusion_method,
-                        alpha=alpha,
-                        score_threshold=score_threshold,
-                        vector_top_k=vector_top_k,
-                        keyword_top_k=keyword_top_k,
-                        candidate_top_k=candidate_top_k,
-                        keyword_candidate_k=keyword_candidate_k,
-                        fusion=fusion,
-                        rrf_k=rrf_k,
+                        mode=query_spec.get("mode", mode),
+                        document_id=query_spec.get("document_id", document_id),
+                        dense_weight=query_spec.get("dense_weight", dense_weight),
+                        bm25_weight=query_spec.get("bm25_weight", bm25_weight),
+                        fusion_method=query_spec.get("fusion_method", fusion_method),
+                        alpha=query_spec.get("alpha", alpha),
+                        score_threshold=query_spec.get("score_threshold", score_threshold),
+                        source_type_filter=query_spec.get("source_type_filter", source_type_filter),
+                        language_filter=query_spec.get("language_filter", language_filter),
+                        metadata_filter=query_spec.get("metadata_filter"),
+                        multi_query=query_spec.get("multi_query", multi_query),
+                        authority_sort=query_spec.get("authority_sort", authority_sort),
+                        vector_top_k=query_spec.get("vector_top_k", vector_top_k),
+                        keyword_top_k=query_spec.get("keyword_top_k", keyword_top_k),
+                        candidate_top_k=query_spec.get("candidate_top_k", candidate_top_k),
+                        keyword_candidate_k=query_spec.get("keyword_candidate_k", keyword_candidate_k),
+                        fusion=query_spec.get("fusion", fusion),
+                        rrf_k=query_spec.get("rrf_k", rrf_k),
                         rrf_weights=rrf_weights,
-                        rerank=rerank,
-                        rerank_model=rerank_model,
-                        rerank_top_n=rerank_top_n,
-                        mmr=mmr,
-                        mmr_lambda=mmr_lambda,
-                        mmr_threshold=mmr_threshold,
+                        rerank=query_spec.get("rerank", rerank),
+                        rerank_model=query_spec.get("rerank_model", rerank_model),
+                        rerank_top_n=query_spec.get("rerank_top_n", rerank_top_n),
+                        mmr=query_spec.get("mmr", mmr),
+                        mmr_lambda=query_spec.get("mmr_lambda", mmr_lambda),
+                        mmr_threshold=query_spec.get("mmr_threshold", mmr_threshold),
                     )
+                    retrieve_time_ms = (time.perf_counter() - retrieve_started) * 1000
+                    merged_meta = dict(meta or {})
+                    merged_meta["queue_wait_ms"] = round(queue_wait_ms, 2)
+                    merged_meta["retrieve_time_ms"] = round(retrieve_time_ms, 2)
                     return {
                         "query": query,
                         "results": [
@@ -5672,18 +5738,22 @@ class KnowledgeService:
                             }
                             for r in results
                         ],
-                        "meta": meta,
+                        "meta": merged_meta,
                     }
                 except Exception as e:
                     logger.warning(f"[retrieve_batch] Query '{query}' failed: {e}")
                     return {
                         "query": query,
                         "results": [],
-                        "meta": {"error": str(e)},
+                        "meta": {
+                            "error": str(e),
+                            "queue_wait_ms": round(queue_wait_ms, 2),
+                            "retrieve_time_ms": round((time.perf_counter() - retrieve_started) * 1000, 2),
+                        },
                     }
 
         # Execute all queries in parallel
-        batch_results = await asyncio.gather(*[_retrieve_single(q) for q in valid_queries])
+        batch_results = await asyncio.gather(*[_retrieve_single(q) for q in valid_specs])
 
         # Dedupe results if requested
         if dedupe_results:
@@ -5700,13 +5770,19 @@ class KnowledgeService:
         # Build metadata
         execution_time_ms = (time.time() - start_time) * 1000
         total_results = sum(len(r.get("results", [])) for r in batch_results)
+        queue_waits = [
+            float((item.get("meta") or {}).get("queue_wait_ms", 0.0) or 0.0)
+            for item in batch_results
+        ]
 
         meta = {
-            "total_queries": len(valid_queries),
+            "total_queries": len(valid_specs),
             "total_results": total_results,
             "execution_time_ms": round(execution_time_ms, 2),
             "max_parallel": max_parallel,
             "dedupe_results": dedupe_results,
+            "avg_queue_wait_ms": round(sum(queue_waits) / len(queue_waits), 2) if queue_waits else 0.0,
+            "max_queue_wait_ms": round(max(queue_waits), 2) if queue_waits else 0.0,
         }
 
         return batch_results, meta

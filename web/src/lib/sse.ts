@@ -342,8 +342,7 @@ export async function* sseFetchEvents<T>(
         const evt = parsePart(part);
         if (!evt) continue;
         yieldedCount++;
-        chunkCount++;
-        if (debug && (yieldedCount <= 3 || chunkCount % 50 === 0)) {
+        if (debug && (yieldedCount <= 3 || yieldedCount % 50 === 0)) {
           console.log(`[SSE-Events] Yielding #${yieldedCount} event='${evt.event}' at ${(performance.now() - startTime).toFixed(0)}ms`);
         }
         yield evt;
