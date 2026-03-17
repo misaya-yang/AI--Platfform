@@ -20,7 +20,22 @@ logger = get_logger(__name__)
 
 QURAN_SOURCE_API = "quran.foundation"
 SUNNAH_SOURCE_API = "sunnah"
+HADITH_CDN_SOURCE_API = "hadith-cdn"
 ALADHAN_SOURCE_API = "aladhan"
+
+# Mapping from sunnah.com collection names to CDN edition names
+_CDN_COLLECTION_MAP: dict[str, str] = {
+    "bukhari": "bukhari",
+    "muslim": "muslim",
+    "tirmidhi": "tirmidhi",
+    "nasai": "nasai",
+    "ibnmajah": "ibnmajah",
+    "abudawud": "abudawud",
+    "malik": "malik",
+    "nawawi": "nawawi",
+    "qudsi": "qudsi",
+    "dehlawi": "dehlawi",
+}
 
 
 class IslamicContentError(RuntimeError):
@@ -622,29 +637,77 @@ class IslamicContentService:
             "audio_url": word.get("audio_url"),
         }
 
+    # ------------------------------------------------------------------
+    # Hadith provider routing: CDN (fawazahmed0) primary, sunnah.com fallback
+    # ------------------------------------------------------------------
+
+    @property
+    def _use_hadith_cdn(self) -> bool:
+        return bool(self.settings.hadith_cdn_enabled and self.settings.hadith_cdn_base_url)
+
+    def _cdn_edition(self, collection_name: str, lang: str | None = None) -> str:
+        lang = lang or self.settings.hadith_cdn_default_lang
+        cdn_name = _CDN_COLLECTION_MAP.get(collection_name, collection_name)
+        return f"{lang}-{cdn_name}"
+
     def _sunnah_headers(self) -> dict[str, str]:
         if not self.settings.sunnah_api_key:
             raise IslamicContentError("Sunnah API key is not configured")
         return {"X-API-Key": self.settings.sunnah_api_key}
+
+    # --- get_hadith_collections ---
 
     async def get_hadith_collections(self, *, use_cache: bool = True) -> dict[str, Any]:
         if use_cache:
             cached = self._read_cached("hadith", "collections.json")
             if cached is not None:
                 return cached
+        if self._use_hadith_cdn:
+            result = await self._cdn_get_hadith_collections()
+        else:
+            result = await self._sunnah_get_hadith_collections()
+        self._write_cached(result, "hadith", "collections.json")
+        return result
+
+    async def _cdn_get_hadith_collections(self) -> dict[str, Any]:
+        payload = await self._request_json(
+            self.settings.hadith_cdn_base_url,
+            "editions.json",
+        )
         items = []
+        for name, info in payload.items():
+            if not isinstance(info, dict):
+                continue
+            display_name = info.get("name") or name.title()
+            items.append({
+                "name": name,
+                "title": display_name,
+                "short_intro": None,
+                "has_books": True,
+                "has_chapters": True,
+                "total_books": None,
+                "total_hadith": None,
+            })
+        return {
+            **self._default_metadata(),
+            "screen": "hadith_collections",
+            "source_api": HADITH_CDN_SOURCE_API,
+            "collections": items,
+        }
+
+    async def _sunnah_get_hadith_collections(self) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
         page = 1
         while True:
             payload = await self._request_json(
-                self.settings.sunnah_base_url,
-                "collections",
+                self.settings.sunnah_base_url, "collections",
                 params={"limit": self.settings.sunnah_page_size, "page": page},
                 headers=self._sunnah_headers(),
             )
             data = payload.get("data") or []
             if not data:
                 break
-            items.extend(self._normalize_hadith_collection(item) for item in data)
+            items.extend(self._normalize_sunnah_collection(item) for item in data)
             total_pages = self._pagination_total_pages(payload.get("pagination") or {})
             if total_pages is not None and page >= total_pages:
                 break
@@ -654,32 +717,85 @@ class IslamicContentService:
             if len(data) < self.settings.sunnah_page_size:
                 break
             page += 1
-        result = {
+        return {
             **self._default_metadata(),
             "screen": "hadith_collections",
             "source_api": SUNNAH_SOURCE_API,
             "collections": items,
         }
-        self._write_cached(result, "hadith", "collections.json")
-        return result
+
+    # --- get_hadith_books ---
 
     async def get_hadith_books(
-        self,
-        collection_name: str,
-        *,
-        use_cache: bool = True,
+        self, collection_name: str, *, use_cache: bool = True,
     ) -> dict[str, Any]:
         cache_name = f"{collection_name}.json"
         if use_cache:
             cached = self._read_cached("hadith", "books", cache_name)
             if cached is not None:
                 return cached
+        if self._use_hadith_cdn:
+            result = await self._cdn_get_hadith_books(collection_name)
+        else:
+            result = await self._sunnah_get_hadith_books(collection_name)
+        self._write_cached(result, "hadith", "books", cache_name)
+        return result
+
+    async def _cdn_get_hadith_books(self, collection_name: str) -> dict[str, Any]:
+        edition = self._cdn_edition(collection_name)
+        payload = await self._request_json(
+            self.settings.hadith_cdn_base_url,
+            f"editions/{edition}.json",
+        )
+        meta = payload.get("metadata") or {}
+        section_details = meta.get("section_details") or {}
+        hadiths = payload.get("hadiths") or []
+
+        # Build book list from section_details + count hadiths per section
+        book_hadith_counts: dict[str, int] = {}
+        for h in hadiths:
+            ref = h.get("reference") or {}
+            bk = str(ref.get("book") or "")
+            if bk:
+                book_hadith_counts[bk] = book_hadith_counts.get(bk, 0) + 1
+
+        books = []
+        for book_num in sorted(section_details.keys(), key=lambda x: int(x) if x.isdigit() else 0):
+            raw_title = section_details[book_num]
+            # CDN sometimes returns a dict instead of a string for section titles
+            if isinstance(raw_title, dict):
+                raw_title = raw_title.get("title") or raw_title.get("name") or f"Book {book_num}"
+            books.append({
+                "book_number": book_num,
+                "title": str(raw_title) if raw_title else f"Book {book_num}",
+                "hadith_start_number": None,
+                "hadith_end_number": None,
+                "number_of_hadith": book_hadith_counts.get(book_num),
+            })
+
+        return {
+            **self._default_metadata(),
+            "screen": "hadith_books",
+            "source_api": HADITH_CDN_SOURCE_API,
+            "collection": {
+                "name": collection_name,
+                "title": meta.get("name") or collection_name.title(),
+                "short_intro": None,
+                "has_books": True,
+                "has_chapters": True,
+                "total_books": len(books),
+                "total_hadith": len(hadiths),
+            },
+            "books": books,
+        }
+
+    async def _sunnah_get_hadith_books(self, collection_name: str) -> dict[str, Any]:
         meta_payload = await self._request_json(
             self.settings.sunnah_base_url,
             f"collections/{collection_name}",
             headers=self._sunnah_headers(),
         )
-        books = []
+        books: list[dict[str, Any]] = []
         page = 1
         while True:
             payload = await self._request_json(
@@ -691,7 +807,7 @@ class IslamicContentService:
             data = payload.get("data") or []
             if not data:
                 break
-            books.extend(self._normalize_hadith_book(item) for item in data)
+            books.extend(self._normalize_sunnah_book(item) for item in data)
             total_pages = self._pagination_total_pages(payload.get("pagination") or {})
             if total_pages is not None and page >= total_pages:
                 break
@@ -701,24 +817,19 @@ class IslamicContentService:
             if len(data) < self.settings.sunnah_page_size:
                 break
             page += 1
-        result = {
+        return {
             **self._default_metadata(),
             "screen": "hadith_books",
             "source_api": SUNNAH_SOURCE_API,
-            "collection": self._normalize_hadith_collection(meta_payload.get("data") or meta_payload),
+            "collection": self._normalize_sunnah_collection(meta_payload.get("data") or meta_payload),
             "books": books,
         }
-        self._write_cached(result, "hadith", "books", cache_name)
-        return result
+
+    # --- get_hadith_book_items ---
 
     async def get_hadith_book_items(
-        self,
-        collection_name: str,
-        book_number: str,
-        *,
-        page: int = 1,
-        limit: int | None = None,
-        use_cache: bool = True,
+        self, collection_name: str, book_number: str, *,
+        page: int = 1, limit: int | None = None, use_cache: bool = True,
     ) -> dict[str, Any]:
         limit = limit or self.settings.sunnah_page_size
         cache_name = f"book_{book_number}_page_{page}_limit_{limit}.json"
@@ -726,51 +837,181 @@ class IslamicContentService:
             cached = self._read_cached("hadith", "hadiths", collection_name, cache_name)
             if cached is not None:
                 return cached
+        if self._use_hadith_cdn:
+            result = await self._cdn_get_hadith_book_items(collection_name, book_number, page=page, limit=limit)
+        else:
+            result = await self._sunnah_get_hadith_book_items(collection_name, book_number, page=page, limit=limit)
+        self._write_cached(result, "hadith", "hadiths", collection_name, cache_name)
+        return result
+
+    async def _cdn_get_hadith_book_items(
+        self, collection_name: str, book_number: str, *, page: int = 1, limit: int = 50,
+    ) -> dict[str, Any]:
+        edition = self._cdn_edition(collection_name)
+        payload = await self._request_json(
+            self.settings.hadith_cdn_base_url,
+            f"editions/{edition}/sections/{book_number}.json",
+        )
+        hadiths = payload.get("hadiths") or []
+
+        # Fetch Arabic text in parallel for summaries
+        ara_texts = await self._cdn_fetch_arabic_for_hadiths(collection_name, hadiths)
+
+        # Client-side pagination
+        start = (page - 1) * limit
+        page_hadiths = hadiths[start : start + limit]
+
+        items = []
+        for h in page_hadiths:
+            ref = h.get("reference") or {}
+            hnum = str(h.get("hadithnumber") or "")
+            text = self._clean_text(h.get("text"))
+            items.append({
+                "collection": collection_name,
+                "book_number": str(ref.get("book") or book_number),
+                "chapter_id": str(ref.get("book") or book_number),
+                "hadith_number": hnum,
+                "title": None,
+                "preview_text": text[:280] if text else "",
+                "arabic_preview_text": self._clean_text(ara_texts.get(hnum))[:280] if ara_texts.get(hnum) else "",
+            })
+        return {
+            **self._default_metadata(),
+            "screen": "hadith_book_items",
+            "source_api": HADITH_CDN_SOURCE_API,
+            "collection_name": collection_name,
+            "book_number": book_number,
+            "items": items,
+            "pagination": {"current_page": page, "total": len(hadiths), "per_page": limit},
+        }
+
+    async def _sunnah_get_hadith_book_items(
+        self, collection_name: str, book_number: str, *, page: int = 1, limit: int = 50,
+    ) -> dict[str, Any]:
         payload = await self._request_json(
             self.settings.sunnah_base_url,
             f"collections/{collection_name}/books/{book_number}/hadiths",
             params={"page": page, "limit": limit},
             headers=self._sunnah_headers(),
         )
-        result = {
+        return {
             **self._default_metadata(),
             "screen": "hadith_book_items",
             "source_api": SUNNAH_SOURCE_API,
             "collection_name": collection_name,
             "book_number": book_number,
-            "items": [self._normalize_hadith_summary(item) for item in payload.get("data") or []],
+            "items": [self._normalize_sunnah_summary(item) for item in payload.get("data") or []],
             "pagination": payload.get("pagination") or {},
         }
-        self._write_cached(result, "hadith", "hadiths", collection_name, cache_name)
-        return result
+
+    # --- get_hadith_detail ---
 
     async def get_hadith_detail(
-        self,
-        collection_name: str,
-        hadith_number: str,
-        *,
-        use_cache: bool = True,
+        self, collection_name: str, hadith_number: str, *, use_cache: bool = True,
     ) -> dict[str, Any]:
         cache_name = f"{hadith_number}.json"
         if use_cache:
             cached = self._read_cached("hadith", "detail", collection_name, cache_name)
             if cached is not None:
                 return cached
+        if self._use_hadith_cdn:
+            result = await self._cdn_get_hadith_detail(collection_name, hadith_number)
+        else:
+            result = await self._sunnah_get_hadith_detail(collection_name, hadith_number)
+        self._write_cached(result, "hadith", "detail", collection_name, cache_name)
+        return result
+
+    async def _cdn_get_hadith_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any]:
+        edition = self._cdn_edition(collection_name)
+        eng_payload = await self._request_json(
+            self.settings.hadith_cdn_base_url,
+            f"editions/{edition}/{hadith_number}.json",
+        )
+        eng_hadiths = eng_payload.get("hadiths") or []
+        eng = eng_hadiths[0] if eng_hadiths else {}
+
+        # Fetch Arabic
+        ara_edition = self._cdn_edition(collection_name, lang="ara")
+        try:
+            ara_payload = await self._request_json(
+                self.settings.hadith_cdn_base_url,
+                f"editions/{ara_edition}/{hadith_number}.json",
+            )
+            ara = (ara_payload.get("hadiths") or [{}])[0]
+        except Exception:
+            ara = {}
+
+        ref = eng.get("reference") or {}
+        # Resolve book title from metadata
+        meta = eng_payload.get("metadata") or {}
+        section_details = meta.get("section_details") or {}
+        book_num = str(ref.get("book") or "")
+        chapter_title = section_details.get(book_num)
+
+        return {
+            **self._default_metadata(),
+            "screen": "hadith_detail",
+            "source_api": HADITH_CDN_SOURCE_API,
+            "hadith": {
+                "collection": collection_name,
+                "book_number": book_num,
+                "chapter_id": book_num,
+                "hadith_number": str(eng.get("hadithnumber") or hadith_number),
+                "chapter_title": chapter_title,
+                "translation_text": self._clean_text(eng.get("text")),
+                "arabic_text": self._clean_text(ara.get("text")),
+                "grades": {
+                    "en": eng.get("grades") or [],
+                    "ar": ara.get("grades") or [],
+                },
+                "share_actions": ["bookmark", "share", "copy"],
+            },
+        }
+
+    async def _sunnah_get_hadith_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any]:
         payload = await self._request_json(
             self.settings.sunnah_base_url,
             f"collections/{collection_name}/hadiths/{hadith_number}",
             headers=self._sunnah_headers(),
         )
-        result = {
+        return {
             **self._default_metadata(),
             "screen": "hadith_detail",
             "source_api": SUNNAH_SOURCE_API,
-            "hadith": self._normalize_hadith_detail(payload.get("data") or payload),
+            "hadith": self._normalize_sunnah_detail(payload.get("data") or payload),
         }
-        self._write_cached(result, "hadith", "detail", collection_name, cache_name)
-        return result
 
-    def _normalize_hadith_collection(self, item: dict[str, Any]) -> dict[str, Any]:
+    # --- Arabic text helper for CDN ---
+
+    async def _cdn_fetch_arabic_for_hadiths(
+        self, collection_name: str, hadiths: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        """Fetch Arabic texts for a list of hadiths. Returns {hadith_number: arabic_text}."""
+        if not hadiths:
+            return {}
+        ara_edition = self._cdn_edition(collection_name, lang="ara")
+        # Use section endpoint to get all Arabic in one call
+        ref = (hadiths[0].get("reference") or {})
+        book = ref.get("book")
+        if book is None:
+            return {}
+        try:
+            payload = await self._request_json(
+                self.settings.hadith_cdn_base_url,
+                f"editions/{ara_edition}/sections/{book}.json",
+            )
+            return {
+                str(h.get("hadithnumber") or ""): h.get("text") or ""
+                for h in (payload.get("hadiths") or [])
+            }
+        except Exception:
+            return {}
+
+    # ------------------------------------------------------------------
+    # Sunnah.com normalizers (kept for fallback)
+    # ------------------------------------------------------------------
+
+    def _normalize_sunnah_collection(self, item: dict[str, Any]) -> dict[str, Any]:
         collection_entries = item.get("collection") or []
         english_entry = next(
             (entry for entry in collection_entries if entry.get("lang") == "en"),
@@ -786,7 +1027,7 @@ class IslamicContentService:
             "total_hadith": item.get("totalHadith") or english_entry.get("totalHadith"),
         }
 
-    def _normalize_hadith_book(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_sunnah_book(self, item: dict[str, Any]) -> dict[str, Any]:
         book_entries = item.get("book") or []
         english_entry = next(
             (entry for entry in book_entries if entry.get("lang") == "en"),
@@ -800,7 +1041,7 @@ class IslamicContentService:
             "number_of_hadith": item.get("numberOfHadith"),
         }
 
-    def _normalize_hadith_summary(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_sunnah_summary(self, item: dict[str, Any]) -> dict[str, Any]:
         entries = item.get("hadith") or []
         english = next((entry for entry in entries if entry.get("lang") == "en"), {})
         arabic = next((entry for entry in entries if entry.get("lang") == "ar"), {})
@@ -814,7 +1055,7 @@ class IslamicContentService:
             "arabic_preview_text": self._clean_text(arabic.get("body"))[:280],
         }
 
-    def _normalize_hadith_detail(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_sunnah_detail(self, item: dict[str, Any]) -> dict[str, Any]:
         entries = item.get("hadith") or []
         english = next((entry for entry in entries if entry.get("lang") == "en"), {})
         arabic = next((entry for entry in entries if entry.get("lang") == "ar"), {})

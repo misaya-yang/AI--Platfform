@@ -65,7 +65,7 @@ def _quran_api_base_default() -> str:
     return "https://apis.quran.foundation/content/api/v4"
 
 
-load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 class AppSettings(BaseModel):
@@ -324,6 +324,16 @@ class HadithSettings(BaseModel):
     )
 
 
+class DuaSettings(BaseModel):
+    data_path: str = Field(
+        default_factory=lambda: _fallback(
+            "ISLAMIC_CONTENT_DUA__DATA_PATH",
+            "GATEWAY_ISLAMIC_CONTENT__DUAS_FILE_PATH",
+            "",
+        )
+    )
+
+
 class BootstrapSettings(BaseModel):
     on_start: bool = False
     fail_if_empty: bool = False
@@ -344,6 +354,13 @@ class ModulesSettings(BaseModel):
             True,
         )
     )
+    enable_dua: bool = Field(
+        default_factory=lambda: _fallback_bool(
+            "ISLAMIC_CONTENT_MODULES__ENABLE_DUA",
+            "GATEWAY_ISLAMIC_CONTENT__ENABLE_DUA",
+            True,
+        )
+    )
 
 
 class Settings(BaseSettings):
@@ -360,5 +377,6 @@ class Settings(BaseSettings):
     quran: QuranSettings = Field(default_factory=QuranSettings)
     quran_user: QuranUserSettings = Field(default_factory=QuranUserSettings)
     hadith: HadithSettings = Field(default_factory=HadithSettings)
+    dua: DuaSettings = Field(default_factory=DuaSettings)
     bootstrap: BootstrapSettings = Field(default_factory=BootstrapSettings)
     modules: ModulesSettings = Field(default_factory=ModulesSettings)

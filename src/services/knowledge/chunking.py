@@ -2387,10 +2387,18 @@ class AutomaticChunker(BaseChunker):
         if not text:
             return []
 
-        # Note: Islamic text chunking is handled via explicit config.mode == ISLAMIC
-        # (see create_chunker()), NOT via auto-detection here.
-
         self._apply_auto_defaults()
+
+        # Strategy 0: Auto-detect Islamic texts (Quran, Hadith, Fiqh, Tafseer)
+        # and delegate to the specialised IslamicTextChunker which preserves
+        # verse and narration boundaries.
+        try:
+            from .islamic_chunking import is_islamic_text, IslamicTextChunker
+
+            if is_islamic_text(text):
+                return IslamicTextChunker(self.config).chunk(text)
+        except Exception:
+            pass  # islamic_chunking module unavailable — continue normally
 
         # Analyze document characteristics
         has_images = any(re.search(p, text) for p in self.IMAGE_PATTERNS)

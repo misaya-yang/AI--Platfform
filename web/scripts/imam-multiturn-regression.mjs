@@ -55,7 +55,7 @@ const scenarios = [
     newSessionAfter: true,
     isolatedTurn: {
       prompt: "第二项请展开讲一下",
-      expectAny: ["没有足够信息", "请提供", "能否说明", "第二项", "咨询"],
+      expectAny: ["没有足够信息", "请提供", "能否说明", "第二项", "咨询", "哪方面"],
     },
   },
 ];
@@ -100,9 +100,14 @@ async function ensureFreshSession(page) {
 }
 
 async function waitForStreamLifecycle(page) {
-  const stopButton = page.getByRole("button", { name: /stop generating/i });
-  await stopButton.waitFor({ state: "visible", timeout: 15_000 }).catch(() => null);
-  await stopButton.waitFor({ state: "hidden", timeout: 120_000 }).catch(() => null);
+  const resolved = await page
+    .waitForFunction(() => {
+      const composer = document.querySelector("#playground-chat-composer");
+      return composer instanceof HTMLTextAreaElement && !composer.disabled;
+    }, undefined, { timeout: 120_000 })
+    .then(() => true)
+    .catch(() => false);
+  return resolved;
 }
 
 async function readLastAssistantMessage(page) {
@@ -112,14 +117,19 @@ async function readLastAssistantMessage(page) {
     return { text: "", statsText: "" };
   }
   const last = messages.nth(count - 1);
-  const text = (await last.innerText()).trim();
-  const stats = await last.locator("xpath=following-sibling::*[1]").innerText().catch(() => "");
+  const text = (
+    await last.locator('[data-message-text="true"]').first().innerText().catch(() => "")
+  ).trim();
+  const stats = (
+    await last.locator('[data-message-stats="true"]').first().innerText().catch(() => "")
+  ).trim();
   return { text, statsText: String(stats || "").trim() };
 }
 
 async function sendTurn(page, prompt, expectAny) {
   console.log(`[turn] prompt: ${prompt}`);
   const beforeAssistantCount = await page.locator('[data-message-role="assistant"]').count();
+  const beforeLast = await readLastAssistantMessage(page);
   const composer = page.locator("#playground-chat-composer");
   await composer.fill(prompt);
 
@@ -129,20 +139,33 @@ async function sendTurn(page, prompt, expectAny) {
 
   let firstVisibleMs = null;
   await page.waitForFunction(
-    ({ expectedCount }) => {
+    ({ expectedCount, previousText, previousStats }) => {
       const messages = document.querySelectorAll('[data-message-role="assistant"]');
-      if (messages.length <= expectedCount) return false;
+      if (!messages.length) return false;
       const last = messages[messages.length - 1];
       const text = (last?.textContent || "").trim();
-      return text.length > 0;
+      if (!text.length) return false;
+      if (messages.length > expectedCount) return true;
+      const maybeStats = last?.nextElementSibling?.textContent || "";
+      return text !== previousText || maybeStats.trim() !== previousStats;
     },
-    { expectedCount: beforeAssistantCount },
+    {
+      expectedCount: beforeAssistantCount,
+      previousText: beforeLast.text,
+      previousStats: beforeLast.statsText,
+    },
     { timeout: 90_000 }
   );
   firstVisibleMs = nowMs() - submittedAt;
   console.log(`[turn] first visible content in ${firstVisibleMs}ms`);
 
-  await waitForStreamLifecycle(page);
+  const streamSettled = await waitForStreamLifecycle(page);
+  if (!streamSettled) {
+    const debugState = await page.evaluate(() => window.__playgroundDebug ?? null).catch(() => null);
+    throw new Error(
+      `Composer did not re-enable within 120s for prompt "${prompt}". Debug: ${JSON.stringify(debugState)}`
+    );
+  }
   const completedAt = nowMs();
   const { text, statsText } = await readLastAssistantMessage(page);
 

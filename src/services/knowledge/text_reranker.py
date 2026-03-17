@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 import re
 import threading
 from collections import OrderedDict
@@ -67,6 +68,14 @@ logger.addFilter(SensitiveDataFilter())
 _rerank_cache: OrderedDict[str, list[tuple[int, float]]] = OrderedDict()
 _rerank_cache_lock = threading.Lock()
 _RERANK_CACHE_MAX_SIZE = 200
+_provider_failure_state: dict[str, tuple[float, str]] = {}
+_provider_failure_lock = threading.Lock()
+_provider_success_state: dict[str, float] = {}
+_provider_probe_locks: dict[str, asyncio.Lock] = {}
+_provider_probe_lock = threading.Lock()
+_PERMANENT_FAILURE_COOLDOWN_SECONDS = 300.0
+_TRANSIENT_FAILURE_COOLDOWN_SECONDS = 30.0
+_SUCCESS_HEALTH_WINDOW_SECONDS = 60.0
 
 
 def _make_rerank_cache_key(model: str, query: str, docs: list[str]) -> str:
@@ -98,6 +107,80 @@ def _set_cached_rerank(
             _rerank_cache[key] = result
             while len(_rerank_cache) > _RERANK_CACHE_MAX_SIZE:
                 _rerank_cache.popitem(last=False)
+
+
+def _make_provider_failure_key(provider: str, model: str, base_url: str | None = None) -> str:
+    normalized_url = (base_url or "").strip().lower()
+    return f"{provider}:{model}:{normalized_url}"
+
+
+def _get_provider_failure_reason(key: str) -> str | None:
+    now = time.monotonic()
+    with _provider_failure_lock:
+        state = _provider_failure_state.get(key)
+        if not state:
+            return None
+        reopen_at, reason = state
+        if reopen_at <= now:
+            _provider_failure_state.pop(key, None)
+            return None
+        return reason
+
+
+def _mark_provider_failure(key: str, reason: str, *, cooldown_seconds: float) -> None:
+    reopen_at = time.monotonic() + max(1.0, cooldown_seconds)
+    with _provider_failure_lock:
+        _provider_failure_state[key] = (reopen_at, reason)
+        _provider_success_state.pop(key, None)
+
+
+def _has_recent_provider_success(key: str) -> bool:
+    now = time.monotonic()
+    with _provider_failure_lock:
+        deadline = _provider_success_state.get(key)
+        if deadline is None:
+            return False
+        if deadline <= now:
+            _provider_success_state.pop(key, None)
+            return False
+        return True
+
+
+def _mark_provider_success(key: str, *, window_seconds: float = _SUCCESS_HEALTH_WINDOW_SECONDS) -> None:
+    deadline = time.monotonic() + max(1.0, window_seconds)
+    with _provider_failure_lock:
+        _provider_success_state[key] = deadline
+
+
+def _get_provider_probe_guard(key: str) -> asyncio.Lock:
+    with _provider_probe_lock:
+        lock = _provider_probe_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _provider_probe_locks[key] = lock
+        return lock
+
+
+def _is_permanent_http_error(exc: httpx.HTTPStatusError) -> bool:
+    status = exc.response.status_code
+    if status in {400, 401, 402, 403}:
+        return True
+    text = ""
+    try:
+        text = exc.response.text or ""
+    except Exception:
+        text = ""
+    lowered = text.lower()
+    permanent_markers = (
+        "arrearage",
+        "account is in good standing",
+        "access denied",
+        "invalid api key",
+        "api key",
+        "unauthorized",
+        "forbidden",
+    )
+    return any(marker in lowered for marker in permanent_markers)
 
 
 # =============================================================================
@@ -152,6 +235,9 @@ class AsyncTextReranker:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url or self.DASHSCOPE_RERANK_URL
+        self._provider_failure_key = _make_provider_failure_key(
+            "dashscope", self.model, self.base_url
+        )
 
     async def rerank(
         self,
@@ -184,6 +270,21 @@ class AsyncTextReranker:
                 results = results[:top_n]
             return results
 
+        if failure_reason := _get_provider_failure_reason(self._provider_failure_key):
+            raise RuntimeError(f"DashScope rerank temporarily unavailable: {failure_reason}")
+
+        probe_lock: asyncio.Lock | None = None
+        if not _has_recent_provider_success(self._provider_failure_key):
+            probe_lock = _get_provider_probe_guard(self._provider_failure_key)
+            await probe_lock.acquire()
+            failure_reason = _get_provider_failure_reason(self._provider_failure_key)
+            if failure_reason:
+                probe_lock.release()
+                raise RuntimeError(f"DashScope rerank temporarily unavailable: {failure_reason}")
+            if _has_recent_provider_success(self._provider_failure_key):
+                probe_lock.release()
+                probe_lock = None
+
         # Build request
         payload = {
             "model": self.model,
@@ -212,6 +313,7 @@ class AsyncTextReranker:
             )
             response.raise_for_status()
             data = response.json()
+            _mark_provider_success(self._provider_failure_key)
 
             # Parse response
             output = data.get("output", {})
@@ -238,11 +340,39 @@ class AsyncTextReranker:
             return results
 
         except httpx.HTTPStatusError as e:
+            cooldown = (
+                _PERMANENT_FAILURE_COOLDOWN_SECONDS
+                if _is_permanent_http_error(e)
+                else _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+            )
+            error_reason = f"HTTP {e.response.status_code}"
+            try:
+                response_text = (e.response.text or "").strip()
+            except Exception:
+                response_text = ""
+            if response_text:
+                error_reason = f"{error_reason}: {response_text[:240]}"
+            _mark_provider_failure(
+                self._provider_failure_key,
+                error_reason,
+                cooldown_seconds=cooldown,
+            )
             logger.error(f"Rerank API error: {e.response.status_code} - {e.response.text}")
+            raise
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            _mark_provider_failure(
+                self._provider_failure_key,
+                str(e),
+                cooldown_seconds=_TRANSIENT_FAILURE_COOLDOWN_SECONDS,
+            )
+            logger.error(f"Rerank transport failure: {e}")
             raise
         except Exception as e:
             logger.error(f"Rerank failed: {e}")
             raise
+        finally:
+            if probe_lock is not None and probe_lock.locked():
+                probe_lock.release()
 
 
 # =============================================================================
@@ -296,7 +426,7 @@ class BGEReranker:
         self._initialized = False
 
     def _ensure_initialized(self):
-        """Lazy load the model."""
+        """Lazy load the model (synchronous, call from thread context)."""
         if self._initialized:
             return
 
@@ -326,16 +456,14 @@ class BGEReranker:
         if not documents:
             return []
 
-        self._ensure_initialized()
+        # Lazy-init + inference both in thread to avoid blocking the event loop
+        def _init_and_compute():
+            self._ensure_initialized()
+            return self._model.compute_score(
+                [[query, doc] for doc in documents], normalize=True
+            )
 
-        # Prepare pairs
-        pairs = [[query, doc] for doc in documents]
-
-        # Run inference in thread
-        def _compute_scores():
-            return self._model.compute_score(pairs, normalize=True)
-
-        scores = await asyncio.to_thread(_compute_scores)
+        scores = await asyncio.to_thread(_init_and_compute)
 
         # Handle single document case
         if isinstance(scores, float):
@@ -380,6 +508,9 @@ class CohereReranker:
     ):
         self.api_key = api_key
         self.model = model
+        self._provider_failure_key = _make_provider_failure_key(
+            "cohere", self.model, self.COHERE_RERANK_URL
+        )
 
     async def rerank(
         self,
@@ -400,6 +531,21 @@ class CohereReranker:
                 results = results[:top_n]
             return results
 
+        if failure_reason := _get_provider_failure_reason(self._provider_failure_key):
+            raise RuntimeError(f"Cohere rerank temporarily unavailable: {failure_reason}")
+
+        probe_lock: asyncio.Lock | None = None
+        if not _has_recent_provider_success(self._provider_failure_key):
+            probe_lock = _get_provider_probe_guard(self._provider_failure_key)
+            await probe_lock.acquire()
+            failure_reason = _get_provider_failure_reason(self._provider_failure_key)
+            if failure_reason:
+                probe_lock.release()
+                raise RuntimeError(f"Cohere rerank temporarily unavailable: {failure_reason}")
+            if _has_recent_provider_success(self._provider_failure_key):
+                probe_lock.release()
+                probe_lock = None
+
         payload = {
             "model": self.model,
             "query": query,
@@ -414,14 +560,45 @@ class CohereReranker:
             "Content-Type": "application/json",
         }
 
-        client = await _get_http_client()
-        response = await client.post(
-            self.COHERE_RERANK_URL,
-            json=payload,
-            headers=headers,
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            client = await _get_http_client()
+            response = await client.post(
+                self.COHERE_RERANK_URL,
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            _mark_provider_success(self._provider_failure_key)
+        except httpx.HTTPStatusError as e:
+            cooldown = (
+                _PERMANENT_FAILURE_COOLDOWN_SECONDS
+                if _is_permanent_http_error(e)
+                else _TRANSIENT_FAILURE_COOLDOWN_SECONDS
+            )
+            error_reason = f"HTTP {e.response.status_code}"
+            try:
+                response_text = (e.response.text or "").strip()
+            except Exception:
+                response_text = ""
+            if response_text:
+                error_reason = f"{error_reason}: {response_text[:240]}"
+            _mark_provider_failure(
+                self._provider_failure_key,
+                error_reason,
+                cooldown_seconds=cooldown,
+            )
+            raise
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            _mark_provider_failure(
+                self._provider_failure_key,
+                str(e),
+                cooldown_seconds=_TRANSIENT_FAILURE_COOLDOWN_SECONDS,
+            )
+            raise
+        finally:
+            if probe_lock is not None and probe_lock.locked():
+                probe_lock.release()
 
         results = []
         cache_data = []

@@ -1111,11 +1111,15 @@ class SiliconFlowEmbedding(BaseEmbedding):
         if not texts:
             return []
 
+        # Sanitize: replace empty/whitespace-only strings with placeholder
+        # to avoid API errors from providers that reject empty input.
+        sanitized = [t if t and t.strip() else "empty" for t in texts]
+
         # Process in batches
         all_vectors: list[list[float]] = []
 
-        for i in range(0, len(texts), self.MAX_BATCH_SIZE):
-            batch = texts[i : i + self.MAX_BATCH_SIZE]
+        for i in range(0, len(sanitized), self.MAX_BATCH_SIZE):
+            batch = sanitized[i : i + self.MAX_BATCH_SIZE]
             batch_info = f"batch {i // self.MAX_BATCH_SIZE + 1}"
 
             vectors = await self._embed_batch_with_retry(batch, batch_info)
@@ -1140,8 +1144,10 @@ class SiliconFlowEmbedding(BaseEmbedding):
                 return await self._embed_batch(texts)
 
             except EmbeddingError as e:
-                if "429" in str(e) or "500" in str(e) or "503" in str(e):
-                    last_error = e
+                err_str = str(e)
+                retryable = any(code in err_str for code in ("429", "500", "502", "503"))
+                last_error = e
+                if retryable:
                     logger.warning(
                         f"SiliconFlow embedding retryable error ({batch_info}) "
                         f"attempt {attempt + 1}/{self.MAX_RETRIES}: {e}"

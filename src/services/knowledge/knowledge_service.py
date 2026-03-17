@@ -2678,10 +2678,12 @@ class KnowledgeService:
                     # Launch all embedding tasks concurrently
                     tasks = [embed_single_batch(idx, batch) for idx, batch in batches]
 
-                    # Process results as they complete (for progressive updates)
+                    # Process results as they complete (for progressive updates).
+                    # Yield to event loop between batches so API requests aren't starved.
                     failed_batches = 0
                     for coro in asyncio.as_completed(tasks):
                         batch_idx, vectors, batch = await coro
+                        await asyncio.sleep(0)  # yield to event loop
 
                         # Build segments for this batch (skip if vectors are None)
                         for j, (

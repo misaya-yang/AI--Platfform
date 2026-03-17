@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "@/layouts/AppLayout";
 import { EnterpriseDashboard } from "@/pages/dashboard/index";
 import { ServicesPage } from "@/pages/Services";
-import { PlaygroundPage } from "@/pages/Playground";
+import { PlaygroundPage } from "@/pages/playground";
 import { TasksPage } from "@/pages/tasks";
 import { SettingsPage } from "@/pages/Settings";
 import { LoginPage } from "@/pages/Login";

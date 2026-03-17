@@ -24,6 +24,7 @@ class ProcessingResult:
     failed_pages: int
     segments_created: int = 0
     error: str | None = None
+    extracted_texts: dict[int, str] | None = None  # page_number -> OCR text
 
 
 class VisionPDFProcessor:
@@ -89,6 +90,8 @@ class VisionPDFProcessor:
         on_progress: Callable[[int, int], Awaitable[None]] | None = None,
         storage_service: Any | None = None,
         tenant_id: str = "default",
+        text_extractor: Callable[[bytes], Awaitable[str]] | None = None,
+        page_offset: int = 0,
     ) -> ProcessingResult:
         fitz = self._get_fitz()
         doc = None
@@ -99,6 +102,7 @@ class VisionPDFProcessor:
             processed_pages = 0
             failed_pages = 0
             segments_created = 0
+            extracted_texts: dict[int, str] = {}
 
             from qdrant_client.http import models as qmodels
 
@@ -168,7 +172,17 @@ class VisionPDFProcessor:
                     continue
 
                 width, height = dims
-                page_number = page_index + 1
+                global_page_index = page_offset + page_index
+                page_number = global_page_index + 1
+
+                # Extract text via VLM OCR callback (reuses rendered image)
+                if text_extractor and img_bytes:
+                    try:
+                        page_text = await text_extractor(img_bytes)
+                        if page_text:
+                            extracted_texts[page_number] = page_text
+                    except Exception as exc:
+                        logger.debug(f"Text extraction failed for page {page_number}: {exc}")
 
                 image_url = None
                 image_attachment_id = None
@@ -200,14 +214,14 @@ class VisionPDFProcessor:
                 batch_meta.append(
                     {
                         "segment_id": str(uuid.uuid4()),
-                        "position": self.position_offset + page_index,
+                        "position": self.position_offset + global_page_index,
                         "text": f"[Page {page_number}]",
                         "image_id": f"{document_id}_page_{page_number}",
                         "image_mime_type": image_media_type,
                         "image_width": width,
                         "image_height": height,
                         "page_number": page_number,
-                        "source_position": page_index,
+                        "source_position": global_page_index,
                         "image_url": image_url,
                         "image_attachment_id": image_attachment_id,
                         "image_filename": image_filename,
@@ -231,6 +245,7 @@ class VisionPDFProcessor:
                 processed_pages=processed_pages,
                 failed_pages=failed_pages,
                 segments_created=segments_created,
+                extracted_texts=extracted_texts if extracted_texts else None,
             )
         except Exception as exc:
             logger.error(f"VisionPDFProcessor failed: {exc}")

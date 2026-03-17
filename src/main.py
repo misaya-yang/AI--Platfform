@@ -518,26 +518,78 @@ def create_app() -> FastAPI:
             except Exception as e:
                 logger.warning(f"Failed to initialize HierarchicalIndexer: {e}")
 
+            # Initialize VLM OCR service for high-accuracy scanned document text extraction
+            # Supports Gemini (default, uses GEMINI_API_KEY) and DashScope backends
+            import os
+            vlm_ocr_service = None
+            ocr_vlm_provider = getattr(settings.knowledge, "ocr_vlm_provider", "gemini")
+            ocr_vlm_model = getattr(settings.knowledge, "ocr_vlm_model", "gemini-2.5-flash")
+
+            # Pick the right API key based on provider
+            ocr_api_key = None
+            if ocr_vlm_provider == "gemini" or (
+                ocr_vlm_provider == "auto" and ocr_vlm_model.startswith("gemini-")
+            ):
+                ocr_api_key = (
+                    os.environ.get("GEMINI_API_KEY")
+                    or os.environ.get("GOOGLE_API_KEY")
+                    or getattr(getattr(settings.knowledge, "gemini", None), "api_key", "")
+                )
+            elif ocr_vlm_provider == "dashscope" or (
+                ocr_vlm_provider == "auto" and not ocr_vlm_model.startswith("gemini-")
+            ):
+                ocr_api_key = getattr(dashscope_config, "api_key", "") if dashscope_config else ""
+
+            if ocr_api_key:
+                try:
+                    from .services.knowledge.vlm_ocr_service import VLMOCRService
+
+                    vlm_ocr_service = VLMOCRService(
+                        api_key=ocr_api_key,
+                        model=ocr_vlm_model,
+                        provider=ocr_vlm_provider,
+                        concurrency=getattr(settings.knowledge, "ocr_vlm_concurrency", 4),
+                        timeout_seconds=getattr(settings.knowledge, "ocr_vlm_timeout_seconds", 30),
+                    )
+                    logger.info(
+                        f"VLMOCRService initialized: provider={vlm_ocr_service.provider}, "
+                        f"model={ocr_vlm_model}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to initialize VLMOCRService: {e}")
+            else:
+                logger.info("VLMOCRService not initialized: no API key for OCR VLM provider")
+
             app.state.knowledge_worker = KnowledgeWorker(
                 app.state.knowledge_service,
                 vision_processor=vision_processor,
                 detector=detector,
                 hierarchical_indexer=hierarchical_indexer,
+                vlm_ocr_service=vlm_ocr_service,
             )
-            await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
+            # In multi-worker deployments, only start the knowledge ingestion
+            # worker in the first process to avoid duplicating embedding work
+            # and to keep other worker processes free for API requests.
+            import os as _os
+            _is_main_worker = _os.environ.get("GATEWAY_KNOWLEDGE_WORKER_ENABLED", "true").lower() in ("true", "1", "yes")
+            if _is_main_worker:
+                await app.state.knowledge_worker.start(settings.knowledge.worker_concurrency)
+            else:
+                logger.info("Knowledge worker disabled in this process (GATEWAY_KNOWLEDGE_WORKER_ENABLED=false)")
 
-            # 恢复服务重启前未完成的任务（使用 0 分钟阈值，立即恢复所有处理中的任务）
-            try:
-                recovery_result = await app.state.knowledge_service.recover_stuck_documents(
-                    stuck_threshold_minutes=0, worker=app.state.knowledge_worker
-                )
-                if recovery_result["recovered_count"] > 0:
-                    logger.info(
-                        f"恢复了 {recovery_result['recovered_count']} 个未完成文档, "
-                        f"重新入队 {recovery_result['requeued_count']} 个"
+            # 恢复服务重启前未完成的任务（仅在 knowledge worker 启动的进程中执行）
+            if _is_main_worker:
+                try:
+                    recovery_result = await app.state.knowledge_service.recover_stuck_documents(
+                        stuck_threshold_minutes=0, worker=app.state.knowledge_worker
                     )
-            except Exception as e:
-                logger.warning(f"恢复未完成文档失败: {e}")
+                    if recovery_result["recovered_count"] > 0:
+                        logger.info(
+                            f"恢复了 {recovery_result['recovered_count']} 个未完成文档, "
+                            f"重新入队 {recovery_result['requeued_count']} 个"
+                        )
+                except Exception as e:
+                    logger.warning(f"恢复未完成文档失败: {e}")
 
             if multimodal_embedding:
                 vlm_status = "with VLM" if knowledge_vlm_service else "no VLM"

@@ -3,11 +3,17 @@ OCR utilities for knowledge base document processing.
 
 This module provides shared OCR functionality to avoid code duplication
 between worker.py and knowledge_service.py.
+
+Supports three OCR strategies:
+- TESSERACT: Traditional Tesseract CLI OCR
+- VLM: High-accuracy Qwen-VL based OCR (recommended for Arabic)
+- HYBRID: VLM primary with Tesseract fallback
 """
 
 from __future__ import annotations
 
 import contextlib
+import enum
 import logging
 import os
 import shutil
@@ -396,3 +402,62 @@ def _process_completed_futures(futures, parts_by_page: dict[int, str]) -> None:
                 parts_by_page[page_idx] = page_text
         except Exception as e:
             logger.warning(f"OCR failed on page task: {e}")
+
+
+# =============================================================================
+# OCR Strategy (VLM / Tesseract / Hybrid)
+# =============================================================================
+
+
+class OCRStrategy(str, enum.Enum):
+    """OCR strategy selection."""
+
+    TESSERACT = "tesseract"
+    VLM = "vlm"
+    HYBRID = "hybrid"
+
+
+async def ocr_image_bytes_auto(
+    image_bytes: bytes,
+    vlm_ocr_service: Any | None = None,
+    config: OCRCConfig | None = None,
+    strategy: str = "hybrid",
+) -> str:
+    """OCR a single image using the configured strategy.
+
+    - tesseract: Use Tesseract CLI only (legacy).
+    - vlm: Use VLM OCR only (high accuracy, requires API).
+    - hybrid: Try VLM first; fall back to Tesseract on failure.
+
+    Args:
+        image_bytes: Image data as bytes.
+        vlm_ocr_service: Optional VLMOCRService instance.
+        config: OCR config for Tesseract fallback.
+        strategy: One of "tesseract", "vlm", "hybrid".
+
+    Returns:
+        Extracted text.
+    """
+    strat = strategy.lower().strip()
+
+    if strat == OCRStrategy.TESSERACT or (strat != OCRStrategy.TESSERACT and vlm_ocr_service is None):
+        return ocr_image_bytes(image_bytes, config=config, fallback_to_eng=True)
+
+    if strat == OCRStrategy.VLM:
+        try:
+            text = await vlm_ocr_service.ocr_image(image_bytes)
+            if text:
+                return text
+        except Exception as e:
+            logger.warning(f"VLM OCR failed: {e}")
+        return ""
+
+    # hybrid: VLM first, Tesseract fallback
+    try:
+        text = await vlm_ocr_service.ocr_image(image_bytes)
+        if text:
+            return text
+    except Exception as e:
+        logger.warning(f"VLM OCR failed in hybrid mode, falling back to Tesseract: {e}")
+
+    return ocr_image_bytes(image_bytes, config=config, fallback_to_eng=True)

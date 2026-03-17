@@ -217,9 +217,13 @@ async def upload_document(
     svc: KnowledgeService = Depends(get_knowledge_service),
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
     user: UserContext = Depends(get_user_context),
+    settings: Settings = Depends(get_settings),
 ):
     """
     Upload a document to the knowledge base.
+
+    Streams the upload to a temporary file to avoid loading large files
+    entirely into memory. Supports files up to KB_MAX_FILE_SIZE_MB (default 200MB).
 
     Args:
         dataset_id: Target dataset ID
@@ -230,19 +234,60 @@ async def upload_document(
             - scanned: Page-as-Image vision embedding (for scanned PDFs)
             - multimodal: Combined text + image embedding
     """
+    import os
+    import tempfile
+
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".html"}
+    KB_MAX_FILE_SIZE_MB = max(1, min(int(os.getenv("KB_MAX_FILE_SIZE_MB", "200")), 500))
+    KB_MAX_FILE_SIZE = KB_MAX_FILE_SIZE_MB * 1024 * 1024
+    CHUNK_SIZE = 64 * 1024  # 64KB
+
+    temp_path = None
     try:
-        content = await file.read()
+        filename = file.filename or "upload"
+        ext = Path(filename).suffix.lower()
+
+        if ext not in ALLOWED_EXTENSIONS:
+            raise ValidationFailedError(
+                f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
+
+        # Stream upload to temp file to avoid memory exhaustion
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=ext, prefix="kb_upload_"
+        ) as tmp:
+            temp_path = tmp.name
+
+        size_bytes = 0
+        with open(temp_path, "wb") as out:
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                if size_bytes > KB_MAX_FILE_SIZE:
+                    raise ValidationFailedError(
+                        f"File too large: {size_bytes / 1024 / 1024:.1f}MB exceeds "
+                        f"limit of {KB_MAX_FILE_SIZE_MB}MB"
+                    )
+                out.write(chunk)
+
         logger.info(
             "Upload started: file=%s, size=%d, dataset=%s, mode=%s",
-            file.filename,
-            len(content),
+            filename,
+            size_bytes,
             dataset_id,
             processing_mode,
         )
+
+        # Read back for document creation (service layer stores original to OSS/S3)
+        with open(temp_path, "rb") as f:
+            content = f.read()
+
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
-            filename=file.filename or "upload",
+            filename=filename,
             content_bytes=content,
             mime_type=file.content_type,
             processing_mode=processing_mode,
@@ -259,6 +304,10 @@ async def upload_document(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        if temp_path:
+            with contextlib.suppress(Exception):
+                os.unlink(temp_path)
 
 
 @router.post("/knowledge/{dataset_id}/documents/batch-upload")

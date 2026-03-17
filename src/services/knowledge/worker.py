@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .hierarchical_indexer import HierarchicalIndexer
     from .knowledge_service import KnowledgeService
     from .vision_pdf_processor import VisionPDFProcessor
+    from .vlm_ocr_service import VLMOCRService
 
 
 logger = get_logger(__name__)
@@ -48,11 +49,13 @@ class KnowledgeWorker:
         vision_processor: VisionPDFProcessor | None = None,
         detector: DocumentTypeDetector | None = None,
         hierarchical_indexer: HierarchicalIndexer | None = None,
+        vlm_ocr_service: VLMOCRService | None = None,
     ):
         self.service = service
         self.vision_processor = vision_processor
         self.detector = detector
         self.hierarchical_indexer = hierarchical_indexer
+        self.vlm_ocr_service = vlm_ocr_service
         self.queue: asyncio.Queue[KnowledgeIngestTask] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._running = False
@@ -62,6 +65,12 @@ class KnowledgeWorker:
             "large_file_threshold",
             DEFAULT_LARGE_FILE_THRESHOLD,
         )
+        self._pdf_split_enabled = getattr(knowledge_settings, "pdf_split_enabled", True)
+        self._pdf_split_max_size = getattr(
+            knowledge_settings, "pdf_split_max_size_bytes", 20 * 1024 * 1024
+        )
+        self._pdf_split_min_pages = getattr(knowledge_settings, "pdf_split_min_pages_per_part", 5)
+        self._ocr_strategy = getattr(knowledge_settings, "ocr_strategy", "hybrid")
 
         # allow KnowledgeService.enqueue_ingest() convenience
         self.service._worker = self
@@ -107,22 +116,31 @@ class KnowledgeWorker:
 
     async def _run(self) -> None:
         while self._running:
-            task = await self.queue.get()
+            try:
+                task = await self.queue.get()
+            except asyncio.CancelledError:
+                return
             try:
                 await self._process_task(task)
+            except asyncio.CancelledError:
+                # Graceful shutdown — mark task as incomplete, not failed.
+                logger.info("Worker cancelled during task processing")
+                return
             except Exception as exc:
                 # Never let a single ingest failure kill the background worker loop.
                 logger.exception(
                     "KB ingest task failed",
                     extra={"dataset_id": task.dataset_id, "document_id": task.document_id},
                 )
-                with contextlib.suppress(Exception):
+                try:
                     await self.service.db.update_document_status(
                         task.document_id,
                         status="failed",
                         progress=100,
                         error=str(exc),
                     )
+                except Exception as db_err:
+                    logger.warning(f"Failed to mark document as failed: {db_err}")
             finally:
                 self.queue.task_done()
 
@@ -319,9 +337,8 @@ class KnowledgeWorker:
                         if page.text.strip():
                             batch_text_parts.append(f"[Page {page.page_number}]\n{page.text}")
                         elif ocr_enabled and page.images:
-                            ocr_text = await asyncio.to_thread(
-                                self._ocr_image_bytes,
-                                self._select_ocr_image(page.images),
+                            ocr_text = await self._ocr_image_auto(
+                                self._select_ocr_image(page.images)
                             )
                             if ocr_text:
                                 batch_text_parts.append(f"[Page {page.page_number}]\n{ocr_text}")
@@ -504,6 +521,19 @@ class KnowledgeWorker:
         config = OCRCConfig.from_settings(knowledge_settings)
 
         return _ocr_image(image_bytes, config=config, fallback_to_eng=True)
+
+    async def _ocr_image_auto(self, image_bytes: bytes) -> str:
+        """Run OCR on a single image using the configured strategy (VLM/Tesseract/Hybrid)."""
+        from .ocr_utils import OCRCConfig, ocr_image_bytes_auto
+
+        knowledge_settings = getattr(self.service.settings, "knowledge", None)
+        config = OCRCConfig.from_settings(knowledge_settings)
+        return await ocr_image_bytes_auto(
+            image_bytes,
+            vlm_ocr_service=self.vlm_ocr_service,
+            config=config,
+            strategy=self._ocr_strategy,
+        )
 
     async def _process_with_hierarchical_indexer(
         self,
@@ -688,7 +718,7 @@ class KnowledgeWorker:
                 doc = fitz.open(stream=content, filetype="pdf")
                 text_parts = []
                 for page in doc:
-                    text_parts.append(page.get_text())
+                    text_parts.append(page.get_text() or "")
                 doc.close()
                 return "\n\n".join(text_parts)
             except Exception as e:
@@ -720,7 +750,18 @@ class KnowledgeWorker:
                 return ""
 
     async def _process_scanned(self, task: KnowledgeIngestTask, doc: dict) -> None:
-        """Process a scanned document using VisionPDFProcessor."""
+        """Process a scanned document using VisionPDFProcessor.
+
+        New flow:
+        1. Download to temp file
+        2. If file > pdf_split_max_size_bytes, split into parts
+        3. For each part:
+           - VisionPDFProcessor generates vision embeddings
+           - Simultaneously, VLM OCR extracts text (reusing rendered images)
+        4. Merge all part texts → update document.content
+        5. Run hierarchical indexer or standard ingestion for text vectors
+        6. Cleanup temp files
+        """
 
         if not self.vision_processor:
             logger.warning(
@@ -735,20 +776,12 @@ class KnowledgeWorker:
         if not original_key:
             raise ValueError("No original file key found for scanned document")
 
-        # Load original file from storage
-        logger.info(f"[Worker] Loading original file from storage: {original_key}")
-        pdf_bytes = await self.service.image_storage_service.download_original_file(original_key)
-
-        if not pdf_bytes:
-            raise ValueError(f"Failed to download original file: {original_key}")
-
-        # Get collection name
+        # Get dataset info
         dataset = await self.service.db.get_dataset(task.dataset_id)
         if not dataset:
             raise ValueError(f"Dataset {task.dataset_id} not found")
 
         # Determine collection name for multimodal vectors
-        # Default 1024 for unified dimension
         vector_dim = 1024
         if self.vision_processor and getattr(self.vision_processor.embedder, "dimension", None):
             vector_dim = int(self.vision_processor.embedder.dimension)
@@ -780,80 +813,196 @@ class KnowledgeWorker:
 
         tenant_id = str(dataset.get("tenant_id") or "default")
 
-        # Define progress callback
-        async def on_progress(current: int, total: int) -> None:
-            progress = int(5 + (current / total) * 90)  # 5% to 95%
-            await self.service.db.update_document_status(
-                task.document_id,
-                status="processing",
-                progress=progress,
-            )
+        # Download original file to temp
+        logger.info(f"[Worker] Downloading original file from storage: {original_key}")
+        temp_path = await self._download_original_to_temp(original_key)
 
-        # Process with VisionPDFProcessor
-        result = await self.vision_processor.process(
-            pdf_bytes=pdf_bytes,
-            document_id=task.document_id,
-            dataset_id=task.dataset_id,
-            collection=collection,
-            on_progress=on_progress,
-            storage_service=self.service.image_storage_service,
-            tenant_id=tenant_id,
-        )
+        import tempfile as _tempfile
 
-        if result.success:
-            # Record vision processing stats and then run text ingestion (OCR fallback)
-            await self.service.db.update_document_status(
-                task.document_id,
-                status="processing",
-                progress=90,
-            )
+        tmp_dir_obj: _tempfile.TemporaryDirectory | None = None
+        try:
+            tmp_dir_obj = _tempfile.TemporaryDirectory(prefix="scanned_split_")
+            tmp_dir = tmp_dir_obj.name
+            file_size = Path(temp_path).stat().st_size
+
+            # Split if needed
+            parts = [temp_path]  # default: single file = original
+            split_results = None
+            if self._pdf_split_enabled and file_size > self._pdf_split_max_size:
+                from .pdf_splitter import PDFSplitter
+
+                splitter = PDFSplitter(
+                    max_size_bytes=self._pdf_split_max_size,
+                    min_pages_per_part=self._pdf_split_min_pages,
+                )
+                split_results = splitter.split_pdf(temp_path, tmp_dir=tmp_dir)
+                parts = [sr.path for sr in split_results]
+                logger.info(
+                    f"[Worker] Split {file_size / 1024 / 1024:.1f}MB PDF into {len(parts)} parts"
+                )
+
+            # Build text_extractor callback using VLM OCR (if available)
+            text_extractor = None
+            if self.vlm_ocr_service and self._ocr_strategy in ("vlm", "hybrid"):
+
+                async def _text_extractor(img_bytes: bytes) -> str:
+                    from .ocr_utils import OCRCConfig, ocr_image_bytes_auto
+
+                    knowledge_settings = getattr(self.service.settings, "knowledge", None)
+                    config = OCRCConfig.from_settings(knowledge_settings)
+                    return await ocr_image_bytes_auto(
+                        img_bytes,
+                        vlm_ocr_service=self.vlm_ocr_service,
+                        config=config,
+                        strategy=self._ocr_strategy,
+                    )
+
+                text_extractor = _text_extractor
+
+            # Process each part
+            all_extracted_texts: dict[int, str] = {}
+            total_processed = 0
+            total_pages_all = 0
+            total_failed = 0
+            total_segments = 0
+
+            for part_idx, part_path in enumerate(parts):
+                part_bytes = await asyncio.to_thread(Path(part_path).read_bytes)
+                page_offset = 0
+                if split_results:
+                    page_offset = split_results[part_idx].page_start
+
+                async def on_progress(current: int, total: int) -> None:
+                    # Scale progress across all parts
+                    base = int(5 + (part_idx / len(parts)) * 85)
+                    part_progress = int((current / total) * (85 / len(parts)))
+                    await self.service.db.update_document_status(
+                        task.document_id,
+                        status="processing",
+                        progress=base + part_progress,
+                    )
+
+                result = await self.vision_processor.process(
+                    pdf_bytes=part_bytes,
+                    document_id=task.document_id,
+                    dataset_id=task.dataset_id,
+                    collection=collection,
+                    on_progress=on_progress,
+                    storage_service=self.service.image_storage_service,
+                    tenant_id=tenant_id,
+                    text_extractor=text_extractor,
+                    page_offset=page_offset,
+                )
+
+                if result.success:
+                    total_processed += result.processed_pages
+                    total_pages_all += result.total_pages
+                    total_segments += result.segments_created
+                    if result.extracted_texts:
+                        all_extracted_texts.update(result.extracted_texts)
+                else:
+                    total_failed += result.total_pages
+                    logger.warning(
+                        f"[Worker] Part {part_idx} failed: {result.error}"
+                    )
+
+                logger.info(
+                    f"[Worker] Part {part_idx}/{len(parts)} done: "
+                    f"{result.processed_pages} pages, {result.segments_created} segments"
+                )
+
+            # Merge extracted texts into document content
+            if all_extracted_texts:
+                ordered_pages = sorted(all_extracted_texts.keys())
+                full_text = "\n\n".join(
+                    f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
+                )
+                try:
+                    await self.service.db.execute(
+                        """UPDATE documents
+                           SET content = $1,
+                               metadata = metadata || $2::jsonb
+                           WHERE document_id = $3""",
+                        full_text[:500_000],  # Truncate for DB storage
+                        json.dumps({
+                            "pages_processed": total_processed,
+                            "total_pages": total_pages_all,
+                            "segments_created": total_segments,
+                            "ocr_strategy": self._ocr_strategy,
+                            "vlm_ocr_pages": len(all_extracted_texts),
+                            "pdf_parts": len(parts),
+                        }),
+                        task.document_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to update document content from VLM OCR: {e}")
+
+                logger.info(
+                    f"[Worker] VLM OCR extracted text from {len(all_extracted_texts)} pages"
+                )
+
+            # Update vision stats
             try:
                 await self.service.db.update_document_fields(
                     task.document_id,
                     {
                         "metadata": {
                             **(metadata or {}),
-                            "pages_processed": result.processed_pages,
-                            "total_pages": result.total_pages,
-                            "segments_created": result.segments_created,
+                            "pages_processed": total_processed,
+                            "total_pages": total_pages_all,
+                            "segments_created": total_segments,
                         }
                     },
                 )
             except Exception as e:
                 logger.debug(f"Failed to update vision metadata: {e}")
+
             logger.info(
                 f"[Worker] Scanned document {task.document_id} vision processing completed: "
-                f"{result.processed_pages}/{result.total_pages} pages"
+                f"{total_processed}/{total_pages_all} pages, {total_segments} segments"
             )
 
-            # Run OCR-backed text ingestion to populate searchable text
-            await self.service.ingest_document(task.dataset_id, task.document_id)
+            # Run text ingestion for searchable text vectors
+            await self.service.db.update_document_status(
+                task.document_id, status="processing", progress=90
+            )
 
-            # Merge vision stats into final metadata (ingest_document sets status)
+            if all_extracted_texts and self.hierarchical_indexer:
+                # Use hierarchical indexer on VLM OCR text for better chunking
+                ordered_pages = sorted(all_extracted_texts.keys())
+                full_text = "\n\n".join(
+                    f"[Page {p}]\n{all_extracted_texts[p]}" for p in ordered_pages
+                )
+                try:
+                    idx_result = await self.hierarchical_indexer.index_document(
+                        document_id=task.document_id,
+                        dataset_id=task.dataset_id,
+                        text=full_text,
+                        metadata=metadata,
+                    )
+                    logger.info(
+                        f"[Worker] Hierarchical text indexing done: "
+                        f"L1={idx_result.l1_count}, L2={idx_result.l2_count}, L3={idx_result.l3_count}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Hierarchical indexing failed, falling back to standard: {e}")
+                    await self.service.ingest_document(task.dataset_id, task.document_id)
+            else:
+                # Fallback to standard OCR-backed text ingestion
+                await self.service.ingest_document(task.dataset_id, task.document_id)
+
+            # Mark completed
             try:
                 await self.service.db.update_document_status(
-                    task.document_id,
-                    status="completed",
-                    progress=100,
-                )
-                await self.service.db.update_document_fields(
-                    task.document_id,
-                    {
-                        "metadata": {
-                            **(metadata or {}),
-                            "pages_processed": result.processed_pages,
-                            "total_pages": result.total_pages,
-                            "segments_created": result.segments_created,
-                        }
-                    },
+                    task.document_id, status="completed", progress=100
                 )
             except Exception as e:
-                logger.debug(f"Failed to update vision stats after ingestion: {e}")
-        else:
-            await self.service.db.update_document_status(
-                task.document_id,
-                status="failed",
-                progress=100,
-                error=result.error or "Unknown error",
-            )
-            logger.error(f"[Worker] Scanned document {task.document_id} failed: {result.error}")
+                logger.debug(f"Failed to update final status: {e}")
+
+        except Exception:
+            raise
+        finally:
+            await self._cleanup_temp_file(temp_path)
+            if tmp_dir_obj is not None:
+                with contextlib.suppress(Exception):
+                    tmp_dir_obj.cleanup()

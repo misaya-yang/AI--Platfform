@@ -104,6 +104,8 @@ class SyncRepository:
             "hadith_collections": "SELECT COUNT(*) FROM hadith_collections",
             "hadith_books": "SELECT COUNT(*) FROM hadith_books",
             "hadith_items": "SELECT COUNT(*) FROM hadith_items",
+            "dua_categories": "SELECT COUNT(*) FROM dua_categories",
+            "dua_items": "SELECT COUNT(*) FROM dua_items",
             "source_sync_runs": "SELECT COUNT(*) FROM source_sync_runs",
         }
         counts: dict[str, int] = {}

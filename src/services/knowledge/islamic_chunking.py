@@ -212,9 +212,27 @@ class IslamicTextChunker(BaseChunker):
             # General Islamic or unknown - use heading-aware chunker with Islamic patterns
             chunks = self._chunk_general_islamic(text)
 
-        # Tag all chunks with source type
+        # Tag all chunks with source type and extract Islamic metadata
+        # (citation_text, source_reference, madhab, language) at chunk time
+        # so it is persisted into the vector store alongside the embedding.
+        try:
+            from .islamic_metadata import IslamicMetadataExtractor
+            _meta_extractor = IslamicMetadataExtractor()
+        except Exception:
+            _meta_extractor = None
+
         for c in chunks:
             c.metadata["islamic_source_type"] = source_type.value
+            if _meta_extractor is not None:
+                try:
+                    islamic_meta = _meta_extractor.extract(
+                        c.text,
+                        c.metadata,
+                    )
+                    if isinstance(islamic_meta, dict):
+                        c.metadata.update(islamic_meta)
+                except Exception:
+                    pass  # metadata extraction is best-effort
 
         # Apply strict section traceability if enabled
         if self.config.strict_section_traceability:

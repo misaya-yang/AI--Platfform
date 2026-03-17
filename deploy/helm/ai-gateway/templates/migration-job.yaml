@@ -1,0 +1,58 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ai-gateway.fullname" . }}-migration-{{ .Release.Revision }}
+  labels:
+    {{- include "ai-gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "ai-gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.global.imageRegistry }}/{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          command:
+            - python
+            - -c
+            - |
+              import sys, os
+              sys.path.insert(0, '/app')
+              os.environ.setdefault('GATEWAY_DATABASE__ENABLED', 'true')
+              os.environ.setdefault('GATEWAY_DATABASE__AUTO_INIT', 'true')
+              from src.config.settings import get_settings
+              settings = get_settings()
+              if settings.database.enabled and settings.database.auto_init:
+                  from src.services.database import init_database
+                  init_database(settings.database.dsn)
+                  print("Database migration completed successfully")
+              else:
+                  print("Database not enabled or auto_init disabled, skipping migration")
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-gateway.fullname" . }}-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-gateway.fullname" . }}-secret
+                  key: POSTGRES_PASSWORD
+            - name: GATEWAY_DATABASE__ENABLED
+              value: "true"
+            - name: GATEWAY_DATABASE__AUTO_INIT
+              value: "true"
+            - name: GATEWAY_DATABASE__DSN
+              value: {{ include "ai-gateway.postgresDSN" . | quote }}
+{{- end }}

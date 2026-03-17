@@ -78,12 +78,10 @@ require_env_file() {
             log_warn ".env not found, copying from .env.production"
             cp "${PROJECT_ROOT}/.env.production" "${PROJECT_ROOT}/.env"
         elif [ -f "${PROJECT_ROOT}/.env.example" ]; then
-            log_error ".env not found. Create one from .env.example:"
-            echo "  cp .env.example .env"
-            exit 1
+            log_warn ".env not found, auto-creating from .env.example"
+            cp "${PROJECT_ROOT}/.env.example" "${PROJECT_ROOT}/.env"
         else
-            log_error ".env file not found"
-            exit 1
+            log_warn ".env not found, continuing with docker-compose defaults"
         fi
     fi
 }

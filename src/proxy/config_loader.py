@@ -71,6 +71,9 @@ class ProxyServiceConfig:
     # 负载均衡
     load_balance_strategy: str = "round_robin"  # round_robin | least_connections | random
     concurrency_limit: int = 32
+    streaming_concurrency_limit: int | None = None
+    non_streaming_concurrency_limit: int | None = None
+    concurrency_queue_timeout: float | None = None
     max_connections: int | None = None
     max_keepalive_connections: int | None = None
     keepalive_expiry: float | None = None
@@ -301,6 +304,19 @@ class ProxyConfigLoader:
             load_balance_strategy=connector_config.get("load_balance_strategy", "round_robin"),
             concurrency_limit=int(
                 _pick_numeric(32, proxy_runtime.get("concurrency_limit"), connector_config.get("concurrency_limit"))
+            ),
+            streaming_concurrency_limit=proxy_runtime.get(
+                "streaming_concurrency_limit",
+                connector_config.get("streaming_concurrency_limit"),
+            ),
+            non_streaming_concurrency_limit=proxy_runtime.get(
+                "non_streaming_concurrency_limit",
+                connector_config.get("non_streaming_concurrency_limit"),
+            ),
+            concurrency_queue_timeout=_pick_numeric(
+                None,
+                proxy_runtime.get("concurrency_queue_timeout"),
+                connector_config.get("concurrency_queue_timeout"),
             ),
             max_connections=proxy_runtime.get("max_connections", connector_config.get("max_connections")),
             max_keepalive_connections=proxy_runtime.get(

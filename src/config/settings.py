@@ -338,6 +338,18 @@ class KnowledgeSettings(BaseModel):
     # Moderate OCR parallelism to speed up scanned PDFs without overloading the machine
     ocr_page_concurrency: int = 3
 
+    # OCR strategy: tesseract (legacy), vlm (high-accuracy VLM), hybrid (VLM with Tesseract fallback)
+    ocr_strategy: str = "hybrid"
+    ocr_vlm_provider: str = "gemini"  # gemini | dashscope | auto
+    ocr_vlm_model: str = "gemini-3-flash-preview"  # Gemini 3 Flash: lowest edit distance (0.115) on OmniDocBench
+    ocr_vlm_concurrency: int = 4
+    ocr_vlm_timeout_seconds: int = 30
+
+    # PDF auto-split for large scanned documents
+    pdf_split_enabled: bool = True
+    pdf_split_max_size_bytes: int = 20 * 1024 * 1024  # 20MB
+    pdf_split_min_pages_per_part: int = 5
+
     # Image segments use a separate position range to avoid conflicts with text segments
     image_position_offset: int = 1_000_000
 
@@ -495,6 +507,9 @@ class ProxySettings(BaseModel):
     health_check_timeout: float = 5.0
     availability_cache_ttl_seconds: float = 15.0
     default_concurrency_limit: int = 32
+    default_streaming_concurrency_limit: int | None = None
+    default_non_streaming_concurrency_limit: int | None = None
+    default_concurrency_queue_timeout: float = 10.0
     client_max_connections: int = 100
     client_max_keepalive_connections: int = 20
     client_keepalive_expiry: float = 30.0
@@ -573,6 +588,10 @@ class IslamicContentSettings(BaseModel):
     sunnah_base_url: str = "https://api.sunnah.com/v1"
     sunnah_api_key: str = ""
     sunnah_page_size: int = 50
+
+    hadith_cdn_base_url: str = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1"
+    hadith_cdn_enabled: bool = True
+    hadith_cdn_default_lang: str = "eng"
 
     aladhan_base_url: str = "https://api.aladhan.com/v1"
     aladhan_default_method: int = 2

@@ -174,9 +174,18 @@ export async function* sseFetch<T>(
   let buffer = "";
   let chunkCount = 0;
   let firstChunkTime: number | null = null;
+  let aborted = false;
+  const abortReader = () => {
+    aborted = true;
+    void reader.cancel().catch(() => {});
+  };
+  init.signal?.addEventListener("abort", abortReader, { once: true });
 
   try {
     while (true) {
+      if (aborted || init.signal?.aborted) {
+        break;
+      }
       const { done, value } = await reader.read();
       
       if (value && firstChunkTime === null) {
@@ -245,6 +254,7 @@ export async function* sseFetch<T>(
       }
     }
   } finally {
+    init.signal?.removeEventListener("abort", abortReader);
     reader.releaseLock();
   }
 }
@@ -279,6 +289,12 @@ export async function* sseFetchEvents<T>(
   let buffer = "";
   let firstChunkTime: number | null = null;
   let yieldedCount = 0;
+  let aborted = false;
+  const abortReader = () => {
+    aborted = true;
+    void reader.cancel().catch(() => {});
+  };
+  init.signal?.addEventListener("abort", abortReader, { once: true });
 
   const parsePart = (part: string): SSEEvent<T> | null => {
     const lines = part.split("\n");
@@ -306,6 +322,9 @@ export async function* sseFetchEvents<T>(
 
   try {
     while (true) {
+      if (aborted || init.signal?.aborted) {
+        break;
+      }
       const { done, value } = await reader.read();
 
       if (value && firstChunkTime === null) {
@@ -349,6 +368,7 @@ export async function* sseFetchEvents<T>(
       }
     }
   } finally {
+    init.signal?.removeEventListener("abort", abortReader);
     reader.releaseLock();
   }
 }
@@ -401,6 +421,12 @@ export async function* sseFetchAGUI(
   let buffer = "";
   let firstChunkTime: number | null = null;
   let yieldedCount = 0;
+  let aborted = false;
+  const abortReader = () => {
+    aborted = true;
+    void reader.cancel().catch(() => {});
+  };
+  init.signal?.addEventListener("abort", abortReader, { once: true });
 
   const parseAGUIPart = (part: string): AGUIEvent | null => {
     const lines = part.split("\n");
@@ -446,6 +472,9 @@ export async function* sseFetchAGUI(
 
   try {
     while (true) {
+      if (aborted || init.signal?.aborted) {
+        break;
+      }
       const { done, value } = await reader.read();
 
       if (value && firstChunkTime === null) {
@@ -489,6 +518,7 @@ export async function* sseFetchAGUI(
       }
     }
   } finally {
+    init.signal?.removeEventListener("abort", abortReader);
     reader.releaseLock();
   }
 }

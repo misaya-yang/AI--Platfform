@@ -1,10 +1,10 @@
 # Islamic Content Service
 
-Standalone Quran and Hadith content microservice extracted from `ai-gateway`.
+Standalone Quran, Dua, and Hadith content microservice extracted from `ai-gateway`.
 
 ## Capabilities
 
-- Bootstrap Quran and Hadith content into PostgreSQL
+- Bootstrap Quran, Dua, and Hadith content into PostgreSQL
 - Serve low-latency read APIs from PostgreSQL and Redis only
 - Expose independent Swagger docs at `/docs`
 - Keep a dedicated `islamic_content` schema inside the shared PostgreSQL database
@@ -21,7 +21,7 @@ cd apps/islamic-content-service
 pip install -e '.[dev]'
 cp .env.example .env
 python -m islamic_content_service.cli db migrate
-python -m islamic_content_service.cli sync bootstrap --sources quran,hadith
+python -m islamic_content_service.cli sync bootstrap --sources quran,hadith,dua
 islamic-content-service
 ```
 
@@ -42,6 +42,10 @@ variables in `.env`.
 - `GET /api/v1/quran/...`
 - `GET /api/v1/quran/chapters/{chapter_id}/audio-text`
 - `GET /api/v1/quran/user/...`
+- `GET /api/v1/dua/categories`
+- `GET /api/v1/dua/categories/{category}`
+- `GET /api/v1/dua/items`
+- `GET /api/v1/dua/{dua_id}`
 - `GET /api/v1/hadith/...`
 
 `/api/v1/quran/chapters/{chapter_id}/audio-text` returns chapter audio, verse text,
@@ -95,8 +99,17 @@ Minimal ayah text-only route:
   - `translation_id`
   - `recitation_id`
 
+Dua API routes:
+- `GET /api/v1/dua/categories` — 31 categories with dua counts
+- `GET /api/v1/dua/categories/{category}` — all duas in a category
+- `GET /api/v1/dua/items` — all 72 duas
+- `GET /api/v1/dua/{dua_id}` — single dua detail (arabic + transliteration + english + urdu + source + reference)
+
+Dua data source: [Islamic Dua and Adhkar (Kaggle)](https://www.kaggle.com/datasets/ahsanneural/islamic-dua-and-adhkar-72-verified-duas), CC BY 4.0.
+
 ## Notes
 
 - Public read APIs never call upstream Quran or Sunnah APIs directly.
+- Dua data is bundled in `data/islamic_dua_dataset_final.csv`, no upstream API needed.
 - Sync is CLI-only in v1.
 - Consumers are expected to reach this service over internal/private networking in v1.

@@ -526,8 +526,10 @@ class InMemoryLoader:
 
     def _get_fitz(self):
         if self._fitz is None:
-            import fitz
-
+            try:
+                import pymupdf as fitz
+            except ImportError:
+                import fitz
             self._fitz = fitz
         return self._fitz
 
