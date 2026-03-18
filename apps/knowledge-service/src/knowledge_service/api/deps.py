@@ -32,3 +32,13 @@ def get_qdrant(request: Request):
 async def get_user_context(request: Request) -> UserContext:
     """Return the resolved user context from gateway headers."""
     return await _get_user_context(request)
+
+
+def get_knowledge_service(request: Request):
+    """Return the KnowledgeService instance."""
+    return getattr(request.app.state, "knowledge_service", None)
+
+
+def get_knowledge_worker(request: Request):
+    """Return the KnowledgeWorker instance."""
+    return getattr(request.app.state, "knowledge_worker", None)

@@ -112,11 +112,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.state.settings = resolved
 
+        # --- Initialize KnowledgeService + Worker ---
+        knowledge_service = None
+        knowledge_worker = None
+        try:
+            from .persistence.database import DatabaseStorage as FullDatabaseStorage
+            from .services.knowledge.knowledge_service import KnowledgeService
+            from .services.knowledge.worker import KnowledgeWorker
+
+            db_storage = FullDatabaseStorage(
+                dsn=resolved.database.dsn,
+                enabled=True,
+                auto_init=False,  # Schema already exists
+                pool_min_size=resolved.database.pool_min_size,
+                pool_max_size=resolved.database.pool_max_size,
+            )
+            await db_storage.connect()
+
+            # KnowledgeService expects gateway-style settings with settings.knowledge.*
+            # Create a compatibility wrapper that maps KB Service flat config
+            class _SettingsCompat:
+                """Adapts KB Service Settings to gateway Settings shape."""
+                def __init__(self, s):
+                    self._s = s
+                    self.knowledge = type("K", (), {
+                        "enabled": True,
+                        "qdrant": type("Q", (), {
+                            "enabled": True,
+                            "url": s.qdrant.url,
+                            "api_key": s.qdrant.api_key,
+                            "timeout_seconds": s.qdrant.timeout_seconds,
+                            "prefer_grpc": s.qdrant.prefer_grpc,
+                            "max_retries": getattr(s.qdrant, "max_retries", 3),
+                            "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
+                        })(),
+                        "dashscope": type("D", (), {
+                            "api_key": s.embeddings.api_key if s.embeddings.provider == "dashscope" else "",
+                        })(),
+                        "gemini": type("G", (), {
+                            "api_key": s.embeddings.api_key if s.embeddings.provider == "gemini" else "",
+                        })(),
+                        "siliconflow": type("SF", (), {
+                            "api_key": s.embeddings.api_key if s.embeddings.provider == "siliconflow" else "",
+                            "base_url": s.embeddings.base_url or "",
+                        })(),
+                        "ocr_enabled": s.ocr.enabled,
+                        "worker_concurrency": s.processing.worker_concurrency,
+                        "document_worker_concurrency": s.processing.document_worker_concurrency,
+                    })()
+                def __getattr__(self, name):
+                    return getattr(self._s, name)
+
+            compat_settings = _SettingsCompat(resolved)
+            knowledge_service = KnowledgeService(
+                settings=compat_settings,
+                database=db_storage,
+            )
+            app.state.knowledge_service = knowledge_service
+
+            knowledge_worker = KnowledgeWorker(knowledge_service)
+            await knowledge_worker.start()
+            app.state.knowledge_worker = knowledge_worker
+
+            logger.info("knowledge_service_initialized",
+                        worker_running=knowledge_worker.is_running if hasattr(knowledge_worker, 'is_running') else True)
+        except Exception as e:
+            logger.warning("knowledge_service_init_partial", error=str(e))
+            # Service still boots — retrieve endpoint works, upload may not until init completes
+
         logger.info("knowledge_service_ready")
         yield
 
         # --- shutdown ---
         logger.info("knowledge_service_shutting_down")
+        if knowledge_worker:
+            try:
+                await knowledge_worker.stop()
+            except Exception:
+                pass
         if hasattr(qdrant, "close"):
             await qdrant.close()
         await db.close()
@@ -146,7 +219,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "service": "knowledge-service"}
 
     # --- API routes ---
-    app.include_router(api_router, prefix="/api/v1/knowledge")
+    # Try full 51-endpoint router first; fall back to placeholder if imports fail
+    try:
+        from .api.routes.knowledge import router as full_knowledge_router
+        app.include_router(full_knowledge_router, prefix="/api/v1")
+        logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
+    except Exception as e:
+        logger.warning("knowledge_routes_fallback", error=str(e), mode="placeholder")
+        app.include_router(api_router, prefix="/api/v1/knowledge")
 
     app.state.settings = resolved
     return app
