@@ -164,9 +164,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return getattr(self._s, name)
 
             compat_settings = _SettingsCompat(resolved)
+
+            # Initialize S3 ImageStorageService for file persistence
+            image_storage = None
+            try:
+                from .storage.image_storage import (
+                    ImageStorageService, StorageBackend, StorageConfig,
+                )
+                storage_cfg = resolved.storage
+                if storage_cfg.backend == "s3" and storage_cfg.s3.bucket:
+                    sc = StorageConfig(
+                        backend=StorageBackend.S3,
+                        s3_bucket=storage_cfg.s3.bucket,
+                        s3_region=storage_cfg.s3.region,
+                        s3_access_key=storage_cfg.s3.access_key,
+                        s3_secret_key=storage_cfg.s3.secret_key,
+                        s3_endpoint_url=storage_cfg.s3.endpoint_url or None,
+                        key_prefix=storage_cfg.key_prefix,
+                        url_expiry_seconds=storage_cfg.url_expiry_seconds,
+                    )
+                    image_storage = ImageStorageService(sc)
+                    logger.info("s3_storage_initialized", bucket=storage_cfg.s3.bucket)
+                else:
+                    sc = StorageConfig(
+                        backend=StorageBackend.LOCAL,
+                        local_base_path=storage_cfg.local_base_path,
+                        key_prefix=storage_cfg.key_prefix,
+                    )
+                    image_storage = ImageStorageService(sc)
+                    logger.info("local_storage_initialized", path=storage_cfg.local_base_path)
+            except Exception as e:
+                logger.warning("storage_init_failed", error=str(e))
+
             knowledge_service = KnowledgeService(
                 settings=compat_settings,
                 database=db_storage,
+                image_storage_service=image_storage,
             )
             app.state.knowledge_service = knowledge_service
 
