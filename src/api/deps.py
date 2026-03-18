@@ -58,25 +58,14 @@ def get_langgraph_proxy(request: Request) -> LangGraphProxy | None:
 
 
 def get_knowledge_service(request: Request):
-    """Get KnowledgeService (KBMS)."""
-    svc = getattr(request.app.state, "knowledge_service", None)
-    if svc is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Knowledge service is not initialized (check GATEWAY_KNOWLEDGE__ENABLED and Qdrant settings).",
-        )
-    return svc
+    """Deprecated: KB now runs as independent microservice at :8092.
+    Kept as stub — returns None. Knowledge routes proxy to KB Service."""
+    return None
 
 
 def get_knowledge_worker(request: Request):
-    """Get KnowledgeWorker (KBMS)."""
-    worker = getattr(request.app.state, "knowledge_worker", None)
-    if worker is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Knowledge worker is not initialized (check GATEWAY_KNOWLEDGE__ENABLED).",
-        )
-    return worker
+    """Deprecated: KB worker now runs inside KB Service microservice."""
+    return None
 
 
 def require_langgraph_proxy(request: Request) -> LangGraphProxy:

@@ -418,8 +418,11 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.warning(f"存储服务初始化失败: {e}")
 
-        # ========== 启动 Knowledge Base (KBMS) 后台任务 ==========
-        if getattr(settings, "knowledge", None) and settings.knowledge.enabled:
+        # ========== Knowledge Base — now runs as independent microservice (:8092) ==========
+        # KB Service handles: chunking, embedding, vector store, worker, Confluence sync.
+        # Gateway proxies /api/v1/knowledge/* to KB Service transparently.
+        # See: apps/knowledge-service/ and docker-compose.yml
+        if False and getattr(settings, "knowledge", None) and settings.knowledge.enabled:
             from .services.knowledge.knowledge_service import KnowledgeService
             from .services.knowledge.worker import KnowledgeWorker
 

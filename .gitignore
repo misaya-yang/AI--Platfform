@@ -115,3 +115,5 @@ test_output*.txt
 *_debug.py
 debug_*.py
 .worktrees
+.mcp.json
+apps/islamic-content-service/data/
