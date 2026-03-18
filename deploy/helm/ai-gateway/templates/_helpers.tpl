@@ -135,3 +135,19 @@ Redis URL for Islamic Content (db 1)
 {{- define "ai-gateway.redisURLDB1" -}}
 redis://:$(REDIS_PASSWORD)@{{ include "ai-gateway.redisHost" . }}:{{ include "ai-gateway.redisPort" . }}/1
 {{- end }}
+
+{{/*
+LangGraph instance URLs — comma-separated list of all enabled agent service URLs.
+Used by the gateway to discover and proxy LangGraph agents.
+*/}}
+{{- define "ai-gateway.langgraphInstanceURLs" -}}
+{{- $urls := list }}
+{{- if .Values.langgraph.enabled }}
+{{- range $name, $agent := .Values.langgraph.agents }}
+{{- if $agent.enabled }}
+{{- $urls = append $urls (printf "http://%s-langgraph-%s:%s" (include "ai-gateway.fullname" $) $name ($agent.port | toString)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- join "," $urls }}
+{{- end }}

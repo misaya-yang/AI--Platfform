@@ -77,6 +77,12 @@ spec:
                   name: {{ include "ai-gateway.fullname" . }}-secret
                   key: DASHSCOPE_API_KEY
             {{- end }}
+            {{- if .Values.langgraph.enabled }}
+            - name: GATEWAY_LANGGRAPH__ENABLED
+              value: "true"
+            - name: GATEWAY_LANGGRAPH__INSTANCE_URLS
+              value: {{ include "ai-gateway.langgraphInstanceURLs" . | quote }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.gateway.probes.liveness.path }}

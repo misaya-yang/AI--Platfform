@@ -105,6 +105,74 @@ islamicContent:
     ISLAMIC_CONTENT_BOOTSTRAP__ON_START: "true"
 
 # -----------------------------------------------------------------------------
+# LangGraph Agents
+# -----------------------------------------------------------------------------
+# Each agent is built with `langgraph build -t <image>` and runs as an
+# independent LangGraph API server. Agents share PostgreSQL/Redis but use
+# separate databases/db-numbers for isolation. Add new agents by adding
+# entries to the agents map below.
+#
+# Build:  langgraph build -t imam-agent:latest  (inside agents/Imam_agent/)
+# Scale:  --set langgraph.agents.imam.autoscaling.maxReplicas=8
+# -----------------------------------------------------------------------------
+langgraph:
+  enabled: true
+  # Shared env for all agents
+  sharedEnv:
+    LANGSMITH_TRACING: "false"
+    LANGSMITH_API_KEY: ""
+    LANGGRAPH_CLOUD_LICENSE_KEY: ""
+
+  agents:
+    imam:
+      enabled: true
+      image:
+        repository: imam-agent
+        tag: latest
+      replicaCount: 1
+      port: 8000
+      databaseName: langgraph_imam
+      redisDb: "2"
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      autoscaling:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 4
+        targetCPUUtilization: 70
+      env: {}
+
+    customer:
+      enabled: true
+      image:
+        repository: financial-customer-agent
+        tag: latest
+      replicaCount: 1
+      port: 8000
+      databaseName: langgraph_customer
+      redisDb: "3"
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      autoscaling:
+        enabled: true
+        minReplicas: 1
+        maxReplicas: 4
+        targetCPUUtilization: 70
+      env:
+        AI_GATEWAY_URL: "http://{{ .Release.Name }}-ai-gateway-gateway:8080"
+        USE_AI_GATEWAY: "true"
+
+# -----------------------------------------------------------------------------
 # PostgreSQL (in-cluster)
 # -----------------------------------------------------------------------------
 postgresql:

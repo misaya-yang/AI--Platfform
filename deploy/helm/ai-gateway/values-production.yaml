@@ -81,6 +81,47 @@ externalQdrant:
   apiKey: ""
 
 # -----------------------------------------------------------------------------
+# LangGraph Agents - higher resources for production
+# -----------------------------------------------------------------------------
+langgraph:
+  enabled: true
+  sharedEnv:
+    LANGSMITH_TRACING: "true"
+    LANGSMITH_API_KEY: ""    # Set via --set langgraph.sharedEnv.LANGSMITH_API_KEY=...
+    LANGGRAPH_CLOUD_LICENSE_KEY: ""
+  agents:
+    imam:
+      enabled: true
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 4Gi
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 8
+        targetCPUUtilization: 60
+    customer:
+      enabled: true
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 4Gi
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 8
+        targetCPUUtilization: 60
+
+# -----------------------------------------------------------------------------
 # Ingress - TLS enabled for production
 # -----------------------------------------------------------------------------
 ingress:
