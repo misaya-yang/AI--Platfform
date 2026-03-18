@@ -208,6 +208,16 @@ services:
       KNOWLEDGE_EMBEDDINGS__PROVIDER: "${KB_EMBEDDING_PROVIDER:-gemini}"
       KNOWLEDGE_EMBEDDINGS__API_KEY: "${KB_EMBEDDING_API_KEY:-}"
       KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "${KB_WORKER_CONCURRENCY:-2}"
+      # Storage (S3)
+      KNOWLEDGE_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-s3}"
+      KNOWLEDGE_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-}"
+      KNOWLEDGE_STORAGE__S3__REGION: "${GATEWAY_STORAGE__S3__REGION:-ap-southeast-2}"
+      KNOWLEDGE_STORAGE__S3__ACCESS_KEY: "${GATEWAY_STORAGE__S3__ACCESS_KEY:-}"
+      KNOWLEDGE_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
+      KNOWLEDGE_STORAGE__S3__ENDPOINT_URL: "${GATEWAY_STORAGE__S3__ENDPOINT_URL:-}"
+      KNOWLEDGE_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
+    volumes:
+      - kb-data:/app/data
     ports:
       - "${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
     networks:
@@ -279,3 +289,5 @@ volumes:
     name: ai-gateway-qdrant-data
   gateway-logs:
     name: ai-gateway-logs
+  kb-data:
+    name: ai-gateway-kb-data

@@ -25,6 +25,18 @@ class UserContext:
     tenant_id: str
     user_tier: str = "normal"
     user_type: str = "user"
+    roles: list = field(default_factory=lambda: ["admin"])
+    ip: str = ""
+    is_authenticated: bool = True
+
+    @property
+    def tier(self) -> str:
+        """Alias for user_tier — gateway code uses user.tier."""
+        return self.user_tier
+
+    @property
+    def role(self) -> str:
+        return self.roles[0] if self.roles else "user"
 
     @property
     def is_anonymous(self) -> bool:

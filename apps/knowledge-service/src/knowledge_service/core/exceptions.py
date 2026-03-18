@@ -27,3 +27,12 @@ class ValidationFailedError(GatewayError):
 class RateLimitError(GatewayError):
     def __init__(self, message: str = "Rate limit exceeded"):
         super().__init__(message, status_code=429)
+
+
+class AuthenticationRequiredError(GatewayError):
+    def __init__(self, message: str = "Authentication required"):
+        super().__init__(message, status_code=401)
+
+
+class ResourceNotFoundError(NotFoundError):
+    pass

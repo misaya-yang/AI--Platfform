@@ -321,6 +321,60 @@ MADHAB_PATTERNS = {
 }
 
 
+def _clean_doc_title_for_citation(title: str) -> str:
+    """Clean a document title for use as citation fallback.
+
+    Removes file extensions, part numbers from auto-split, underscores,
+    and produces a human-readable book title.
+
+    Examples:
+        "Tafsir Ibn Kathir_Part_8_p3501-4000.pdf" → "Tafsir Ibn Kathir"
+        "English_ArRaheeq_AlMakhtum_THE_SEALED_NECTAR.pdf" → "Ar-Raheeq Al-Makhtum (The Sealed Nectar)"
+        "StoriesQuran.pdf" → "Stories of the Quran"
+    """
+    if not title:
+        return ""
+
+    # Known title mappings for our corpus
+    _TITLE_MAP = {
+        "english arraheeq almakhtum the sealed nectar": "Ar-Raheeq Al-Makhtum (The Sealed Nectar)",
+        "arraheeq almakhtum": "Ar-Raheeq Al-Makhtum (The Sealed Nectar)",
+        "sealed nectar": "Ar-Raheeq Al-Makhtum (The Sealed Nectar)",
+        "muhammad the last prophet": "Muhammad: The Last Prophet",
+        "storiesquran": "Stories of the Quran",
+        "themuslimcreed": "The Muslim Creed",
+        "atlas of the quran": "Atlas of the Quran",
+        "fiqh of marriage": "Fiqh of Marriage in Islam",
+        "kitaabul imaan": "Kitaab al-Imaan (Book of Faith)",
+        "tawheed made easy": "Tawheed Made Easy",
+        "alaqeedah alwasitiyah": "Al-Aqeedah Al-Wasitiyah",
+        "islamic view of jesus": "The Islamic View of Jesus",
+        "guide to understaning islam": "A Brief Guide to Understanding Islam",
+        "book of purification": "The Book of Purification and Purity (Hanafi)",
+        "book of prayer": "The Book of Prayer (Hanafi)",
+        "book of fasting": "The Book of Fasting (Hanafi)",
+        "book of inheritance": "The Book of Inheritance (Hanafi)",
+    }
+
+    # Check known mappings first
+    key = re.sub(r"\.pdf$", "", title, flags=re.IGNORECASE).strip()
+    key_lower = key.lower().replace("_", " ").replace("-", " ").strip()
+    # Remove part/page suffixes: _Part_N_pXXX-YYY
+    key_lower = re.sub(r"\s*part\s*\d+\s*p\d+.*$", "", key_lower, flags=re.IGNORECASE).strip()
+
+    for pattern, replacement in _TITLE_MAP.items():
+        if pattern in key_lower:
+            return replacement
+
+    # Generic cleanup: remove .pdf, _Part_N_pXXX-YYY, replace underscores
+    cleaned = re.sub(r"\.pdf$", "", title, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[_]Part[_]\d+[_]p\d+-\d+$", "", cleaned)
+    cleaned = re.sub(r"\s*Part\s*\d+\s*p\d+-\d+$", "", cleaned)
+    cleaned = cleaned.replace("_", " ").strip()
+
+    return cleaned
+
+
 class IslamicMetadataExtractor:
     """Extract structured Islamic metadata from chunk text and document context."""
 
@@ -415,8 +469,8 @@ class IslamicMetadataExtractor:
         doc_context = _get_doc_title(doc_meta)
 
         if not reference:
-            # Fallback to document-level citation
-            return doc_context or ""
+            # Fallback to cleaned document title (never raw filename)
+            return _clean_doc_title_for_citation(doc_context or "")
 
         if source_type == IslamicSourceType.QURAN:
             surah = reference.get("surah")
@@ -477,7 +531,7 @@ class IslamicMetadataExtractor:
                 parts.append(topic)
             return ", ".join(parts)
 
-        return doc_context or ""
+        return _clean_doc_title_for_citation(doc_context or "")
 
     # ------------------------------------------------------------------
     # Internal reference extraction
@@ -496,7 +550,7 @@ class IslamicMetadataExtractor:
         elif source_type == IslamicSourceType.HADITH:
             return self._extract_hadith_reference(text, doc_meta=doc_meta, doc_title=doc_title)
         elif source_type == IslamicSourceType.TAFSEER:
-            return self._extract_tafseer_reference(text)
+            return self._extract_tafseer_reference(text, doc_title=doc_title)
         elif source_type == IslamicSourceType.FIQH:
             return self._extract_fiqh_reference(text, doc_meta=doc_meta, doc_title=doc_title)
         return {}
@@ -694,11 +748,13 @@ class IslamicMetadataExtractor:
 
         return ref
 
-    def _extract_tafseer_reference(self, text: str) -> dict[str, Any]:
+    def _extract_tafseer_reference(
+        self, text: str, doc_title: str | None = None,
+    ) -> dict[str, Any]:
         """Extract Tafseer reference: author, surah, verse."""
         ref: dict[str, Any] = {}
 
-        # Author detection
+        # Author detection — search both text content AND document title
         authors = {
             "ibn kathir": "Ibn Kathir",
             "al-tabari": "at-Tabari",
@@ -710,8 +766,9 @@ class IslamicMetadataExtractor:
             "ibn abbas": "Ibn Abbas",
             "al-sa'di": "as-Sa'di",
         }
+        search_text = f"{text} {doc_title or ''}"
         for key, canonical in authors.items():
-            if re.search(re.escape(key), text, re.IGNORECASE):
+            if re.search(re.escape(key), search_text, re.IGNORECASE):
                 ref["author"] = canonical
                 break
 

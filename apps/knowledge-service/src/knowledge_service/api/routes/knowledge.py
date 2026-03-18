@@ -284,6 +284,59 @@ async def upload_document(
         with open(temp_path, "rb") as f:
             content = f.read()
 
+        # --- Auto-split large PDFs ---
+        PDF_SPLIT_THRESHOLD = int(os.getenv("KB_PDF_SPLIT_MAX_SIZE_MB", "20")) * 1024 * 1024
+        PDF_SPLIT_PAGES = int(os.getenv("KB_PDF_SPLIT_PAGES_PER_PART", "500"))
+
+        if ext == ".pdf" and size_bytes > PDF_SPLIT_THRESHOLD:
+            import fitz
+            import math
+
+            doc_fitz = fitz.open(stream=content, filetype="pdf")
+            total_pages = len(doc_fitz)
+            num_parts = math.ceil(total_pages / PDF_SPLIT_PAGES)
+
+            logger.info(
+                "Auto-splitting large PDF: %s (%d pages, %.1fMB) into %d parts",
+                filename, total_pages, size_bytes / 1024 / 1024, num_parts,
+            )
+
+            results = []
+            for i in range(num_parts):
+                start = i * PDF_SPLIT_PAGES
+                end = min(start + PDF_SPLIT_PAGES, total_pages)
+                part_doc = fitz.open()
+                part_doc.insert_pdf(doc_fitz, from_page=start, to_page=end - 1)
+                part_bytes = part_doc.tobytes()
+                part_doc.close()
+
+                part_name = f"{Path(filename).stem}_Part_{i+1}_p{start+1}-{end}.pdf"
+
+                doc = await svc.create_document_from_upload(
+                    user, dataset_id,
+                    filename=part_name,
+                    content_bytes=part_bytes,
+                    mime_type="application/pdf",
+                    processing_mode=processing_mode,
+                )
+                await worker.enqueue(dataset_id, doc["document_id"])
+                results.append(doc)
+                logger.info(
+                    "Part %d/%d created: %s, pages %d-%d, doc=%s",
+                    i + 1, num_parts, part_name, start + 1, end, doc["document_id"],
+                )
+
+            doc_fitz.close()
+
+            return {
+                "status": "split_and_queued",
+                "original_filename": filename,
+                "total_pages": total_pages,
+                "parts": len(results),
+                "documents": results,
+            }
+
+        # --- Standard single-document upload ---
         doc = await svc.create_document_from_upload(
             user,
             dataset_id,
