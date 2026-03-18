@@ -191,6 +191,42 @@ services:
   # Microservices
   # ===========================================================================
 
+  # Knowledge Base Service (KB CRUD + Retrieval)
+  knowledge-service:
+    build:
+      context: ./apps/knowledge-service
+      dockerfile: Dockerfile
+    image: knowledge-service:${TAG:-latest}
+    container_name: ai-gateway-knowledge
+    environment:
+      KNOWLEDGE_APP__HOST: "0.0.0.0"
+      KNOWLEDGE_APP__PORT: "8092"
+      KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-111111}@postgres:5432/${POSTGRES_DB:-gateway}"
+      KNOWLEDGE_REDIS__ENABLED: "true"
+      KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/2"
+      KNOWLEDGE_QDRANT__URL: "http://qdrant:6333"
+      KNOWLEDGE_EMBEDDINGS__PROVIDER: "${KB_EMBEDDING_PROVIDER:-gemini}"
+      KNOWLEDGE_EMBEDDINGS__API_KEY: "${KB_EMBEDDING_API_KEY:-}"
+      KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "${KB_WORKER_CONCURRENCY:-2}"
+    ports:
+      - "${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
+    networks:
+      - ai-gateway-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
   # Islamic Content Service (Quran / Dua / Hadith)
   islamic-content:
     build:

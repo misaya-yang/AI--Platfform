@@ -76,6 +76,11 @@ spec:
             # Qdrant
             - name: QDRANT_URL
               value: {{ include "ai-gateway.qdrantUrl" $ | quote }}
+            # KB Service (direct, no Gateway round-trip)
+            {{- if $.Values.knowledgeService.enabled }}
+            - name: KB_SERVICE_URL
+              value: {{ include "ai-gateway.knowledgeServiceUrl" $ | quote }}
+            {{- end }}
             # Agent-specific env
             {{- range $key, $value := $agent.env }}
             - name: {{ $key }}

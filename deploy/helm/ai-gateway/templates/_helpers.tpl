@@ -137,6 +137,15 @@ redis://:$(REDIS_PASSWORD)@{{ include "ai-gateway.redisHost" . }}:{{ include "ai
 {{- end }}
 
 {{/*
+Knowledge Service URL (internal)
+*/}}
+{{- define "ai-gateway.knowledgeServiceUrl" -}}
+{{- if .Values.knowledgeService.enabled }}
+{{- printf "http://%s-knowledge:8092" (include "ai-gateway.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
 LangGraph instance URLs — comma-separated list of all enabled agent service URLs.
 Used by the gateway to discover and proxy LangGraph agents.
 */}}
