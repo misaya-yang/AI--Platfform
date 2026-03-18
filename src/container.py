@@ -495,9 +495,7 @@ class Container:
         return proxy
 
     def _create_multi_rate_limiter(self):
-        """创建多维度限流器"""
-        if not self.settings.langgraph.enabled:
-            return None
+        """创建多维度限流器 — always enabled for AOP enforcement"""
 
         from .core.gateway.multi_dimension_rate_limiter import (
             MultiDimensionRateLimitConfig,
@@ -506,7 +504,8 @@ class Container:
         )
 
         tier_limits = {}
-        for tier, limits in self.settings.langgraph.tier_limits.items():
+        lg_tier_limits = getattr(self.settings.langgraph, "tier_limits", {}) if self.settings.langgraph else {}
+        for tier, limits in lg_tier_limits.items():
             tier_limits[tier] = TierLimit(
                 requests=limits.get("requests", 10),
                 window=limits.get("window", 60),
