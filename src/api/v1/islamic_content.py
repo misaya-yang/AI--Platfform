@@ -1,23 +1,27 @@
 """Islamic Content API — transparent proxy to Islamic Content microservice.
 
 All requests to /api/v1/islamic/* are forwarded 1:1 to the Islamic Content
-Service (default: http://islamic-content:8091). The Gateway adds AOP
-(auth, rate limiting, logging) without duplicating business logic.
+Service (default: http://islamic-content:8091). The Gateway applies AOP
+(auth context, rate limiting, logging) before forwarding.
 
 Route mapping:
   Gateway: /api/v1/islamic/{path}  →  Microservice: /api/v1/{path}
-
-Example:
-  GET /api/v1/islamic/quran/chapters
-    → GET http://islamic-content:8091/api/v1/quran/chapters
 """
 
 from __future__ import annotations
 
 import os
+import time
 
 import httpx
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+
+from ..deps import get_rate_limiter, get_user_context
+from ...core.auth.user_resolver import UserContext
+from ...core.gateway.multi_dimension_rate_limiter import (
+    MultiDimensionRateLimiter,
+    RateLimitContext,
+)
 
 router = APIRouter(prefix="/islamic", tags=["Islamic Content"])
 
@@ -45,20 +49,43 @@ def _get_client() -> httpx.AsyncClient:
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     summary="Proxy to Islamic Content Service",
 )
-async def proxy_islamic_content(path: str, request: Request) -> Response:
+async def proxy_islamic_content(
+    path: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    rate_limiter: MultiDimensionRateLimiter | None = Depends(get_rate_limiter),
+) -> Response:
     """Forward all /islamic/* requests to the Islamic Content microservice."""
-    client = _get_client()
 
-    # Build upstream URL: /api/v1/islamic/quran/chapters → /api/v1/quran/chapters
+    # --- AOP: Rate Limiting ---
+    if rate_limiter is not None:
+        ctx = RateLimitContext.from_user_context(user)
+        result = await rate_limiter.check(ctx)
+        if not result.allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded",
+                headers={
+                    "X-RateLimit-Limit": str(result.limit),
+                    "X-RateLimit-Remaining": str(result.remaining),
+                    "Retry-After": str(result.retry_after),
+                },
+            )
+
+    # --- Proxy ---
+    client = _get_client()
     upstream_path = f"/api/v1/{path}"
     if request.url.query:
         upstream_path += f"?{request.url.query}"
 
-    # Forward headers (strip hop-by-hop)
     headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "connection", "transfer-encoding", "content-length")
     }
+    # Inject user context for downstream service
+    headers["X-User-Id"] = user.user_id
+    headers["X-Tenant-Id"] = user.tenant_id
+    headers["X-User-Tier"] = user.tier
 
     body = await request.body()
 
@@ -69,7 +96,6 @@ async def proxy_islamic_content(path: str, request: Request) -> Response:
         content=body if body else None,
     )
 
-    # Forward response as-is
     response_headers = {
         k: v for k, v in upstream_resp.headers.items()
         if k.lower() not in ("transfer-encoding", "connection", "content-encoding")
