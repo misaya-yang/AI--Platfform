@@ -1,0 +1,71 @@
+"""Lightweight auth that trusts headers forwarded by the API Gateway.
+
+The Gateway authenticates users and forwards identity information as
+``X-User-Id``, ``X-Tenant-Id``, ``X-User-Tier``, and ``X-User-Type`` headers.
+This module extracts those headers into a :class:`UserContext` dataclass and
+exposes a FastAPI dependency for convenient injection.
+
+When ``allow_anonymous`` is enabled in settings (development / internal calls),
+requests without any identity headers are accepted with a synthetic anonymous
+context.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from fastapi import HTTPException, Request
+
+
+@dataclass(frozen=True)
+class UserContext:
+    """Resolved identity from gateway-forwarded headers."""
+
+    user_id: str
+    tenant_id: str
+    user_tier: str = "normal"
+    user_type: str = "user"
+
+    @property
+    def is_anonymous(self) -> bool:
+        return self.user_id == "anonymous"
+
+
+# Sentinel used when anonymous access is allowed but no headers are present.
+ANONYMOUS_CONTEXT = UserContext(
+    user_id="anonymous",
+    tenant_id="default",
+    user_tier="anonymous",
+    user_type="anonymous",
+)
+
+
+async def get_user_context(request: Request) -> UserContext:
+    """FastAPI dependency: resolve user context from forwarded headers.
+
+    If ``settings.app.allow_anonymous`` is ``True`` and no identity headers
+    are present, an anonymous context is returned.  Otherwise a 401 is raised.
+    """
+    user_id = request.headers.get("X-User-Id", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id", "").strip()
+    user_tier = request.headers.get("X-User-Tier", "normal").strip()
+    user_type = request.headers.get("X-User-Type", "user").strip()
+
+    if user_id and tenant_id:
+        return UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            user_tier=user_tier,
+            user_type=user_type,
+        )
+
+    # Check if anonymous access is allowed
+    settings = request.app.state.settings
+    if settings.app.allow_anonymous:
+        return ANONYMOUS_CONTEXT
+
+    raise HTTPException(
+        status_code=401,
+        detail="Missing required identity headers (X-User-Id, X-Tenant-Id). "
+        "Requests must be routed through the API Gateway.",
+    )

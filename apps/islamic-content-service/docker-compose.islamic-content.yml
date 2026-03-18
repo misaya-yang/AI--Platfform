@@ -1,17 +1,69 @@
+# Islamic Content Service - 独立部署
+#
+# 快速启动：
+#   docker compose -f docker-compose.islamic-content.yml up -d
+#
+# 首次启动后执行数据同步：
+#   docker compose -f docker-compose.islamic-content.yml exec islamic-content \
+#     python -m islamic_content_service.cli sync bootstrap --sources dua
+#
+# 如果有 Quran Foundation 凭证，可同步 Quran：
+#   docker compose -f docker-compose.islamic-content.yml exec islamic-content \
+#     python -m islamic_content_service.cli sync bootstrap --sources quran,dua
+#
+# 查看日志：
+#   docker compose -f docker-compose.islamic-content.yml logs -f islamic-content
+
 services:
-  islamic-content-service:
+  islamic-content:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: islamic-content-service
     env_file:
       - .env
     ports:
-      - "8091:8091"
+      - "${ISLAMIC_CONTENT_APP__PORT:-8091}:8091"
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: islamic-content-pg
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-111111}
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - ic-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    container_name: islamic-content-redis
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "111111"]
     ports:
-      - "6381:6379"
+      - "${REDIS_PORT:-6381}:6379"
+    volumes:
+      - ic-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "111111", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  ic-pg-data:
+  ic-redis-data:

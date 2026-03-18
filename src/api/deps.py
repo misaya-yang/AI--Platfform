@@ -18,9 +18,6 @@ from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ..core.auth.user_resolver import UserContext
 from ..core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
-from ..persistence.islamic_content_repository import IslamicContentRepository
-from ..services.islamic_content import IslamicContentService
-
 logger = logging.getLogger(__name__)
 
 
@@ -109,18 +106,10 @@ def get_rate_limiter(request: Request) -> MultiDimensionRateLimiter | None:
     return getattr(request.app.state, "multi_rate_limiter", None)
 
 
-def get_islamic_content_service(request: Request) -> IslamicContentService:
-    """Get or lazily initialize the Islamic content aggregation service."""
-    service = getattr(request.app.state, "islamic_content_service", None)
-    if service is None:
-        settings = get_settings(request)
-        database = getattr(request.app.state, "database", None)
-        repository = None
-        if getattr(database, "_pool", None):
-            repository = IslamicContentRepository(database)
-        service = IslamicContentService(settings.islamic_content, repository=repository)
-        request.app.state.islamic_content_service = service
-    return service
+def get_islamic_content_service(request: Request):
+    """Deprecated: Islamic Content is now proxied to the microservice at :8091.
+    Kept as stub for backward compatibility if any code still references it."""
+    return None
 
 
 def get_guest_session_manager(request: Request):

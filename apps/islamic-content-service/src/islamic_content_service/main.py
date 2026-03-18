@@ -15,10 +15,13 @@ from .clients.sunnah_client import SunnahClient
 from .config import Settings
 from .db import Database
 from .observability import configure_logging
+from .repositories.dua_repository import DuaRepository
 from .repositories.hadith_repository import HadithRepository
 from .repositories.quran_repository import QuranRepository
 from .repositories.sync_repository import SyncRepository
 from .services.bootstrap_service import BootstrapService
+from .services.dua_query_service import DuaQueryService
+from .services.dua_sync_service import DuaSyncService
 from .services.hadith_query_service import HadithQueryService
 from .services.hadith_sync_service import HadithSyncService
 from .services.quran_query_service import QuranQueryService
@@ -31,6 +34,7 @@ OPENAPI_TAGS = [
     {"name": "Quran", "description": "Low-latency Quran read APIs backed by PostgreSQL."},
     {"name": "Quran User", "description": "Quran OAuth and user API proxy routes."},
     {"name": "Hadith", "description": "Low-latency Hadith read APIs backed by PostgreSQL."},
+    {"name": "Dua", "description": "Verified Islamic Dua and Adhkar collection."},
 ]
 
 
@@ -46,6 +50,7 @@ class Runtime:
     quran_query_service: QuranQueryService
     quran_user_service: QuranUserService
     hadith_query_service: HadithQueryService
+    dua_query_service: DuaQueryService
 
     async def close(self) -> None:
         await self.quran_client.close()
@@ -59,14 +64,19 @@ async def build_runtime(settings: Settings) -> Runtime:
     configure_logging(settings.app.log_level)
     db = Database(settings.database)
     await db.connect()
+    # In editable install: parents[2] = project root. In Docker: use /app.
+    src_relative = Path(__file__).resolve().parents[2] / "migrations"
+    migrations_dir = src_relative if src_relative.is_dir() else Path("/app/migrations")
     if settings.database.auto_migrate:
-        await db.migrate(Path(__file__).resolve().parents[2] / "migrations" / "001_init_schema.sql")
+        await db.migrate(migrations_dir / "001_init_schema.sql")
+        await db.migrate(migrations_dir / "002_dua_tables.sql")
     cache = RedisCache(settings.cache)
     await cache.connect()
 
     sync_repository = SyncRepository(db)
     quran_repository = QuranRepository(db)
     hadith_repository = HadithRepository(db)
+    dua_repository = DuaRepository(db)
 
     quran_client = QuranFoundationClient(settings.quran)
     quran_user_client = QuranUserClient(settings.quran_user)
@@ -77,14 +87,22 @@ async def build_runtime(settings: Settings) -> Runtime:
     quran_query_service = QuranQueryService(settings.quran, settings.cache, quran_repository, cache)
     quran_user_service = QuranUserService(settings.quran_user, quran_user_client)
     hadith_query_service = HadithQueryService(settings.cache, hadith_repository, cache)
+    src_data = Path(__file__).resolve().parents[2] / "data" / "islamic_dua_dataset_final.csv"
+    dua_data_path = settings.dua.data_path or str(
+        src_data if src_data.is_file() else Path("/app/data/islamic_dua_dataset_final.csv")
+    )
+    dua_sync_service = DuaSyncService(dua_data_path, dua_repository)
+    dua_query_service = DuaQueryService(settings.cache, dua_repository, cache)
     bootstrap_service = BootstrapService(
         settings,
         db,
         sync_repository,
         quran_sync_service,
         hadith_sync_service,
+        dua_sync_service,
         quran_query_service,
         hadith_query_service,
+        dua_query_service,
         cache,
     )
     return Runtime(
@@ -98,6 +116,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         quran_query_service=quran_query_service,
         quran_user_service=quran_user_service,
         hadith_query_service=hadith_query_service,
+        dua_query_service=dua_query_service,
     )
 
 
@@ -118,6 +137,7 @@ def create_app(settings: Settings | None = None, *, enable_runtime: bool = True)
         app.state.quran_query_service = runtime.quran_query_service
         app.state.quran_user_service = runtime.quran_user_service
         app.state.hadith_query_service = runtime.hadith_query_service
+        app.state.dua_query_service = runtime.dua_query_service
         if resolved_settings.bootstrap.on_start:
             await runtime.bootstrap_service.bootstrap(
                 [
@@ -125,9 +145,11 @@ def create_app(settings: Settings | None = None, *, enable_runtime: bool = True)
                     for module_name, enabled in (
                         ("quran", resolved_settings.modules.enable_quran),
                         ("hadith", resolved_settings.modules.enable_hadith),
+                        ("dua", resolved_settings.modules.enable_dua),
                     )
                     if enabled
-                ]
+                ],
+                skip_unconfigured=True,
             )
         yield
         await runtime.close()

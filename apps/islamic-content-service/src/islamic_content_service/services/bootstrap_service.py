@@ -3,11 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import logging
+
 from ..cache import RedisCache
 from ..config import Settings
 from ..db import Database
 from ..domain.constants import SCHEMA_VERSION
 from ..repositories.sync_repository import SyncRepository
+
+logger = logging.getLogger(__name__)
+from .dua_query_service import DuaQueryService
+from .dua_sync_service import DuaSyncService
 from .hadith_query_service import HadithQueryService
 from .hadith_sync_service import HadithSyncService
 from .quran_query_service import QuranQueryService
@@ -22,8 +28,10 @@ class BootstrapService:
         sync_repository: SyncRepository,
         quran_sync_service: QuranSyncService,
         hadith_sync_service: HadithSyncService,
+        dua_sync_service: DuaSyncService,
         quran_query_service: QuranQueryService,
         hadith_query_service: HadithQueryService,
+        dua_query_service: DuaQueryService,
         cache: RedisCache,
     ) -> None:
         self.settings = settings
@@ -31,8 +39,10 @@ class BootstrapService:
         self.sync_repository = sync_repository
         self.quran_sync_service = quran_sync_service
         self.hadith_sync_service = hadith_sync_service
+        self.dua_sync_service = dua_sync_service
         self.quran_query_service = quran_query_service
         self.hadith_query_service = hadith_query_service
+        self.dua_query_service = dua_query_service
         self.cache = cache
 
     async def _module_status(
@@ -46,11 +56,9 @@ class BootstrapService:
         latest_completed_at = await self.sync_repository.get_latest_completed_at(source_name)
         status = "missing_credentials"
         if primary_count > 0 and aux_count is not None and aux_count == 0:
-            status = "partial_data" if configured else "stale_data"
-        elif primary_count > 0 and configured:
-            status = "ready"
+            status = "partial_data"
         elif primary_count > 0:
-            status = "stale_data"
+            status = "ready"
         elif configured:
             status = "empty_db"
         counts = {"primary": primary_count}
@@ -63,56 +71,86 @@ class BootstrapService:
             "counts": counts,
         }
 
-    async def bootstrap(self, sources: list[str]) -> dict[str, Any]:
+    async def bootstrap(
+        self, sources: list[str], *, skip_unconfigured: bool = False,
+    ) -> dict[str, Any]:
         steps = []
         if "quran" in sources and self.settings.modules.enable_quran:
-            run_id = await self.sync_repository.start_sync_run(
-                "quran",
-                {
-                    "default_translation_id": self.settings.quran.default_translation_id,
-                    "default_recitation_id": self.settings.quran.default_recitation_id,
-                    "sync_all_translations": self.settings.quran.sync_all_translations,
-                    "sync_all_recitations": self.settings.quran.sync_all_recitations,
-                    "translation_ids": self.settings.quran.translation_ids,
-                    "recitation_ids": self.settings.quran.recitation_ids,
-                },
-            )
-            try:
-                metrics = await self.quran_sync_service.sync()
-                await self.sync_repository.finish_sync_run(run_id, status="completed", metrics=metrics)
-                await self.quran_query_service.invalidate()
-                steps.append({"name": "quran", "status": "completed", **metrics})
-            except Exception as exc:
-                await self.sync_repository.finish_sync_run(
-                    run_id,
-                    status="failed",
-                    metrics={},
-                    error_summary=str(exc),
-                )
-                raise
+            if skip_unconfigured and not self.quran_sync_service.is_configured():
+                logger.info("Skipping quran sync (not configured)")
+                steps.append({"name": "quran", "status": "skipped"})
+            else:
+                await self._sync_quran(steps)
         if "hadith" in sources and self.settings.modules.enable_hadith:
-            run_id = await self.sync_repository.start_sync_run(
-                "hadith",
-                {"collections": self.settings.hadith.sync_collections},
-            )
-            try:
-                metrics = await self.hadith_sync_service.sync()
-                await self.sync_repository.finish_sync_run(run_id, status="completed", metrics=metrics)
-                await self.hadith_query_service.invalidate()
-                steps.append({"name": "hadith", "status": "completed", **metrics})
-            except Exception as exc:
-                await self.sync_repository.finish_sync_run(
-                    run_id,
-                    status="failed",
-                    metrics={},
-                    error_summary=str(exc),
-                )
-                raise
+            if skip_unconfigured and not self.hadith_sync_service.is_configured():
+                logger.info("Skipping hadith sync (not configured)")
+                steps.append({"name": "hadith", "status": "skipped"})
+            else:
+                await self._sync_hadith(steps)
+        if "dua" in sources and self.settings.modules.enable_dua:
+            if skip_unconfigured and not self.dua_sync_service.is_configured():
+                logger.info("Skipping dua sync (data file not found)")
+                steps.append({"name": "dua", "status": "skipped"})
+            else:
+                await self._sync_dua(steps)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "schema_version": SCHEMA_VERSION,
             "steps": steps,
         }
+
+    async def _sync_quran(self, steps: list[dict[str, Any]]) -> None:
+        run_id = await self.sync_repository.start_sync_run(
+            "quran",
+            {
+                "default_translation_id": self.settings.quran.default_translation_id,
+                "default_recitation_id": self.settings.quran.default_recitation_id,
+                "sync_all_translations": self.settings.quran.sync_all_translations,
+                "sync_all_recitations": self.settings.quran.sync_all_recitations,
+                "translation_ids": self.settings.quran.translation_ids,
+                "recitation_ids": self.settings.quran.recitation_ids,
+            },
+        )
+        try:
+            metrics = await self.quran_sync_service.sync()
+            await self.sync_repository.finish_sync_run(run_id, status="completed", metrics=metrics)
+            await self.quran_query_service.invalidate()
+            steps.append({"name": "quran", "status": "completed", **metrics})
+        except Exception as exc:
+            await self.sync_repository.finish_sync_run(
+                run_id, status="failed", metrics={}, error_summary=str(exc),
+            )
+            raise
+
+    async def _sync_hadith(self, steps: list[dict[str, Any]]) -> None:
+        run_id = await self.sync_repository.start_sync_run(
+            "hadith", {"collections": self.settings.hadith.sync_collections},
+        )
+        try:
+            metrics = await self.hadith_sync_service.sync()
+            await self.sync_repository.finish_sync_run(run_id, status="completed", metrics=metrics)
+            await self.hadith_query_service.invalidate()
+            steps.append({"name": "hadith", "status": "completed", **metrics})
+        except Exception as exc:
+            await self.sync_repository.finish_sync_run(
+                run_id, status="failed", metrics={}, error_summary=str(exc),
+            )
+            raise
+
+    async def _sync_dua(self, steps: list[dict[str, Any]]) -> None:
+        run_id = await self.sync_repository.start_sync_run(
+            "dua", {"data_path": self.dua_sync_service.data_path},
+        )
+        try:
+            metrics = await self.dua_sync_service.sync()
+            await self.sync_repository.finish_sync_run(run_id, status="completed", metrics=metrics)
+            await self.dua_query_service.invalidate()
+            steps.append({"name": "dua", "status": "completed", **metrics})
+        except Exception as exc:
+            await self.sync_repository.finish_sync_run(
+                run_id, status="failed", metrics={}, error_summary=str(exc),
+            )
+            raise
 
     async def get_manifest(self) -> dict[str, Any]:
         manifest = await self.sync_repository.build_manifest()
@@ -134,6 +172,7 @@ class BootstrapService:
         quran_translation_count = counts.get("quran_ayah_translations", quran_count)
         quran_audio_track_count = counts.get("quran_ayah_audio", quran_count)
         hadith_count = counts.get("hadith_items", 0)
+        dua_count = counts.get("dua_items", 0)
 
         if self.settings.modules.enable_quran:
             modules["quran"] = await self._module_status(
@@ -167,12 +206,30 @@ class BootstrapService:
                 "counts": {"primary": hadith_count},
             }
 
+        if self.settings.modules.enable_dua:
+            modules["dua"] = await self._module_status(
+                source_name="dua",
+                configured=self.dua_sync_service.is_configured(),
+                primary_count=dua_count,
+            )
+        else:
+            modules["dua"] = {
+                "status": "disabled",
+                "configured": False,
+                "latest_completed_at": None,
+                "counts": {"primary": dua_count},
+            }
+
         db_ready = await self.db.ping()
-        cache_ready = True if not self.cache.enabled else await self.cache.ping()
-        active_module_statuses = [
-            item["status"] for item in modules.values() if item["status"] != "disabled"
+        cache_ready = not self.cache.enabled or await self.cache.ping()
+        blocking_statuses = [
+            item["status"]
+            for item in modules.values()
+            if item["status"] not in ("disabled", "missing_credentials")
         ]
-        healthy = db_ready and cache_ready and all(status == "ready" for status in active_module_statuses)
+        healthy = db_ready and cache_ready and all(
+            status == "ready" for status in blocking_statuses
+        )
         return {
             "status": "ready" if healthy else "not_ready",
             "schema_version": SCHEMA_VERSION,

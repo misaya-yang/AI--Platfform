@@ -43,6 +43,10 @@ from .response_cache import ResponseCache
 logger = get_logger(__name__)
 
 
+class ProxyQueueTimeoutError(RuntimeError):
+    """Raised when a proxy request waits too long for a service slot."""
+
+
 # LangGraph 需要 assistant_id 的路径模式
 LANGGRAPH_ASSISTANT_PATHS = [
     "/runs",  # POST /runs
@@ -164,6 +168,9 @@ class TransparentProxy:
         health_check_timeout: float = 5.0,
         availability_cache_ttl: float = 15.0,
         default_concurrency_limit: int = 32,
+        default_streaming_concurrency_limit: int | None = None,
+        default_non_streaming_concurrency_limit: int | None = None,
+        default_concurrency_queue_timeout: float = 10.0,
         client_max_connections: int = 100,
         client_max_keepalive_connections: int = 20,
         client_keepalive_expiry: float = 30.0,
@@ -185,6 +192,9 @@ class TransparentProxy:
         self.health_check_timeout = health_check_timeout
         self.availability_cache_ttl = availability_cache_ttl
         self.default_concurrency_limit = default_concurrency_limit
+        self.default_streaming_concurrency_limit = default_streaming_concurrency_limit
+        self.default_non_streaming_concurrency_limit = default_non_streaming_concurrency_limit
+        self.default_concurrency_queue_timeout = default_concurrency_queue_timeout
         self.client_max_connections = client_max_connections
         self.client_max_keepalive_connections = client_max_keepalive_connections
         self.client_keepalive_expiry = client_keepalive_expiry
@@ -196,7 +206,7 @@ class TransparentProxy:
         # 负载均衡状态
         self._lb_counters: dict[str, int] = {}  # round-robin 计数器
         self._lb_connections: dict[str, dict[str, int]] = {}  # 连接计数
-        self._service_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._service_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
         self._availability: dict[str, dict[str, Any]] = {}
         self._availability_lock = asyncio.Lock()
 
@@ -241,23 +251,63 @@ class TransparentProxy:
 
         return self._clients[client_key]
 
-    def _get_service_semaphore(self, config: ProxyServiceConfig) -> asyncio.Semaphore:
-        service_id = config.service_id
-        limit = max(1, int(config.concurrency_limit or self.default_concurrency_limit))
-        semaphore = self._service_semaphores.get(service_id)
+    def _resolve_concurrency_limit(
+        self,
+        config: ProxyServiceConfig,
+        slot_kind: str,
+    ) -> int:
+        if slot_kind == "stream":
+            configured = (
+                config.streaming_concurrency_limit
+                if config.streaming_concurrency_limit is not None
+                else self.default_streaming_concurrency_limit
+            )
+        else:
+            configured = (
+                config.non_streaming_concurrency_limit
+                if config.non_streaming_concurrency_limit is not None
+                else self.default_non_streaming_concurrency_limit
+            )
+
+        limit = configured if configured is not None else config.concurrency_limit
+        if limit is None:
+            limit = self.default_concurrency_limit
+        return max(1, int(limit))
+
+    def _resolve_queue_timeout(self, config: ProxyServiceConfig) -> float:
+        timeout = config.concurrency_queue_timeout
+        if timeout is None:
+            timeout = self.default_concurrency_queue_timeout
+        return max(float(timeout or 0.0), 0.1)
+
+    def _get_service_semaphore(
+        self,
+        config: ProxyServiceConfig,
+        slot_kind: str,
+    ) -> asyncio.Semaphore:
+        service_key = (config.service_id, slot_kind)
+        limit = self._resolve_concurrency_limit(config, slot_kind)
+        semaphore = self._service_semaphores.get(service_key)
         if semaphore is None:
             semaphore = asyncio.Semaphore(limit)
-            self._service_semaphores[service_id] = semaphore
+            self._service_semaphores[service_key] = semaphore
         return semaphore
 
     async def _acquire_request_slot(
         self,
         config: ProxyServiceConfig,
         upstream_base: str,
+        slot_kind: str,
     ) -> tuple[Callable[[], Awaitable[None]], float]:
-        semaphore = self._get_service_semaphore(config)
+        semaphore = self._get_service_semaphore(config, slot_kind)
+        queue_timeout = self._resolve_queue_timeout(config)
         wait_started = time.perf_counter()
-        await semaphore.acquire()
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=queue_timeout)
+        except asyncio.TimeoutError as exc:
+            raise ProxyQueueTimeoutError(
+                f"Service busy ({slot_kind} queue exceeded {queue_timeout:.1f}s)"
+            ) from exc
         queue_wait_ms = (time.perf_counter() - wait_started) * 1000
 
         service_connections = self._lb_connections.setdefault(config.service_id, {})
@@ -401,6 +451,11 @@ class TransparentProxy:
             # 默认 round_robin
             return urls[0]
 
+    def _resolve_slot_kind(self, request: ProxyRequest) -> str:
+        if request.stream or self._is_streaming_path(request.path):
+            return "stream"
+        return "default"
+
     def _build_upstream_url(
         self,
         config: ProxyServiceConfig,
@@ -502,7 +557,27 @@ class TransparentProxy:
         # 5. 获取 HTTP 客户端
         client = await self._get_client(config)
         t_client_done = time.perf_counter()
-        release_slot, queue_wait_ms = await self._acquire_request_slot(config, upstream_base)
+        slot_kind = self._resolve_slot_kind(request)
+        try:
+            release_slot, queue_wait_ms = await self._acquire_request_slot(
+                config,
+                upstream_base,
+                slot_kind,
+            )
+        except ProxyQueueTimeoutError as e:
+            duration = (time.time() - start_time) * 1000
+            logger.warning(
+                "[Proxy] Queue timeout after %.2fms service=%s slot=%s error=%s",
+                duration,
+                config.service_id,
+                slot_kind,
+                e,
+            )
+            return ProxyResponse(
+                status_code=503,
+                headers={},
+                error=str(e),
+            )
 
         # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
@@ -520,6 +595,7 @@ class TransparentProxy:
             f"headers={((t_headers_done - t_config_done) * 1000):.1f}ms "
             f"client={((t_client_done - t_headers_done) * 1000):.1f}ms "
             f"body={((t_body_done - t_client_done) * 1000):.1f}ms "
+            f"slot={slot_kind} "
             f"queue_wait={queue_wait_ms:.1f}ms "
             f"total_prep={((t_body_done - start_time) * 1000):.1f}ms"
         )

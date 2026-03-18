@@ -23,6 +23,7 @@ from src.proxy.context_injector import ContextInjector, RequestContext
 from src.proxy.transparent_proxy import (
     LANGGRAPH_ASSISTANT_PATHS,
     LANGGRAPH_OPERATION_TYPES,
+    ProxyQueueTimeoutError,
     ProxyRequest,
     ProxyResponse,
     TransparentProxy,
@@ -218,6 +219,37 @@ class TestTransparentProxy:
 
         assert response.status_code == 503
         assert "Service unavailable" in (response.error or "")
+
+    @pytest.mark.asyncio
+    async def test_stream_slots_are_isolated_from_default_slots(
+        self, transparent_proxy, proxy_config
+    ):
+        stream_sem = transparent_proxy._get_service_semaphore(proxy_config, "stream")
+        default_sem = transparent_proxy._get_service_semaphore(proxy_config, "default")
+
+        assert stream_sem is not default_sem
+
+    @pytest.mark.asyncio
+    async def test_queue_timeout_raises_when_slot_is_exhausted(
+        self, transparent_proxy, proxy_config
+    ):
+        proxy_config.non_streaming_concurrency_limit = 1
+        proxy_config.concurrency_queue_timeout = 0.01
+
+        release_slot, _ = await transparent_proxy._acquire_request_slot(
+            proxy_config,
+            proxy_config.upstream_url,
+            "default",
+        )
+
+        with pytest.raises(ProxyQueueTimeoutError):
+            await transparent_proxy._acquire_request_slot(
+                proxy_config,
+                proxy_config.upstream_url,
+                "default",
+            )
+
+        await release_slot()
 
     @pytest.mark.asyncio
     async def test_proxy_auto_heals_invalid_assistant(
@@ -561,7 +593,9 @@ class TestTransparentProxy:
         self, transparent_proxy, proxy_config
     ):
         release, queue_wait_ms = await transparent_proxy._acquire_request_slot(
-            proxy_config, proxy_config.upstream_url
+            proxy_config,
+            proxy_config.upstream_url,
+            "default",
         )
 
         assert queue_wait_ms >= 0

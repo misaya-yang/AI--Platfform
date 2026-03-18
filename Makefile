@@ -34,6 +34,19 @@ COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compos
 
 .DEFAULT_GOAL := help
 
+# -- Quick Start --------------------------------------------------------------
+
+.PHONY: quickstart
+
+quickstart:                 ## 零配置一键部署 (首次使用)
+	@test -f .env || (echo "Auto-creating .env from defaults..." && cp .env.example .env)
+	@$(COMPOSE) up -d --build
+	@echo ""
+	@echo "AI Gateway is starting..."
+	@echo "  Gateway:  http://localhost:8080"
+	@echo "  Frontend: http://localhost:80"
+	@echo "  Run 'make status' to check health."
+
 # -- Deployment ---------------------------------------------------------------
 
 .PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status
@@ -90,6 +103,22 @@ restore:                    ## 从最新备份恢复
 
 backup-list:                ## 列出所有备份
 	@bash $(SCRIPTS)/backup.sh --list
+
+# -- Islamic Content Service --------------------------------------------------
+
+.PHONY: ic-sync ic-sync-dua ic-sync-quran ic-logs
+
+ic-sync:                    ## 同步 Islamic Content 全量数据 (dua + quran)
+	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources quran,dua
+
+ic-sync-dua:                ## 仅同步 Dua 数据 (无需外部凭证)
+	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources dua
+
+ic-sync-quran:              ## 仅同步 Quran 数据 (需要凭证)
+	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources quran
+
+ic-logs:                    ## 查看 Islamic Content 服务日志
+	@$(COMPOSE) logs -f islamic-content
 
 # -- Development Environment --------------------------------------------------
 

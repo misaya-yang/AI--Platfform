@@ -24,14 +24,26 @@ async function fresh(){
 async function turn(prompt){
   await page.locator('#playground-chat-composer').fill(prompt);
   await page.getByRole('button', { name: /send|发送/i }).click();
-  const stop = page.getByRole('button', { name: /stop generating/i });
-  await stop.waitFor({ state:'visible', timeout:15000 }).catch(()=>null);
-  await stop.waitFor({ state:'hidden', timeout:120000 }).catch(()=>null);
+  await page.waitForFunction(() => {
+    const composer = document.querySelector('#playground-chat-composer');
+    return composer instanceof HTMLTextAreaElement && !composer.disabled;
+  }, undefined, { timeout: 120000 }).catch(()=>null);
   await page.waitForTimeout(1000);
+  const debugState = await page.evaluate(() => window.__playgroundDebug ?? null).catch(() => null);
+  const composerDisabled = await page.locator('#playground-chat-composer').isDisabled().catch(() => null);
   const texts = await page.locator('[data-message-role="assistant"]').evaluateAll((els)=>
-    els.map((el, i)=>({i, text:(el.textContent||'').trim().slice(0,1500)}))
+    els.map((el, i)=>({
+      i,
+      text: ((el.querySelector('[data-message-text=\"true\"]')?.textContent)||'').trim().slice(0,1500),
+      supplemental: Array.from(el.querySelectorAll('[data-message-supplemental]')).map((node)=>
+        `${node.getAttribute('data-message-supplemental')}:${(node.textContent||'').trim().slice(0,160)}`
+      ),
+      stats: ((el.querySelector('[data-message-stats=\"true\"]')?.textContent)||'').trim(),
+    }))
   );
   console.log('\nPROMPT', prompt);
+  console.log('COMPOSER_DISABLED', composerDisabled);
+  console.log('DEBUG', JSON.stringify(debugState, null, 2));
   console.log(JSON.stringify(texts,null,2));
 }
 await login();

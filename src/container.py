@@ -601,6 +601,15 @@ class Container:
             health_check_timeout=self.settings.proxy.health_check_timeout,
             availability_cache_ttl=self.settings.proxy.availability_cache_ttl_seconds,
             default_concurrency_limit=self.settings.proxy.default_concurrency_limit,
+            default_streaming_concurrency_limit=(
+                self.settings.proxy.default_streaming_concurrency_limit
+            ),
+            default_non_streaming_concurrency_limit=(
+                self.settings.proxy.default_non_streaming_concurrency_limit
+            ),
+            default_concurrency_queue_timeout=(
+                self.settings.proxy.default_concurrency_queue_timeout
+            ),
             client_max_connections=self.settings.proxy.client_max_connections,
             client_max_keepalive_connections=self.settings.proxy.client_max_keepalive_connections,
             client_keepalive_expiry=self.settings.proxy.client_keepalive_expiry,
