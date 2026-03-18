@@ -177,6 +177,14 @@ class VectorStore:
             lambda: self._client.create_collection(
                 collection_name=actual,
                 vectors_config=qmodels.VectorParams(size=int(dimension), distance=dist),
+                hnsw_config=qmodels.HnswConfigDiff(
+                    m=16,                # Connection degree (balanced recall vs memory)
+                    ef_construct=200,    # Build-time accuracy
+                    full_scan_threshold=10000,  # Use HNSW for collections > 10K points
+                ),
+                optimizers_config=qmodels.OptimizersConfigDiff(
+                    indexing_threshold=20000,  # Build index after 20K points
+                ),
             )
         )
 
@@ -424,7 +432,7 @@ class VectorStore:
             return []
 
         q = (query_text or "").strip().lower()
-        q_terms = [t for t in re.split(r"\\W+", q) if t]
+        q_terms = [t for t in re.split(r"\W+", q) if t]
 
         def lexical_score(text: str) -> float:
             if not q_terms:
