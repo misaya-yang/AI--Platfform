@@ -135,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 """Adapts KB Service Settings to gateway Settings shape."""
                 def __init__(self, s):
                     self._s = s
+                    embed = s.embeddings
                     self.knowledge = type("K", (), {
                         "enabled": True,
                         "qdrant": type("Q", (), {
@@ -147,18 +148,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
                         })(),
                         "dashscope": type("D", (), {
-                            "api_key": s.embeddings.api_key if s.embeddings.provider == "dashscope" else "",
+                            "api_key": embed.api_key if embed.provider == "dashscope" else "",
+                            "model_name": embed.model if embed.provider == "dashscope" else "",
                         })(),
                         "gemini": type("G", (), {
-                            "api_key": s.embeddings.api_key if s.embeddings.provider == "gemini" else "",
+                            "api_key": embed.api_key if embed.provider == "gemini" else "",
+                            "model_name": embed.model if embed.provider == "gemini" else "",
                         })(),
                         "siliconflow": type("SF", (), {
-                            "api_key": s.embeddings.api_key if s.embeddings.provider == "siliconflow" else "",
-                            "base_url": s.embeddings.base_url or "",
+                            "api_key": embed.api_key if embed.provider == "siliconflow" else "",
+                            "base_url": embed.base_url or "",
+                            "model_name": embed.model if embed.provider == "siliconflow" else "",
                         })(),
                         "ocr_enabled": s.ocr.enabled,
                         "worker_concurrency": s.processing.worker_concurrency,
                         "document_worker_concurrency": s.processing.document_worker_concurrency,
+                        # Embedding config
+                        "text_embedding_dimension": embed.dimension,
+                        "text_embedding_batch_size": embed.batch_size,
+                        "text_embedding_max_concurrent": embed.max_concurrent,
+                        "text_embedding_config": {
+                            "provider": embed.provider,
+                            "model": embed.model,
+                            "api_key": embed.api_key,
+                            "dimension": embed.dimension,
+                            "base_url": embed.base_url or "",
+                        },
+                        "default_embedding_model": embed.model,
+                        "default_embedding_provider": embed.provider,
+                        # Multimodal (optional)
+                        "multimodal_embedding_model": getattr(s, "multimodal", type("M", (), {"model": ""})()).model,
+                        "multimodal_embedding_max_concurrent": 5,
+                        # VLM
+                        "vlm_max_concurrent": getattr(s.ocr, "vlm_concurrency", 4),
+                        # Islamic profile (optional)
+                        "islamic_profile": None,
                     })()
                 def __getattr__(self, name):
                     return getattr(self._s, name)
