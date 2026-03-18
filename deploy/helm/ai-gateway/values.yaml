@@ -105,6 +105,32 @@ islamicContent:
     ISLAMIC_CONTENT_BOOTSTRAP__ON_START: "true"
 
 # -----------------------------------------------------------------------------
+# Knowledge Base Service
+# -----------------------------------------------------------------------------
+knowledgeService:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: knowledge-service
+    tag: latest
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilization: 70
+  env:
+    KNOWLEDGE_APP__HOST: "0.0.0.0"
+    KNOWLEDGE_APP__PORT: "8092"
+    KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "2"
+
+# -----------------------------------------------------------------------------
 # LangGraph Agents
 # -----------------------------------------------------------------------------
 # Each agent is built with `langgraph build -t <image>` and runs as an

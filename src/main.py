@@ -762,9 +762,7 @@ def create_app() -> FastAPI:
         if assistant_service is not None:
             await assistant_service.close()
 
-        islamic_content_service = getattr(app.state, "islamic_content_service", None)
-        if islamic_content_service is not None:
-            await islamic_content_service.close()
+        # Islamic Content: now handled by microservice at :8091, no cleanup needed
 
         # Stop Assistant TaskManager lifecycle
         from .services.assistant.task_manager import shutdown_task_manager
