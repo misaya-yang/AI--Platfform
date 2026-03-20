@@ -343,8 +343,8 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
       let rafId: number | null = null;
 
-      const flushAssistant = (overrides?: Partial<ChatMessage>) => {
-        if (!isRequestValid()) return;
+      const flushAssistant = (overrides?: Partial<ChatMessage>, force = false) => {
+        if (!force && !isRequestValid()) return;
         const toolCalls = mapToolCalls(streamState);
         const content = streamState.content;
 
@@ -1386,7 +1386,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               flushAssistant({
                 status: "cancelled",
                 isStreaming: false,
-              });
+              }, true);
               closeStreamTrace("cancelled", {
                 reason: "abort_signal",
               });
@@ -1406,6 +1406,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         clearStreamGuards();
 
         if (!isRequestValid()) {
+          // Force-update the message so it doesn't stay stuck in streaming
+          flushAssistant({
+            status: "cancelled",
+            isStreaming: false,
+          }, true);
           closeStreamTrace("cancelled", {
             reason: "request_invalidated",
           });
@@ -1717,7 +1722,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           flushAssistant({
             status: "cancelled",
             isStreaming: false,
-          });
+          }, true);
           closeStreamTrace("cancelled", {
             reason: "abort_signal_outer",
           });
@@ -1795,6 +1800,21 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         ) {
           abortControllerRef.current = null;
         }
+        // Safety net: ensure no assistant message is left stuck in streaming state
+        setMessages((m) => {
+          const last = m[assistantIndex];
+          if (last && last.isStreaming) {
+            const next = [...m];
+            next[assistantIndex] = {
+              ...last,
+              isStreaming: false,
+              isThinking: false,
+              status: last.status === "streaming" ? (last.content ? "completed" : "cancelled") : last.status,
+            };
+            return next;
+          }
+          return m;
+        });
         if (sessionEnabled && serviceId) {
           refreshSessions().catch(console.error);
         }
