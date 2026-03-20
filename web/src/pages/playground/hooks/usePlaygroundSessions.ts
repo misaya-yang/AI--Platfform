@@ -388,7 +388,6 @@ export function usePlaygroundSessions({
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
-      await deleteSession(id);
       if (loadingHistorySessionRef.current === id) {
         invalidatePendingHistoryLoad();
       }
@@ -398,12 +397,16 @@ export function usePlaygroundSessions({
         setHistoryRestoreState("idle");
         setHistoryRestoreError(null);
       }
+      // Optimistic: remove from list immediately
+      setSessions((prev) => prev.filter((s) => s.session_id !== id));
       setLocalTitles((prev) => {
         const next = { ...prev };
         delete next[id];
         return next;
       });
-      await refreshSessions();
+      // Server delete + silent background sync
+      await deleteSession(id);
+      await refreshSessions(true);
     },
     [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles, invalidatePendingHistoryLoad]
   );
