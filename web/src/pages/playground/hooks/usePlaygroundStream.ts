@@ -119,6 +119,8 @@ export interface UsePlaygroundStreamOptions {
   sessionThreadIdRef: React.MutableRefObject<Record<string, string>>;
   /** Pending session init promise */
   pendingSessionInitRef: React.MutableRefObject<Promise<string | null> | null>;
+  /** Pending thread creation promise from session init */
+  pendingThreadRef: React.MutableRefObject<Promise<string | null> | null>;
   /** Interaction flag */
   interactionStartedRef: React.MutableRefObject<boolean>;
   /** Stick-to-bottom ref */
@@ -156,6 +158,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
     loadingHistorySessionRef,
     sessionThreadIdRef,
     pendingSessionInitRef,
+    pendingThreadRef,
     interactionStartedRef,
     stickToBottomRef,
     invalidatePendingHistoryLoad,
@@ -466,10 +469,27 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             (sessions.find((s) => s.session_id === effectiveSessionId)?.metadata
               ?.langgraph_thread_id as string | undefined);
 
+          // Await pending thread pre-creation from handleNewSession
+          if (!threadId && pendingThreadRef.current) {
+            try {
+              const preCreatedId = await pendingThreadRef.current;
+              if (preCreatedId) {
+                threadId = preCreatedId;
+              }
+            } catch {
+              // Pre-creation failed, fall through to fallback
+            } finally {
+              pendingThreadRef.current = null;
+            }
+            // Re-check cache after awaiting
+            if (!threadId) {
+              threadId = sessionThreadIdRef.current[effectiveSessionId];
+            }
+          }
+
           if (!threadId) {
-            // Thread should have been pre-created in handleNewSession.
-            // Only create here as fallback (e.g., for restored sessions without thread).
-            // Use a short timeout to avoid blocking the first message.
+            // Fallback: thread wasn't pre-created (e.g., restored session).
+            // Create inline with a short timeout.
             const threadInitTimeout = createTimeoutSignal(
               TRANSPARENT_PROXY_THREAD_INIT_TIMEOUT_MS
             );

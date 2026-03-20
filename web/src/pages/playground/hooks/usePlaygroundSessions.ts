@@ -58,6 +58,8 @@ export interface UsePlaygroundSessionsReturn {
   interactionStartedRef: React.MutableRefObject<boolean>;
   /** Invalidate any pending history load */
   invalidatePendingHistoryLoad: () => void;
+  /** Pending thread creation promise (resolves to threadId or null) */
+  pendingThreadRef: React.MutableRefObject<Promise<string | null> | null>;
   /** Loading state for streaming */
   loading: boolean;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
@@ -94,6 +96,7 @@ export function usePlaygroundSessions({
   const loadingHistorySessionRef = useRef<string | null>(null);
   const sessionThreadIdRef = useRef<Record<string, string>>({});
   const pendingSessionInitRef = useRef<Promise<string | null> | null>(null);
+  const pendingThreadRef = useRef<Promise<string | null> | null>(null);
 
   // Keep messagesRef in sync
   useEffect(() => {
@@ -290,8 +293,8 @@ export function usePlaygroundSessions({
 
       if (isTransparentProxy) {
         const token = useAuthStore.getState().token;
-        // Fire-and-forget: don't block session creation
-        fetch(`/api/v1/proxy/${serviceId}/threads`, {
+        // Pre-create thread as a promise — handleSend will await it
+        const threadPromise = fetch(`/api/v1/proxy/${serviceId}/threads`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -310,12 +313,16 @@ export function usePlaygroundSessions({
                 updateSession(created.session_id, {
                   metadata: { langgraph_thread_id: tid },
                 }).catch(() => {});
+                return tid as string;
               }
             }
+            return null;
           })
-          .catch((err) =>
-            console.warn("[Session] Eager thread pre-creation failed:", err)
-          );
+          .catch((err) => {
+            console.warn("[Session] Thread pre-creation failed:", err);
+            return null;
+          });
+        pendingThreadRef.current = threadPromise;
       }
 
       // Silent refresh to sync with server (no loading flicker)
@@ -545,6 +552,7 @@ export function usePlaygroundSessions({
     abortControllerRef,
     sessionThreadIdRef,
     pendingSessionInitRef,
+    pendingThreadRef,
     messagesRef,
     interactionStartedRef,
     invalidatePendingHistoryLoad,
