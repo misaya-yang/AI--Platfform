@@ -50,7 +50,18 @@ HADITH_COLLECTIONS = {
     "tirmidhi": ("eng-tirmidhi", "Jami at-Tirmidhi", True, True),
     "nasai": ("eng-nasai", "Sunan an-Nasa'i", True, True),
     "ibnmajah": ("eng-ibnmajah", "Sunan Ibn Majah", True, True),
-    "nawawi": ("eng-nawawi40", "Forty Hadith Nawawi", False, False),
+    "nawawi": ("eng-nawawi", "Forty Hadith Nawawi", False, False),
+}
+
+# Arabic editions for bilingual sync
+HADITH_ARABIC_EDITIONS = {
+    "bukhari": "ara-bukhari",
+    "muslim": "ara-muslim",
+    "abudawud": "ara-abudawud",
+    "tirmidhi": "ara-tirmidhi",
+    "nasai": "ara-nasai",
+    "ibnmajah": "ara-ibnmajah",
+    "nawawi": "ara-nawawi",
 }
 
 
@@ -418,8 +429,45 @@ async def sync_hadith(pool: asyncpg.Pool, client: httpx.AsyncClient):
 
         log.info("  %s: %d hadiths synced", coll_name, len(hadiths_raw))
 
+    # ── Phase 2: Sync Arabic text into hadith_localizations ──
+    log.info("Syncing Arabic text for all collections...")
+    ar_count = 0
+    for coll_name, ar_key in HADITH_ARABIC_EDITIONS.items():
+        url = f"{HADITH_CDN}/editions/{ar_key}.json"
+        data = await _get_json(client, url, retries=3)
+        if not data:
+            log.warning("  %s: Arabic edition not available", coll_name)
+            continue
+        ar_hadiths = data.get("hadiths", [])
+        log.info("  %s: %d Arabic hadiths from CDN", coll_name, len(ar_hadiths))
+
+        async with pool.acquire() as conn:
+            for h in ar_hadiths:
+                hadith_num = str(h.get("hadithnumber", ""))
+                if not hadith_num:
+                    continue
+                ar_text = h.get("text", h.get("body", ""))
+                if not ar_text:
+                    continue
+                # Find the item_id for this hadith
+                row = await conn.fetchrow(f"""
+                    SELECT id FROM {SCHEMA}.hadith_items
+                    WHERE collection_name = $1 AND hadith_number = $2
+                """, coll_name, hadith_num)
+                if row:
+                    await conn.execute(f"""
+                        INSERT INTO {SCHEMA}.hadith_localizations
+                            (hadith_item_id, language, chapter_title, body_text, updated_at)
+                        VALUES ($1, 'ar', '', $2, NOW())
+                        ON CONFLICT (hadith_item_id, language) DO UPDATE SET
+                            body_text = EXCLUDED.body_text, updated_at = NOW()
+                    """, row["id"], ar_text)
+                    ar_count += 1
+
+        log.info("  %s: %d Arabic texts synced", coll_name, ar_count)
+
     elapsed = time.time() - t0
-    log.info("═══ HADITH SYNC DONE (%d total items) in %.1fs ═══", total_items, elapsed)
+    log.info("═══ HADITH SYNC DONE (%d items + %d Arabic) in %.1fs ═══", total_items, ar_count, elapsed)
 
 
 # ─── Record sync run ─────────────────────────────────────────────────────────

@@ -206,7 +206,7 @@ export function UserQuotaPanel() {
                   }}
                 >
                   {summary.blocked > 0
-                    ? t("dashboard.userQuota.alert.blocked", { count: summary.blocked }, `${summary.blocked} 个用户已封禁`)
+                    ? t("dashboard.userQuota.alert.blocked", { count: summary.blocked, defaultValue: `${summary.blocked} 个用户已封禁` })
                     : summary.exceeded > 0
                     ? t("dashboard.userQuota.alert.exceeded", { count: summary.exceeded })
                     : t("dashboard.userQuota.alert.warning", { count: summary.warning })}
