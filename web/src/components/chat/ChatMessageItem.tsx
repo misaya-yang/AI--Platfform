@@ -93,23 +93,29 @@ export const ChatMessageItem = memo(
       const [thinkingExpanded, setThinkingExpanded] = useState(true);
       const hasAutoCollapsed = useRef(false);
 
-      // Auto-collapse thinking section when response completes
+      // Auto-collapse thinking section when response completes or is cancelled
+      const isFinalState =
+        !isStreaming &&
+        (message.status === "completed" ||
+          message.status === "cancelled" ||
+          message.status === "failed" ||
+          message.status === "idle");
+
       useEffect(() => {
-        if (
-          !isStreaming &&
-          hasVisibleAssistantText &&
-          allToolCallsDone &&
-          !hasAutoCollapsed.current
-        ) {
+        if (isFinalState && !hasAutoCollapsed.current) {
           hasAutoCollapsed.current = true;
-          // Small delay so user sees the transition
-          const timer = setTimeout(() => setThinkingExpanded(false), 600);
+          const timer = setTimeout(() => setThinkingExpanded(false), 400);
           return () => clearTimeout(timer);
         }
-      }, [isStreaming, hasVisibleAssistantText, allToolCallsDone]);
+      }, [isFinalState]);
 
       // Thinking summary text for collapsed state
       const thinkingSummary = (() => {
+        if (isFinalState && hasToolCalls) {
+          return t("playground.thinking.toolsDone", "{{count}} tool calls", {
+            count: toolCallsCount,
+          });
+        }
         if (isStreaming && !hasToolCalls && !message.content) {
           return t("playground.thinking.label", "Thinking...");
         }
@@ -117,13 +123,9 @@ export const ChatMessageItem = memo(
           return t("playground.thinking.usingTools", "Using tools...");
         }
         if (allToolCallsDone) {
-          const parts: string[] = [];
-          parts.push(
-            t("playground.thinking.toolsDone", "{{count}} tool calls", {
-              count: toolCallsCount,
-            })
-          );
-          return parts.join(" · ");
+          return t("playground.thinking.toolsDone", "{{count}} tool calls", {
+            count: toolCallsCount,
+          });
         }
         return t("playground.thinking.label", "Thinking...");
       })();
