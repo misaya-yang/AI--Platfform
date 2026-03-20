@@ -4,10 +4,12 @@ import {
   deleteSession,
   getSessionHistory,
   listSessions,
+  updateSession,
   type SessionSummary,
 } from "@/api/sessions";
 import type { ChatMessage } from "@/components/ChatWindow";
 import { useAppStore } from "@/store/useAppStore";
+import { useAuthStore } from "@/store/useAuthStore";
 import {
   trackChatHistoryEmptyState,
   trackChatHistoryRestored,
@@ -20,7 +22,7 @@ import {
 
 export interface UsePlaygroundSessionsOptions {
   serviceId?: string;
-  services: { service_id: string; service_type?: string }[];
+  services: { service_id: string; service_type?: string; metadata?: Record<string, unknown> }[];
 }
 
 export interface UsePlaygroundSessionsReturn {
@@ -277,6 +279,45 @@ export function usePlaygroundSessions({
         if (exists) return prev;
         return [{ session_id: created.session_id, service_id: serviceId, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), metadata: {} } as SessionSummary, ...prev];
       });
+
+      // Eagerly pre-create LangGraph thread (non-blocking)
+      // So by the time user sends first message, thread is already ready
+      const activeService = services.find((s) => s.service_id === serviceId);
+      const isTransparentProxy =
+        activeService?.service_type === "langgraph" ||
+        activeService?.metadata?.adapter_type === "langgraph" ||
+        activeService?.metadata?.proxy_mode === "transparent";
+
+      if (isTransparentProxy) {
+        const token = useAuthStore.getState().token;
+        // Fire-and-forget: don't block session creation
+        fetch(`/api/v1/proxy/${serviceId}/threads`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            metadata: { gateway_session_id: created.session_id },
+          }),
+        })
+          .then((resp) => (resp.ok ? resp.json() : null))
+          .then((data) => {
+            if (data) {
+              const tid = data.thread_id || data.id || data.threadId;
+              if (tid) {
+                sessionThreadIdRef.current[created.session_id] = tid;
+                updateSession(created.session_id, {
+                  metadata: { langgraph_thread_id: tid },
+                }).catch(() => {});
+              }
+            }
+          })
+          .catch((err) =>
+            console.warn("[Session] Eager thread pre-creation failed:", err)
+          );
+      }
+
       // Silent refresh to sync with server (no loading flicker)
       await refreshSessions(true);
       return created.session_id;

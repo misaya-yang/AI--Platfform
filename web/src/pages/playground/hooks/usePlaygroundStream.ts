@@ -467,6 +467,9 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               ?.langgraph_thread_id as string | undefined);
 
           if (!threadId) {
+            // Thread should have been pre-created in handleNewSession.
+            // Only create here as fallback (e.g., for restored sessions without thread).
+            // Use a short timeout to avoid blocking the first message.
             const threadInitTimeout = createTimeoutSignal(
               TRANSPARENT_PROXY_THREAD_INIT_TIMEOUT_MS
             );
@@ -510,7 +513,8 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 console.warn("Thread create failed:", resp.status);
               }
             } catch (err) {
-              console.warn("Thread create error:", err);
+              // Don't block on failure — proceed without thread (stateless mode)
+              console.warn("Thread create fallback failed:", err);
             } finally {
               threadInitTimeout.cancel();
             }
