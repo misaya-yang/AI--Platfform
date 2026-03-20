@@ -171,6 +171,44 @@ export function usePlaygroundSessions({
       setHistoryRestoreError(null);
       setMessages([]);
 
+      // Eagerly pre-create thread for this session if it doesn't have one yet
+      const hasThread = !!sessionThreadIdRef.current[id];
+      if (!hasThread) {
+        const activeService = services.find((s) => s.service_id === serviceId);
+        const isTransparentProxy =
+          activeService?.service_type === "langgraph" ||
+          activeService?.metadata?.adapter_type === "langgraph" ||
+          activeService?.metadata?.proxy_mode === "transparent";
+
+        if (isTransparentProxy && serviceId) {
+          const token = useAuthStore.getState().token;
+          pendingThreadRef.current = fetch(
+            `/api/v1/proxy/${serviceId}/threads`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: JSON.stringify({ metadata: { gateway_session_id: id } }),
+            }
+          )
+            .then((resp) => (resp.ok ? resp.json() : null))
+            .then((data) => {
+              if (data) {
+                const tid = data.thread_id || data.id || data.threadId;
+                if (tid) {
+                  sessionThreadIdRef.current[id] = tid;
+                  updateSession(id, { metadata: { langgraph_thread_id: tid } }).catch(() => {});
+                  return tid as string;
+                }
+              }
+              return null;
+            })
+            .catch(() => null);
+        }
+      }
+
       try {
         const timeoutMs = 10000;
         const historyPromise = getSessionHistory(id, { limit: 200 });
@@ -250,7 +288,7 @@ export function usePlaygroundSessions({
         }
       }
     },
-    [setActiveSessionId]
+    [setActiveSessionId, serviceId, services]
   );
 
   const handleNewSession = useCallback(async () => {
