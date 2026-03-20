@@ -579,8 +579,17 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             ) {
               return;
             }
+            // Don't abort if content already arrived
             if (streamState.content.trim().length > 0) {
               maxTimerId = null;
+              return;
+            }
+            // Don't abort if tool calls are active — stream is healthy,
+            // just waiting for model to generate text after tool execution
+            if (streamState.toolCalls.length > 0) {
+              // Re-arm for another cycle instead of aborting
+              maxTimerId = null;
+              armStreamMaxGuard();
               return;
             }
             streamFallbackReason = "max_stream_duration";
