@@ -562,6 +562,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             ) {
               return;
             }
+            // Don't stall-abort if tool calls are active — during tool execution
+            // LangGraph only sends heartbeats (SSE comments, not data events),
+            // so the stall timer fires even though the stream is healthy.
+            if (streamState.toolCalls.length > 0 && !streamState.content.trim()) {
+              stallTimerId = null;
+              armStreamStallGuard();
+              return;
+            }
             streamFallbackReason = "stall_timeout";
             streamAbortController.abort();
           }, TRANSPARENT_PROXY_STREAM_STALL_MS);
