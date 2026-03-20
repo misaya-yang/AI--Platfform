@@ -126,7 +126,7 @@ export interface UsePlaygroundStreamOptions {
   /** Invalidate pending history load */
   invalidatePendingHistoryLoad: () => void;
   /** Refresh sessions list */
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (silent?: boolean) => Promise<void>;
   /** i18n translation function */
   t: TFunction;
   /** Current loading state (for uiStreamingActive derivation) */
@@ -424,7 +424,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             effectiveSessionId = created.session_id;
             currentRequestSessionRef.current = created.session_id;
             opts.setActiveSessionId(created.session_id);
-            refreshSessions().catch(console.error);
+            refreshSessions(true).catch(console.error);
           } else if (!effectiveSessionId) {
             effectiveSessionId = activeSessionId;
             currentRequestSessionRef.current = activeSessionId ?? null;

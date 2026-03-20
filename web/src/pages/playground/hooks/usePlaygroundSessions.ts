@@ -111,12 +111,13 @@ export function usePlaygroundSessions({
     setLoading(false);
   }, [loading, messages]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (silent = false) => {
     if (!serviceId) {
       setSessions([]);
       return;
     }
-    setSessionsLoading(true);
+    // Only show loading spinner on initial load, not on background refreshes
+    if (!silent) setSessionsLoading(true);
     try {
       const data = await listSessions({ service_id: serviceId, limit: 100 });
       setSessions(data);
@@ -139,7 +140,7 @@ export function usePlaygroundSessions({
         return updated;
       });
     } finally {
-      setSessionsLoading(false);
+      if (!silent) setSessionsLoading(false);
     }
   }, [serviceId, setLocalTitles]);
 
@@ -270,7 +271,14 @@ export function usePlaygroundSessions({
       setHistoryRestoreState("idle");
       setHistoryRestoreError(null);
       setMessages([]);
-      await refreshSessions();
+      // Optimistic: insert new session at top immediately, then sync in background
+      setSessions((prev) => {
+        const exists = prev.some((s) => s.session_id === created.session_id);
+        if (exists) return prev;
+        return [{ session_id: created.session_id, service_id: serviceId, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), metadata: {} } as SessionSummary, ...prev];
+      });
+      // Silent refresh to sync with server (no loading flicker)
+      await refreshSessions(true);
       return created.session_id;
     })();
 
