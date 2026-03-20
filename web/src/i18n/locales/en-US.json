@@ -1700,6 +1700,11 @@
     "toolCallsUsed": "{{count}} tool calls",
     "toolCallsRunning": "In progress",
     "allCompleted": "All done",
+    "thinking": {
+      "label": "Thinking...",
+      "usingTools": "Using tools...",
+      "toolsDone": "{{count}} tool calls"
+    },
     "newChat": "New chat",
     "selectAgentToView": "Select an agent to view chats.",
     "noChatsYet": "No chats yet. Start a new one.",

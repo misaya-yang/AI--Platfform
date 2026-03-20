@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { memo, useState, forwardRef } from "react";
+import { memo, useState, useEffect, useRef, forwardRef } from "react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
@@ -9,7 +9,7 @@ import { MessageAvatar } from "./MessageAvatar";
 import { StatsBadge } from "./StatsBadge";
 import { TimelineSection } from "./TimelineSection";
 import { ArtifactsSection } from "./ArtifactsSection";
-import { ChevronDown, Wrench } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 
 /**
  * Remove internal "Process (brief)" execution traces from assistant output.
@@ -51,7 +51,6 @@ export const ChatMessageItem = memo(
         toolCallsMode = "full",
         toolCallsDefaultOpen = true,
         showTimeline = true,
-        showThinkingIndicator = true,
         index,
       },
       ref
@@ -82,33 +81,56 @@ export const ChatMessageItem = memo(
         message.toolCalls?.filter(
           (tc) => tc.toolCall.status === "completed"
         ).length ?? 0;
+      const allToolCallsDone =
+        hasToolCalls && completedToolCalls === toolCallsCount && !hasRunningToolCalls;
+
+      // Thinking section: visible when streaming OR has tool calls
+      const isStreaming = !!message.isStreaming;
+      const showThinkingSection =
+        !isUser && (isStreaming || hasToolCalls) && !hasTimeline;
+
+      // Claude Desktop style: expanded while streaming, collapsed when done
+      const [thinkingExpanded, setThinkingExpanded] = useState(true);
+      const hasAutoCollapsed = useRef(false);
+
+      // Auto-collapse thinking section when response completes
+      useEffect(() => {
+        if (
+          !isStreaming &&
+          hasVisibleAssistantText &&
+          allToolCallsDone &&
+          !hasAutoCollapsed.current
+        ) {
+          hasAutoCollapsed.current = true;
+          // Small delay so user sees the transition
+          const timer = setTimeout(() => setThinkingExpanded(false), 600);
+          return () => clearTimeout(timer);
+        }
+      }, [isStreaming, hasVisibleAssistantText, allToolCallsDone]);
+
+      // Thinking summary text for collapsed state
+      const thinkingSummary = (() => {
+        if (isStreaming && !hasToolCalls && !message.content) {
+          return t("playground.thinking.label", "Thinking...");
+        }
+        if (hasRunningToolCalls) {
+          return t("playground.thinking.usingTools", "Using tools...");
+        }
+        if (allToolCallsDone) {
+          const parts: string[] = [];
+          parts.push(
+            t("playground.thinking.toolsDone", "{{count}} tool calls", {
+              count: toolCallsCount,
+            })
+          );
+          return parts.join(" · ");
+        }
+        return t("playground.thinking.label", "Thinking...");
+      })();
 
       const [isTimelineExpanded, setIsTimelineExpanded] = useState(
         message.timeline?.status === "running"
       );
-      const initialToolCallExpand =
-        toolCallsMode === "full" ||
-        toolCallsDefaultOpen ||
-        hasRunningToolCalls;
-      const [toolCallsExpanded, setToolCallsExpanded] =
-        useState(initialToolCallExpand);
-      const toolCallsAreForcedOpen =
-        toolCallsMode === "full" || hasRunningToolCalls;
-      const shouldShowToolCallsList =
-        canShowToolCalls &&
-        (toolCallsAreForcedOpen || toolCallsExpanded);
-      const shouldShowToolCallsSummary =
-        canShowToolCalls &&
-        toolCallsMode === "collapsed" &&
-        !toolCallsAreForcedOpen &&
-        !toolCallsExpanded;
-
-      // Show a minimal waiting cursor when streaming with no content and no tool calls yet
-      const isWaitingForFirstToken =
-        !isUser &&
-        message.isStreaming &&
-        !message.content &&
-        !hasToolCalls;
 
       return (
         <motion.div
@@ -184,17 +206,6 @@ export const ChatMessageItem = memo(
                     ]
               )}
             >
-              {/* Minimal waiting cursor (Claude Desktop style) */}
-              {isWaitingForFirstToken && (
-                <div className="px-1 py-2">
-                  <span
-                    className="inline-block w-[2px] h-5 rounded-full bg-gradient-to-b from-slate-400 to-slate-500 dark:from-slate-400 dark:to-slate-500"
-                    style={{ animation: "cursor-blink 1s ease-in-out infinite" }}
-                  />
-                  <style>{`@keyframes cursor-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }`}</style>
-                </div>
-              )}
-
               {/* AG-UI Timeline Section */}
               {hasTimeline && message.timeline && (
                 <div data-message-supplemental="timeline">
@@ -208,121 +219,106 @@ export const ChatMessageItem = memo(
                 </div>
               )}
 
-              {/* Tool Calls - Collapsed Summary */}
-              {shouldShowToolCallsSummary && !hasTimeline && (
-                <div
-                  data-message-supplemental="tool-summary"
-                  className="mb-3 w-full min-w-0"
-                >
+              {/* Claude Desktop-style Thinking Section */}
+              {showThinkingSection && canShowToolCalls && (
+                <div data-message-supplemental="thinking" className="w-full">
+                  {/* Thinking header - always visible, acts as toggle */}
                   <button
                     type="button"
-                    onClick={() => setToolCallsExpanded(true)}
+                    onClick={() => setThinkingExpanded(!thinkingExpanded)}
                     className={cn(
-                      "flex w-full items-center gap-3 rounded-xl border",
-                      "bg-slate-50/80 dark:bg-slate-800/40 px-4 py-2.5",
-                      "text-[13px] font-medium text-slate-600 dark:text-slate-300",
-                      "border-slate-200/60 dark:border-slate-700/40",
-                      "transition-all duration-200",
-                      "hover:bg-slate-100/80 dark:hover:bg-slate-800/60",
-                      "hover:border-slate-300/60 dark:hover:border-slate-600/50"
+                      "flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-left",
+                      "transition-colors duration-150",
+                      "hover:bg-slate-100/60 dark:hover:bg-white/[0.04]",
+                      "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30"
                     )}
                   >
-                    <div className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-100 dark:bg-blue-900/40">
-                      <Wrench className="h-3 w-3 text-blue-600 dark:text-blue-400" />
-                    </div>
-                    <span className="flex-1 text-left">
-                      {t(
-                        "playground.toolCallsUsed",
-                        "{{count}} tool calls",
-                        { count: toolCallsCount }
+                    <motion.div
+                      animate={{ rotate: thinkingExpanded ? 90 : 0 }}
+                      transition={{ duration: 0.15 }}
+                      className="flex-shrink-0"
+                    >
+                      <ChevronRight className="h-3 w-3 text-slate-400 dark:text-slate-500" />
+                    </motion.div>
+
+                    {/* Animated sparkle when still thinking */}
+                    <Sparkles
+                      className={cn(
+                        "h-3.5 w-3.5 flex-shrink-0",
+                        isStreaming
+                          ? "text-violet-500 animate-pulse"
+                          : "text-slate-400 dark:text-slate-500"
                       )}
+                    />
+
+                    <span
+                      className={cn(
+                        "text-[12px] font-medium",
+                        isStreaming
+                          ? "text-violet-600 dark:text-violet-400"
+                          : "text-slate-500 dark:text-slate-400"
+                      )}
+                    >
+                      {thinkingSummary}
                     </span>
-                    {completedToolCalls === toolCallsCount && (
-                      <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">
-                        {t("playground.allCompleted", "All done")}
-                      </span>
+
+                    {/* Shimmer bar when still processing */}
+                    {isStreaming && (
+                      <div className="flex-1 h-[2px] ml-2 rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden max-w-[80px]">
+                        <div className="h-full bg-gradient-to-r from-transparent via-violet-500/50 to-transparent animate-shimmer" />
+                      </div>
                     )}
-                    <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
                   </button>
+
+                  {/* Expandable tool calls content */}
+                  <AnimatePresence initial={false}>
+                    {thinkingExpanded && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{
+                          duration: 0.25,
+                          ease: [0.25, 0.1, 0.25, 1],
+                        }}
+                        className="overflow-hidden"
+                      >
+                        <div className="pl-5 pt-1.5 space-y-2">
+                          {message.toolCalls?.map((tc, idx) => (
+                            <ToolCallBlock
+                              key={
+                                tc.toolCall.tool_call_id || idx
+                              }
+                              toolCall={tc.toolCall}
+                              result={tc.result}
+                              argsText={tc.argsText}
+                              argsValid={tc.argsValid}
+                              stepNumber={
+                                toolCallsCount > 1
+                                  ? idx + 1
+                                  : undefined
+                              }
+                            />
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               )}
 
-              {/* Tool Calls - Expanded List */}
-              {!isUser &&
-                shouldShowToolCallsList &&
-                !hasTimeline && (
-                  <div
-                    data-message-supplemental="tool-calls"
-                    className="mb-3 w-full min-w-0"
-                  >
-                    {/* Tool calls header */}
-                    <div className="flex items-center gap-2 mb-2 px-0.5">
-                      <div className="flex items-center gap-2 flex-1">
-                        <div className="flex h-5 w-5 items-center justify-center rounded-md bg-blue-100 dark:bg-blue-900/40">
-                          <Wrench className="h-2.5 w-2.5 text-blue-600 dark:text-blue-400" />
-                        </div>
-                        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                          {t("playground.toolCalls", "Tool Calls")}
-                        </span>
-                        {hasRunningToolCalls && (
-                          <span className="flex items-center gap-1 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                            <span className="relative flex h-1.5 w-1.5">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-500" />
-                            </span>
-                            {t(
-                              "playground.toolCallsRunning",
-                              "In progress"
-                            )}
-                          </span>
-                        )}
-                        {!hasRunningToolCalls &&
-                          completedToolCalls === toolCallsCount &&
-                          toolCallsCount > 0 && (
-                            <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                              {completedToolCalls}/{toolCallsCount}
-                            </span>
-                          )}
-                      </div>
-                      {toolCallsMode === "collapsed" && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setToolCallsExpanded(false)
-                          }
-                          className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
-                        >
-                          {t("playground.collapse", "Collapse")}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Tool call list with subtle connecting line */}
-                    <div className="relative space-y-2 w-full">
-                      {/* Vertical connecting line */}
-                      {toolCallsCount > 1 && (
-                        <div className="absolute left-[21px] top-3 bottom-3 w-px bg-slate-200/60 dark:bg-slate-700/40" />
-                      )}
-                      {message.toolCalls?.map((tc, idx) => (
-                        <div
-                          key={
-                            tc.toolCall.tool_call_id || idx
-                          }
-                          className="relative"
-                        >
-                          <ToolCallBlock
-                            toolCall={tc.toolCall}
-                            result={tc.result}
-                            argsText={tc.argsText}
-                            argsValid={tc.argsValid}
-                            stepNumber={
-                              toolCallsCount > 1
-                                ? idx + 1
-                                : undefined
-                            }
-                          />
-                        </div>
-                      ))}
+              {/* Waiting-only thinking (no tool calls yet) */}
+              {showThinkingSection &&
+                !canShowToolCalls &&
+                isStreaming &&
+                !hasVisibleAssistantText && (
+                  <div className="flex items-center gap-2 px-2 py-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-violet-500 animate-pulse flex-shrink-0" />
+                    <span className="text-[12px] font-medium text-violet-600 dark:text-violet-400">
+                      {t("playground.thinking.label", "Thinking...")}
+                    </span>
+                    <div className="h-[2px] rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden max-w-[60px]">
+                      <div className="h-full bg-gradient-to-r from-transparent via-violet-500/50 to-transparent animate-shimmer" />
                     </div>
                   </div>
                 )}
@@ -349,7 +345,7 @@ export const ChatMessageItem = memo(
                   ) : (
                     <StreamOutput
                       text={assistantDisplayContent}
-                      isStreaming={!!message.isStreaming}
+                      isStreaming={isStreaming}
                       id={message.id || `msg-${index}`}
                     />
                   )}

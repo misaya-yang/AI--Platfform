@@ -1072,6 +1072,41 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     );
                   }
 
+                  // Extract tool results from completed tool messages
+                  // (critical: must do this HERE since seenMessageIds
+                  //  will cause the updates handler to skip this message)
+                  if (isToolMessage) {
+                    const toolResult =
+                      extractToolResult(message);
+                    if (toolResult) {
+                      const existingArgs =
+                        streamState.toolCalls.find(
+                          (tc) =>
+                            tc.id === toolResult.id
+                        )?.arguments || "";
+                      processStreamChunk({
+                        request_id: "",
+                        chunk_index:
+                          nextSyntheticChunkIndex(),
+                        is_final: false,
+                        event_type: "tool_result",
+                        tool_call: {
+                          tool_call_id:
+                            toolResult.id ||
+                            `auto-${++toolCallIdCounter}`,
+                          name:
+                            toolResult.name || "",
+                          arguments: existingArgs,
+                          status: toolResult.status,
+                        },
+                        content: {
+                          type: "tool_result",
+                          data: toolResult.content,
+                        },
+                      });
+                    }
+                  }
+
                   const isAIMessage =
                     !isToolMessage &&
                     (msgType.includes("ai") ||

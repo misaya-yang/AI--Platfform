@@ -1700,6 +1700,11 @@
     "toolCallsUsed": "{{count}} 项工具调用",
     "toolCallsRunning": "执行中",
     "allCompleted": "全部完成",
+    "thinking": {
+      "label": "思考中...",
+      "usingTools": "使用工具中...",
+      "toolsDone": "{{count}} 次工具调用"
+    },
     "newChat": "新对话",
     "selectAgentToView": "选择一个 Agent 以查看对话记录。",
     "noChatsYet": "还没有对话记录，开始新对话吧。",
