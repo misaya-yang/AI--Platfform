@@ -11,7 +11,7 @@
  * SDK's `Message` type and our `ChatMessage` type.
  */
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type {
   Message,
@@ -213,10 +213,16 @@ function resolveAssistantId(
   activeService?: UseLangGraphStreamOptions["activeService"],
 ): string {
   const meta = activeService?.metadata ?? {};
+  // Check service metadata first, then connector_config
+  const connectorConfig = (meta.connector_config ?? {}) as Record<string, unknown>;
   return (
     (meta.graph_id as string) ||
     (meta.assistant_id as string) ||
+    (connectorConfig.graph_id as string) ||
+    (connectorConfig.assistant_id as string) ||
     (meta.graph_name as string) ||
+    // LangGraph default assistant uses the graph name as ID.
+    // For self-hosted deployments, "agent" is the standard default.
     "agent"
   );
 }
@@ -260,11 +266,37 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   }, [sessionEnabled, activeSessionId, sessionThreadIdRef]);
 
   const token = useAuthStore((s) => s.token);
-  const assistantId = resolveAssistantId(activeService);
+  const staticAssistantId = resolveAssistantId(activeService);
+
+  // Discover the actual assistant ID from LangGraph at mount time.
+  // The proxy config often doesn't carry graph_id, but LangGraph knows.
+  const [discoveredAssistantId, setDiscoveredAssistantId] = useState<string | null>(null);
   // useStream requires a full URL (it uses new URL() internally)
   const apiUrl = serviceId
     ? `${window.location.origin}/api/v1/proxy/${serviceId}`
     : "";
+
+  useEffect(() => {
+    if (!apiUrl || !isLangGraphService) return;
+    // Query LangGraph assistants API to discover the correct assistant ID
+    fetch(`${apiUrl}/assistants/search`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ limit: 1 }),
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((assistants: Array<{ assistant_id: string; graph_id: string }>) => {
+        if (assistants.length > 0) {
+          setDiscoveredAssistantId(assistants[0].assistant_id);
+        }
+      })
+      .catch(() => {});
+  }, [apiUrl, isLangGraphService, token]);
+
+  const assistantId = discoveredAssistantId || staticAssistantId;
 
   // Whether this service uses the LangGraph transparent proxy
   const isLangGraphService = useMemo(() => {
