@@ -3833,12 +3833,23 @@ class KnowledgeService:
         # --- PRE_RETRIEVAL Hook: Islamic multi-query expansion ---
         # Resolve Islamic enhancement config from dataset index_config
         islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
-        islamic_multi_query = bool(islamic_cfg.get("multi_query", False)) or bool(multi_query)
         islamic_citation = bool(islamic_cfg.get("citation_format", False))
-        islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(
-            authority_sort
-        )
         islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
+
+        # multi_query / authority_sort: explicit request parameter overrides dataset config.
+        # Only fall back to dataset config when the caller didn't specify (None).
+        if multi_query is not None:
+            islamic_multi_query = bool(multi_query)
+        else:
+            islamic_multi_query = bool(islamic_cfg.get("multi_query", False))
+
+        if authority_sort is not None:
+            islamic_authority_sort = bool(authority_sort)
+        else:
+            islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False))
+
+        # Auto-detection fallback: ONLY when caller didn't specify (multi_query is None)
+        # AND dataset config is also False. Disabled when explicitly passed False.
         if not islamic_multi_query and multi_query is None:
             try:
                 from .multi_query import ISLAMIC_SYNONYMS
