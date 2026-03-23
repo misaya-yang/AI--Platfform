@@ -18,6 +18,8 @@
   "dependencies": {
     "@ant-design/cssinjs": "^2.0.1",
     "@ant-design/icons": "^6.1.0",
+    "@langchain/core": "^1.1.35",
+    "@langchain/langgraph-sdk": "^1.8.0",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-dialog": "^1.1.4",
     "@radix-ui/react-dropdown-menu": "^2.1.4",
