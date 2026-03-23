@@ -37,21 +37,15 @@ export default defineConfig(({ mode }) => {
       },
     },
 
-    // Pre-bundle LangGraph SDK to avoid circular dependency issues
-    optimizeDeps: {
-      include: ["@langchain/langgraph-sdk", "@langchain/langgraph-sdk/react"],
-    },
-
     build: {
       outDir: "dist",
       sourcemap: mode === "development",
       // Optimize chunk splitting
       rollupOptions: {
         output: {
-          manualChunks(id) {
-            if (id.includes("@langchain")) return "langgraph";
-            if (id.includes("react-dom") || id.includes("react-router")) return "vendor";
-            if (id.includes("antd") || id.includes("@ant-design")) return "ui";
+          manualChunks: {
+            vendor: ["react", "react-dom", "react-router-dom"],
+            ui: ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
           },
         },
       },

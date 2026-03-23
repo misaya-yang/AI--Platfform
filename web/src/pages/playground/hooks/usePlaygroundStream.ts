@@ -464,80 +464,68 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
         let threadId: string | undefined;
         if (useTransparentProxy && sessionEnabled && effectiveSessionId) {
+          // 1. Check cache first (instant, no await)
           threadId =
             sessionThreadIdRef.current[effectiveSessionId] ||
             (sessions.find((s) => s.session_id === effectiveSessionId)?.metadata
               ?.langgraph_thread_id as string | undefined);
 
-          // Await pending thread pre-creation from handleNewSession
+          // 2. If pre-creation is pending, give it a SHORT window (500ms max)
+          //    to resolve. Don't block indefinitely — that was causing 8-22s TTFT.
           if (!threadId && pendingThreadRef.current) {
             try {
-              const preCreatedId = await pendingThreadRef.current;
+              const preCreatedId = await Promise.race([
+                pendingThreadRef.current,
+                new Promise<null>((r) => setTimeout(() => r(null), 500)),
+              ]);
               if (preCreatedId) {
                 threadId = preCreatedId;
               }
             } catch {
-              // Pre-creation failed, fall through to fallback
+              // Pre-creation failed, fall through
             } finally {
               pendingThreadRef.current = null;
             }
-            // Re-check cache after awaiting
             if (!threadId) {
               threadId = sessionThreadIdRef.current[effectiveSessionId];
             }
           }
 
+          // 3. If still no thread, create one NON-BLOCKING.
+          //    Start streaming immediately; the thread will be ready by the time
+          //    LangGraph processes the run (it creates thread + run atomically).
           if (!threadId) {
-            // Fallback: thread wasn't pre-created (e.g., restored session).
-            // Create inline with a short timeout.
-            const threadInitTimeout = createTimeoutSignal(
-              TRANSPARENT_PROXY_THREAD_INIT_TIMEOUT_MS
-            );
-            try {
-              const threadInitSignal = combineAbortSignals([
-                abortController.signal,
-                threadInitTimeout.signal,
-              ]);
-              const resp = await fetch(
-                `/api/v1/proxy/${serviceId}/threads`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    ...(token
-                      ? { Authorization: `Bearer ${token}` }
-                      : {}),
-                  },
-                  body: JSON.stringify({
-                    metadata: {
-                      gateway_session_id: effectiveSessionId,
-                    },
-                  }),
-                  signal: threadInitSignal,
-                }
-              );
-              if (resp.ok) {
-                const data = await resp.json();
-                threadId =
-                  data.thread_id || data.id || data.threadId;
-                if (threadId) {
-                  sessionThreadIdRef.current[effectiveSessionId] =
-                    threadId;
-                  updateSession(effectiveSessionId, {
-                    metadata: { langgraph_thread_id: threadId },
-                  }).catch((err) =>
-                    console.error("Failed to update thread id:", err)
-                  );
-                }
-              } else {
-                console.warn("Thread create failed:", resp.status);
+            // Fire-and-forget thread creation (save for future messages in this session)
+            fetch(
+              `/api/v1/proxy/${serviceId}/threads`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                  metadata: { gateway_session_id: effectiveSessionId },
+                }),
               }
-            } catch (err) {
-              // Don't block on failure — proceed without thread (stateless mode)
-              console.warn("Thread create fallback failed:", err);
-            } finally {
-              threadInitTimeout.cancel();
-            }
+            )
+              .then((resp) => (resp.ok ? resp.json() : null))
+              .then((data) => {
+                if (data) {
+                  const tid = data.thread_id || data.id || data.threadId;
+                  if (tid && effectiveSessionId) {
+                    sessionThreadIdRef.current[effectiveSessionId] = tid;
+                    updateSession(effectiveSessionId, {
+                      metadata: { langgraph_thread_id: tid },
+                    }).catch(() => {});
+                  }
+                }
+              })
+              .catch((err) =>
+                console.warn("Background thread create failed:", err)
+              );
+            // Don't set threadId — streaming will use stateless mode for first message,
+            // or the proxy will route to a new thread automatically.
           }
         }
 

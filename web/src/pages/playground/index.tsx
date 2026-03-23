@@ -29,7 +29,7 @@ import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { formatDateTime } from "@/utils/intl";
 
 import { usePlaygroundSessions } from "./hooks/usePlaygroundSessions";
-import { useLangGraphStream } from "./hooks/useLangGraphStream";
+import { usePlaygroundStream } from "./hooks/usePlaygroundStream";
 import { useScrollToBottom } from "./hooks/useScrollToBottom";
 
 const PLAYGROUND_COMPOSER_ID = "playground-chat-composer";
@@ -97,7 +97,7 @@ export function PlaygroundPage() {
   const { scrollRef, showScrollToBottom, scrollToBottom, stickToBottomRef } =
     useScrollToBottom(messages);
 
-  const streamHook = useLangGraphStream({
+  const streamHook = usePlaygroundStream({
     serviceId,
     activeService,
     sessionEnabled,
