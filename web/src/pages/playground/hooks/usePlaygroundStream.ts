@@ -1892,7 +1892,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           return m;
         });
         if (sessionEnabled && serviceId) {
-          refreshSessions().catch(console.error);
+          refreshSessions(true).catch(console.error);
         }
       }
     },
