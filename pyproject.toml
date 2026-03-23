@@ -40,6 +40,9 @@ dependencies = [
     # HTTP Client
     "httpx>=0.28.0",
 
+    # Caching
+    "cachetools>=5.5.0",
+
     # Configuration & Serialization
     "PyYAML>=6.0.3",
     "jsonschema>=4.25.0",

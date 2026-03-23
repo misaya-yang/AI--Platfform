@@ -26,6 +26,7 @@ dependencies = [
     "structlog>=25.1.0",
     "orjson>=3.11.0",
     "python-dotenv>=1.2.0",
+    "cachetools>=5.5.0",
     # sentence-transformers / paddleocr removed — embeddings use remote Gemini API,
     # OCR uses VLM service. Avoids pulling PyTorch (~2GB) into the image.
 ]
