@@ -48,10 +48,10 @@ export default defineConfig(({ mode }) => {
       // Optimize chunk splitting
       rollupOptions: {
         output: {
-          manualChunks: {
-            vendor: ["react", "react-dom", "react-router-dom"],
-            ui: ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
-            langgraph: ["@langchain/langgraph-sdk"],
+          manualChunks(id) {
+            if (id.includes("@langchain")) return "langgraph";
+            if (id.includes("react-dom") || id.includes("react-router")) return "vendor";
+            if (id.includes("antd") || id.includes("@ant-design")) return "ui";
           },
         },
       },
