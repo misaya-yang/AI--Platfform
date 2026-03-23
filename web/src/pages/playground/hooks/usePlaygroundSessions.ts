@@ -35,7 +35,7 @@ export interface UsePlaygroundSessionsReturn {
   setSessionEnabled: (enabled: boolean) => void;
   messages: ChatMessage[];
   setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (silent?: boolean) => Promise<void>;
   handleSelectSession: (id: string) => Promise<void>;
   handleNewSession: () => Promise<string | null>;
   handleDeleteSession: (id: string) => Promise<void>;

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, startTransition } from "react";
 
 import { invokeService } from "@/api/gateway";
-import { createSession, updateSession, addSessionMessage } from "@/api/sessions";
+import { createSession, getSession, updateSession, addSessionMessage } from "@/api/sessions";
 import {
   sseFetch,
   sseFetchEvents,
@@ -1891,11 +1891,22 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           }
           return m;
         });
-        // Skip full session list refresh after stream completes.
-        // refreshSessions() causes sidebar flash because the API returns
+        // Sync only the active session's title instead of a full list refresh.
+        // Full refreshSessions() causes sidebar flash because the API returns
         // new updated_at timestamps, triggering a full React re-render.
-        // The session list will naturally sync on next user interaction
-        // (new session, select session, or page refresh).
+        if (sessionEnabled && serviceId && activeSessionId) {
+          getSession(activeSessionId)
+            .then((s) => {
+              const title = s.metadata?.title as string | undefined;
+              if (title) {
+                opts.setLocalTitles((prev: Record<string, string>) => ({
+                  ...prev,
+                  [activeSessionId]: title,
+                }));
+              }
+            })
+            .catch(() => {});
+        }
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
