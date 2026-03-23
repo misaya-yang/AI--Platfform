@@ -3745,13 +3745,16 @@ class KnowledgeService:
         candidate_k = min(candidate_k, 2000)
 
         # Keyword candidate pool for BM25 scoring.
+        # Reduced from max(keyword_k*10, 200) to max(keyword_k*3, 50) because
+        # tokenizing 200 documents in Python takes ~1.7s (Arabic+multilingual regex).
+        # 50 candidates is sufficient for top_k=5 with good FTS ranking.
         keyword_pool_k = int(
             keyword_candidate_k
             if keyword_candidate_k is not None
-            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 10, 200)
+            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 3, 50)
         )
         keyword_pool_k = max(keyword_pool_k, keyword_k)
-        keyword_pool_k = min(keyword_pool_k, 5000)
+        keyword_pool_k = min(keyword_pool_k, 500)
 
         # RRF params
         rrf_k_value = int(fusion_config["rrf_k"])
