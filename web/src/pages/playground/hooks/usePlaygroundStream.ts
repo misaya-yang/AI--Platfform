@@ -621,6 +621,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             if (!streamState.content.trim().length) {
               return;
             }
+            // Don't idle-abort if tool calls are active — model may resume
+            // text generation after tool execution completes (same logic as
+            // stall guard and max guard).
+            if (streamState.toolCalls.length > 0) {
+              contentIdleTimerId = null;
+              armContentIdleGuard();
+              return;
+            }
             streamFallbackReason = "content_idle_complete";
             streamAbortController.abort();
           }, TRANSPARENT_PROXY_CONTENT_IDLE_MS);

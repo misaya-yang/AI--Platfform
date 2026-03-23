@@ -232,7 +232,7 @@ class AgentLoopConfig:
 
     # Model configuration
     model_id: str = "gemini-2.0-flash"
-    temperature: float = 0.7
+    temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)
     max_tokens: int = 4096
 
     # Feature flags
@@ -253,8 +253,8 @@ class AgentLoopConfig:
     # - tool: KB is available but model decides when to call
     # - off: do not use KB
     kb_mode: str = "auto"
-    kb_top_k: int = 5  # Number of KB results to retrieve
-    kb_min_relevance: float = 0.6  # Higher threshold for quality (was 0.5)
+    kb_top_k: int = 8  # More results per search to reduce need for multiple calls (was 5)
+    kb_min_relevance: float = 0.5  # Slightly relaxed for bilingual content (was 0.6)
     kb_max_queries: int = 1  # Single query for speed (was 3)
     kb_results_per_query: int = 3  # Results per query
     kb_max_content_length: int = 600  # Reduced for faster processing (was 800)
@@ -269,7 +269,7 @@ class AgentLoopConfig:
     file_paths: list[str] = field(default_factory=list)
 
     # Execution limits
-    max_tool_iterations: int = 10
+    max_tool_iterations: int = 5  # Reduced from 10; KB is limited to 1 call anyway
     max_concurrent_tools: int = 5
 
     # Context compression parameters
@@ -294,7 +294,7 @@ class AgentLoopConfig:
     enable_error_recovery: bool = True  # Enable intelligent error recovery
     error_max_retries: int = 3  # Maximum retry attempts per operation
     error_base_delay: float = 1.0  # Base delay for exponential backoff (seconds)
-    error_max_delay: float = 30.0  # Maximum delay between retries (seconds)
+    error_max_delay: float = 10.0  # Maximum delay between retries (was 30s, too conservative)
 
     # ========================================================================
     # Streaming-First Mode (Manus-style architecture)

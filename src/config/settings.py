@@ -275,7 +275,7 @@ class KnowledgeIslamicProfileSettings(BaseModel):
     citation_format: bool = True
     authority_sort: bool = True
     strict_section_traceability: bool = True
-    max_expanded_queries: int = 3
+    max_expanded_queries: int = 1
 
 
 class KnowledgeSettings(BaseModel):
@@ -289,9 +289,9 @@ class KnowledgeSettings(BaseModel):
         default_factory=KnowledgeIslamicProfileSettings
     )
     # Retrieval latency controls
-    dataset_fanout_max_concurrency: int = 3
-    retrieval_query_max_concurrency: int = 3
-    retrieval_cache_ttl_seconds: int = 45
+    dataset_fanout_max_concurrency: int = 6
+    retrieval_query_max_concurrency: int = 8
+    retrieval_cache_ttl_seconds: int = 300
 
     # =============================================
     # Text Embedding Configuration (for text-only datasets)
