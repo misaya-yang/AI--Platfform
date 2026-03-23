@@ -261,7 +261,10 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
 
   const token = useAuthStore((s) => s.token);
   const assistantId = resolveAssistantId(activeService);
-  const apiUrl = serviceId ? `/api/v1/proxy/${serviceId}` : "";
+  // useStream requires a full URL (it uses new URL() internally)
+  const apiUrl = serviceId
+    ? `${window.location.origin}/api/v1/proxy/${serviceId}`
+    : "";
 
   // Whether this service uses the LangGraph transparent proxy
   const isLangGraphService = useMemo(() => {
