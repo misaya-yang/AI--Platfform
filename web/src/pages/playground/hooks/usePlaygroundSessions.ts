@@ -125,7 +125,18 @@ export function usePlaygroundSessions({
     if (!silent) setSessionsLoading(true);
     try {
       const data = await listSessions({ service_id: serviceId, limit: 100 });
-      setSessions(data);
+      // In silent mode, skip setSessions if the session list hasn't materially
+      // changed (same IDs in same order). This prevents sidebar re-renders
+      // caused by new array references with only timestamp differences.
+      if (silent) {
+        setSessions((prev) => {
+          const prevIds = prev.map((s) => s.session_id).join(",");
+          const nextIds = data.map((s) => s.session_id).join(",");
+          return prevIds === nextIds ? prev : data;
+        });
+      } else {
+        setSessions(data);
+      }
       const nextThreads = { ...sessionThreadIdRef.current };
       for (const s of data) {
         const threadId = s.metadata?.langgraph_thread_id as string | undefined;

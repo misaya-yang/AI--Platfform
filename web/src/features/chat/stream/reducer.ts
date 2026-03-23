@@ -317,7 +317,11 @@ export function applyUsageToTurnState(
   if (timing.durationMs != null) {
     next = { ...next, durationMs: timing.durationMs };
   }
-  if (timing.firstTokenMs != null) {
+  // Only apply server-reported firstTokenMs if we haven't already measured it
+  // client-side. The client markFirstToken fires on the first tool_call or text
+  // event (~2s), but the server may report a later value that only counts the
+  // first *text* token after tool execution (~5-8s), which misleads the user.
+  if (timing.firstTokenMs != null && next.firstTokenMs == null) {
     next = { ...next, firstTokenMs: timing.firstTokenMs };
   }
   return next;
