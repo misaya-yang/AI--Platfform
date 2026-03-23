@@ -746,6 +746,10 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 messages: [{ role: "user", content: inputText }],
               },
               stream_mode: ["messages", "updates", "custom"],
+              // "exit" = only persist final state, not intermediate checkpoints.
+              // Eliminates ~2-3s overhead per graph step (model/tools).
+              // Safe because we don't use human-in-the-loop interrupts.
+              durability: "exit",
             };
             const streamPath = threadId
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
