@@ -1891,9 +1891,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           }
           return m;
         });
-        if (sessionEnabled && serviceId) {
-          refreshSessions(true).catch(console.error);
-        }
+        // Skip full session list refresh after stream completes.
+        // refreshSessions() causes sidebar flash because the API returns
+        // new updated_at timestamps, triggering a full React re-render.
+        // The session list will naturally sync on next user interaction
+        // (new session, select session, or page refresh).
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
