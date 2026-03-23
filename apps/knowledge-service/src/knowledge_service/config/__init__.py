@@ -139,9 +139,9 @@ class ProcessingSettings(BaseModel):
     hierarchical_l3_top_k: int = 5
 
     # Retrieval concurrency
-    dataset_fanout_max_concurrency: int = 3
-    retrieval_query_max_concurrency: int = 3
-    retrieval_cache_ttl_seconds: int = 45
+    dataset_fanout_max_concurrency: int = 6
+    retrieval_query_max_concurrency: int = 8
+    retrieval_cache_ttl_seconds: int = 300
 
     # Document type detection
     detection_sample_pages: int = 5

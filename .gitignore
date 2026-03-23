@@ -117,3 +117,9 @@ debug_*.py
 .worktrees
 .mcp.json
 apps/islamic-content-service/data/
+*.png
+
+# Demo & test screenshots
+demo-screenshots/
+playground-*.png
+regression-test-*.png

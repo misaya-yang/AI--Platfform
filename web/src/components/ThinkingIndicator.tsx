@@ -1,13 +1,14 @@
 /**
- * ThinkingIndicator - Elegant AI thinking animation
+ * ThinkingIndicator - Professional AI thinking animation
  *
- * Design: Refined, subtle with clear visual feedback
- * - Smooth, non-distracting animation
- * - Larger, readable text
- * - Clear status communication
+ * Design: Minimal, refined with clear visual feedback
+ * - Pulsing ring indicator (no bouncing dots)
+ * - Phase-aware rotating messages
+ * - Shimmer progress bar for visual momentum
+ * - Reduced motion support
  */
 
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Brain, Sparkles, Search, Zap, type LucideIcon } from "lucide-react";
@@ -25,30 +26,6 @@ interface ThinkingMessage {
   text: string;
 }
 
-// Elegant dot animation
-function ThinkingDots() {
-  return (
-    <div className="flex items-center gap-1">
-      {[0, 1, 2].map((i) => (
-        <motion.div
-          key={i}
-          className="w-1.5 h-1.5 rounded-full bg-gradient-to-br from-violet-400 to-purple-500"
-          animate={{
-            scale: [1, 1.3, 1],
-            opacity: [0.5, 1, 0.5],
-          }}
-          transition={{
-            duration: 1.2,
-            delay: i * 0.2,
-            repeat: Infinity,
-            ease: "easeInOut",
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
 // Main thinking indicator
 export function ThinkingIndicator({
   phase,
@@ -58,13 +35,48 @@ export function ThinkingIndicator({
   const { t } = useTranslation();
   const [messageIndex, setMessageIndex] = useState(0);
 
-  const thinkingMessages: ThinkingMessage[] = useMemo(() => [
-    { key: "analyzing", icon: Search, text: t("playground.thinking.analyzing", "Analyzing your request...") },
-    { key: "thinking", icon: Brain, text: t("playground.thinking.thinking", "Thinking...") },
-    { key: "searching", icon: Search, text: t("playground.thinking.searching", "Searching knowledge base...") },
-    { key: "planning", icon: Sparkles, text: t("playground.thinking.planning", "Planning response...") },
-    { key: "preparing", icon: Zap, text: t("playground.thinking.preparing", "Preparing answer...") },
-  ], [t]);
+  const thinkingMessages: ThinkingMessage[] = useMemo(
+    () => [
+      {
+        key: "analyzing",
+        icon: Search,
+        text: t(
+          "playground.thinking.analyzing",
+          "Analyzing your request..."
+        ),
+      },
+      {
+        key: "thinking",
+        icon: Brain,
+        text: t("playground.thinking.thinking", "Thinking..."),
+      },
+      {
+        key: "searching",
+        icon: Search,
+        text: t(
+          "playground.thinking.searching",
+          "Searching knowledge base..."
+        ),
+      },
+      {
+        key: "planning",
+        icon: Sparkles,
+        text: t(
+          "playground.thinking.planning",
+          "Planning response..."
+        ),
+      },
+      {
+        key: "preparing",
+        icon: Zap,
+        text: t(
+          "playground.thinking.preparing",
+          "Preparing answer..."
+        ),
+      },
+    ],
+    [t]
+  );
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -74,89 +86,88 @@ export function ThinkingIndicator({
   }, [thinkingMessages.length]);
 
   const currentMessage = phase
-    ? thinkingMessages.find((m) => m.key === phase) || thinkingMessages[messageIndex]
+    ? thinkingMessages.find((m) => m.key === phase) ||
+      thinkingMessages[messageIndex]
     : thinkingMessages[messageIndex];
 
   const Icon = currentMessage.icon;
 
   if (expanded) {
     return (
-      <div className={cn("flex flex-col items-center gap-5 py-6", className)}>
-        {/* Animated icon */}
-        <motion.div
-          className="relative"
-          animate={{ scale: [1, 1.05, 1] }}
-          transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-        >
-          <div className="absolute inset-0 bg-violet-500/20 rounded-2xl blur-xl" />
-          <div className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/25">
-            <Icon className="w-8 h-8 text-white" />
+      <div
+        className={cn(
+          "flex flex-col items-center gap-5 py-8",
+          className
+        )}
+      >
+        {/* Pulsing ring indicator */}
+        <div className="relative">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/20 animate-thinking-ring">
+            <Icon className="w-7 h-7 text-white" />
           </div>
-        </motion.div>
+        </div>
 
         {/* Status text */}
-        <motion.div
-          key={currentMessage.key}
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-center"
-        >
-          <p className="text-[15px] font-medium text-slate-700 dark:text-slate-200">
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={currentMessage.key}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25 }}
+            className="text-[15px] font-medium text-slate-600 dark:text-slate-300"
+          >
             {currentMessage.text}
-          </p>
-        </motion.div>
+          </motion.p>
+        </AnimatePresence>
 
-        {/* Progress dots */}
-        <ThinkingDots />
+        {/* Shimmer bar */}
+        <div className="w-32 h-1 rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden">
+          <div className="h-full bg-gradient-to-r from-transparent via-violet-500/60 to-transparent animate-shimmer" />
+        </div>
       </div>
     );
   }
 
+  // Compact mode
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       className={cn(
-        "inline-flex items-center gap-3 py-2 px-4 mb-3 rounded-lg min-w-[200px]",
-        "bg-gradient-to-r from-violet-50/80 to-purple-50/80",
-        "dark:from-violet-900/20 dark:to-purple-900/20",
-        "border border-violet-200/50 dark:border-violet-700/30",
+        "inline-flex items-center gap-3 py-2.5 px-4 rounded-xl",
+        "bg-gradient-to-r from-violet-50/60 to-purple-50/60",
+        "dark:from-violet-900/15 dark:to-purple-900/15",
+        "border border-violet-200/40 dark:border-violet-700/25",
         className
       )}
     >
-      {/* Animated icon - compact */}
-      <motion.div
-        className="relative flex-shrink-0"
-        animate={{ scale: [1, 1.05, 1] }}
-        transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-      >
-        <div className="absolute inset-0 bg-violet-500/20 rounded-lg blur-md" />
-        <div className={cn(
-          "relative w-9 h-9 rounded-lg flex items-center justify-center",
-          "bg-gradient-to-br from-violet-500 to-purple-600",
-          "shadow-md shadow-violet-500/25"
-        )}>
-          <motion.div
-            animate={{ rotate: [0, 5, -5, 0] }}
-            transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-          >
-            <Icon className="w-4.5 h-4.5 text-white" />
-          </motion.div>
+      {/* Animated indicator */}
+      <div className="relative flex-shrink-0">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-md shadow-violet-500/20 animate-thinking-ring">
+          <Icon className="w-4 h-4 text-white" />
         </div>
-      </motion.div>
+      </div>
 
-      {/* Status text and dots */}
-      <div className="flex items-center gap-3">
-        <motion.span
-          key={currentMessage.key}
-          initial={{ opacity: 0, x: -8 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ duration: 0.3 }}
-          className="text-[14px] font-medium text-violet-700 dark:text-violet-300"
-        >
-          {currentMessage.text}
-        </motion.span>
-        <ThinkingDots />
+      {/* Status text */}
+      <div className="flex flex-col gap-1 min-w-0">
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={currentMessage.key}
+            initial={{ opacity: 0, x: -6 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 6 }}
+            transition={{ duration: 0.2 }}
+            className="text-[13px] font-medium text-violet-700 dark:text-violet-300 whitespace-nowrap"
+          >
+            {currentMessage.text}
+          </motion.span>
+        </AnimatePresence>
+
+        {/* Inline shimmer bar */}
+        <div className="w-24 h-[3px] rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden">
+          <div className="h-full bg-gradient-to-r from-transparent via-violet-500/50 to-transparent animate-shimmer" />
+        </div>
       </div>
     </motion.div>
   );

@@ -423,6 +423,63 @@
 }
 
 /* ========================================
+   Tool Call & Thinking Animations
+   ======================================== */
+
+/* Shimmer progress bar for running tool calls */
+@keyframes shimmer {
+  0% { transform: translateX(-200%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s ease-in-out infinite;
+  width: 50%;
+}
+
+/* Thinking ring pulse */
+@keyframes thinking-ring {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(139, 92, 246, 0);
+  }
+}
+
+.animate-thinking-ring {
+  animation: thinking-ring 2s ease-in-out infinite;
+}
+
+/* Gradient text shimmer */
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-gradient-text {
+  background-size: 200% 200%;
+  animation: gradient-shift 3s ease infinite;
+}
+
+/* Smooth step entrance */
+@keyframes step-enter {
+  0% {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-step-enter {
+  animation: step-enter 0.3s ease-out forwards;
+}
+
+/* ========================================
    Radix UI 兼容层（保留以支持现有组件）
    ======================================== */
 

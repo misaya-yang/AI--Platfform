@@ -3745,13 +3745,16 @@ class KnowledgeService:
         candidate_k = min(candidate_k, 2000)
 
         # Keyword candidate pool for BM25 scoring.
+        # Reduced from max(keyword_k*10, 200) to max(keyword_k*3, 50) because
+        # tokenizing 200 documents in Python takes ~1.7s (Arabic+multilingual regex).
+        # 50 candidates is sufficient for top_k=5 with good FTS ranking.
         keyword_pool_k = int(
             keyword_candidate_k
             if keyword_candidate_k is not None
-            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 10, 200)
+            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 3, 50)
         )
         keyword_pool_k = max(keyword_pool_k, keyword_k)
-        keyword_pool_k = min(keyword_pool_k, 5000)
+        keyword_pool_k = min(keyword_pool_k, 500)
 
         # RRF params
         rrf_k_value = int(fusion_config["rrf_k"])
@@ -3833,12 +3836,23 @@ class KnowledgeService:
         # --- PRE_RETRIEVAL Hook: Islamic multi-query expansion ---
         # Resolve Islamic enhancement config from dataset index_config
         islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
-        islamic_multi_query = bool(islamic_cfg.get("multi_query", False)) or bool(multi_query)
         islamic_citation = bool(islamic_cfg.get("citation_format", False))
-        islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False)) or bool(
-            authority_sort
-        )
         islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
+
+        # multi_query / authority_sort: explicit request parameter overrides dataset config.
+        # Only fall back to dataset config when the caller didn't specify (None).
+        if multi_query is not None:
+            islamic_multi_query = bool(multi_query)
+        else:
+            islamic_multi_query = bool(islamic_cfg.get("multi_query", False))
+
+        if authority_sort is not None:
+            islamic_authority_sort = bool(authority_sort)
+        else:
+            islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False))
+
+        # Auto-detection fallback: ONLY when caller didn't specify (multi_query is None)
+        # AND dataset config is also False. Disabled when explicitly passed False.
         if not islamic_multi_query and multi_query is None:
             try:
                 from .multi_query import ISLAMIC_SYNONYMS

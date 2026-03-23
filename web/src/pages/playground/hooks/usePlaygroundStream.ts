@@ -119,6 +119,8 @@ export interface UsePlaygroundStreamOptions {
   sessionThreadIdRef: React.MutableRefObject<Record<string, string>>;
   /** Pending session init promise */
   pendingSessionInitRef: React.MutableRefObject<Promise<string | null> | null>;
+  /** Pending thread creation promise from session init */
+  pendingThreadRef: React.MutableRefObject<Promise<string | null> | null>;
   /** Interaction flag */
   interactionStartedRef: React.MutableRefObject<boolean>;
   /** Stick-to-bottom ref */
@@ -126,7 +128,7 @@ export interface UsePlaygroundStreamOptions {
   /** Invalidate pending history load */
   invalidatePendingHistoryLoad: () => void;
   /** Refresh sessions list */
-  refreshSessions: () => Promise<void>;
+  refreshSessions: (silent?: boolean) => Promise<void>;
   /** i18n translation function */
   t: TFunction;
   /** Current loading state (for uiStreamingActive derivation) */
@@ -156,6 +158,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
     loadingHistorySessionRef,
     sessionThreadIdRef,
     pendingSessionInitRef,
+    pendingThreadRef,
     interactionStartedRef,
     stickToBottomRef,
     invalidatePendingHistoryLoad,
@@ -343,8 +346,8 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
       let rafId: number | null = null;
 
-      const flushAssistant = (overrides?: Partial<ChatMessage>) => {
-        if (!isRequestValid()) return;
+      const flushAssistant = (overrides?: Partial<ChatMessage>, force = false) => {
+        if (!force && !isRequestValid()) return;
         const toolCalls = mapToolCalls(streamState);
         const content = streamState.content;
 
@@ -424,7 +427,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             effectiveSessionId = created.session_id;
             currentRequestSessionRef.current = created.session_id;
             opts.setActiveSessionId(created.session_id);
-            refreshSessions().catch(console.error);
+            refreshSessions(true).catch(console.error);
           } else if (!effectiveSessionId) {
             effectiveSessionId = activeSessionId;
             currentRequestSessionRef.current = activeSessionId ?? null;
@@ -461,59 +464,68 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
         let threadId: string | undefined;
         if (useTransparentProxy && sessionEnabled && effectiveSessionId) {
+          // 1. Check cache first (instant, no await)
           threadId =
             sessionThreadIdRef.current[effectiveSessionId] ||
             (sessions.find((s) => s.session_id === effectiveSessionId)?.metadata
               ?.langgraph_thread_id as string | undefined);
 
-          if (!threadId) {
-            const threadInitTimeout = createTimeoutSignal(
-              TRANSPARENT_PROXY_THREAD_INIT_TIMEOUT_MS
-            );
+          // 2. If pre-creation is pending, give it a SHORT window (500ms max)
+          //    to resolve. Don't block indefinitely — that was causing 8-22s TTFT.
+          if (!threadId && pendingThreadRef.current) {
             try {
-              const threadInitSignal = combineAbortSignals([
-                abortController.signal,
-                threadInitTimeout.signal,
+              const preCreatedId = await Promise.race([
+                pendingThreadRef.current,
+                new Promise<null>((r) => setTimeout(() => r(null), 500)),
               ]);
-              const resp = await fetch(
-                `/api/v1/proxy/${serviceId}/threads`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    ...(token
-                      ? { Authorization: `Bearer ${token}` }
-                      : {}),
-                  },
-                  body: JSON.stringify({
-                    metadata: {
-                      gateway_session_id: effectiveSessionId,
-                    },
-                  }),
-                  signal: threadInitSignal,
-                }
-              );
-              if (resp.ok) {
-                const data = await resp.json();
-                threadId =
-                  data.thread_id || data.id || data.threadId;
-                if (threadId) {
-                  sessionThreadIdRef.current[effectiveSessionId] =
-                    threadId;
-                  updateSession(effectiveSessionId, {
-                    metadata: { langgraph_thread_id: threadId },
-                  }).catch((err) =>
-                    console.error("Failed to update thread id:", err)
-                  );
-                }
-              } else {
-                console.warn("Thread create failed:", resp.status);
+              if (preCreatedId) {
+                threadId = preCreatedId;
               }
-            } catch (err) {
-              console.warn("Thread create error:", err);
+            } catch {
+              // Pre-creation failed, fall through
             } finally {
-              threadInitTimeout.cancel();
+              pendingThreadRef.current = null;
             }
+            if (!threadId) {
+              threadId = sessionThreadIdRef.current[effectiveSessionId];
+            }
+          }
+
+          // 3. If still no thread, create one NON-BLOCKING.
+          //    Start streaming immediately; the thread will be ready by the time
+          //    LangGraph processes the run (it creates thread + run atomically).
+          if (!threadId) {
+            // Fire-and-forget thread creation (save for future messages in this session)
+            fetch(
+              `/api/v1/proxy/${serviceId}/threads`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                  metadata: { gateway_session_id: effectiveSessionId },
+                }),
+              }
+            )
+              .then((resp) => (resp.ok ? resp.json() : null))
+              .then((data) => {
+                if (data) {
+                  const tid = data.thread_id || data.id || data.threadId;
+                  if (tid && effectiveSessionId) {
+                    sessionThreadIdRef.current[effectiveSessionId] = tid;
+                    updateSession(effectiveSessionId, {
+                      metadata: { langgraph_thread_id: tid },
+                    }).catch(() => {});
+                  }
+                }
+              })
+              .catch((err) =>
+                console.warn("Background thread create failed:", err)
+              );
+            // Don't set threadId — streaming will use stateless mode for first message,
+            // or the proxy will route to a new thread automatically.
           }
         }
 
@@ -538,6 +550,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             ) {
               return;
             }
+            // Don't stall-abort if tool calls are active — during tool execution
+            // LangGraph only sends heartbeats (SSE comments, not data events),
+            // so the stall timer fires even though the stream is healthy.
+            if (streamState.toolCalls.length > 0 && !streamState.content.trim()) {
+              stallTimerId = null;
+              armStreamStallGuard();
+              return;
+            }
             streamFallbackReason = "stall_timeout";
             streamAbortController.abort();
           }, TRANSPARENT_PROXY_STREAM_STALL_MS);
@@ -555,8 +575,17 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             ) {
               return;
             }
+            // Don't abort if content already arrived
             if (streamState.content.trim().length > 0) {
               maxTimerId = null;
+              return;
+            }
+            // Don't abort if tool calls are active — stream is healthy,
+            // just waiting for model to generate text after tool execution
+            if (streamState.toolCalls.length > 0) {
+              // Re-arm for another cycle instead of aborting
+              maxTimerId = null;
+              armStreamMaxGuard();
               return;
             }
             streamFallbackReason = "max_stream_duration";
@@ -578,6 +607,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               return;
             }
             if (!streamState.content.trim().length) {
+              return;
+            }
+            // Don't idle-abort if tool calls are active — model may resume
+            // text generation after tool execution completes (same logic as
+            // stall guard and max guard).
+            if (streamState.toolCalls.length > 0) {
+              contentIdleTimerId = null;
+              armContentIdleGuard();
               return;
             }
             streamFallbackReason = "content_idle_complete";
@@ -709,6 +746,10 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 messages: [{ role: "user", content: inputText }],
               },
               stream_mode: ["messages", "updates", "custom"],
+              // "exit" = only persist final state, not intermediate checkpoints.
+              // Eliminates ~2-3s overhead per graph step (model/tools).
+              // Safe because we don't use human-in-the-loop interrupts.
+              durability: "exit",
             };
             const streamPath = threadId
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
@@ -1072,6 +1113,41 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     );
                   }
 
+                  // Extract tool results from completed tool messages
+                  // (critical: must do this HERE since seenMessageIds
+                  //  will cause the updates handler to skip this message)
+                  if (isToolMessage) {
+                    const toolResult =
+                      extractToolResult(message);
+                    if (toolResult) {
+                      const existingArgs =
+                        streamState.toolCalls.find(
+                          (tc) =>
+                            tc.id === toolResult.id
+                        )?.arguments || "";
+                      processStreamChunk({
+                        request_id: "",
+                        chunk_index:
+                          nextSyntheticChunkIndex(),
+                        is_final: false,
+                        event_type: "tool_result",
+                        tool_call: {
+                          tool_call_id:
+                            toolResult.id ||
+                            `auto-${++toolCallIdCounter}`,
+                          name:
+                            toolResult.name || "",
+                          arguments: existingArgs,
+                          status: toolResult.status,
+                        },
+                        content: {
+                          type: "tool_result",
+                          data: toolResult.content,
+                        },
+                      });
+                    }
+                  }
+
                   const isAIMessage =
                     !isToolMessage &&
                     (msgType.includes("ai") ||
@@ -1386,7 +1462,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               flushAssistant({
                 status: "cancelled",
                 isStreaming: false,
-              });
+              }, true);
               closeStreamTrace("cancelled", {
                 reason: "abort_signal",
               });
@@ -1406,6 +1482,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         clearStreamGuards();
 
         if (!isRequestValid()) {
+          // Force-update the message so it doesn't stay stuck in streaming
+          flushAssistant({
+            status: "cancelled",
+            isStreaming: false,
+          }, true);
           closeStreamTrace("cancelled", {
             reason: "request_invalidated",
           });
@@ -1717,7 +1798,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           flushAssistant({
             status: "cancelled",
             isStreaming: false,
-          });
+          }, true);
           closeStreamTrace("cancelled", {
             reason: "abort_signal_outer",
           });
@@ -1795,8 +1876,23 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         ) {
           abortControllerRef.current = null;
         }
+        // Safety net: ensure no assistant message is left stuck in streaming state
+        setMessages((m) => {
+          const last = m[assistantIndex];
+          if (last && last.isStreaming) {
+            const next = [...m];
+            next[assistantIndex] = {
+              ...last,
+              isStreaming: false,
+              isThinking: false,
+              status: last.status === "streaming" ? (last.content ? "completed" : "cancelled") : last.status,
+            };
+            return next;
+          }
+          return m;
+        });
         if (sessionEnabled && serviceId) {
-          refreshSessions().catch(console.error);
+          refreshSessions(true).catch(console.error);
         }
       }
     },

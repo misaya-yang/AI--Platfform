@@ -329,48 +329,19 @@ export const StreamOutput = memo(function StreamOutput({
       >
         {filteredText}
       </ReactMarkdown>
-      {/* Streaming cursor with thinking animation */}
+      {/* Streaming cursor - clean blinking bar */}
       {isStreaming && (
-        <span className="inline-flex items-center gap-1 ml-1 align-text-bottom">
-          {/* Animated cursor bar */}
+        <span className="inline-flex items-center ml-0.5 align-text-bottom">
           <span
-            className="inline-block w-0.5 h-4 bg-violet-500 rounded-sm"
+            className="inline-block w-[2px] h-[18px] rounded-full bg-gradient-to-b from-violet-500 to-purple-500"
             style={{
               animation: 'cursor-blink 1s ease-in-out infinite',
             }}
           />
-          {/* Pulsing dots for "thinking" effect */}
-          <span className="inline-flex gap-0.5 ml-0.5">
-            <span
-              className="w-1 h-1 rounded-full bg-violet-400"
-              style={{
-                animation: 'thinking-dot 1.4s ease-in-out infinite',
-                animationDelay: '0s',
-              }}
-            />
-            <span
-              className="w-1 h-1 rounded-full bg-purple-400"
-              style={{
-                animation: 'thinking-dot 1.4s ease-in-out infinite',
-                animationDelay: '0.2s',
-              }}
-            />
-            <span
-              className="w-1 h-1 rounded-full bg-fuchsia-400"
-              style={{
-                animation: 'thinking-dot 1.4s ease-in-out infinite',
-                animationDelay: '0.4s',
-              }}
-            />
-          </span>
           <style>{`
             @keyframes cursor-blink {
               0%, 100% { opacity: 1; }
-              50% { opacity: 0.3; }
-            }
-            @keyframes thinking-dot {
-              0%, 100% { transform: scale(1); opacity: 0.5; }
-              50% { transform: scale(1.3); opacity: 1; }
+              50% { opacity: 0.15; }
             }
           `}</style>
         </span>

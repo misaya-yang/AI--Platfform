@@ -48,12 +48,7 @@ RUN pip install --no-cache-dir ".[all]" \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
-# Pre-download PaddleOCR models (English + Arabic) to avoid first-run delay
-RUN python -c "\
-from paddleocr import PaddleOCR; \
-PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False); \
-PaddleOCR(use_angle_cls=True, lang='ar', use_gpu=False, show_log=False); \
-print('PaddleOCR models pre-downloaded successfully')"
+# Note: PaddleOCR is handled by the Knowledge Service container, not here.
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Minimal production image
@@ -75,8 +70,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy pre-downloaded PaddleOCR models from builder
-COPY --from=builder /root/.paddleocr /home/appuser/.paddleocr
 
 # Copy application code
 COPY src/ ./src/
@@ -85,7 +78,7 @@ COPY config/ ./config/
 
 # Create necessary directories and fix permissions
 RUN mkdir -p /app/logs && \
-    chown -R appuser:appuser /app /home/appuser/.paddleocr
+    chown -R appuser:appuser /app
 
 # Switch to non-root user
 USER appuser

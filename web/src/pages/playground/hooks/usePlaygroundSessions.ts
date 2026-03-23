@@ -4,10 +4,12 @@ import {
   deleteSession,
   getSessionHistory,
   listSessions,
+  updateSession,
   type SessionSummary,
 } from "@/api/sessions";
 import type { ChatMessage } from "@/components/ChatWindow";
 import { useAppStore } from "@/store/useAppStore";
+import { useAuthStore } from "@/store/useAuthStore";
 import {
   trackChatHistoryEmptyState,
   trackChatHistoryRestored,
@@ -20,7 +22,7 @@ import {
 
 export interface UsePlaygroundSessionsOptions {
   serviceId?: string;
-  services: { service_id: string; service_type?: string }[];
+  services: { service_id: string; service_type?: string; metadata?: Record<string, unknown> }[];
 }
 
 export interface UsePlaygroundSessionsReturn {
@@ -56,6 +58,8 @@ export interface UsePlaygroundSessionsReturn {
   interactionStartedRef: React.MutableRefObject<boolean>;
   /** Invalidate any pending history load */
   invalidatePendingHistoryLoad: () => void;
+  /** Pending thread creation promise (resolves to threadId or null) */
+  pendingThreadRef: React.MutableRefObject<Promise<string | null> | null>;
   /** Loading state for streaming */
   loading: boolean;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
@@ -92,6 +96,7 @@ export function usePlaygroundSessions({
   const loadingHistorySessionRef = useRef<string | null>(null);
   const sessionThreadIdRef = useRef<Record<string, string>>({});
   const pendingSessionInitRef = useRef<Promise<string | null> | null>(null);
+  const pendingThreadRef = useRef<Promise<string | null> | null>(null);
 
   // Keep messagesRef in sync
   useEffect(() => {
@@ -111,12 +116,13 @@ export function usePlaygroundSessions({
     setLoading(false);
   }, [loading, messages]);
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useCallback(async (silent = false) => {
     if (!serviceId) {
       setSessions([]);
       return;
     }
-    setSessionsLoading(true);
+    // Only show loading spinner on initial load, not on background refreshes
+    if (!silent) setSessionsLoading(true);
     try {
       const data = await listSessions({ service_id: serviceId, limit: 100 });
       setSessions(data);
@@ -139,7 +145,7 @@ export function usePlaygroundSessions({
         return updated;
       });
     } finally {
-      setSessionsLoading(false);
+      if (!silent) setSessionsLoading(false);
     }
   }, [serviceId, setLocalTitles]);
 
@@ -164,6 +170,44 @@ export function usePlaygroundSessions({
       setHistoryRestoreState("loading");
       setHistoryRestoreError(null);
       setMessages([]);
+
+      // Eagerly pre-create thread for this session if it doesn't have one yet
+      const hasThread = !!sessionThreadIdRef.current[id];
+      if (!hasThread) {
+        const activeService = services.find((s) => s.service_id === serviceId);
+        const isTransparentProxy =
+          activeService?.service_type === "langgraph" ||
+          activeService?.metadata?.adapter_type === "langgraph" ||
+          activeService?.metadata?.proxy_mode === "transparent";
+
+        if (isTransparentProxy && serviceId) {
+          const token = useAuthStore.getState().token;
+          pendingThreadRef.current = fetch(
+            `/api/v1/proxy/${serviceId}/threads`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: JSON.stringify({ metadata: { gateway_session_id: id } }),
+            }
+          )
+            .then((resp) => (resp.ok ? resp.json() : null))
+            .then((data) => {
+              if (data) {
+                const tid = data.thread_id || data.id || data.threadId;
+                if (tid) {
+                  sessionThreadIdRef.current[id] = tid;
+                  updateSession(id, { metadata: { langgraph_thread_id: tid } }).catch(() => {});
+                  return tid as string;
+                }
+              }
+              return null;
+            })
+            .catch(() => null);
+        }
+      }
 
       try {
         const timeoutMs = 10000;
@@ -244,7 +288,7 @@ export function usePlaygroundSessions({
         }
       }
     },
-    [setActiveSessionId]
+    [setActiveSessionId, serviceId, services]
   );
 
   const handleNewSession = useCallback(async () => {
@@ -270,7 +314,57 @@ export function usePlaygroundSessions({
       setHistoryRestoreState("idle");
       setHistoryRestoreError(null);
       setMessages([]);
-      await refreshSessions();
+      // Optimistic: insert new session at top immediately, then sync in background
+      setSessions((prev) => {
+        const exists = prev.some((s) => s.session_id === created.session_id);
+        if (exists) return prev;
+        return [{ session_id: created.session_id, service_id: serviceId, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), metadata: {} } as SessionSummary, ...prev];
+      });
+
+      // Eagerly pre-create LangGraph thread (non-blocking)
+      // So by the time user sends first message, thread is already ready
+      const activeService = services.find((s) => s.service_id === serviceId);
+      const isTransparentProxy =
+        activeService?.service_type === "langgraph" ||
+        activeService?.metadata?.adapter_type === "langgraph" ||
+        activeService?.metadata?.proxy_mode === "transparent";
+
+      if (isTransparentProxy) {
+        const token = useAuthStore.getState().token;
+        // Pre-create thread as a promise — handleSend will await it
+        const threadPromise = fetch(`/api/v1/proxy/${serviceId}/threads`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            metadata: { gateway_session_id: created.session_id },
+          }),
+        })
+          .then((resp) => (resp.ok ? resp.json() : null))
+          .then((data) => {
+            if (data) {
+              const tid = data.thread_id || data.id || data.threadId;
+              if (tid) {
+                sessionThreadIdRef.current[created.session_id] = tid;
+                updateSession(created.session_id, {
+                  metadata: { langgraph_thread_id: tid },
+                }).catch(() => {});
+                return tid as string;
+              }
+            }
+            return null;
+          })
+          .catch((err) => {
+            console.warn("[Session] Thread pre-creation failed:", err);
+            return null;
+          });
+        pendingThreadRef.current = threadPromise;
+      }
+
+      // Silent refresh to sync with server (no loading flicker)
+      await refreshSessions(true);
       return created.session_id;
     })();
 
@@ -294,7 +388,6 @@ export function usePlaygroundSessions({
 
   const handleDeleteSession = useCallback(
     async (id: string) => {
-      await deleteSession(id);
       if (loadingHistorySessionRef.current === id) {
         invalidatePendingHistoryLoad();
       }
@@ -304,12 +397,16 @@ export function usePlaygroundSessions({
         setHistoryRestoreState("idle");
         setHistoryRestoreError(null);
       }
+      // Optimistic: remove from list immediately
+      setSessions((prev) => prev.filter((s) => s.session_id !== id));
       setLocalTitles((prev) => {
         const next = { ...prev };
         delete next[id];
         return next;
       });
-      await refreshSessions();
+      // Server delete + silent background sync
+      await deleteSession(id);
+      await refreshSessions(true);
     },
     [activeSessionId, refreshSessions, setActiveSessionId, setLocalTitles, invalidatePendingHistoryLoad]
   );
@@ -496,6 +593,7 @@ export function usePlaygroundSessions({
     abortControllerRef,
     sessionThreadIdRef,
     pendingSessionInitRef,
+    pendingThreadRef,
     messagesRef,
     interactionStartedRef,
     invalidatePendingHistoryLoad,

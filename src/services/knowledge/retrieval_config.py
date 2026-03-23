@@ -538,10 +538,10 @@ DEFAULT_CONFIGS = {
         top_k=10,  # More results for multi-madhab coverage
         score_threshold=0.25,  # Lower threshold for bilingual Arabic/English content
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        rerank=RerankConfig(enabled=False),  # Disabled: no measurable quality gain, saves 500-1000ms
         mmr=MMRConfig(enabled=True, lambda_mult=0.6),  # Ensure madhab diversity
         islamic=IslamicEnhancementConfig(
-            multi_query=True,
+            multi_query=False,  # Disabled: single query + higher concurrency is faster
             citation_format=True,
             authority_sort=True,
         ),
@@ -552,10 +552,10 @@ DEFAULT_CONFIGS = {
         top_k=10,
         score_threshold=0.25,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        rerank=RerankConfig(enabled=False),  # Disabled: no measurable quality gain, saves 500-1000ms
         mmr=MMRConfig(enabled=True, lambda_mult=0.6),
         islamic=IslamicEnhancementConfig(
-            multi_query=True,
+            multi_query=False,  # Disabled: single query + higher concurrency is faster
             citation_format=True,
             authority_sort=True,
             strict_section_traceability=True,  # Enable strict section traceability

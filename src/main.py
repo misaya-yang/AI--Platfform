@@ -931,6 +931,29 @@ async def _load_services_from_database(container: Container, settings: Settings)
 
         if loaded_count > 0:
             logger.info(f"从数据库加载了 {loaded_count} 个服务")
+
+        # Auto-sync LangGraph service URLs from environment config
+        # This ensures DB services always point to the correct upstream
+        # (e.g., localhost:2024 in dev, imam-agent:8000 in Docker)
+        if settings.langgraph.enabled and settings.langgraph.instance_urls:
+            env_url = settings.langgraph.instance_urls[0]
+            updated = 0
+            for svc in db_services:
+                if svc.get("service_type") == "langgraph" and svc.get("status") == "active":
+                    cc = svc.get("connector_config") or {}
+                    db_url = cc.get("upstream_url") or cc.get("base_url") or ""
+                    if db_url and db_url != env_url:
+                        new_cc = dict(cc, base_url=env_url, upstream_url=env_url)
+                        await database.execute(
+                            "UPDATE services SET connector_config = $1::jsonb WHERE service_id = $2",
+                            [__import__("json").dumps(new_cc), svc["service_id"]],
+                        )
+                        logger.info(
+                            f"Auto-synced service '{svc['service_id']}' URL: {db_url} -> {env_url}"
+                        )
+                        updated += 1
+            if updated:
+                logger.info(f"Synced {updated} LangGraph service URL(s) to match environment")
     except Exception as e:
         logger.warning(f"从数据库加载服务失败: {e}")
 

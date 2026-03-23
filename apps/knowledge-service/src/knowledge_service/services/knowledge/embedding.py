@@ -1223,14 +1223,11 @@ _embedder_cache: dict[str, BaseEmbedding] = {}
 _embedder_cache_lock = asyncio.Lock()
 
 # =============================================================================
-# Query Embedding Cache - LRU cache for query embeddings to avoid recomputation
+# Query Embedding Cache - TTLCache for query embeddings (lock-free, async-safe)
 # =============================================================================
-import threading
-from collections import OrderedDict
+from cachetools import TTLCache
 
-_query_embedding_cache: OrderedDict[str, list[float]] = OrderedDict()
-_query_cache_lock = threading.Lock()
-_QUERY_CACHE_MAX_SIZE = 500  # Max cached queries
+_query_embedding_cache: TTLCache[str, list[float]] = TTLCache(maxsize=1000, ttl=1800)
 
 
 def _get_query_cache_key(provider: str, model: str, query: str) -> str:
@@ -1241,12 +1238,7 @@ def _get_query_cache_key(provider: str, model: str, query: str) -> str:
 def get_cached_query_embedding(provider: str, model: str, query: str) -> list[float] | None:
     """Get cached query embedding if exists."""
     key = _get_query_cache_key(provider, model, query)
-    with _query_cache_lock:
-        if key in _query_embedding_cache:
-            # Move to end (LRU)
-            _query_embedding_cache.move_to_end(key)
-            return _query_embedding_cache[key]
-    return None
+    return _query_embedding_cache.get(key)
 
 
 def set_cached_query_embedding(
@@ -1254,14 +1246,7 @@ def set_cached_query_embedding(
 ) -> None:
     """Cache query embedding."""
     key = _get_query_cache_key(provider, model, query)
-    with _query_cache_lock:
-        if key in _query_embedding_cache:
-            _query_embedding_cache.move_to_end(key)
-        else:
-            _query_embedding_cache[key] = embedding
-            # Evict oldest if over limit
-            while len(_query_embedding_cache) > _QUERY_CACHE_MAX_SIZE:
-                _query_embedding_cache.popitem(last=False)
+    _query_embedding_cache[key] = embedding
 
 
 def _make_cache_key(config: EmbeddingConfig, dimension: int | None) -> str:

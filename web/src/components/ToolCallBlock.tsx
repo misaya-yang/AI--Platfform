@@ -1,194 +1,272 @@
 /**
- * ToolCallBlock - Refined, stable tool call visualization
- * 
- * Design: Clean, professional with subtle depth
- * - Larger, readable typography
- * - Stable animations without excessive motion
- * - Clear visual hierarchy
+ * ToolCallBlock - Claude Desktop-inspired tool call visualization
+ *
+ * Design principles:
+ * - Left border accent colored by status (amber/blue/emerald/rose)
+ * - Live elapsed time counter for running tools
+ * - Shimmer progress bar for running state
+ * - Auto-expand when running, smooth collapse/expand
+ * - Professional, minimal chrome
  */
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import type { ToolCall } from "@/types/gateway";
 import { useTranslation } from "react-i18next";
-import { CheckCircle2, Clock, Loader2, AlertCircle, ChevronRight, Terminal, ArrowRight, Sparkles } from "lucide-react";
+import {
+  CheckCircle2,
+  Clock,
+  Loader2,
+  AlertCircle,
+  ChevronRight,
+  Terminal,
+} from "lucide-react";
 
 interface ToolCallBlockProps {
   toolCall: ToolCall;
   result?: string;
   argsText?: string;
   argsValid?: boolean;
+  /** Optional step number for sequential display */
+  stepNumber?: number;
 }
 
-// Status configurations with refined aesthetics
-const statusConfig: Record<string, {
-  label: string;
-  labelKey: string;
-  bg: string;
-  border: string;
-  text: string;
-  icon: typeof CheckCircle2;
-  glow: string;
-}> = {
+// Status visual configs
+const statusConfig = {
   pending: {
     label: "Waiting",
     labelKey: "playground.toolCall.pending",
-    bg: "bg-amber-500/8 dark:bg-amber-500/10",
-    border: "border-amber-500/25 dark:border-amber-400/20",
+    accent: "border-l-amber-400 dark:border-l-amber-500",
+    iconBg: "bg-amber-100 dark:bg-amber-900/40",
     text: "text-amber-600 dark:text-amber-400",
     icon: Clock,
-    glow: "shadow-amber-500/5",
   },
   running: {
     label: "Running",
     labelKey: "playground.toolCall.running",
-    bg: "bg-sky-500/8 dark:bg-sky-500/12",
-    border: "border-sky-500/30 dark:border-sky-400/25",
-    text: "text-sky-600 dark:text-sky-400",
+    accent: "border-l-blue-500 dark:border-l-blue-400",
+    iconBg: "bg-blue-100 dark:bg-blue-900/40",
+    text: "text-blue-600 dark:text-blue-400",
     icon: Loader2,
-    glow: "shadow-sky-500/10",
   },
   completed: {
     label: "Done",
     labelKey: "playground.toolCall.completed",
-    bg: "bg-emerald-500/8 dark:bg-emerald-500/10",
-    border: "border-emerald-500/25 dark:border-emerald-400/20",
+    accent: "border-l-emerald-500 dark:border-l-emerald-400",
+    iconBg: "bg-emerald-100 dark:bg-emerald-900/40",
     text: "text-emerald-600 dark:text-emerald-400",
     icon: CheckCircle2,
-    glow: "shadow-emerald-500/5",
   },
   error: {
     label: "Failed",
     labelKey: "playground.toolCall.error",
-    bg: "bg-rose-500/8 dark:bg-rose-500/12",
-    border: "border-rose-500/30 dark:border-rose-400/25",
+    accent: "border-l-rose-500 dark:border-l-rose-400",
+    iconBg: "bg-rose-100 dark:bg-rose-900/40",
     text: "text-rose-600 dark:text-rose-400",
     icon: AlertCircle,
-    glow: "shadow-rose-500/10",
   },
-};
+} as const;
 
-export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCallBlockProps) {
+/** Live elapsed time counter for running tools */
+function ElapsedTimer({ className }: { className?: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(performance.now());
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setElapsed((performance.now() - startRef.current) / 1000);
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <span className={cn("tabular-nums font-mono text-[10px]", className)}>
+      {elapsed.toFixed(1)}s
+    </span>
+  );
+}
+
+/** Format a tool name for display: snake_case -> readable */
+function formatToolName(name: string): string {
+  return name || "unknown_tool";
+}
+
+export function ToolCallBlock({
+  toolCall,
+  result,
+  argsText,
+  argsValid,
+  stepNumber,
+}: ToolCallBlockProps) {
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
   const status = toolCall.status || "pending";
   const config = statusConfig[status] || statusConfig.pending;
   const StatusIcon = config.icon;
   const isRunning = status === "running";
+  const prevStatusRef = useRef(status);
+
+  // Auto-expand when running
+  useEffect(() => {
+    if (status === "running" && prevStatusRef.current !== "running") {
+      setIsExpanded(true);
+    }
+    prevStatusRef.current = status;
+  }, [status]);
 
   // Parse arguments
   const rawArgs = argsText ?? toolCall.arguments ?? "";
-  const hasValidArgs = argsValid ?? (rawArgs ? (() => {
-    try {
-      JSON.parse(rawArgs);
-      return true;
-    } catch {
-      return false;
-    }
-  })() : false);
+  const hasValidArgs =
+    argsValid ??
+    (() => {
+      if (!rawArgs) return false;
+      try {
+        JSON.parse(rawArgs);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
 
-  let parsedArgs: Record<string, unknown> | null = null;
-  if (hasValidArgs && rawArgs) {
+  const formatJson = useCallback((raw: string, valid: boolean): string => {
+    if (!valid || !raw) return raw;
     try {
-      parsedArgs = JSON.parse(rawArgs);
+      return JSON.stringify(JSON.parse(raw), null, 2);
     } catch {
-      parsedArgs = null;
+      return raw;
     }
-  }
+  }, []);
+
+  const formattedArgs = formatJson(rawArgs, hasValidArgs);
 
   // Parse result
-  let parsedResult: unknown = result;
-  try {
-    if (result) {
-      parsedResult = JSON.parse(result);
+  let formattedResult: string = result || "";
+  if (result) {
+    try {
+      const parsed = JSON.parse(result);
+      formattedResult =
+        typeof parsed === "object"
+          ? JSON.stringify(parsed, null, 2)
+          : String(result);
+    } catch {
+      formattedResult = result;
     }
-  } catch {
-    // Keep raw string
   }
 
-  // Generate preview text
-  const argsPreview = parsedArgs ? JSON.stringify(parsedArgs) : rawArgs;
-  const preview = argsPreview.length > 80 ? `${argsPreview.slice(0, 80)}…` : argsPreview;
+  // Compact preview for collapsed state
+  const argsPreview = (() => {
+    if (!rawArgs) return "";
+    try {
+      const parsed = JSON.parse(rawArgs);
+      // Show first key-value pair as preview
+      const entries = Object.entries(parsed);
+      if (entries.length === 0) return "{}";
+      const [key, val] = entries[0];
+      const valStr =
+        typeof val === "string"
+          ? `"${val.length > 40 ? val.slice(0, 40) + "..." : val}"`
+          : JSON.stringify(val);
+      const preview = `${key}: ${valStr}`;
+      return entries.length > 1 ? `${preview}, ...` : preview;
+    } catch {
+      return rawArgs.length > 60 ? rawArgs.slice(0, 60) + "..." : rawArgs;
+    }
+  })();
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
+      layout="position"
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
       className={cn(
-        "relative w-full rounded-xl border overflow-hidden",
-        "transition-shadow duration-200",
-        config.bg,
-        config.border,
-        isExpanded ? "shadow-md" : "shadow-sm"
+        "relative w-full rounded-lg overflow-hidden",
+        "border border-slate-200/60 dark:border-slate-700/40",
+        "border-l-[3px] transition-[border-color,box-shadow] duration-300",
+        config.accent,
+        isExpanded
+          ? "shadow-sm dark:shadow-black/20"
+          : "shadow-none"
       )}
     >
-      {/* Subtle glow effect for running state */}
+      {/* Shimmer progress bar for running state */}
       {isRunning && (
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute inset-0 bg-gradient-to-r from-sky-500/0 via-sky-500/5 to-sky-500/0 animate-pulse" />
+        <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-blue-100/50 dark:bg-blue-900/30">
+          <div className="h-full bg-gradient-to-r from-transparent via-blue-500/70 to-transparent animate-shimmer" />
         </div>
       )}
 
-      {/* Header - Compact */}
+      {/* Header */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={cn(
-          "flex w-full items-center gap-2.5 px-3 py-1.5 text-left",
-          "transition-colors duration-200",
-          "hover:bg-white/5 dark:hover:bg-white/3",
-          "focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:ring-inset"
+          "flex w-full items-center gap-2 px-3 py-2 text-left",
+          "transition-colors duration-150",
+          "bg-white/50 dark:bg-white/[0.02]",
+          "hover:bg-slate-50/80 dark:hover:bg-white/[0.04]",
+          "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30 focus-visible:ring-inset"
         )}
         type="button"
       >
         {/* Expand chevron */}
         <motion.div
           animate={{ rotate: isExpanded ? 90 : 0 }}
-          transition={{ duration: 0.2 }}
+          transition={{ duration: 0.15, ease: "easeOut" }}
           className="flex-shrink-0"
         >
           <ChevronRight className="h-3 w-3 text-slate-400 dark:text-slate-500" />
         </motion.div>
 
-        {/* Tool icon */}
-        <div className={cn(
-          "flex h-6 w-6 items-center justify-center rounded flex-shrink-0",
-          "bg-gradient-to-br from-slate-100 to-slate-50",
-          "dark:from-slate-800 dark:to-slate-900",
-          "border border-slate-200/50 dark:border-slate-700/50"
-        )}>
-          <Terminal className={cn("h-3 w-3", config.text)} />
+        {/* Step number (optional) */}
+        {stepNumber != null && (
+          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-slate-200/70 dark:bg-slate-700/60 text-[9px] font-bold text-slate-500 dark:text-slate-400 flex-shrink-0">
+            {stepNumber}
+          </span>
+        )}
+
+        {/* Status icon */}
+        <div
+          className={cn(
+            "flex h-5 w-5 items-center justify-center rounded-md flex-shrink-0",
+            config.iconBg
+          )}
+        >
+          <StatusIcon
+            className={cn(
+              "h-3 w-3",
+              config.text,
+              isRunning && "animate-spin"
+            )}
+          />
         </div>
 
-        {/* Tool name and preview */}
+        {/* Tool name */}
         <div className="flex-1 min-w-0">
-          <span className="font-mono text-[12px] font-semibold text-slate-800 dark:text-slate-100 tracking-tight">
-            {toolCall.name || t("playground.toolCall.unknownTool", "unknown_tool")}
+          <span className="font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-200 tracking-tight">
+            {formatToolName(toolCall.name)}
           </span>
-
-          {!isExpanded && preview && (
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate font-mono">
-              {preview}
-            </p>
+          {/* Inline preview when collapsed */}
+          {!isExpanded && argsPreview && (
+            <span className="ml-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate">
+              {argsPreview}
+            </span>
           )}
         </div>
 
-        {/* Status badge - compact */}
-        <div className={cn(
-          "flex items-center gap-1 px-2 py-0.5 rounded-full flex-shrink-0",
-          "text-[10px] font-semibold",
-          config.bg,
-          config.border,
-          config.text,
-          "border"
-        )}>
-          <StatusIcon className={cn(
-            "h-2.5 w-2.5",
-            isRunning && "animate-spin"
-          )} />
-          <span>{t(config.labelKey, config.label)}</span>
+        {/* Status area */}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {isRunning && (
+            <ElapsedTimer className={config.text} />
+          )}
+          <span
+            className={cn(
+              "text-[10px] font-semibold uppercase tracking-wider",
+              config.text
+            )}
+          >
+            {t(config.labelKey, config.label)}
+          </span>
         </div>
       </button>
 
@@ -199,56 +277,69 @@ export function ToolCallBlock({ toolCall, result, argsText, argsValid }: ToolCal
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
+            transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
             className="overflow-hidden"
           >
-            <div className="border-t border-slate-200/50 dark:border-slate-700/40">
+            <div className="border-t border-slate-200/50 dark:border-slate-700/30">
               {/* Arguments section */}
               {rawArgs && (
-                <div className="px-4 py-3 border-b border-slate-200/30 dark:border-slate-700/30">
-                  <div className="flex items-center gap-2 mb-2">
-                    <ArrowRight className="h-3 w-3 text-slate-400 dark:text-slate-500" />
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <div className="px-3 py-2.5">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Terminal className="h-2.5 w-2.5 text-slate-400 dark:text-slate-500" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-slate-400 dark:text-slate-500">
                       {hasValidArgs
                         ? t("playground.toolCall.arguments", "Arguments")
-                        : t("playground.toolCall.argumentsPartial", "Arguments (streaming...)")}
+                        : t(
+                            "playground.toolCall.argumentsPartial",
+                            "Arguments (streaming...)"
+                          )}
                     </span>
                     {!hasValidArgs && (
-                      <span className="flex h-1.5 w-1.5 ml-1">
-                        <span className="animate-ping absolute inline-flex h-1.5 w-1.5 rounded-full bg-sky-400 opacity-75" />
-                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-sky-500" />
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-500" />
                       </span>
                     )}
                   </div>
-                  <pre className={cn(
-                    "max-h-40 overflow-auto rounded-lg p-3",
-                    "bg-slate-900/90 dark:bg-black/40",
-                    "text-[11px] font-mono text-slate-200 leading-relaxed",
-                    "border border-slate-700/50",
-                    "whitespace-pre-wrap break-words"
-                  )}>
-                    {parsedArgs ? JSON.stringify(parsedArgs, null, 2) : rawArgs}
+                  <pre
+                    className={cn(
+                      "max-h-40 overflow-auto rounded-md p-2.5",
+                      "bg-slate-50 dark:bg-slate-900/60",
+                      "text-[11px] font-mono text-slate-600 dark:text-slate-300 leading-relaxed",
+                      "border border-slate-200/50 dark:border-slate-700/40",
+                      "whitespace-pre-wrap break-words"
+                    )}
+                  >
+                    {formattedArgs}
                   </pre>
                 </div>
               )}
 
               {/* Result section */}
               {result && (
-                <div className="px-4 py-3">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Sparkles className="h-3 w-3 text-emerald-500" />
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <div
+                  className={cn(
+                    "px-3 py-2.5",
+                    rawArgs &&
+                      "border-t border-slate-200/30 dark:border-slate-700/20"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500 dark:text-emerald-400" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-emerald-500 dark:text-emerald-400">
                       {t("playground.toolCall.result", "Result")}
                     </span>
                   </div>
-                  <pre className={cn(
-                    "max-h-40 overflow-auto rounded-lg p-3",
-                    "bg-emerald-950/50 dark:bg-emerald-950/30",
-                    "text-[11px] font-mono text-emerald-100 leading-relaxed",
-                    "border border-emerald-800/30",
-                    "whitespace-pre-wrap break-words"
-                  )}>
-                    {typeof parsedResult === "object" ? JSON.stringify(parsedResult, null, 2) : String(result)}
+                  <pre
+                    className={cn(
+                      "max-h-40 overflow-auto rounded-md p-2.5",
+                      "bg-emerald-50/50 dark:bg-emerald-950/20",
+                      "text-[11px] font-mono text-slate-600 dark:text-emerald-200 leading-relaxed",
+                      "border border-emerald-200/40 dark:border-emerald-800/30",
+                      "whitespace-pre-wrap break-words"
+                    )}
+                  >
+                    {formattedResult}
                   </pre>
                 </div>
               )}
