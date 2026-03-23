@@ -269,7 +269,7 @@ class AgentLoopConfig:
     file_paths: list[str] = field(default_factory=list)
 
     # Execution limits
-    max_tool_iterations: int = 5  # Reduced from 10; KB is limited to 1 call anyway
+    max_tool_iterations: int = 10
     max_concurrent_tools: int = 5
 
     # Context compression parameters
