@@ -37,6 +37,11 @@ export default defineConfig(({ mode }) => {
       },
     },
 
+    // Pre-bundle LangGraph SDK to avoid circular dependency issues
+    optimizeDeps: {
+      include: ["@langchain/langgraph-sdk", "@langchain/langgraph-sdk/react"],
+    },
+
     build: {
       outDir: "dist",
       sourcemap: mode === "development",
@@ -46,6 +51,7 @@ export default defineConfig(({ mode }) => {
           manualChunks: {
             vendor: ["react", "react-dom", "react-router-dom"],
             ui: ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
+            langgraph: ["@langchain/langgraph-sdk"],
           },
         },
       },
