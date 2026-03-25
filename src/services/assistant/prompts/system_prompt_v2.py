@@ -436,7 +436,7 @@ The following information was retrieved from enterprise knowledge bases:
 **Usage Guidelines**:
 - Prioritize knowledge base content for accuracy and enterprise relevance
 - Cite specific document names when quoting or referencing
-- If knowledge base content doesn't directly address the query, supplement with general knowledge while clearly noting the distinction
+- If knowledge base content doesn't directly address the query, state this clearly rather than guessing
 - **Never fabricate information**—if the knowledge base lacks relevant content, state this clearly
 </kb_context>"""
 

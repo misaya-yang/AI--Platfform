@@ -274,7 +274,7 @@ class AgentLoopConfig:
 
     # Context compression parameters
     compress_threshold: int = 10  # Compress when messages exceed this count
-    min_recent_messages: int = 6  # Keep this many recent messages intact
+    min_recent_messages: int = 10  # Keep this many recent messages intact
     compressed_context_tokens: int = 2000  # Target token count for compressed context
     max_summary_tokens: int = 500  # Max tokens for compression summary
 
@@ -1606,8 +1606,8 @@ class AgentLoop:
 
             def _trim_history_for_streaming(
                 messages_history: list[dict[str, Any]],
-                max_messages: int = 12,
-                max_chars: int = 7000,
+                max_messages: int = 24,
+                max_chars: int = 20000,
             ) -> list[dict[str, Any]]:
                 """
                 Keep recent turns only for streaming-first calls.
@@ -1641,7 +1641,7 @@ class AgentLoop:
                     selected.append(
                         {
                             "role": role,
-                            "content": _truncate_text(content_text, 1600),
+                            "content": _truncate_text(content_text, 2500),
                         }
                     )
                     running_chars = projected

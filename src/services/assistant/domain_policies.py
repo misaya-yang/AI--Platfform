@@ -110,24 +110,25 @@ class ImamPolicy:
         return re.sub(r"\s+", " ", text).strip().lower()
 
     def scenario_rules(self) -> str:
-        """Generate compact scenario rules for the system prompt."""
+        """Generate compact scenario rules for the system prompt.
+
+        Only hard constraints that the gateway must enforce.
+        Behavioral guidance (intent analysis, madhab depth, format adaptation)
+        lives in the agent's own IMAM_SYSTEM_PROMPT — not here.
+        """
         rules = [
-            # Retrieval-First approach
-            "ALWAYS base your answers on the retrieved knowledge base content.",
-            "If retrieved content is relevant, answer the question using that content.",
-            "If retrieved content does not answer the question, politely explain that "
-            "this topic is not covered in the current knowledge base.",
-            # Source constraints
-            "Only use the provided knowledge base content; do not add external knowledge.",
-            "Use formal, objective, third-person language and avoid personal opinions.",
-            # Forbidden content
-            "Avoid interfaith comparisons/criticism and political content.",
-            # Citations
-            "Provide citations after each paragraph and a sources list at the end.",
-            # Advisory deduplication
-            "Use consultation reminder exactly once by ending with the fixed closing phrase.",
-            "Do NOT add any extra advisory blocks such as 'Important Note' that repeats the same scholar-consultation reminder.",
-            f'End with the fixed closing phrase: "{self.config.closing_phrase}"',
+            # 1. Identity override — gateway prompt says "Enterprise AI Assistant"
+            "You are the AI Imam, a rigorous Islamic knowledge consultant for the Wahda community. "
+            "Ground every answer in the authenticated knowledge base.",
+            # 2. Source constraint [Imam.md §2-3]
+            "Use ONLY the retrieved knowledge base content. NEVER supplement with external or general knowledge. "
+            "If the KB does not cover the question, decline: state the topic is not in the current knowledge base.",
+            # 3. Citation integrity [Imam.md §11-14] — binds to REF-N format from tool
+            "When citing, use the exact Citation field from [REF-N] results. Do not construct, modify, or "
+            "invent citations. Sort sources by authority: Quran > Hadith > Tafsir > Fiqh. "
+            "End with a **Sources** list.",
+            # 4. Closing phrase [Imam.md §23]
+            f'End with the closing phrase exactly once: "{self.config.closing_phrase}"',
         ]
         return "<imam_rules>\n- " + "\n- ".join(rules) + "\n</imam_rules>"
 
@@ -251,20 +252,19 @@ class ImamPolicy:
         normalized_answer = self._normalize_ws(answer)
         normalized_closing = self._normalize_ws(self.config.closing_phrase)
 
+        # --- Structural checks ---
+
         closing_occurrences = normalized_answer.count(normalized_closing)
         if closing_occurrences == 0:
             issues.append("missing_closing_phrase")
         elif closing_occurrences > 1:
             issues.append("duplicate_closing_phrase")
 
-        # Keep consultation advisory only once (the required closing phrase).
-        # If "qualified Islamic scholar" appears more than once, the answer usually
-        # contains an extra advisory paragraph (e.g. "Important Note") that should be removed.
         scholar_mentions = normalized_answer.count("qualified islamic scholar")
         if scholar_mentions > 1:
             issues.append("duplicate_consultation_reminder")
 
-        # Require citations markers in content and a sources section
+        # Require citation markers in content and a sources section
         has_citation_marker = bool(re.search(r"\[[0-9]+\]", answer)) or bool(
             re.search(r"\b(Quran|Sahih|Tafsir|Hadith|Fiqh)\b", answer, re.IGNORECASE)
         )
@@ -276,6 +276,38 @@ class ImamPolicy:
         )
         if not has_sources:
             issues.append("missing_sources_section")
+
+        # --- Quality checks ---
+
+        # Citation mismatch: body [N] markers should map to Sources entries
+        body_refs = set(re.findall(r"\[(\d+)\]", answer))
+        sources_section = ""
+        sources_match = re.search(
+            r"(?:^\s*\*\*Sources\*?\*?|^\s*Sources:)(.*)",
+            answer,
+            re.MULTILINE | re.DOTALL,
+        )
+        if sources_match:
+            sources_section = sources_match.group(1)
+        sources_refs = set(re.findall(r"\[(\d+)\]", sources_section))
+        # Check for body refs that have no corresponding source entry
+        if body_refs and sources_section:
+            orphan_body = body_refs - sources_refs
+            if orphan_body:
+                issues.append("citation_mismatch")
+
+        # Generic answer: long response with no scholarly specificity
+        word_count = len(answer.split())
+        if word_count > 200:
+            has_scholarly_ref = bool(
+                re.search(
+                    r"\b(hanafi|maliki|shafi.i|hanbali|ibn|al-|imam\s+\w+)\b",
+                    answer,
+                    re.IGNORECASE,
+                )
+            )
+            if not has_scholarly_ref and not has_citation_marker:
+                issues.append("generic_answer")
 
         return issues
 
@@ -292,6 +324,14 @@ class ImamPolicy:
                 "Remove repeated advisory/disclaimer text. Keep only one consultation reminder by using "
                 "the fixed closing phrase exactly once at the very end. Do not include an extra 'Important Note' "
                 "that repeats the same reminder."
+            )
+        if "citation_mismatch" in issues:
+            repairs.append(
+                "Ensure every [N] marker in the text has a matching entry in the Sources section."
+            )
+        if "generic_answer" in issues:
+            repairs.append(
+                "Include specific madhab positions or scholarly references rather than generic frameworks."
             )
         if not repairs:
             repairs.append(
