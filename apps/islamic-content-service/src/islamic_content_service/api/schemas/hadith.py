@@ -67,6 +67,21 @@ class HadithBookItemsResponse(BaseModel):
     pagination: dict = Field(default_factory=dict)
 
 
+class HadithChapterSchema(BaseModel):
+    chapter_id: str
+    chapter_title: str
+    hadith_count: int
+
+
+class HadithChaptersResponse(BaseModel):
+    generated_at: str
+    screen: str = "hadith_chapters"
+    source_api: str
+    collection_name: str
+    book_number: str
+    chapters: list[HadithChapterSchema]
+
+
 class HadithDetailResponse(BaseModel):
     generated_at: str
     screen: str = "hadith_detail"

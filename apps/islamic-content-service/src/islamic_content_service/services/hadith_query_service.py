@@ -104,6 +104,30 @@ class HadithQueryService:
             _load,
         )
 
+    async def get_chapters(
+        self, collection_name: str, book_number: str
+    ) -> dict[str, Any]:
+        async def _load() -> dict[str, Any]:
+            chapters = await self.repository.get_chapters(collection_name, book_number)
+            if not chapters:
+                raise NotReadyError(
+                    f"No chapters found for {collection_name} book {book_number}"
+                )
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "hadith_chapters",
+                "source_api": SUNNAH_SOURCE_API,
+                "collection_name": collection_name,
+                "book_number": book_number,
+                "chapters": chapters,
+            }
+
+        return await self._cached(
+            f"hadith:chapters:{collection_name}:{book_number}",
+            self.cache_settings.ttl_seconds,
+            _load,
+        )
+
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any]:
         async def _load() -> dict[str, Any]:
             detail = await self.repository.get_detail(collection_name, hadith_number)

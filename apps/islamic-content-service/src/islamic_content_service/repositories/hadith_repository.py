@@ -238,6 +238,24 @@ class HadithRepository:
             },
         }
 
+    async def get_chapters(
+        self, collection_name: str, book_number: str
+    ) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT chapter_id, chapter_title, COUNT(*) AS hadith_count
+            FROM hadith_items
+            WHERE collection_name = $1
+              AND book_number = $2
+              AND chapter_id IS NOT NULL AND chapter_id != ''
+            GROUP BY chapter_id, chapter_title
+            ORDER BY chapter_id
+            """,
+            collection_name,
+            book_number,
+        )
+        return [dict(row) for row in rows]
+
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any] | None:
         row = await self.db.fetchrow(
             """

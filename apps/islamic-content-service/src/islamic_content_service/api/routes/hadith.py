@@ -6,6 +6,7 @@ from ..deps import get_hadith_query_service
 from ..schemas.hadith import (
     HadithBookItemsResponse,
     HadithBooksResponse,
+    HadithChaptersResponse,
     HadithCollectionsResponse,
     HadithDetailResponse,
 )
@@ -60,6 +61,22 @@ async def get_book_items(
 ):
     try:
         return await service.get_book_items(collection_name, book_number, page=page, limit=limit)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/collections/{collection_name}/books/{book_number}/chapters",
+    response_model=HadithChaptersResponse,
+    summary="List chapters in a book",
+)
+async def get_chapters(
+    collection_name: str,
+    book_number: str,
+    service: HadithQueryService = Depends(get_hadith_query_service),
+):
+    try:
+        return await service.get_chapters(collection_name, book_number)
     except NotReadyError as exc:
         raise _to_http_error(exc) from exc
 
