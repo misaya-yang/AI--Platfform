@@ -8,7 +8,7 @@ import enUS from "./locales/en-US.json";
 export const APP_LOCALES = ["zh-CN", "en-US"] as const;
 export type AppLocale = (typeof APP_LOCALES)[number];
 
-const DEFAULT_LOCALE: AppLocale = "zh-CN";
+const DEFAULT_LOCALE: AppLocale = "en-US";
 const APP_LOCALE_SET = new Set<string>(APP_LOCALES);
 
 export function resolveAppLocale(input?: string): AppLocale {

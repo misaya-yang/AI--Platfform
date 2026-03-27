@@ -71,7 +71,10 @@
     "send": "发送",
     "table": "表格",
     "tableFile": "表格文件",
-    "unknown": "未知"
+    "unknown": "未知",
+    "service": "服务",
+    "model": "模型",
+    "provider": "厂商"
   },
   "language": {
     "zhCN": "简体中文",
@@ -285,7 +288,9 @@
       "ok": "数据已更新",
       "delayed": "数据延迟/尚未入库",
       "empty": "暂无数据",
-      "error": "数据错误"
+      "error": "数据错误",
+      "freshnessMinutes": "{{minutes}} 分钟前更新",
+      "unknown": "未知"
     },
     "serviceEndpoints": "服务入口",
     "filters": {
@@ -318,7 +323,8 @@
       "exit": "退出全屏"
     },
     "trend": {
-      "vsPrevious": "较上期"
+      "vsPrevious": "较上期",
+      "noBaseline": "无基线对比"
     },
     "serviceHealth": {
       "title": "服务健康",
@@ -338,7 +344,8 @@
     },
     "tokenUsage": {
       "modelBreakdown": "模型分布",
-      "providerBreakdown": "厂商分布"
+      "providerBreakdown": "厂商分布",
+      "unattributedWarning": "部分请求未归因到具体厂商/模型，请检查服务配置"
     },
     "cost": {
       "title": "成本分析",
@@ -346,7 +353,10 @@
       "serviceBreakdown": "按服务分解",
       "today": "今日",
       "week": "本周",
-      "month": "本月"
+      "month": "本月",
+      "estimatedHint": "USD 估算成本（按模型定价表换算）",
+      "unattributedWarning": "部分请求未归因到具体厂商/模型，请检查服务配置",
+      "providerBreakdown": "厂商分布"
     },
     "security": {
       "title": "安全事件",
@@ -360,7 +370,10 @@
       "range": {
         "today": "今日",
         "week": "本周"
-      }
+      },
+      "quotaExceeded": "配额超限",
+      "quotaExceededCount": "配额{{count}}",
+      "noEvents": "当前时间范围内无安全事件"
     },
     "userQuota": {
       "title": "用户配额",
@@ -371,14 +384,24 @@
       "status": {
         "normal": "正常",
         "warning": "预警",
-        "exceeded": "超额"
+        "exceeded": "超额",
+        "blocked": "封禁"
       },
       "alert": {
         "warning": "接近上限",
         "exceeded": "已超额",
         "hint": "升级可提升配额",
         "upgradeAction": "升级方案",
-        "upgradeHint": "联系管理员调整配额"
+        "upgradeHint": "联系管理员调整配额",
+        "blocked": "{{count}} 个用户已封禁"
+      },
+      "strategy": "策略",
+      "total": "总计",
+      "strategy_labels": {
+        "hard_block": "硬限制",
+        "rate_limit": "限流",
+        "downgrade_model": "降级",
+        "allow_but_alert": "告警"
       }
     },
     "requestTrace": {
@@ -401,7 +424,48 @@
         "upstream": "上游请求",
         "response": "响应处理",
         "logging": "日志记录"
+      },
+      "tab": {
+        "all": "全部",
+        "error": "失败请求",
+        "slow": "慢请求",
+        "sampled": "采样"
+      },
+      "kpiFilter": "来自KPI联动",
+      "emptyFiltered": "当前筛选条件下无追踪记录"
+    },
+    "workspace": {
+      "overview": {
+        "title": "运营总览",
+        "subtitle": "关注服务稳定性、请求吞吐与核心成本走势",
+        "short": "总览"
+      },
+      "reliability": {
+        "title": "故障与可靠性",
+        "subtitle": "按错误类型拆分成功率，快速定位最可能的故障根因",
+        "short": "可靠性"
+      },
+      "governance": {
+        "title": "成本与配额治理",
+        "subtitle": "聚焦预算控制、用户配额和超额策略执行状态",
+        "short": "治理"
+      },
+      "tracing": {
+        "title": "请求追踪",
+        "subtitle": "按慢请求/失败请求抽样，查看阶段耗时和故障落点",
+        "short": "追踪"
       }
+    },
+    "kpi": {
+      "noRealData": "暂无真实请求数据",
+      "totalCostUsd": "总成本 (USD)"
+    },
+    "failure": {
+      "title": "失败根因分析",
+      "errorType": "错误类型",
+      "failureCount": "失败数",
+      "totalFailures": "总失败数",
+      "noFailures": "当前时间范围内无失败记录"
     }
   },
   "errors": {
@@ -1685,11 +1749,9 @@
     "you": "你",
     "assistant": "AI 助手",
     "thinking": {
-      "analyzing": "分析问题中...",
-      "thinking": "思考中...",
-      "searching": "搜索知识库中...",
-      "planning": "规划步骤...",
-      "preparing": "准备回应..."
+      "label": "思考中...",
+      "usingTools": "使用工具中...",
+      "toolsDone": "{{count}} 次工具调用"
     },
     "timeline": {
       "running": "Agent 执行中...",
@@ -1700,11 +1762,6 @@
     "toolCallsUsed": "{{count}} 项工具调用",
     "toolCallsRunning": "执行中",
     "allCompleted": "全部完成",
-    "thinking": {
-      "label": "思考中...",
-      "usingTools": "使用工具中...",
-      "toolsDone": "{{count}} 次工具调用"
-    },
     "newChat": "新对话",
     "selectAgentToView": "选择一个 Agent 以查看对话记录。",
     "noChatsYet": "还没有对话记录，开始新对话吧。",

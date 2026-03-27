@@ -37,8 +37,8 @@ export function DataStatusBadge({ dataStatus, dataFreshnessMinutes }: DataStatus
   const config = STATUS_CONFIG[status];
 
   const freshnessText = dataFreshnessMinutes !== undefined && dataFreshnessMinutes >= 0
-    ? t("dashboard.dataStatus.freshnessMinutes", { minutes: Math.round(dataFreshnessMinutes), defaultValue: `${Math.round(dataFreshnessMinutes)} 分钟前更新` })
-    : t("dashboard.dataStatus.unknown", "未知");
+    ? t("dashboard.dataStatus.freshnessMinutes", { minutes: Math.round(dataFreshnessMinutes) })
+    : t("dashboard.dataStatus.unknown");
 
   return (
     <Tooltip

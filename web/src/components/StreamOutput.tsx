@@ -288,6 +288,24 @@ function filterToolJsonOutput(text: string): string {
 }
 
 /**
+ * Detect if text is predominantly RTL (Arabic, Persian, Urdu, Hebrew).
+ * Strips markdown syntax before counting to avoid false negatives.
+ */
+function isRtlText(text: string): boolean {
+  // Strip markdown formatting, URLs, code blocks
+  const plain = text
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`[^`]*`/g, "")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[#*_~>\-|]/g, "");
+  // Count RTL characters (Arabic, Hebrew, Persian/Urdu extended)
+  const rtlChars = (plain.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u0590-\u05FF]/g) || []).length;
+  const latinChars = (plain.match(/[a-zA-Z]/g) || []).length;
+  // If RTL chars outnumber Latin chars, it's an RTL response
+  return rtlChars > 0 && rtlChars > latinChars;
+}
+
+/**
  * High-performance streaming markdown renderer.
  *
  * Uses block-level memoization to achieve O(n) rendering instead of O(n²).
@@ -309,10 +327,13 @@ export const StreamOutput = memo(function StreamOutput({
   // Filter out accidental JSON tool output before parsing
   const filteredText = useMemo(() => filterToolJsonOutput(text), [text]);
 
+  // Detect RTL content (Arabic, Persian, Urdu, Hebrew)
+  const rtl = useMemo(() => isRtlText(filteredText), [filteredText]);
+
   if (!text) return null;
 
   return (
-    <div className="assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-slate-200/70 dark:prose-pre:border-slate-700/60 prose-pre:bg-slate-100/70 dark:prose-pre:bg-slate-900/60 prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-slate-300 dark:prose-blockquote:border-l-slate-600">
+    <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-slate-200/70 dark:prose-pre:border-slate-700/60 prose-pre:bg-slate-100/70 dark:prose-pre:bg-slate-900/60 prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-slate-300 dark:prose-blockquote:border-l-slate-600${rtl ? " text-right" : ""}`}>
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,

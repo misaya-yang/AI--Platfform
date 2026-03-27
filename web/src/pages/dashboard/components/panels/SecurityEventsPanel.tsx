@@ -366,7 +366,7 @@ export function SecurityEventsPanel() {
                   <span style={{ fontSize: 11, color: "#f59e0b" }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
                 )}
                 {user.quotaExceeded > 0 && (
-                  <span style={{ fontSize: 11, color: "#f97316" }}>{t("dashboard.security.quotaExceededCount", { count: user.quotaExceeded, defaultValue: `配额${user.quotaExceeded}` })}</span>
+                  <span style={{ fontSize: 11, color: "#f97316" }}>{t("dashboard.security.quotaExceededCount", { count: user.quotaExceeded })}</span>
                 )}
               </div>
             </div>

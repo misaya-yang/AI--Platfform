@@ -149,6 +149,7 @@ function KPICard({
   onClick,
   noData,
 }: KPICardProps) {
+  const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
 
@@ -270,7 +271,7 @@ function KPICard({
             </div>
             {noData ? (
               <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 4 }}>
-                暂无真实请求数据
+                {t("dashboard.kpi.noRealData")}
               </div>
             ) : (
               <Trend value={trend ?? null} isPositiveGood={isPositiveGood} isNewData={isNewData} />

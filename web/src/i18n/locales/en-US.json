@@ -71,7 +71,10 @@
     "table": "Table",
     "tableFile": "Table file",
     "test": "Test",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "service": "Service",
+    "model": "Model",
+    "provider": "Provider"
   },
   "language": {
     "zhCN": "Simplified Chinese",
@@ -285,7 +288,9 @@
       "ok": "Up to date",
       "delayed": "Delayed / not ingested",
       "empty": "No data",
-      "error": "Data error"
+      "error": "Data error",
+      "freshnessMinutes": "Updated {{minutes}} min ago",
+      "unknown": "Unknown"
     },
     "serviceEndpoints": "Service Endpoints",
     "filters": {
@@ -318,7 +323,8 @@
       "exit": "Exit fullscreen"
     },
     "trend": {
-      "vsPrevious": "vs previous period"
+      "vsPrevious": "vs previous period",
+      "noBaseline": "No baseline comparison"
     },
     "serviceHealth": {
       "title": "Service Health",
@@ -338,7 +344,8 @@
     },
     "tokenUsage": {
       "modelBreakdown": "Model breakdown",
-      "providerBreakdown": "Provider breakdown"
+      "providerBreakdown": "Provider breakdown",
+      "unattributedWarning": "Some requests are not attributed to a provider/model. Check service configuration."
     },
     "cost": {
       "title": "Cost Analysis",
@@ -346,7 +353,10 @@
       "serviceBreakdown": "Service breakdown",
       "today": "Today",
       "week": "This week",
-      "month": "This month"
+      "month": "This month",
+      "estimatedHint": "USD estimated cost (based on model pricing)",
+      "unattributedWarning": "Some requests are not attributed to a provider/model. Check service configuration.",
+      "providerBreakdown": "Provider breakdown"
     },
     "security": {
       "title": "Security Events",
@@ -360,7 +370,10 @@
       "range": {
         "today": "Today",
         "week": "This week"
-      }
+      },
+      "quotaExceeded": "Quota Exceeded",
+      "quotaExceededCount": "Quota {{count}}",
+      "noEvents": "No security events in current time range"
     },
     "userQuota": {
       "title": "User Quota",
@@ -371,14 +384,24 @@
       "status": {
         "normal": "Normal",
         "warning": "Warning",
-        "exceeded": "Exceeded"
+        "exceeded": "Exceeded",
+        "blocked": "Blocked"
       },
       "alert": {
         "warning": "Approaching limit",
         "exceeded": "Limit exceeded",
         "hint": "Upgrade to increase quota",
         "upgradeAction": "Upgrade plan",
-        "upgradeHint": "Contact admin to adjust quota"
+        "upgradeHint": "Contact admin to adjust quota",
+        "blocked": "{{count}} user(s) blocked"
+      },
+      "strategy": "Strategy",
+      "total": "Total",
+      "strategy_labels": {
+        "hard_block": "Hard Block",
+        "rate_limit": "Rate Limit",
+        "downgrade_model": "Downgrade",
+        "allow_but_alert": "Alert"
       }
     },
     "requestTrace": {
@@ -401,7 +424,48 @@
         "upstream": "Upstream request",
         "response": "Response handling",
         "logging": "Logging"
+      },
+      "tab": {
+        "all": "All",
+        "error": "Failed",
+        "slow": "Slow",
+        "sampled": "Sampled"
+      },
+      "kpiFilter": "From KPI link",
+      "emptyFiltered": "No traces match the current filter"
+    },
+    "workspace": {
+      "overview": {
+        "title": "Operations Overview",
+        "subtitle": "Monitor service stability, request throughput & cost trends",
+        "short": "Overview"
+      },
+      "reliability": {
+        "title": "Failures & Reliability",
+        "subtitle": "Breakdown by error type, pinpoint root causes quickly",
+        "short": "Reliability"
+      },
+      "governance": {
+        "title": "Cost & Quota Governance",
+        "subtitle": "Budget control, user quotas and overage policy enforcement",
+        "short": "Governance"
+      },
+      "tracing": {
+        "title": "Request Tracing",
+        "subtitle": "Sample slow/failed requests, inspect stage latency & failures",
+        "short": "Tracing"
       }
+    },
+    "kpi": {
+      "noRealData": "No real request data",
+      "totalCostUsd": "Total Cost (USD)"
+    },
+    "failure": {
+      "title": "Failure Root Cause Analysis",
+      "errorType": "Error Type",
+      "failureCount": "Failures",
+      "totalFailures": "Total Failures",
+      "noFailures": "No failures in current time range"
     }
   },
   "errors": {
@@ -1685,11 +1749,9 @@
     "you": "You",
     "assistant": "AI Assistant",
     "thinking": {
-      "analyzing": "Analyzing...",
-      "thinking": "Thinking...",
-      "searching": "Searching knowledge base...",
-      "planning": "Planning...",
-      "preparing": "Preparing response..."
+      "label": "Thinking...",
+      "usingTools": "Using tools...",
+      "toolsDone": "{{count}} tool calls"
     },
     "timeline": {
       "running": "Agent working...",
@@ -1700,11 +1762,6 @@
     "toolCallsUsed": "{{count}} tool calls",
     "toolCallsRunning": "In progress",
     "allCompleted": "All done",
-    "thinking": {
-      "label": "Thinking...",
-      "usingTools": "Using tools...",
-      "toolsDone": "{{count}} tool calls"
-    },
     "newChat": "New chat",
     "selectAgentToView": "Select an agent to view chats.",
     "noChatsYet": "No chats yet. Start a new one.",

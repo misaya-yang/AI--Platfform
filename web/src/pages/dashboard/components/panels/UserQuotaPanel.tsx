@@ -18,11 +18,11 @@ function formatTokens(num: number): string {
   return num.toLocaleString();
 }
 
-const STRATEGY_CONFIG: Record<string, { color: string; label: string }> = {
-  hard_block: { color: "red", label: "硬限制" },
-  rate_limit: { color: "orange", label: "限流" },
-  downgrade_model: { color: "blue", label: "降级" },
-  allow_but_alert: { color: "gold", label: "告警" },
+const STRATEGY_COLORS: Record<string, string> = {
+  hard_block: "red",
+  rate_limit: "orange",
+  downgrade_model: "blue",
+  allow_but_alert: "gold",
 };
 
 export function UserQuotaPanel() {
@@ -107,8 +107,9 @@ export function UserQuotaPanel() {
       key: "strategy",
       width: 70,
       render: (_: unknown, record: QuotaUserOverviewItem) => {
-        const config = STRATEGY_CONFIG[record.overage_strategy] || { color: "default", label: record.overage_strategy };
-        return <Tag color={config.color} style={{ margin: 0, fontSize: 10 }}>{config.label}</Tag>;
+        const color = STRATEGY_COLORS[record.overage_strategy] || "default";
+        const label = t(`dashboard.userQuota.strategy_labels.${record.overage_strategy}`, record.overage_strategy);
+        return <Tag color={color} style={{ margin: 0, fontSize: 10 }}>{label}</Tag>;
       },
     },
     {
@@ -119,8 +120,8 @@ export function UserQuotaPanel() {
       render: (status: string, record: QuotaUserOverviewItem) => {
         if (record.is_blocked) {
           return (
-            <Tooltip title={record.blocked_reason || "已封禁"}>
-              <Tag icon={<StopOutlined />} color="error">{t("dashboard.userQuota.status.blocked", "封禁")}</Tag>
+            <Tooltip title={record.blocked_reason || t("dashboard.userQuota.status.blocked")}>
+              <Tag icon={<StopOutlined />} color="error">{t("dashboard.userQuota.status.blocked")}</Tag>
             </Tooltip>
           );
         }
@@ -206,7 +207,7 @@ export function UserQuotaPanel() {
                   }}
                 >
                   {summary.blocked > 0
-                    ? t("dashboard.userQuota.alert.blocked", { count: summary.blocked, defaultValue: `${summary.blocked} 个用户已封禁` })
+                    ? t("dashboard.userQuota.alert.blocked", { count: summary.blocked })
                     : summary.exceeded > 0
                     ? t("dashboard.userQuota.alert.exceeded", { count: summary.exceeded })
                     : t("dashboard.userQuota.alert.warning", { count: summary.warning })}
