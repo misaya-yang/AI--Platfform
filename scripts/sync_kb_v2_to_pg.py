@@ -28,6 +28,8 @@ import sys
 import time
 from typing import Any
 
+import json
+
 import asyncpg
 from qdrant_client import AsyncQdrantClient
 
@@ -137,17 +139,22 @@ async def insert_segments(
     """Insert Qdrant points into PG segments table."""
     inserted = 0
 
+    # Track per-document position counters for UNIQUE(document_id, position)
+    doc_positions: dict[str, int] = {}
+
     for i in range(0, len(points), PG_BATCH):
         batch = points[i:i + PG_BATCH]
         rows = []
-        for pos, point in enumerate(batch, start=i):
+        for point in batch:
             payload = point["payload"]
             source_type = payload.get("source_type", "unknown")
             doc_id = doc_map.get(source_type, doc_map.get("unknown", ""))
-            text = payload.get("text", payload.get("content", ""))
+            pos = doc_positions.get(doc_id, 0)
+            doc_positions[doc_id] = pos + 1
+            text = (payload.get("text", payload.get("content", "")) or "").replace("\x00", "")
 
             # Build citation_text from payload
-            citation = payload.get("citation_text", "")
+            citation = (payload.get("citation_text", "") or "").replace("\x00", "")
 
             # Compute content hash
             content_hash = hashlib.sha256(text.encode()).hexdigest()[:16] if text else ""
@@ -163,9 +170,9 @@ async def insert_segments(
                 text,                 # text
                 0,                    # token_count (we don't have this)
                 point["id"],          # vector_id (same as Qdrant point ID)
-                payload,              # metadata (full payload as JSONB)
+                json.dumps(payload).replace("\\u0000", ""),  # metadata (JSONB, null bytes stripped)
                 source_type,          # source_type
-                payload,              # source_reference
+                json.dumps(payload).replace("\\u0000", ""),  # source_reference (JSONB, null bytes stripped)
                 citation,             # citation_text
                 payload.get("language", "en"),  # language
                 content_hash,         # content_hash
