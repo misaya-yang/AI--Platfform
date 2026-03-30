@@ -48,7 +48,6 @@ def _get_source_type(segment: dict[str, Any], metadata: dict[str, Any]) -> str:
     return (
         segment.get("source_type")
         or metadata.get("source_type")
-        or metadata.get("islamic_source_type")
         or "unknown"
     )
 

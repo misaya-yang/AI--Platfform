@@ -337,9 +337,13 @@ class KnowledgeWorker:
                         if page.text.strip():
                             batch_text_parts.append(f"[Page {page.page_number}]\n{page.text}")
                         elif ocr_enabled and page.images:
-                            ocr_text = await self._ocr_image_auto(
-                                self._select_ocr_image(page.images)
-                            )
+                            try:
+                                ocr_text = await self._ocr_image_auto(
+                                    self._select_ocr_image(page.images)
+                                )
+                            except Exception as ocr_err:
+                                logger.warning(f"[Worker] OCR failed for page {page.page_number}: {ocr_err}")
+                                ocr_text = ""
                             if ocr_text:
                                 batch_text_parts.append(f"[Page {page.page_number}]\n{ocr_text}")
 
@@ -872,10 +876,12 @@ class KnowledgeWorker:
                 if split_results:
                     page_offset = split_results[part_idx].page_start
 
-                async def on_progress(current: int, total: int) -> None:
-                    # Scale progress across all parts
-                    base = int(5 + (part_idx / len(parts)) * 85)
-                    part_progress = int((current / total) * (85 / len(parts)))
+                _part_idx = part_idx  # Capture loop var to avoid closure issue
+
+                async def on_progress(current: int, total: int, _pi: int = _part_idx) -> None:
+                    # Scale progress across all parts (monotonically increasing)
+                    base = int(5 + (_pi / len(parts)) * 85)
+                    part_progress = int((current / max(total, 1)) * (85 / len(parts)))
                     await self.service.db.update_document_status(
                         task.document_id,
                         status="processing",

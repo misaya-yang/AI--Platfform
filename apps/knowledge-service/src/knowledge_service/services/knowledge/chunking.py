@@ -276,12 +276,12 @@ def detect_text_language(text: str) -> tuple[str, float]:
     if arabic_ratio > 0.6:
         return ("ar", arabic_ratio)
     elif arabic_ratio > 0.3:
-        return ("mixed", 0.7)
+        return ("mixed", arabic_ratio)
     elif cjk_ratio > 0.5:
         # Could further distinguish zh/ja/ko if needed
         return ("zh", cjk_ratio)
     elif cjk_ratio > 0.2:
-        return ("mixed", 0.6)
+        return ("mixed", cjk_ratio)
     else:
         return ("en", 1.0 - arabic_ratio - cjk_ratio)
 
@@ -1962,13 +1962,9 @@ class RecursiveChunker(BaseChunker):
         if token_limit <= 0:
             return [self._create_chunk(text, 0)]
 
-        # Optional min/max token constraints (only if explicitly configured)
-        min_tokens = (
-            self.config.min_chunk_tokens if self.config.mode == ChunkingMode.FIXED_SIZE else None
-        )
-        max_tokens = (
-            self.config.max_chunk_tokens if self.config.mode == ChunkingMode.FIXED_SIZE else None
-        )
+        # Apply min/max token constraints when configured (all modes, not just FIXED_SIZE)
+        min_tokens = self.config.min_chunk_tokens
+        max_tokens = self.config.max_chunk_tokens
 
         # Safety limit: prevent infinite recursion
         MAX_RECURSION_DEPTH = 20
@@ -2240,6 +2236,7 @@ class HierarchicalChunker(BaseChunker):
             )
 
             for child_idx, child in enumerate(children):
+                child.index = len(all_chunks) + child_idx  # Unique index across all chunks
                 child.metadata["is_child"] = True
                 child.metadata["chunk_type"] = "child"
                 child.metadata["parent_index"] = parent_idx

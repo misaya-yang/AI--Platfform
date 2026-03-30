@@ -222,7 +222,7 @@ class IslamicTextChunker(BaseChunker):
             _meta_extractor = None
 
         for c in chunks:
-            c.metadata["islamic_source_type"] = source_type.value
+            c.metadata["source_type"] = source_type.value
             if _meta_extractor is not None:
                 try:
                     islamic_meta = _meta_extractor.extract(
@@ -334,7 +334,7 @@ class IslamicTextChunker(BaseChunker):
                         self._create_chunk(
                             section,
                             len(chunks),
-                            {"islamic_source_type": "quran", "chunk_strategy": "surah_section"},
+                            {"source_type": "quran", "chunk_strategy": "surah_section"},
                         )
                     )
                 else:
@@ -355,7 +355,7 @@ class IslamicTextChunker(BaseChunker):
                         self._create_chunk(
                             section,
                             len(chunks),
-                            {"islamic_source_type": "quran", "chunk_strategy": "surah_section"},
+                            {"source_type": "quran", "chunk_strategy": "surah_section"},
                         )
                     )
                 else:
@@ -707,7 +707,7 @@ class IslamicTextChunker(BaseChunker):
                             self._create_chunk(
                                 current_text.strip(),
                                 len(chunks),
-                                {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                                {"source_type": source_type, "chunk_strategy": strategy},
                             )
                         )
                     current_text = ""
@@ -721,7 +721,7 @@ class IslamicTextChunker(BaseChunker):
                             self._create_chunk(
                                 current_text.strip(),
                                 len(chunks),
-                                {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                                {"source_type": source_type, "chunk_strategy": strategy},
                             )
                         )
                         current_text = ""
@@ -731,7 +731,7 @@ class IslamicTextChunker(BaseChunker):
                     sub_chunks = RecursiveChunker(self.config).chunk(part)
                     for sc in sub_chunks:
                         sc.index = len(chunks)
-                        sc.metadata["islamic_source_type"] = source_type
+                        sc.metadata["source_type"] = source_type
                         sc.metadata["chunk_strategy"] = f"{strategy}_sub"
                         chunks.append(sc)
                 else:
@@ -744,7 +744,7 @@ class IslamicTextChunker(BaseChunker):
                     self._create_chunk(
                         current_text.strip(),
                         len(chunks),
-                        {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        {"source_type": source_type, "chunk_strategy": strategy},
                     )
                 )
         else:
@@ -762,7 +762,7 @@ class IslamicTextChunker(BaseChunker):
                             self._create_chunk(
                                 current_text.strip(),
                                 len(chunks),
-                                {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                                {"source_type": source_type, "chunk_strategy": strategy},
                             )
                         )
                     current_text = ""
@@ -775,7 +775,7 @@ class IslamicTextChunker(BaseChunker):
                             self._create_chunk(
                                 current_text.strip(),
                                 len(chunks),
-                                {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                                {"source_type": source_type, "chunk_strategy": strategy},
                             )
                         )
                         current_text = ""
@@ -784,7 +784,7 @@ class IslamicTextChunker(BaseChunker):
                     sub_chunks = RecursiveChunker(self.config).chunk(part)
                     for sc in sub_chunks:
                         sc.index = len(chunks)
-                        sc.metadata["islamic_source_type"] = source_type
+                        sc.metadata["source_type"] = source_type
                         sc.metadata["chunk_strategy"] = f"{strategy}_sub"
                         chunks.append(sc)
                 else:
@@ -796,7 +796,7 @@ class IslamicTextChunker(BaseChunker):
                     self._create_chunk(
                         current_text.strip(),
                         len(chunks),
-                        {"islamic_source_type": source_type, "chunk_strategy": strategy},
+                        {"source_type": source_type, "chunk_strategy": strategy},
                     )
                 )
 
