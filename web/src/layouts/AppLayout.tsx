@@ -398,7 +398,7 @@ export function AppLayout() {
 
         {/* Main content */}
         <Content style={{
-          padding: isMobile ? '8px' : '12px 16px',
+          padding: 0,
           minHeight: 'calc(100vh - 44px)',
           overflow: 'auto',
         }}>
