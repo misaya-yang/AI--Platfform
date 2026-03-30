@@ -83,24 +83,24 @@ export const lightTheme: ThemeConfig = {
 // Dark theme configuration
 export const darkTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#60A5FA',
-    colorInfo: '#60A5FA',
-    colorSuccess: '#22C55E',
-    colorWarning: '#F59E0B',
-    colorError: '#EF4444',
+    colorPrimary: '#6E9FFF',
+    colorInfo: '#6E9FFF',
+    colorSuccess: '#34D399',
+    colorWarning: '#FBBF24',
+    colorError: '#F87171',
     fontFamily: '"IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
     fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
 
-    colorBgContainer: '#1E293B',
-    colorBgElevated: '#273449',
-    colorBgLayout: '#0F172A',
+    colorBgContainer: '#1C1D24',
+    colorBgElevated: '#26272F',
+    colorBgLayout: '#111217',
 
-    colorText: '#E2E8F0',
-    colorTextSecondary: '#94A3B8',
-    colorTextTertiary: '#64748B',
+    colorText: '#EDEEF0',
+    colorTextSecondary: '#9C9FA8',
+    colorTextTertiary: '#6B6E78',
 
-    colorBorder: '#334155',
-    colorBorderSecondary: '#1E293B',
+    colorBorder: 'rgba(255,255,255,0.08)',
+    colorBorderSecondary: 'rgba(255,255,255,0.05)',
 
     borderRadius: 8,
     borderRadiusLG: 8,
@@ -120,9 +120,9 @@ export const darkTheme: ThemeConfig = {
     },
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(59, 130, 246, 0.22)',
+      itemSelectedBg: 'rgba(110, 159, 255, 0.15)',
       itemSelectedColor: '#93C5FD',
-      itemHoverBg: '#334155',
+      itemHoverBg: 'rgba(255, 255, 255, 0.06)',
       itemBorderRadius: 6,
     },
   },

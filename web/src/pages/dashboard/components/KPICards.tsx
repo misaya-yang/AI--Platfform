@@ -398,7 +398,7 @@ export function KPICards() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(auto-fit, minmax(220px, 1fr))`,
+        gridTemplateColumns: `repeat(${LAYOUT.KPI_COLUMNS}, 1fr)`,
         gap: LAYOUT.CARD_GAP,
       }}
     >

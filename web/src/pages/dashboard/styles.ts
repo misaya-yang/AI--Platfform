@@ -84,51 +84,51 @@ export const LAYOUT = {
 
 // ── Color system (WCAG AA compliant) ────────────────────────────────
 export const getColors = (darkMode: boolean) => ({
-  // Backgrounds
-  pageBg:    darkMode ? '#0C1222' : '#F8FAFC',
-  cardBg:    darkMode ? '#1A2332' : '#FFFFFF',
-  cardHover: darkMode ? '#243044' : '#F8FAFC',
-  innerBg:   darkMode ? '#0C1222' : '#F8FAFC',
+  // Backgrounds — Grafana/Linear-inspired neutral dark (reduced blue saturation)
+  pageBg:    darkMode ? '#111217' : '#F8FAFC',
+  cardBg:    darkMode ? '#1C1D24' : '#FFFFFF',
+  cardHover: darkMode ? '#26272F' : '#F8FAFC',
+  innerBg:   darkMode ? '#16171D' : '#F8FAFC',
 
-  // Borders
-  border:      darkMode ? '#2D3A4A' : '#E2E8F0',
-  borderHover: darkMode ? '#3D4D60' : '#CBD5E1',
+  // Borders — subtle, alpha-based for dark (shadcn 2025 pattern)
+  border:      darkMode ? 'rgba(255,255,255,0.08)' : '#E2E8F0',
+  borderHover: darkMode ? 'rgba(255,255,255,0.14)' : '#CBD5E1',
 
-  // Text — all values satisfy WCAG AA on their respective backgrounds
-  textPrimary:   darkMode ? '#F1F5F9' : '#0F172A',
-  textSecondary: darkMode ? '#94A3B8' : '#475569',   // Light: 4.6:1 contrast
-  textMuted:     darkMode ? '#64748B' : '#94A3B8',
+  // Text — WCAG AA on respective backgrounds
+  textPrimary:   darkMode ? '#EDEEF0' : '#0F172A',
+  textSecondary: darkMode ? '#9C9FA8' : '#475569',
+  textMuted:     darkMode ? '#6B6E78' : '#94A3B8',
 
-  // Semantic colors — AA compliant
-  accent:  '#2563EB',
-  success: '#059669',
-  warning: '#D97706',
-  error:   '#DC2626',    // Changed from #EF4444 for AA compliance
-  purple:  '#7C3AED',
+  // Semantic colors — desaturated for dark mode (MD3 guideline)
+  accent:  darkMode ? '#6E9FFF' : '#2563EB',
+  success: darkMode ? '#34D399' : '#059669',
+  warning: darkMode ? '#FBBF24' : '#D97706',
+  error:   darkMode ? '#F87171' : '#DC2626',
+  purple:  darkMode ? '#A78BFA' : '#7C3AED',
 
   // Semantic backgrounds (subtle)
-  successBg: darkMode ? 'rgba(5,150,105,0.1)' : '#ECFDF5',
-  warningBg: darkMode ? 'rgba(217,119,6,0.1)' : '#FFFBEB',
-  errorBg:   darkMode ? 'rgba(220,38,38,0.1)' : '#FEF2F2',
-  accentBg:  darkMode ? 'rgba(37,99,235,0.1)' : '#EFF6FF',
+  successBg: darkMode ? 'rgba(52,211,153,0.08)' : '#ECFDF5',
+  warningBg: darkMode ? 'rgba(251,191,36,0.08)' : '#FFFBEB',
+  errorBg:   darkMode ? 'rgba(248,113,113,0.08)' : '#FEF2F2',
+  accentBg:  darkMode ? 'rgba(110,159,255,0.08)' : '#EFF6FF',
 
-  // Shadows
+  // Shadows — minimal in dark mode
   shadowSm: darkMode
-    ? '0 1px 2px rgba(0,0,0,0.3)'
+    ? '0 1px 2px rgba(0,0,0,0.4)'
     : '0 1px 2px rgba(0,0,0,0.05)',
   shadowMd: darkMode
-    ? '0 2px 8px rgba(0,0,0,0.4)'
+    ? '0 2px 8px rgba(0,0,0,0.5)'
     : '0 2px 8px rgba(0,0,0,0.08)',
   shadowLg: darkMode
-    ? '0 4px 16px rgba(0,0,0,0.5)'
+    ? '0 4px 16px rgba(0,0,0,0.6)'
     : '0 4px 16px rgba(0,0,0,0.1)',
 
-  // Gradients
-  accentGradient:  'linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)',
-  successGradient: 'linear-gradient(135deg, #059669 0%, #047857 100%)',
-  warningGradient: 'linear-gradient(135deg, #D97706 0%, #B45309 100%)',
-  errorGradient:   'linear-gradient(135deg, #DC2626 0%, #B91C1C 100%)',
-  purpleGradient:  'linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%)',
+  // Gradients (lighter tones in dark mode for visibility)
+  accentGradient:  darkMode ? 'linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)' : 'linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)',
+  successGradient: darkMode ? 'linear-gradient(135deg, #10B981 0%, #059669 100%)' : 'linear-gradient(135deg, #059669 0%, #047857 100%)',
+  warningGradient: darkMode ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'linear-gradient(135deg, #D97706 0%, #B45309 100%)',
+  errorGradient:   darkMode ? 'linear-gradient(135deg, #EF4444 0%, #DC2626 100%)' : 'linear-gradient(135deg, #DC2626 0%, #B91C1C 100%)',
+  purpleGradient:  darkMode ? 'linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%)' : 'linear-gradient(135deg, #7C3AED 0%, #6D28D9 100%)',
 });
 
 // ── Common styles ───────────────────────────────────────────────────
