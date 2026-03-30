@@ -318,7 +318,7 @@ export function ProviderStatusCard() {
   const totalModels = providerList.reduce((sum, [, p]) => sum + (p.model_count || 0), 0);
 
   return (
-    <div style={{ marginBottom: LAYOUT.SECTION_GAP, padding: `0 ${LAYOUT.GRID_GAP}px` }}>
+    <div style={{ marginBottom: LAYOUT.SECTION_GAP }}>
       <PanelWrapper
         title={t("services.providersStatus.title")}
         onRefresh={refetch}

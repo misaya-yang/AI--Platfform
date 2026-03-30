@@ -138,18 +138,20 @@ function DashboardContent() {
           </div>
         </div>
 
-        {/* ─── Tab Content ─── */}
+        {/* ─── Tab Content (all content shares same container padding) ─── */}
         {activeTab === "summary" && (
-          <>
+          <div>
             <div style={{ marginBottom: LAYOUT.CARD_GAP }}><KPICards /></div>
-            <ProviderStatusCard />
-          </>
+            <div style={{ margin: 0 }}><ProviderStatusCard /></div>
+          </div>
         )}
         {activeTab !== "summary" && (
-          <DashboardLayout
-            width={effectiveWidth - P * 2 + LAYOUT.GRID_GAP * 2}
-            forceWorkspace={workspaceMap[activeTab] as "overview" | "reliability" | "governance" | "tracing"}
-          />
+          <div style={{ margin: `0 -${LAYOUT.GRID_GAP}px` }}>
+            <DashboardLayout
+              width={effectiveWidth}
+              forceWorkspace={workspaceMap[activeTab] as "overview" | "reliability" | "governance" | "tracing"}
+            />
+          </div>
         )}
       </div>
 
