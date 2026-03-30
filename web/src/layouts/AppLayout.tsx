@@ -229,14 +229,14 @@ export function AppLayout() {
         trigger={null}
         width={210}
         collapsedWidth={isMobile ? 0 : 64}
-        className="app-sider border-r border-border bg-card/50 backdrop-blur-xl"
+        className="app-sider bg-card/50 backdrop-blur-xl"
         style={{
           position: 'fixed',
           left: isMobile ? siderOffset : 0,
           top: 0,
           bottom: 0,
           zIndex: 100,
-          borderRight: '1px solid var(--border)',
+          borderRight: 'none',
           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
         theme={resolvedTheme}
@@ -398,7 +398,7 @@ export function AppLayout() {
 
         {/* Main content */}
         <Content style={{
-          padding: 0,
+          padding: isMobile ? '8px' : '0 16px 16px 16px',
           minHeight: 'calc(100vh - 44px)',
           overflow: 'auto',
         }}>

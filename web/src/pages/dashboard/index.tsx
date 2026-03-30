@@ -83,7 +83,7 @@ function DashboardContent() {
   const P = LAYOUT.PAGE_PADDING;
 
   return (
-    <div ref={containerRef} style={{ minHeight: "100%", background: colors.pageBg, padding: P }}>
+    <div ref={containerRef} style={{ minHeight: "100%", background: colors.pageBg, padding: `${P}px 0` }}>
       <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
 
         {/* ─── Row 1: Title + Time Range + Refresh ─── */}
