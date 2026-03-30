@@ -571,8 +571,8 @@ class KnowledgeService:
         return create_embedding(econf, dimension=resolved_dimension)
 
     def _build_islamic_dataset_defaults(self) -> dict[str, Any]:
-        profile = self.settings.knowledge.islamic_profile
-        if not profile.enabled:
+        profile = getattr(self.settings.knowledge, "islamic_profile", None)
+        if not profile or not getattr(profile, "enabled", False):
             return {}
         return {
             "retrieval": {
