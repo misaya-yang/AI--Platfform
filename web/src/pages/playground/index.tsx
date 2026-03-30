@@ -192,18 +192,18 @@ export function PlaygroundPage() {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="flex overflow-hidden bg-card -m-6" style={{ height: 'calc(100vh - 64px)', width: 'calc(100% + 48px)' }}>
+    <div className="flex overflow-hidden bg-card" style={{ height: 'calc(100vh - 40px)', width: '100%', margin: '-16px', marginTop: 0, paddingTop: 0 }}>
       {/* Sessions Sidebar */}
       {playgroundSidebarOpen && (
         <aside
           className={cn(
-            "w-[280px] flex-col border-r border-border/40 bg-gradient-to-b from-muted/30 to-muted/10",
+            "w-[280px] flex-col bg-gradient-to-b from-muted/30 to-muted/10",
             isMobile
               ? "absolute inset-y-0 left-0 z-30 flex shadow-2xl"
               : "hidden md:flex"
           )}
         >
-        <div className="h-14 flex items-center px-4 border-b border-border/40">
+        <div className="h-14 flex items-center px-4">
           <Button
             size="sm"
             onClick={() => void handleNewSession()}
@@ -340,7 +340,7 @@ export function PlaygroundPage() {
 
       <div className="flex-1 flex flex-col relative overflow-hidden min-h-0">
       {/* Header / Config Bar */}
-      <div className="h-14 flex items-center border-b border-border/60 bg-background px-6">
+      <div className="h-12 flex items-center bg-background px-6">
         <div className="flex items-center justify-between gap-4 w-full max-w-4xl mx-auto">
           <div className="flex items-center gap-3 flex-1">
             <Button
