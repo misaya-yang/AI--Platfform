@@ -208,7 +208,7 @@ export function PlaygroundPage() {
             size="sm"
             onClick={() => void handleNewSession()}
             disabled={!serviceId || uiStreamingActive}
-            className="w-full gap-2.5 h-10 bg-foreground/5 hover:bg-foreground/10 text-foreground border border-border/50 hover:border-border transition-all duration-200 rounded-xl font-medium"
+            className="w-full gap-2.5 h-10 bg-foreground/5 hover:bg-foreground/10 text-foreground border border-transparent dark:border-transparent  transition-all duration-200 rounded-xl font-medium"
           >
             <div className="flex h-5 w-5 items-center justify-center rounded-md bg-gradient-to-br from-blue-500 to-cyan-500">
               <MessageSquarePlus className="h-3 w-3 text-white" />
@@ -347,7 +347,7 @@ export function PlaygroundPage() {
               type="button"
               variant="ghost"
               size="icon"
-              className="h-9 w-9 rounded-xl border border-border/50"
+              className="h-9 w-9 rounded-xl border border-transparent dark:border-transparent"
               onClick={() => setPlaygroundSidebarOpen(!playgroundSidebarOpen)}
               aria-label={
                 playgroundSidebarOpen
@@ -378,7 +378,7 @@ export function PlaygroundPage() {
             </div>
 
           <div className="flex items-center gap-2">
-            <label className="flex items-center gap-2 rounded-full border border-border/60 bg-muted/30 px-3 py-1.5 cursor-pointer select-none hover:bg-muted/50 transition-colors">
+            <label className="flex items-center gap-2 rounded-full border border-transparent dark:border-transparent bg-muted/30 px-3 py-1.5 cursor-pointer select-none hover:bg-muted/50 transition-colors">
               <input
                 type="checkbox"
                 id="session-toggle"
@@ -425,7 +425,7 @@ export function PlaygroundPage() {
           </div>
         ) : messages.length === 0 ? (
           <div className="flex h-full items-center justify-center p-8">
-            <div className="max-w-md rounded-3xl border border-border/60 bg-card/70 px-6 py-5 text-sm shadow-sm">
+            <div className="max-w-md rounded-3xl border border-transparent dark:border-transparent bg-card/70 px-6 py-5 text-sm shadow-sm">
               <div className="font-medium text-foreground">
                 {historyRestoreState === "loading" && activeSessionId
                   ? t("playground.restoringSessionTitle", "Restoring selected conversation")
@@ -508,10 +508,10 @@ export function PlaygroundPage() {
             "absolute bottom-40 left-1/2 -translate-x-1/2 z-10",
             "flex items-center justify-center",
             "h-9 w-9 rounded-full",
-            "bg-card/95 border border-border/60 shadow-lg backdrop-blur-sm",
+            "bg-card/95 border border-transparent dark:border-transparent shadow-lg backdrop-blur-sm",
             "text-muted-foreground hover:text-foreground hover:bg-accent",
             "transition-all duration-200 hover:scale-105",
-            "ring-1 ring-black/5 dark:ring-white/5"
+            ""
           )}
           aria-label={t("playground.scrollToBottom", "Scroll to bottom")}
         >
@@ -522,7 +522,7 @@ export function PlaygroundPage() {
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
         <div className="mx-auto w-full max-w-4xl">
-          <div className="rounded-2xl border border-border/60 bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ring-1 ring-black/5 dark:ring-white/5">
+          <div className="rounded-2xl border border-transparent dark:border-transparent bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ">
             <MultimodalInput
               onSend={handleSend}
               onStop={handleStopStreaming}
