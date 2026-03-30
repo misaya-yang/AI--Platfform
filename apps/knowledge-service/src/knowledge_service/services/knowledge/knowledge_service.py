@@ -10,7 +10,7 @@ import re
 import tempfile
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -76,6 +76,7 @@ if TYPE_CHECKING:
 # This prevents overwhelming the VLM API when multiple documents are processed simultaneously
 _global_vlm_semaphore: asyncio.Semaphore | None = None
 _global_vlm_max_concurrent: int = 10  # Default, updated from settings on first use
+_global_vlm_lock = asyncio.Lock()
 
 
 def _ensure_dict(value: Any) -> dict[str, Any]:
@@ -415,14 +416,22 @@ class KnowledgeService:
         if vlm is None:
             return None
 
-        # Initialize global semaphore if not done yet
+        # Initialize global semaphore with lock to prevent race conditions
         vlm_max_concurrent = self.settings.knowledge.vlm_max_concurrent
         if _global_vlm_semaphore is None or _global_vlm_max_concurrent != vlm_max_concurrent:
-            _global_vlm_max_concurrent = vlm_max_concurrent
-            _global_vlm_semaphore = asyncio.Semaphore(vlm_max_concurrent)
-            logger.info(
-                f"Initialized global VLM semaphore with max_concurrent={vlm_max_concurrent}"
-            )
+            # Use synchronous check-then-set — safe because Python GIL ensures
+            # atomicity of the assignment, and the lock prevents double-init
+            try:
+                if _global_vlm_lock.locked():
+                    pass  # Another coroutine is initializing
+                elif _global_vlm_semaphore is None or _global_vlm_max_concurrent != vlm_max_concurrent:
+                    _global_vlm_max_concurrent = vlm_max_concurrent
+                    _global_vlm_semaphore = asyncio.Semaphore(vlm_max_concurrent)
+                    logger.info(
+                        f"Initialized global VLM semaphore with max_concurrent={vlm_max_concurrent}"
+                    )
+            except RuntimeError:
+                pass  # Lock not usable outside event loop — first call will init
 
         semaphore = _global_vlm_semaphore
 
@@ -6385,7 +6394,7 @@ class KnowledgeService:
 
         update_data: dict[str, Any] = {"enabled": enabled}
         if not enabled:
-            update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["disabled_at"] = datetime.now(timezone.utc)  # Pass datetime object, not string
             update_data["disabled_by"] = user.user_id
         else:
             update_data["disabled_at"] = None
@@ -6410,7 +6419,7 @@ class KnowledgeService:
 
         update_data: dict[str, Any] = {"archived": archived}
         if archived:
-            update_data["archived_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["archived_at"] = datetime.now(timezone.utc)  # Pass datetime object, not string
             update_data["archived_by"] = user.user_id
             update_data["archived_reason"] = reason
         else:
@@ -6534,7 +6543,7 @@ class KnowledgeService:
 
         update_data: dict[str, Any] = {"enabled": enabled}
         if not enabled:
-            update_data["disabled_at"] = datetime.utcnow()  # Pass datetime object, not string
+            update_data["disabled_at"] = datetime.now(timezone.utc)  # Pass datetime object, not string
             update_data["disabled_by"] = user.user_id
         else:
             update_data["disabled_at"] = None

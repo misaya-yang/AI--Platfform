@@ -386,15 +386,16 @@ def _run_tesseract_with_temp(
         _cleanup_temp_files(img_path, out_base)
 
 
-def _process_completed_futures(futures, parts_by_page: dict[int, str]) -> None:
-    """Process completed futures from the executor."""
+def _process_completed_futures(futures: list, parts_by_page: dict[int, str]) -> None:
+    """Process completed futures from the executor.
+
+    Safely removes completed futures from the list without corrupting iteration.
+    """
     from concurrent.futures import as_completed
 
-    try:
-        fut = next(as_completed(futures))
-    except Exception:
-        fut = None
-    if fut is not None:
+    # Collect completed futures first, then remove — avoids modifying list during iteration
+    done = [f for f in futures if f.done()]
+    for fut in done:
         futures.remove(fut)
         try:
             page_idx, page_text = fut.result()

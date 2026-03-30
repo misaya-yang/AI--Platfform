@@ -286,16 +286,18 @@ class DatasetService:
 
     async def _effective_dataset_permission(self, user: UserContext, dataset_id: str) -> str | None:
         """Get effective permission for user on dataset."""
-        # Admin bypass
-        if user.is_authenticated and (
-            "admin" in (user.roles or []) or "system" in (user.roles or [])
-        ):
-            return "owner"
-
         # Check dataset visibility
         dataset = await self.db.get_dataset(dataset_id)
         if not dataset:
             return None
+
+        # Admin/system bypass — only within the same tenant
+        if user.is_authenticated and (
+            "admin" in (user.roles or []) or "system" in (user.roles or [])
+        ):
+            dataset_tenant = dataset.get("tenant_id")
+            if not dataset_tenant or dataset_tenant == getattr(user, "tenant_id", None):
+                return "owner"
 
         is_public = dataset.get("is_public", False)
 

@@ -400,7 +400,7 @@ class HierarchicalIndexer:
         segment_rows = []
         failed_segments = []
 
-        for segment, vector in zip(segments, vectors, strict=False):
+        for segment, vector in zip(segments, vectors, strict=True):
             if vector is None:
                 failed_segments.append(segment.segment_id)
                 continue
@@ -508,7 +508,7 @@ class HierarchicalIndexer:
 
         points = []
         segment_rows = []
-        for segment, vector in zip(segments, vectors, strict=False):
+        for segment, vector in zip(segments, vectors, strict=True):
             if vector is None:
                 continue
 

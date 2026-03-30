@@ -106,7 +106,7 @@ class IngestionService:
         await self.db.update_document_status(document_id, status="embedding", progress=50)
 
         try:
-            await self._embed_and_store_chunks(
+            failed_batches = await self._embed_and_store_chunks(
                 dataset_id=dataset_id,
                 document_id=document_id,
                 chunks=chunks,
@@ -137,15 +137,25 @@ class IngestionService:
             )
             return {"success": False, "error": str(e)}
 
-        # Step 4: Complete
-        await self.db.update_document_status(document_id, status="completed", progress=100)
-
-        logger.info(f"Document {document_id} ingested successfully with {len(chunks)} chunks")
+        # Step 4: Complete — distinguish full vs partial success
+        if failed_batches > 0:
+            await self.db.update_document_status(
+                document_id, status="partial", progress=100,
+                error=f"{failed_batches} embedding batch(es) failed — document partially indexed",
+            )
+            logger.warning(
+                "Document %s partially ingested: %d/%d chunks, %d batches failed",
+                document_id, len(chunks), len(chunks), failed_batches,
+            )
+        else:
+            await self.db.update_document_status(document_id, status="completed", progress=100)
+            logger.info(f"Document {document_id} ingested successfully with {len(chunks)} chunks")
 
         return {
-            "success": True,
+            "success": failed_batches == 0,
             "document_id": document_id,
             "chunk_count": len(chunks),
+            "failed_batches": failed_batches,
         }
 
     async def reindex_document(
@@ -409,8 +419,12 @@ class IngestionService:
         document_id: str,
         chunks: list[tuple[str, int, str, dict[str, Any]]],
         embedding_config: dict[str, Any] | None,
-    ) -> None:
-        """Embed chunks and store in vector database."""
+    ) -> int:
+        """Embed chunks and store in vector database.
+
+        Returns:
+            Number of failed embedding batches (0 = all succeeded).
+        """
         config = embedding_config or {}
         config.get("provider", "local")
         config.get("model", "hash-384")
@@ -443,6 +457,7 @@ class IngestionService:
         qdrant_batch_size = 16
 
         total_inserted = 0
+        failed_batches = 0
 
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i : i + batch_size]
@@ -452,15 +467,14 @@ class IngestionService:
             try:
                 embeddings = await embedder.embed_documents(texts)
             except Exception as embed_err:
+                failed_batches += 1
                 logger.error(f"Embedding failed for batch {i // batch_size + 1}: {embed_err}")
-                # Mark document as partially failed
                 await self.db.update_document_status(
                     document_id,
-                    status="partially_failed",
+                    status="embedding",
                     progress=50 + int((total_inserted / len(chunks)) * 40),
                     error=f"Embedding failed for batch {i // batch_size + 1}: {str(embed_err)[:200]}",
                 )
-                # Continue with next batch instead of failing entire document
                 continue
 
             # Prepare segments for DB
@@ -544,6 +558,8 @@ class IngestionService:
             # Update progress
             progress = 50 + int((total_inserted / len(chunks)) * 40)
             await self.db.update_document_status(document_id, status="embedding", progress=progress)
+
+        return failed_batches
 
     # ========================================================================
     # Incremental Update Support

@@ -192,7 +192,7 @@ class VectorStore:
             ("section_title", qmodels.PayloadSchemaType.KEYWORD),
         )
         for field_name, field_schema in payload_indexes:
-            with contextlib.suppress(Exception):
+            try:
                 await self._call(
                     lambda fn=field_name, fs=field_schema: self._client.create_payload_index(
                         collection_name=actual,
@@ -200,6 +200,15 @@ class VectorStore:
                         field_schema=fs,
                     )
                 )
+            except Exception as idx_err:
+                err_msg = str(idx_err).lower()
+                if "already exists" in err_msg or "already indexed" in err_msg:
+                    pass  # Expected — index already exists
+                else:
+                    logger.warning(
+                        "Failed to create payload index %s on %s: %s",
+                        field_name, actual, idx_err,
+                    )
 
         return actual
 
@@ -216,19 +225,27 @@ class VectorStore:
         point_ids: Sequence[str],
         tenant_id: str | None = None,
     ) -> None:
-        """Delete points from collection, optionally verifying tenant ownership.
+        """Delete points from collection with tenant isolation.
 
         Args:
             collection_name: Name of the collection.
             point_ids: Sequence of point IDs to delete.
-            tenant_id: If provided, only delete points belonging to this tenant.
+            tenant_id: Tenant ID for isolation. If omitted, deletion still
+                proceeds (for backward compat) but a warning is logged.
         """
         ids = [pid for pid in point_ids if pid]
         if not ids:
             return
 
+        if not tenant_id:
+            logger.warning(
+                "delete_points called without tenant_id — no tenant isolation applied "
+                "(collection=%s, points=%d)",
+                collection_name, len(ids),
+            )
+
+        # Always use filter-based deletion when tenant_id is available
         if tenant_id:
-            # Use filter-based deletion to ensure tenant isolation
             await self._call(
                 lambda: self._client.delete(
                     collection_name=collection_name,
