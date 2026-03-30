@@ -146,7 +146,7 @@ export function CostAnalysisPanel() {
 
   const pieColors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444"];
   const providerPieColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
-  const gridColor = darkMode ? "#334155" : "#e2e8f0";
+  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
 
   return (
     <PanelWrapper

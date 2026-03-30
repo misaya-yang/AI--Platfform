@@ -112,7 +112,7 @@ export function TokenUsagePanel() {
     tokens: point.total_tokens,
   }));
 
-  const gridColor = darkMode ? "#334155" : "#e2e8f0";
+  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
   const modelColors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444"];
 
   return (
@@ -161,7 +161,7 @@ export function TokenUsagePanel() {
             success={{ percent: inputPercent }}
             showInfo={false}
             strokeColor="#8b5cf6"
-            railColor={darkMode ? "#334155" : "#e2e8f0"}
+            railColor={darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}
           />
         </div>
       </div>

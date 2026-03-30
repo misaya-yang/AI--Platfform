@@ -91,7 +91,7 @@ function ServiceCard({ service }: ServiceCardProps) {
       className="service-cost-card"
       style={{
         borderRadius: 16,
-        border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
+        border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e2e8f0",
         background: darkMode ? "#1e293b" : "#ffffff",
         overflow: "hidden",
       }}
@@ -156,7 +156,7 @@ function ServiceCard({ service }: ServiceCardProps) {
         </Row>
 
         {/* Token 分解 */}
-        <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}` }}>
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}` }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
             <span style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>
               {t("cost.inputTokens")}: {formatNumber(service.input_tokens)}
@@ -171,7 +171,7 @@ function ServiceCard({ service }: ServiceCardProps) {
             <Progress
               percent={service.percentage}
               strokeColor={config.gradient}
-              railColor={darkMode ? "#334155" : "#e2e8f0"}
+              railColor={darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}
               showInfo={false}
               size="small"
             />
@@ -192,7 +192,7 @@ function EmptyState({ darkMode, statusLabel }: { darkMode: boolean; statusLabel?
     <Card
       style={{
         borderRadius: 16,
-        border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
+        border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e2e8f0",
         background: darkMode ? "#1e293b" : "#ffffff",
       }}
     >
@@ -297,7 +297,7 @@ export function ServiceCostAnalysis({
                 borderRadius: 999,
                 background: darkMode ? "#0f172a" : "#f1f5f9",
                 color: darkMode ? "#e2e8f0" : "#475569",
-                border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+                border: `1px solid ${darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}`,
               }}
             >
               {statusLabel}
@@ -311,7 +311,7 @@ export function ServiceCostAnalysis({
                 width: 32,
                 height: 32,
                 borderRadius: 8,
-                background: darkMode ? "#334155" : "#f1f5f9",
+                background: darkMode ? "rgba(255,255,255,0.08)" : "#f1f5f9",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -331,7 +331,7 @@ export function ServiceCostAnalysis({
           style={{
             borderRadius: 16,
             marginBottom: 20,
-            border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
+            border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e2e8f0",
             background: darkMode
               ? "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)"
               : "linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)",

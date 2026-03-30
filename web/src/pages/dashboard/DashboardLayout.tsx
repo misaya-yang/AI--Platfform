@@ -75,13 +75,20 @@ function saveWorkspace(workspace: WorkspaceKey) {
 
 interface DashboardLayoutProps {
   width?: number;
+  forceWorkspace?: WorkspaceKey;
 }
 
-export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
+export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayoutProps) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
-  const [workspace, setWorkspace] = useState<WorkspaceKey>(() => loadWorkspace());
+  const [workspace, setWorkspace] = useState<WorkspaceKey>(() => forceWorkspace || loadWorkspace());
+
+  // Sync with parent-controlled workspace
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  if (forceWorkspace && forceWorkspace !== workspace) {
+    setWorkspace(forceWorkspace);
+  }
 
   const workspaceConfigs = useMemo<Record<WorkspaceKey, WorkspaceConfig>>(
     () => ({
@@ -143,12 +150,12 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
 
   return (
     <div style={{ minHeight: "100%" }}>
-      <div
+      {!forceWorkspace && <div
         style={{
           borderRadius: LAYOUT.CARD_RADIUS,
           border: `1px solid ${colors.border}`,
           background: darkMode
-            ? "linear-gradient(120deg, rgba(15,23,42,0.98), rgba(30,41,59,0.9))"
+            ? `linear-gradient(120deg, ${colors.cardBg}, ${colors.cardHover})`
             : "linear-gradient(120deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92))",
           boxShadow: colors.shadowSm,
           padding: "16px 18px",
@@ -241,7 +248,7 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
             ]}
           />
         </div>
-      </div>
+      </div>}
 
       <div
         style={{

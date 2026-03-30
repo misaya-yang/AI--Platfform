@@ -249,7 +249,7 @@ export function DashboardHeader() {
       <div
         style={{
           borderRadius: 16,
-          background: darkMode ? "rgba(30, 41, 59, 0.7)" : "rgba(255, 255, 255, 0.8)",
+          background: darkMode ? colors.cardBg : "rgba(255, 255, 255, 0.8)",
           backdropFilter: "blur(12px)",
           border: `1px solid ${darkMode ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)"}`,
           boxShadow: colors.shadowSm,

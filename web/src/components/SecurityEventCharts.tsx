@@ -127,7 +127,7 @@ export function SecurityEventCharts({
     [serviceAuthQuery.data, serviceRateQuery.data]
   );
 
-  const chartGridColor = darkMode ? "#334155" : "#e2e8f0";
+  const chartGridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
 
   const renderBarChart = (data: BreakdownDatum[], loading: boolean) => {
     if (loading) return <Spin />;
@@ -189,7 +189,7 @@ export function SecurityEventCharts({
     <Card
       style={{
         borderRadius: 16,
-        border: darkMode ? "1px solid #334155" : "1px solid #e2e8f0",
+        border: darkMode ? "1px solid rgba(255,255,255,0.08)" : "1px solid #e2e8f0",
         background: darkMode ? "#1e293b" : "#ffffff",
       }}
       styles={{ body: { padding: 20 } }}
@@ -207,7 +207,7 @@ export function SecurityEventCharts({
                 borderRadius: 999,
                 background: darkMode ? "#0f172a" : "#f1f5f9",
                 color: darkMode ? "#e2e8f0" : "#475569",
-                border: `1px solid ${darkMode ? "#334155" : "#e2e8f0"}`,
+                border: `1px solid ${darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}`,
               }}
             >
               {statusLabel}

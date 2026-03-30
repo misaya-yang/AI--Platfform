@@ -234,7 +234,7 @@ export function SecurityEventsPanel() {
   const dataStatus = authBreakdownQuery.data?.data_status || rateLimitBreakdownQuery.data?.data_status;
   const dataFreshness = authBreakdownQuery.data?.data_freshness_minutes ?? rateLimitBreakdownQuery.data?.data_freshness_minutes;
 
-  const gridColor = darkMode ? "#334155" : "#e2e8f0";
+  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
 
   return (
     <PanelWrapper

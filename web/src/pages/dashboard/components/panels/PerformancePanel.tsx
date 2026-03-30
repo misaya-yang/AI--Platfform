@@ -52,7 +52,7 @@ export function PerformancePanel() {
   }));
 
   const latestData = chartData[chartData.length - 1];
-  const gridColor = darkMode ? "#334155" : "#e2e8f0";
+  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
 
   const metricOptions = [
     { value: "avg", label: t("metrics.avgLatency") },
