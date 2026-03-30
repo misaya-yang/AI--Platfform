@@ -159,6 +159,8 @@ class UsageRecorder:
         self._pricing_cache_time: float = 0
         self._pricing_cache_ttl: float = 300  # 5 minutes
         self._trace_p95_cache: dict[str, tuple[int, float]] = {}
+        self._flushed_ids: set[str] = set()
+        self._flushed_ids_max: int = 10000
 
     def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
@@ -194,17 +196,18 @@ class UsageRecorder:
         return ""
 
     # Well-known model name prefix -> provider mappings for fallback inference
-    _MODEL_PREFIX_PROVIDER_MAP = {
-        "gemini": "google",
-        "gpt": "openai",
-        "claude": "anthropic",
-        "qwen": "dashscope",
-        "deepseek": "deepseek",
-        "llama": "meta",
-        "mistral": "mistral",
-        "mixtral": "mistral",
-        "command": "cohere",
-    }
+    # Sorted longest-first so "mixtral" matches before "mistral"
+    _MODEL_PREFIX_PROVIDER_MAP: list[tuple[str, str]] = [
+        ("deepseek", "deepseek"),
+        ("mixtral", "mistral"),
+        ("mistral", "mistral"),
+        ("gemini", "google"),
+        ("claude", "anthropic"),
+        ("command", "cohere"),
+        ("llama", "meta"),
+        ("qwen", "dashscope"),
+        ("gpt", "openai"),
+    ]
 
     async def _get_provider_for_model(self, model: str) -> str:
         normalized_model = str(model or "").strip()
@@ -216,9 +219,9 @@ class UsageRecorder:
             provider = pricing.get("provider")
             if provider:
                 return str(provider).strip()
-        # 2. Fallback: infer from model name prefix
+        # 2. Fallback: infer from model name prefix (case-insensitive)
         model_lower = normalized_model.lower()
-        for prefix, provider in self._MODEL_PREFIX_PROVIDER_MAP.items():
+        for prefix, provider in self._MODEL_PREFIX_PROVIDER_MAP:
             if model_lower.startswith(prefix):
                 return provider
         return ""
@@ -445,6 +448,11 @@ class UsageRecorder:
         self._buffer.clear()
         self._ensure_request_ids(records)
 
+        # Dedup: skip records already flushed successfully
+        records = [r for r in records if r.request_id not in self._flushed_ids]
+        if not records:
+            return
+
         if not self.database or not self.database._pool:
             logger.warning(f"No database connection, dropping {len(records)} usage records")
             return
@@ -456,6 +464,13 @@ class UsageRecorder:
                 await self._write_sampled_traces(conn, records)
                 await self._update_daily_aggregates(conn, records)
                 await self._update_hourly_aggregates(conn, records)
+            # Track flushed request_ids to prevent double-counting on retry
+            for r in records:
+                self._flushed_ids.add(r.request_id)
+            if len(self._flushed_ids) > self._flushed_ids_max:
+                # Evict oldest entries by discarding half
+                to_keep = list(self._flushed_ids)[len(self._flushed_ids) // 2:]
+                self._flushed_ids = set(to_keep)
             logger.debug(f"Flushed {len(records)} usage records")
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
@@ -746,14 +761,14 @@ class UsageRecorder:
                     total_input_tokens = total_input_tokens + $10,
                     total_output_tokens = total_output_tokens + $11,
                     total_cost_cents = total_cost_cents + $12,
-                    avg_latency_ms = (
-                        (avg_latency_ms * request_count + $13 * $7) /
-                        NULLIF(request_count + $7, 0)
-                    )::integer,
-                    avg_first_token_ms = (
-                        (avg_first_token_ms * request_count + $14 * $7) /
-                        NULLIF(request_count + $7, 0)
-                    )::integer,
+                    avg_latency_ms = CASE WHEN request_count + $7 > 0 THEN (
+                        (avg_latency_ms * request_count + $13 * $7)
+                        / (request_count + $7)
+                    )::integer ELSE 0 END,
+                    avg_first_token_ms = CASE WHEN request_count + $7 > 0 THEN (
+                        (avg_first_token_ms * request_count + $14 * $7)
+                        / (request_count + $7)
+                    )::integer ELSE 0 END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE tenant_id = $1
                   AND COALESCE(user_id, '') = $2

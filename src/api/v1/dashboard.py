@@ -378,8 +378,8 @@ async def get_realtime_dashboard(
         ),
         tokens=TokenMetrics(
             total=snapshot.total_tokens,
-            input_tokens=0,  # Will be filled from detailed query
-            output_tokens=0,
+            input_tokens=snapshot.input_tokens,
+            output_tokens=snapshot.output_tokens,
             cost_usd=snapshot.token_cost_usd,
             per_minute=snapshot.tokens_per_minute,
         ),

@@ -70,6 +70,8 @@ class RealtimeSnapshot:
 
     # Token/Cost (today)
     total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     token_cost_usd: float = 0.0
     tokens_per_minute: float = 0.0
 
@@ -114,6 +116,8 @@ class RealtimeSnapshot:
             },
             "tokens": {
                 "total": self.total_tokens,
+                "input": self.input_tokens,
+                "output": self.output_tokens,
                 "cost_usd": round(self.token_cost_usd, 4),
                 "per_minute": round(self.tokens_per_minute, 1),
             },
@@ -411,6 +415,8 @@ class RealtimeMetricsService:
             duration_sum = int(results[6] or 0)
             duration_count = int(results[7] or 0)
 
+            snapshot.input_tokens = input_tokens
+            snapshot.output_tokens = output_tokens
             snapshot.total_tokens = input_tokens + output_tokens
             snapshot.token_cost_usd = (
                 microcents_to_usd(cost_microcents)
@@ -439,12 +445,16 @@ class RealtimeMetricsService:
                         (requests_5m * avg_tokens_per_request) / WINDOW_MINUTES, 1
                     )
                 else:
-                    # 回退到简单计算
-                    elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
+                    # 回退到简单计算 — 使用距当日零点的秒数除以60
+                    _now = datetime.now()
+                    _day_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    elapsed_minutes = max(1, (_now - _day_start).total_seconds() / 60)
                     snapshot.tokens_per_minute = round(snapshot.total_tokens / elapsed_minutes, 1)
             except Exception:
                 # 发生错误时回退到简单计算
-                elapsed_minutes = max(1, datetime.now().hour * 60 + datetime.now().minute)
+                _now = datetime.now()
+                _day_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+                elapsed_minutes = max(1, (_now - _day_start).total_seconds() / 60)
                 snapshot.tokens_per_minute = round(snapshot.total_tokens / elapsed_minutes, 1)
 
             snapshot.total_runs = total_runs
