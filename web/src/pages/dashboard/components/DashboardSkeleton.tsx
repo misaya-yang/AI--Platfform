@@ -84,7 +84,7 @@ export function DashboardSkeleton() {
   const colors = getColors(darkMode);
 
   return (
-    <div style={{ padding: LAYOUT.PAGE_PADDING, background: colors.pageBg, minHeight: "100vh" }}>
+    <div aria-hidden="true" role="presentation" style={{ padding: LAYOUT.PAGE_PADDING, background: colors.pageBg, minHeight: "100vh" }}>
       <style>{`@keyframes shimmer { 0% { background-position: -200px 0; } 100% { background-position: calc(200px + 100%) 0; } }`}</style>
 
       {/* Header skeleton */}

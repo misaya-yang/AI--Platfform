@@ -186,7 +186,7 @@ function ProviderDetailModal({
       render: (text: string, record: Model) => (
         <div>
           <div style={{ fontWeight: 500 }}>{text}</div>
-          <div style={{ fontSize: 11, color: "var(--text-secondary, #94a3b8)" }}>{record.model_id}</div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>{record.model_id}</div>
         </div>
       ),
     },

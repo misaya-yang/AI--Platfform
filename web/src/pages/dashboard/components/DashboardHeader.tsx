@@ -133,10 +133,10 @@ export function DashboardHeader() {
               fontSize: 11,
               padding: "4px 12px",
               borderRadius: 20, // Pill style
-              background: darkMode ? "rgba(99, 102, 241, 0.15)" : "#EEF2FF",
+              background: colors.accentBg,
               color: colors.accent,
               fontWeight: 600,
-              border: `1px solid ${darkMode ? "rgba(99, 102, 241, 0.2)" : "#DDE6FF"}`,
+              border: `1px solid ${colors.border}`,
               display: "flex",
               alignItems: "center",
               gap: 6,
@@ -313,7 +313,7 @@ export function DashboardHeader() {
                       fontSize: 11,
                       padding: "2px 8px",
                       borderRadius: 12,
-                      background: darkMode ? "rgba(99, 102, 241, 0.15)" : "#EEF2FF",
+                      background: colors.accentBg,
                       color: colors.accent,
                     }}
                   >
@@ -326,7 +326,7 @@ export function DashboardHeader() {
                       fontSize: 11,
                       padding: "2px 8px",
                       borderRadius: 12,
-                      background: darkMode ? "rgba(16, 185, 129, 0.15)" : "#ECFDF5",
+                      background: colors.successBg,
                       color: colors.success,
                     }}
                   >
@@ -339,7 +339,7 @@ export function DashboardHeader() {
                       fontSize: 11,
                       padding: "2px 8px",
                       borderRadius: 12,
-                      background: darkMode ? "rgba(245, 158, 11, 0.15)" : "#FEF3C7",
+                      background: colors.warningBg,
                       color: colors.warning,
                     }}
                   >

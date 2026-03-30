@@ -13,6 +13,7 @@ import {
   Database,
 } from "lucide-react";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
@@ -100,10 +101,13 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
 
 // ── Mini sparkline (7-day trend) ────────────────────────────────────
 function Sparkline({ color, darkMode }: { color: string; darkMode: boolean }) {
-  // Generate subtle placeholder sparkline data (replaced with real data when available)
-  const data = Array.from({ length: 7 }, (_, i) => ({
-    v: 40 + Math.sin(i * 0.8) * 20 + Math.random() * 15,
-  }));
+  // Memoize sparkline data to prevent re-render jitter
+  const data = useMemo(
+    () => Array.from({ length: 7 }, (_, i) => ({
+      v: 40 + Math.sin(i * 0.8) * 20 + ((i * 17 + 7) % 15),
+    })),
+    []
+  );
 
   return (
     <div style={{ height: 32, marginTop: 8, opacity: 0.7 }}>

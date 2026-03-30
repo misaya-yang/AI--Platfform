@@ -160,7 +160,7 @@ class UsageRecorder:
         self._pricing_cache_ttl: float = 300  # 5 minutes
         self._trace_p95_cache: dict[str, tuple[int, float]] = {}
         self._flushed_ids: set[str] = set()
-        self._flushed_ids_max: int = 10000
+        self._flushed_ids_max: int = 5000
 
     def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
@@ -468,9 +468,8 @@ class UsageRecorder:
             for r in records:
                 self._flushed_ids.add(r.request_id)
             if len(self._flushed_ids) > self._flushed_ids_max:
-                # Evict oldest entries by discarding half
-                to_keep = list(self._flushed_ids)[len(self._flushed_ids) // 2:]
-                self._flushed_ids = set(to_keep)
+                # Evict: clear and keep only current batch ids
+                self._flushed_ids = {r.request_id for r in records}
             logger.debug(f"Flushed {len(records)} usage records")
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
