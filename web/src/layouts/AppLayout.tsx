@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Layout, Typography, Space, Dropdown } from "antd";
+import { Layout, Typography, Dropdown } from "antd";
 import type { MenuProps } from "antd";
 import {
   DashboardOutlined,
@@ -243,7 +243,7 @@ export function AppLayout() {
       >
         <div className="flex flex-col h-full bg-sidebar/50">
           {/* Logo area */}
-          <div className="h-[52px] flex items-center px-6 border-b border-border/40">
+          <div className="h-[48px] flex items-center px-5">
             <Logo collapsed={collapsed} />
           </div>
 
@@ -296,10 +296,10 @@ export function AppLayout() {
           </div>
 
           {/* Footer Actions */}
-          <div className="p-4 border-t border-border/40 bg-muted/5 space-y-3">
+          <div className="p-4 space-y-3">
             {/* Theme Toggle */}
             <div className={`
-              flex items-center transition-all duration-300 bg-background/50 rounded-xl p-1 border border-border/20
+              flex items-center transition-all duration-300 rounded-xl p-1
               ${collapsed ? 'justify-center flex-col gap-2' : 'justify-between px-3'}
             `}>
               {!collapsed && (
@@ -348,52 +348,36 @@ export function AppLayout() {
         background: 'transparent',
         minHeight: '100vh',
       }}>
-        {/* 顶部导航栏 */}
+        {/* 顶部栏 — 只保留用户菜单，不重复页面标题 */}
         <Header style={{
-          padding: isMobile ? '0 12px' : '0 20px',
+          padding: '0 16px',
           background: 'transparent',
           borderBottom: 'none',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
+          justifyContent: 'flex-end',
           position: 'relative',
           zIndex: 50,
-          height: 44,
+          height: 40,
         }}>
-          {/* 左侧 - 面包屑/标题 */}
-          <div className="flex items-center gap-3">
-            {isMobile && (
-              <button
-                type="button"
-                onClick={() => setCollapsed((prev) => !prev)}
-                className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border/70 bg-background/80"
-                aria-label={t("nav.toggleSidebar", "Toggle sidebar")}
-              >
-                <MenuOutlined />
-              </button>
-            )}
-            <Text strong style={{ fontSize: 16, fontWeight: 600 }}>
-              {(() => {
-                const item = filteredNavItems.find(item => location.pathname.startsWith(item.key));
-                return item ? t(item.labelKey) : '';
-              })()}
-            </Text>
-          </div>
-
-          {/* 右侧 - 工具栏 */}
-          <Space size={16}>
-            {/* 用户菜单 */}
-            <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-              <div
-                className="user-menu-trigger flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer hover:bg-accent transition-colors"
-              >
-                <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center">
-                  <UserOutlined className="text-primary" />
-                </div>
-                <Text style={{ fontSize: 13, fontWeight: 500 }}>{user?.display_name || user?.user_id || t('common.user')}</Text>
+          {isMobile && (
+            <button
+              type="button"
+              onClick={() => setCollapsed((prev) => !prev)}
+              className="h-8 w-8 inline-flex items-center justify-center rounded-md mr-auto"
+              aria-label={t("nav.toggleSidebar", "Toggle sidebar")}
+            >
+              <MenuOutlined />
+            </button>
+          )}
+          <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
+            <div className="flex items-center gap-2 px-2 py-1 rounded-lg cursor-pointer hover:bg-accent/50 transition-colors">
+              <div className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center">
+                <UserOutlined className="text-primary text-xs" />
               </div>
-            </Dropdown>
-          </Space>
+              <Text style={{ fontSize: 12, fontWeight: 500 }}>{user?.display_name || user?.user_id || t('common.user')}</Text>
+            </div>
+          </Dropdown>
         </Header>
 
         {/* Main content */}
