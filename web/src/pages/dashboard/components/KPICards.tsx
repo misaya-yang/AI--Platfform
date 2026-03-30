@@ -88,7 +88,10 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
     : t("dashboard.trend.down", "下降");
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 600, color, marginTop: 6 }}>
+    <div
+      style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 600, color, marginTop: 6 }}
+      aria-label={`${trendLabel} ${Math.abs(value)}%`}
+    >
       {isUp ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
       <span>{Math.abs(value)}%</span>
       <span style={{ fontSize: 11, opacity: 0.8 }}>{trendLabel}</span>

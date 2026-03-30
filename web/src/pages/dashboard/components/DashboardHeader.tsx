@@ -104,7 +104,7 @@ export function DashboardHeader() {
   return (
     <div style={{ marginBottom: LAYOUT.SECTION_GAP }}>
       {/* Aria-live region for auto-refresh notification */}
-      <div aria-live="polite" aria-atomic="true" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0,0,0,0)" }}>
+      <div aria-live="polite" aria-atomic="true" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clipPath: "inset(100%)" }}>
         {t("dashboard.refresh.lastUpdated", { time: dayjs(lastRefresh).format("HH:mm:ss") })}
       </div>
 
