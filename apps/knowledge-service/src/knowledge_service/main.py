@@ -161,6 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "model_name": embed.model if embed.provider == "siliconflow" else "",
                         })(),
                         "ocr_enabled": s.ocr.enabled,
+                        "ocr_strategy": s.ocr.strategy,
                         "worker_concurrency": s.processing.worker_concurrency,
                         "document_worker_concurrency": s.processing.document_worker_concurrency,
                         # Embedding config
@@ -259,7 +260,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as e:
                     logger.warning("vlm_ocr_init_failed", error=str(e))
 
-            knowledge_worker = KnowledgeWorker(knowledge_service, vlm_ocr_service=vlm_ocr_service)
+            # Initialize document type detector for auto-mode processing
+            doc_detector = None
+            try:
+                from .services.knowledge.document_detector import DocumentTypeDetector
+                doc_detector = DocumentTypeDetector()
+                logger.info("document_detector_initialized")
+            except Exception as e:
+                logger.warning("document_detector_init_failed", error=str(e))
+
+            knowledge_worker = KnowledgeWorker(
+                knowledge_service,
+                detector=doc_detector,
+                vlm_ocr_service=vlm_ocr_service,
+            )
             await knowledge_worker.start()
             app.state.knowledge_worker = knowledge_worker
 
