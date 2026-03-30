@@ -8,7 +8,7 @@ import {
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
-import { getColors, LAYOUT } from "./styles";
+import { getColors, LAYOUT, TYPOGRAPHY } from "./styles";
 import type { PanelType } from "./types";
 import {
   ServiceHealthPanel,
@@ -145,7 +145,7 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
     <div style={{ minHeight: "100%" }}>
       <div
         style={{
-          borderRadius: 16,
+          borderRadius: LAYOUT.CARD_RADIUS,
           border: `1px solid ${colors.border}`,
           background: darkMode
             ? "linear-gradient(120deg, rgba(15,23,42,0.98), rgba(30,41,59,0.9))"
@@ -167,8 +167,7 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
           <div style={{ minWidth: 280 }}>
             <div
               style={{
-                fontSize: 18,
-                fontWeight: 700,
+                ...TYPOGRAPHY.sectionTitle,
                 color: colors.textPrimary,
                 letterSpacing: "-0.02em",
               }}

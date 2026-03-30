@@ -19,7 +19,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
-import { LAYOUT, getColors } from "../styles";
+import { LAYOUT, getColors, TRANSITION, TYPOGRAPHY } from "../styles";
 import type { SourceFilter, RefreshInterval } from "../types";
 import { useDashboardEntityLabels } from "../hooks/useDashboardEntityLabels";
 
@@ -115,11 +115,10 @@ export function DashboardHeader() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <h1
             style={{
-              fontSize: 26, // Increased size
-              fontWeight: 800, // Bolder
+              ...TYPOGRAPHY.pageTitle,
               margin: 0,
               color: colors.textPrimary,
-              letterSpacing: "-0.03em",
+              letterSpacing: "-0.02em",
             }}
           >
             {t("metrics.title")}
@@ -156,6 +155,7 @@ export function DashboardHeader() {
           <Tooltip title={t("dashboard.refresh.now")}>
             <button
               onClick={triggerRefresh}
+              aria-label={t("dashboard.refresh.now")}
               style={{
                 width: 36,
                 height: 36,
@@ -167,7 +167,7 @@ export function DashboardHeader() {
                 justifyContent: "center",
                 cursor: "pointer",
                 color: colors.textSecondary,
-                transition: "all 0.2s",
+                transition: TRANSITION.fast,
               }}
             >
               <SyncOutlined style={{ fontSize: 14 }} />
@@ -177,6 +177,7 @@ export function DashboardHeader() {
           <Tooltip title={isFullscreen ? t("dashboard.fullscreen.exit") : t("dashboard.fullscreen.enter")}>
             <button
               onClick={handleFullscreen}
+              aria-label={isFullscreen ? t("dashboard.fullscreen.exit") : t("dashboard.fullscreen.enter")}
               style={{
                 width: 36,
                 height: 36,
@@ -188,7 +189,7 @@ export function DashboardHeader() {
                 justifyContent: "center",
                 cursor: "pointer",
                 color: colors.textSecondary,
-                transition: "all 0.2s",
+                transition: TRANSITION.fast,
               }}
             >
               {isFullscreen ? (
@@ -210,7 +211,7 @@ export function DashboardHeader() {
           border: `1px solid ${darkMode ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)"}`,
           boxShadow: colors.shadowSm,
           overflow: "hidden",
-          transition: "all 0.3s ease",
+          transition: TRANSITION.slow,
         }}
       >
         {/* Collapsed Header - Always visible */}
@@ -283,7 +284,7 @@ export function DashboardHeader() {
                       padding: "2px 8px",
                       borderRadius: 12,
                       background: darkMode ? "rgba(16, 185, 129, 0.15)" : "#ECFDF5",
-                      color: "#10B981",
+                      color: colors.success,
                     }}
                   >
                     {resolveUserLabel(userId)}
@@ -296,7 +297,7 @@ export function DashboardHeader() {
                       padding: "2px 8px",
                       borderRadius: 12,
                       background: darkMode ? "rgba(245, 158, 11, 0.15)" : "#FEF3C7",
-                      color: "#F59E0B",
+                      color: colors.warning,
                     }}
                   >
                     {source === "internal" ? t("dashboard.filters.internalShort") : t("dashboard.filters.externalShort")}
@@ -356,7 +357,7 @@ export function DashboardHeader() {
                 justifyContent: "center",
                 cursor: "pointer",
                 color: colors.textMuted,
-                transition: "all 0.2s",
+                transition: TRANSITION.fast,
               }}
             >
               {filterCollapsed ? <DownOutlined style={{ fontSize: 10 }} /> : <UpOutlined style={{ fontSize: 10 }} />}
@@ -369,7 +370,7 @@ export function DashboardHeader() {
           style={{
             maxHeight: filterCollapsed ? 0 : 200,
             overflow: "hidden",
-            transition: "max-height 0.3s ease",
+            transition: `max-height 300ms cubic-bezier(0.4, 0, 0.2, 1)`,
           }}
         >
           <div

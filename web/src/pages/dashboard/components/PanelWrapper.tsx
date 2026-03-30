@@ -4,7 +4,7 @@ import { type ReactNode } from "react";
 import { Tooltip } from "antd";
 import { SyncOutlined } from "@ant-design/icons";
 import { useAppStore } from "@/store/useAppStore";
-import { LAYOUT, getColors } from "../styles";
+import { LAYOUT, getColors, TRANSITION } from "../styles";
 import { useTranslation } from "react-i18next";
 import { DataStatusBadge } from "./DataStatusBadge";
 
@@ -53,8 +53,8 @@ export function PanelWrapper({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "0 20px",
-          height: 56, // Increased header height
+          padding: `0 ${LAYOUT.CARD_PADDING}px`,
+          height: 48,
           borderBottom: `1px solid ${colors.border}`,
           background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.015)",
           flexShrink: 0,
@@ -86,20 +86,20 @@ export function PanelWrapper({
                   width: 32, // Slightly larger
                   height: 32,
                   borderRadius: 8,
-                  background: darkMode ? "#334155" : "#f1f5f9",
+                  background: colors.innerBg,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   cursor: "pointer",
-                  transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                  transition: TRANSITION.normal,
                   border: `1px solid ${colors.border}`,
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.background = darkMode ? "#475569" : "#e2e8f0";
+                  e.currentTarget.style.background = darkMode ? colors.borderHover : colors.border;
                   e.currentTarget.style.transform = "rotate(180deg)";
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.background = darkMode ? "#334155" : "#f1f5f9";
+                  e.currentTarget.style.background = colors.innerBg;
                   e.currentTarget.style.transform = "rotate(0deg)";
                 }}
               >
@@ -119,7 +119,7 @@ export function PanelWrapper({
       {/* Body */}
       <div
         style={{
-          padding: noPadding ? 0 : 20, // Match header padding
+          padding: noPadding ? 0 : LAYOUT.CARD_PADDING,
           flex: 1,
           overflow: "auto",
         }}

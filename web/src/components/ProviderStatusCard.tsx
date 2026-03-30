@@ -20,7 +20,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { api } from "@/lib/api";
 
 // Import unified layout from dashboard styles
-import { LAYOUT, getColors, gridStyles } from "@/pages/dashboard/styles";
+import { LAYOUT, getColors, gridStyles, TRANSITION } from "@/pages/dashboard/styles";
 import { PanelWrapper } from "@/pages/dashboard/components/PanelWrapper";
 
 // Provider configuration
@@ -110,13 +110,13 @@ function ProviderCard({
       onClick={configured ? onClick : undefined}
       style={{
         padding: "18px",
-        borderRadius: 14,
+        borderRadius: LAYOUT.CARD_RADIUS,
         background: configured ? colors.cardBg : colors.innerBg,
         border: `1.5px solid ${borderColor}`,
         position: "relative",
         overflow: "hidden",
         cursor: configured ? "pointer" : "default",
-        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        transition: TRANSITION.slow,
         minWidth: 0,
         boxShadow: colors.shadowSm,
       }}
@@ -195,7 +195,7 @@ function ProviderCard({
             style={{
               fontSize: 12,
               fontWeight: 500,
-              color: configured ? colors.textSecondary : colors.textMuted,
+              color: colors.textSecondary,
               marginTop: 2,
               display: "flex",
               alignItems: "center",
@@ -256,7 +256,7 @@ function ProviderDetailModal({
       render: (text: string, record: Model) => (
         <div>
           <div style={{ fontWeight: 500 }}>{text}</div>
-          <div style={{ fontSize: 11, color: "#94a3b8" }}>{record.model_id}</div>
+          <div style={{ fontSize: 11, color: "var(--text-secondary, #94a3b8)" }}>{record.model_id}</div>
         </div>
       ),
     },

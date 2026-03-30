@@ -3,20 +3,20 @@
 
 import { Spin } from "antd";
 import {
-  ApiOutlined,
-  DollarOutlined,
-  ThunderboltOutlined,
-  CheckCircleOutlined,
-  DatabaseOutlined,
-  ArrowUpOutlined,
-  ArrowDownOutlined,
-  MinusOutlined,
-} from "@ant-design/icons";
+  ArrowUp,
+  ArrowDown,
+  Minus,
+  Activity,
+  DollarSign,
+  Zap,
+  CheckCircle,
+  Database,
+} from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary } from "@/api/usage";
-import { LAYOUT, getColors, gridStyles } from "../styles";
+import { LAYOUT, getColors, gridStyles, TRANSITION } from "../styles";
 import { useTranslation } from "react-i18next";
 import dayjs from "dayjs";
 
@@ -73,7 +73,7 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
         }}
       >
         <span>NEW</span>
-        <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.noBaseline", "无基线对比")}</span>
+        <span style={{ color: colors.textSecondary, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.noBaseline", "无基线对比")}</span>
       </div>
     );
   }
@@ -87,11 +87,11 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
           gap: 4,
           fontSize: 11,
           fontWeight: 600,
-          color: colors.textMuted,
+          color: colors.textSecondary,
           marginTop: 4,
         }}
       >
-        <MinusOutlined />
+        <Minus size={12} />
         <span>--</span>
       </div>
     );
@@ -113,9 +113,9 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
         marginTop: 4,
       }}
     >
-      {isUp ? <ArrowUpOutlined /> : <ArrowDownOutlined />}
+      {isUp ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
       <span>{Math.abs(value)}%</span>
-      <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.vsPrevious")}</span>
+      <span style={{ color: colors.textSecondary, fontWeight: 400, marginLeft: 2 }}>{t("dashboard.trend.vsPrevious")}</span>
     </div>
   );
 }
@@ -166,7 +166,7 @@ function KPICard({
         flexDirection: "column",
         justifyContent: "center",
         minWidth: 0,
-        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        transition: TRANSITION.slow,
         position: "relative",
         overflow: "hidden",
         cursor: onClick ? "pointer" : "default",
@@ -270,7 +270,7 @@ function KPICard({
               )}
             </div>
             {noData ? (
-              <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 4 }}>
+              <div style={{ fontSize: 11, color: colors.textSecondary, marginTop: 4 }}>
                 {t("dashboard.kpi.noRealData")}
               </div>
             ) : (
@@ -331,7 +331,7 @@ export function KPICards() {
     {
       title: t("metrics.totalRequests"),
       value: hasData ? formatNumber(data?.total_requests || 0) : "--",
-      icon: <ApiOutlined />,
+      icon: <Activity size={20} />,
       iconColor: colors.accent,
       iconGradient: colors.accentGradient,
       trend: requestsTrend,
@@ -341,7 +341,7 @@ export function KPICards() {
     {
       title: t("dashboard.kpi.totalCostUsd", "总成本 (USD)"),
       value: hasData ? formatCurrency(data?.total_cost_usd || 0) : "--",
-      icon: <DollarOutlined />,
+      icon: <DollarSign size={20} />,
       iconColor: colors.success,
       iconGradient: colors.successGradient,
       trend: costTrend,
@@ -353,7 +353,7 @@ export function KPICards() {
       title: t("metrics.avgLatency"),
       value: hasData ? Math.round(data?.avg_latency_ms || 0) : "--",
       suffix: hasData ? "ms" : undefined,
-      icon: <ThunderboltOutlined />,
+      icon: <Zap size={20} />,
       iconColor: colors.warning,
       iconGradient: colors.warningGradient,
       trend: latencyTrend,
@@ -369,7 +369,7 @@ export function KPICards() {
       title: t("metrics.successRate"),
       value: hasData ? (data?.success_rate || 0).toFixed(1) : "--",
       suffix: hasData ? "%" : undefined,
-      icon: <CheckCircleOutlined />,
+      icon: <CheckCircle size={20} />,
       iconColor: data?.success_rate && data.success_rate >= 95 ? colors.success : colors.warning,
       iconGradient: data?.success_rate && data.success_rate >= 95 ? colors.successGradient : colors.warningGradient,
       trend: successRateTrend,
@@ -383,7 +383,7 @@ export function KPICards() {
     {
       title: t("metrics.totalTokens"),
       value: hasData ? formatNumber(data?.total_tokens || 0) : "--",
-      icon: <DatabaseOutlined />,
+      icon: <Database size={20} />,
       iconColor: colors.purple,
       iconGradient: colors.purpleGradient,
       trend: tokensTrend,
