@@ -539,6 +539,77 @@ class KnowledgeWorker:
             strategy=self._ocr_strategy,
         )
 
+    async def _process_scanned_with_vlm_ocr(
+        self, task: KnowledgeIngestTask, doc: dict,
+    ) -> None:
+        """Process a scanned PDF using VLM OCR for text extraction, then standard ingestion.
+
+        Fallback when VisionPDFProcessor is not available but VLM OCR service is.
+        Renders each page to image → VLM OCR → concatenated text → ingest as text.
+        """
+        import fitz
+        metadata = doc.get("metadata", {})
+        original_key = metadata.get("original_file_key")
+        if not original_key:
+            await self.service.db.update_document_status(
+                task.document_id, status="failed", progress=100, error="no original file"
+            )
+            return
+
+        await self.service.db.update_document_status(task.document_id, status="processing", progress=5)
+
+        # Download PDF from storage
+        pdf_bytes = await self.service.image_storage.download_bytes(original_key)
+        if not pdf_bytes:
+            await self.service.db.update_document_status(
+                task.document_id, status="failed", progress=100, error="failed to download file"
+            )
+            return
+
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        total_pages = len(pdf_doc)
+        logger.info(f"[Worker] VLM OCR processing {total_pages} pages for {task.document_id}")
+
+        # Render pages to images and OCR in batches
+        all_text_parts = []
+        batch_size = 5
+        for batch_start in range(0, total_pages, batch_size):
+            batch_end = min(batch_start + batch_size, total_pages)
+            images = []
+            for pn in range(batch_start, batch_end):
+                page = pdf_doc[pn]
+                mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
+                pix = page.get_pixmap(matrix=mat)
+                images.append(pix.tobytes("png"))
+
+            texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
+            for i, text in enumerate(texts):
+                if text and text.strip():
+                    all_text_parts.append(f"[Page {batch_start + i + 1}]\n{text}")
+
+            progress = 5 + int((batch_end / total_pages) * 60)
+            await self.service.db.update_document_status(
+                task.document_id, status="processing", progress=progress,
+            )
+
+        pdf_doc.close()
+
+        if not all_text_parts:
+            await self.service.db.update_document_status(
+                task.document_id, status="failed", progress=100, error="VLM OCR extracted no text"
+            )
+            return
+
+        full_text = "\n\n".join(all_text_parts)
+        logger.info(f"[Worker] VLM OCR extracted {len(full_text)} chars from {total_pages} pages")
+
+        # Update document content and re-ingest as text
+        await self.service.db.update_document(
+            task.document_id, {"content": full_text, "word_count": len(full_text.split())}
+        )
+        await self.service.db.update_document_status(task.document_id, status="embedding", progress=70)
+        await self.service.ingest_document(task.dataset_id, task.document_id)
+
     async def _process_with_hierarchical_indexer(
         self,
         task: KnowledgeIngestTask,
@@ -768,6 +839,10 @@ class KnowledgeWorker:
         """
 
         if not self.vision_processor:
+            if self.vlm_ocr_service:
+                logger.info("[Worker] No VisionPDFProcessor, using VLM OCR text extraction for scanned PDF")
+                await self._process_scanned_with_vlm_ocr(task, doc)
+                return
             logger.warning(
                 "[Worker] VisionPDFProcessor not available, falling back to standard processing"
             )
