@@ -229,7 +229,7 @@ export function AppLayout() {
         trigger={null}
         width={210}
         collapsedWidth={isMobile ? 0 : 64}
-        className="app-sider bg-card/50 backdrop-blur-xl"
+        className="app-sider"
         style={{
           position: 'fixed',
           left: isMobile ? siderOffset : 0,
@@ -237,11 +237,12 @@ export function AppLayout() {
           bottom: 0,
           zIndex: 100,
           borderRight: 'none',
+          background: darkMode ? '#0A0A0B' : '#FFFFFF',
           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
         theme={resolvedTheme}
       >
-        <div className="flex flex-col h-full bg-sidebar/50">
+        <div className="flex flex-col h-full">
           {/* Logo area */}
           <div className="h-[48px] flex items-center px-5">
             <Logo collapsed={collapsed} />
@@ -412,6 +413,14 @@ export function AppLayout() {
 
       {/* Global styles */}
       <style>{`
+        /* Kill any Ant Design sider borders/shadows */
+        .ant-layout-sider,
+        .ant-layout-sider *,
+        .ant-layout-sider-children {
+          border-right: none !important;
+          border-inline-end: none !important;
+          box-shadow: none !important;
+        }
         .app-sider .ant-menu-item {
           margin: 4px 12px !important;
           border-radius: 10px !important;
