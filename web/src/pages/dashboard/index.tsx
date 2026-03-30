@@ -119,7 +119,9 @@ function DashboardContent() {
             style={{ minWidth: 90 }} />
           <div style={{ width: 1, height: 18, background: colors.border, margin: "0 2px" }} />
           <CalendarOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
-          <RangePicker size="small" value={dateRange} onChange={(d) => d && setDateRange(d)}
+          <RangePicker size="small"
+            value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
+            onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
             format="YYYY-MM-DD" allowClear={false} style={{ width: 220 }} />
           <Select size="small" value={granularity} onChange={setGranularity}
             options={[{ label: "按天", value: "day" }, { label: "按小时", value: "hour" }]}
