@@ -573,26 +573,27 @@ class KnowledgeWorker:
         # Render pages to images and OCR in batches
         all_text_parts = []
         batch_size = 5
-        for batch_start in range(0, total_pages, batch_size):
-            batch_end = min(batch_start + batch_size, total_pages)
-            images = []
-            for pn in range(batch_start, batch_end):
-                page = pdf_doc[pn]
-                mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
-                pix = page.get_pixmap(matrix=mat)
-                images.append(pix.tobytes("png"))
+        try:
+            for batch_start in range(0, total_pages, batch_size):
+                batch_end = min(batch_start + batch_size, total_pages)
+                images = []
+                for pn in range(batch_start, batch_end):
+                    page = pdf_doc[pn]
+                    mat = fitz.Matrix(200 / 72, 200 / 72)  # 200 DPI
+                    pix = page.get_pixmap(matrix=mat)
+                    images.append(pix.tobytes("png"))
 
-            texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
-            for i, text in enumerate(texts):
-                if text and text.strip():
-                    all_text_parts.append(f"[Page {batch_start + i + 1}]\n{text}")
+                texts = await self.vlm_ocr_service.ocr_pdf_pages(images)
+                for i, text in enumerate(texts):
+                    if text and text.strip():
+                        all_text_parts.append(f"[Page {batch_start + i + 1}]\n{text}")
 
-            progress = 5 + int((batch_end / total_pages) * 60)
-            await self.service.db.update_document_status(
-                task.document_id, status="processing", progress=progress,
-            )
-
-        pdf_doc.close()
+                progress = 5 + int((batch_end / total_pages) * 60)
+                await self.service.db.update_document_status(
+                    task.document_id, status="processing", progress=progress,
+                )
+        finally:
+            pdf_doc.close()
 
         if not all_text_parts:
             await self.service.db.update_document_status(

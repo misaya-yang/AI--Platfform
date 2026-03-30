@@ -86,10 +86,13 @@ async def proxy_to_kb_service(
             content=request.stream(),  # Bug 1: stream request body
         )
         resp = await client.send(req, stream=True)  # Bug 1: stream response
-        _cb_success()
+        if resp.status_code < 500:
+            _cb_success()
+        else:
+            _cb_fail()
         rh, mt = _clean_headers(resp.headers), resp.headers.get("content-type")
         cl = resp.headers.get("content-length")
-        if cl and int(cl) < 256 * 1024:  # small response: buffer
+        if cl and cl.isdigit() and int(cl) < 256 * 1024:  # small response: buffer
             body = await resp.aread()
             await resp.aclose()
             return Response(content=body, status_code=resp.status_code, headers=rh, media_type=mt)
