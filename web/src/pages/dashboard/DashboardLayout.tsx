@@ -249,7 +249,7 @@ export function DashboardLayout({ width = 1200 }: DashboardLayoutProps) {
           gridTemplateColumns: useSingleColumn
             ? "minmax(0, 1fr)"
             : "repeat(2, minmax(0, 1fr))",
-          gap: LAYOUT.GRID_GAP,
+          gap: useSingleColumn ? 12 : LAYOUT.GRID_GAP,
           alignItems: "stretch",
         }}
       >

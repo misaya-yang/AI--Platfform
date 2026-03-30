@@ -39,6 +39,16 @@ export const TRANSITION = {
   slow:   'all 300ms cubic-bezier(0.4, 0, 0.2, 1)',
 } as const;
 
+// ── Reduced motion CSS (inject via <style>) ────────────────────────
+export const REDUCED_MOTION_CSS = `
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+`;
+
 // ── Elevation / Shadows ─────────────────────────────────────────────
 export const ELEVATION = (dark: boolean) => ({
   none: 'none',
