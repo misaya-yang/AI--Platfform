@@ -216,8 +216,8 @@ export function AppLayout() {
         ? t("theme.mode.dark", "Dark")
         : t("theme.mode.light", "Light");
 
-  const siderOffset = isMobile ? (collapsed ? -260 : 0) : 0;
-  const contentMarginLeft = isMobile ? 0 : collapsed ? 80 : 260;
+  const siderOffset = isMobile ? (collapsed ? -210 : 0) : 0;
+  const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : 210;
 
 
   return (
@@ -227,8 +227,8 @@ export function AppLayout() {
         collapsed={collapsed}
         onCollapse={setCollapsed}
         trigger={null}
-        width={260}
-        collapsedWidth={isMobile ? 0 : 80}
+        width={210}
+        collapsedWidth={isMobile ? 0 : 64}
         className="app-sider border-r border-border bg-card/50 backdrop-blur-xl"
         style={{
           position: 'fixed',
@@ -350,17 +350,15 @@ export function AppLayout() {
       }}>
         {/* 顶部导航栏 */}
         <Header style={{
-          padding: isMobile ? '0 16px' : '0 32px',
-          background: darkMode ? 'rgba(10, 10, 11, 0.85)' : 'rgba(255, 255, 255, 0.8)',
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid var(--border)',
+          padding: isMobile ? '0 12px' : '0 20px',
+          background: 'transparent',
+          borderBottom: 'none',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          position: 'sticky',
-          top: 0,
+          position: 'relative',
           zIndex: 50,
-          height: 52,
+          height: 44,
         }}>
           {/* 左侧 - 面包屑/标题 */}
           <div className="flex items-center gap-3">
@@ -400,8 +398,8 @@ export function AppLayout() {
 
         {/* Main content */}
         <Content style={{
-          padding: isMobile ? '16px' : '24px',
-          minHeight: 'calc(100vh - 64px)',
+          padding: isMobile ? '8px' : '12px 16px',
+          minHeight: 'calc(100vh - 44px)',
           overflow: 'auto',
         }}>
           <Outlet />

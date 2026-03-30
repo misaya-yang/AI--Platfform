@@ -59,11 +59,11 @@ export const ELEVATION = (dark: boolean) => ({
 
 // ── Layout constants ────────────────────────────────────────────────
 export const LAYOUT = {
-  CARD_GAP: 16,
-  CARD_PADDING: 16,
-  CARD_RADIUS: 10,
-  PAGE_PADDING: 20,
-  KPI_HEIGHT: 140,
+  CARD_GAP: 12,
+  CARD_PADDING: 12,
+  CARD_RADIUS: 8,
+  PAGE_PADDING: 12,
+  KPI_HEIGHT: 120,
   PANEL_MIN_HEIGHT: 400,
   DASHBOARD_MIN_CONTENT_WIDTH: 1180,
 

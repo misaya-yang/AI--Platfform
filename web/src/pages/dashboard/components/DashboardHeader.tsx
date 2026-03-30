@@ -47,7 +47,7 @@ export function DashboardHeader() {
   } = useDashboardContext();
 
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [filterCollapsed, setFilterCollapsed] = useState(false);
+  const [filterCollapsed, setFilterCollapsed] = useState(true);
   const { serviceOptions, userOptions, resolveServiceLabel, resolveUserLabel } =
     useDashboardEntityLabels();
 

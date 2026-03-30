@@ -73,12 +73,12 @@ function DashboardContent() {
     >
       <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
         {/* Header */}
-        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: 12 }}>
+        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: 8 }}>
           <DashboardHeader />
         </div>
 
         {/* ─── Tab Bar ─── */}
-        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: 16 }}>
+        <div style={{ padding: `0 ${LAYOUT.PAGE_PADDING}px`, marginBottom: 10 }}>
           <div className="dash-tabs">
             {tabs.map((tab) => (
               <button
