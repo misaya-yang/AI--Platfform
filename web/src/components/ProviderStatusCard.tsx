@@ -82,7 +82,7 @@ interface ProviderCardProps {
   onClick: () => void;
 }
 
-function ProviderCard({
+function ProviderRow({
   providerKey,
   name,
   configured,
@@ -93,131 +93,61 @@ function ProviderCard({
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
 
-  const config = PROVIDER_CONFIG[providerKey] || {
-    icon: <CloudOutlined />,
-    color: "#64748b",
-    gradient: "linear-gradient(135deg, #64748b 0%, #475569 100%)",
-  };
-
-  const borderColor = configured
-    ? darkMode
-      ? `${config.color}40`
-      : `${config.color}30`
-    : colors.border;
-
   return (
     <div
       onClick={configured ? onClick : undefined}
       style={{
-        padding: "18px",
-        borderRadius: LAYOUT.CARD_RADIUS,
-        background: configured ? colors.cardBg : colors.innerBg,
-        border: `1.5px solid ${borderColor}`,
-        position: "relative",
-        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "10px 16px",
+        borderRadius: 8,
         cursor: configured ? "pointer" : "default",
-        transition: TRANSITION.slow,
-        minWidth: 0,
-        boxShadow: colors.shadowSm,
+        transition: TRANSITION.fast,
+        background: "transparent",
       }}
       onMouseEnter={(e) => {
         if (configured) {
-          e.currentTarget.style.transform = "translateY(-4px)";
-          e.currentTarget.style.boxShadow = colors.shadowLg;
-          e.currentTarget.style.borderColor = `${config.color}60`;
+          e.currentTarget.style.background = colors.cardHover;
         }
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.transform = "translateY(0)";
-        e.currentTarget.style.boxShadow = colors.shadowSm;
-        e.currentTarget.style.borderColor = borderColor;
+        e.currentTarget.style.background = "transparent";
       }}
     >
-      {/* Decorative accent blob */}
-      {configured && (
-        <div 
-          style={{
-            position: "absolute",
-            bottom: -15,
-            right: -15,
-            width: 60,
-            height: 60,
-            background: config.gradient,
-            opacity: 0.08,
-            filter: "blur(15px)",
-            borderRadius: "50%",
-            pointerEvents: "none",
-          }}
-        />
-      )}
-
-      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {/* Status dot */}
         <div
           style={{
-            width: 44,
-            height: 44,
-            borderRadius: 12,
-            background: configured ? config.gradient : colors.border,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 20,
-            color: configured ? "#ffffff" : colors.textMuted,
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: configured ? colors.success : "transparent",
+            border: configured ? "none" : `1.5px solid ${colors.textSecondary}`,
             flexShrink: 0,
-            boxShadow: configured ? `0 4px 10px ${config.color}30` : "none",
+          }}
+        />
+        <span
+          style={{
+            fontSize: 14,
+            fontWeight: configured ? 500 : 400,
+            color: configured ? colors.textPrimary : colors.textSecondary,
           }}
         >
-          {config.icon}
-        </div>
-
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-            <span
-              style={{
-                fontSize: 15,
-                fontWeight: 700,
-                color: colors.textPrimary,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {name}
-            </span>
-            {configured ? (
-              <CheckCircleOutlined style={{ color: colors.success, fontSize: 14 }} />
-            ) : (
-              <CloseCircleOutlined style={{ color: colors.textMuted, fontSize: 14 }} />
-            )}
-          </div>
-
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: colors.textSecondary,
-              marginTop: 2,
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-              flexWrap: "nowrap",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
-            {configured && modelCount > 0 ? (
-              <>
-                <span>{t("services.providersStatus.modelsCount", { count: modelCount })}</span>
-                <span style={{ fontSize: 10, opacity: 0.5 }}>•</span>
-                <span style={{ color: config.color, fontSize: 11 }}>{t("services.providersStatus.viewDetails")}</span>
-              </>
-            ) : (
-              t("services.providersStatus.unconfigured")
-            )}
-          </div>
-        </div>
+          {name}
+        </span>
       </div>
+      <span
+        style={{
+          fontSize: 13,
+          color: configured ? colors.textSecondary : colors.textSecondary,
+          fontWeight: 400,
+        }}
+      >
+        {configured && modelCount > 0
+          ? t("services.providersStatus.modelsCount", { count: modelCount })
+          : t("services.providersStatus.unconfigured")}
+      </span>
     </div>
   );
 }
@@ -423,9 +353,9 @@ export function ProviderStatusCard() {
           </div>
         }
       >
-        <div style={gridStyles.fiveColumnResponsive}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           {providerList.map(([key, provider]) => (
-            <ProviderCard
+            <ProviderRow
               key={key}
               providerKey={key}
               name={provider.name}
