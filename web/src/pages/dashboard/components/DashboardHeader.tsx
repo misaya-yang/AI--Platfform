@@ -103,6 +103,11 @@ export function DashboardHeader() {
 
   return (
     <div style={{ marginBottom: LAYOUT.SECTION_GAP }}>
+      {/* Aria-live region for auto-refresh notification */}
+      <div aria-live="polite" aria-atomic="true" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0,0,0,0)" }}>
+        {t("dashboard.refresh.lastUpdated", { time: dayjs(lastRefresh).format("HH:mm:ss") })}
+      </div>
+
       {/* Title Row */}
       <div
         style={{
@@ -150,8 +155,46 @@ export function DashboardHeader() {
           </div>
         </div>
 
-        {/* Action buttons */}
+        {/* Time shortcuts + Action buttons */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Quick time range buttons */}
+          {(
+            [
+              { label: "24h", days: 1 },
+              { label: "7d", days: 7 },
+              { label: "30d", days: 30 },
+            ] as const
+          ).map(({ label, days }) => {
+            const isActive =
+              dayjs(dateRange[1]).diff(dayjs(dateRange[0]), "day") + 1 === days &&
+              dayjs(dateRange[1]).isSame(dayjs(), "day");
+            return (
+              <button
+                key={label}
+                onClick={() => {
+                  const end = dayjs().format("YYYY-MM-DD");
+                  const start = dayjs().subtract(days - 1, "day").format("YYYY-MM-DD");
+                  setDateRange([start, end]);
+                }}
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  border: `1px solid ${isActive ? colors.accent : colors.border}`,
+                  background: isActive ? colors.accentBg : "transparent",
+                  color: isActive ? colors.accent : colors.textSecondary,
+                  cursor: "pointer",
+                  transition: TRANSITION.fast,
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+
+          <div style={{ width: 1, height: 20, background: colors.border, margin: "0 4px" }} />
+
           <Tooltip title={t("dashboard.refresh.now")}>
             <button
               onClick={triggerRefresh}
@@ -379,12 +422,12 @@ export function DashboardHeader() {
               alignItems: "center",
               justifyContent: "flex-start",
               flexWrap: "wrap",
-              gap: LAYOUT.GRID_GAP,
-              padding: "14px 20px",
+              gap: 12,
+              padding: "12px 20px",
             }}
           >
             {/* Filter Group: Data Filters */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div
                 style={{
                   display: "flex",
@@ -446,7 +489,7 @@ export function DashboardHeader() {
             />
 
             {/* Filter Group: Time Range */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div
                 style={{
                   display: "flex",
