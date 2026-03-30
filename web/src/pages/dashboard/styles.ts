@@ -59,11 +59,11 @@ export const ELEVATION = (dark: boolean) => ({
 
 // ── Layout constants ────────────────────────────────────────────────
 export const LAYOUT = {
-  CARD_GAP: 24,
-  CARD_PADDING: 24,
-  CARD_RADIUS: 12,
-  PAGE_PADDING: 24,
-  KPI_HEIGHT: 160,
+  CARD_GAP: 16,
+  CARD_PADDING: 16,
+  CARD_RADIUS: 10,
+  PAGE_PADDING: 20,
+  KPI_HEIGHT: 140,
   PANEL_MIN_HEIGHT: 400,
   DASHBOARD_MIN_CONTENT_WIDTH: 1180,
 
@@ -84,27 +84,27 @@ export const LAYOUT = {
 
 // ── Color system (WCAG AA compliant) ────────────────────────────────
 export const getColors = (darkMode: boolean) => ({
-  // Backgrounds — Grafana/Linear-inspired neutral dark (reduced blue saturation)
-  pageBg:    darkMode ? '#111217' : '#F8FAFC',
-  cardBg:    darkMode ? '#1C1D24' : '#FFFFFF',
-  cardHover: darkMode ? '#26272F' : '#F8FAFC',
-  innerBg:   darkMode ? '#16171D' : '#F8FAFC',
+  // Backgrounds — Vercel/Linear neutral dark
+  pageBg:    darkMode ? '#0A0A0B' : '#F8FAFC',
+  cardBg:    darkMode ? '#161618' : '#FFFFFF',
+  cardHover: darkMode ? '#1E1E21' : '#F8FAFC',
+  innerBg:   darkMode ? '#111113' : '#F8FAFC',
 
-  // Borders — subtle, alpha-based for dark (shadcn 2025 pattern)
-  border:      darkMode ? 'rgba(255,255,255,0.08)' : '#E2E8F0',
-  borderHover: darkMode ? 'rgba(255,255,255,0.14)' : '#CBD5E1',
+  // Borders — alpha-based (shadcn 2025 / Vercel)
+  border:      darkMode ? 'rgba(255,255,255,0.06)' : '#E2E8F0',
+  borderHover: darkMode ? 'rgba(255,255,255,0.12)' : '#CBD5E1',
 
-  // Text — WCAG AA on respective backgrounds
-  textPrimary:   darkMode ? '#EDEEF0' : '#0F172A',
-  textSecondary: darkMode ? '#9C9FA8' : '#475569',
-  textMuted:     darkMode ? '#6B6E78' : '#94A3B8',
+  // Text — WCAG AA
+  textPrimary:   darkMode ? '#EDEDEF' : '#0F172A',
+  textSecondary: darkMode ? '#8B8B8E' : '#475569',
+  textMuted:     darkMode ? '#5A5A5D' : '#94A3B8',
 
-  // Semantic colors — desaturated for dark mode (MD3 guideline)
-  accent:  darkMode ? '#6E9FFF' : '#2563EB',
-  success: darkMode ? '#34D399' : '#059669',
-  warning: darkMode ? '#FBBF24' : '#D97706',
-  error:   darkMode ? '#F87171' : '#DC2626',
-  purple:  darkMode ? '#A78BFA' : '#7C3AED',
+  // Semantic colors
+  accent:  darkMode ? '#3B82F6' : '#2563EB',
+  success: darkMode ? '#22C55E' : '#059669',
+  warning: darkMode ? '#EAB308' : '#D97706',
+  error:   darkMode ? '#EF4444' : '#DC2626',
+  purple:  darkMode ? '#8B5CF6' : '#7C3AED',
 
   // Semantic backgrounds (subtle)
   successBg: darkMode ? 'rgba(52,211,153,0.08)' : '#ECFDF5',
