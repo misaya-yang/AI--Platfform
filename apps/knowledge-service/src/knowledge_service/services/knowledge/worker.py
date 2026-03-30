@@ -604,8 +604,9 @@ class KnowledgeWorker:
         logger.info(f"[Worker] VLM OCR extracted {len(full_text)} chars from {total_pages} pages")
 
         # Update document content and re-ingest as text
-        await self.service.db.update_document(
-            task.document_id, {"content": full_text, "word_count": len(full_text.split())}
+        await self.service.db.update_document_content(task.document_id, full_text)
+        await self.service.db.update_document_fields(
+            task.document_id, {"word_count": len(full_text.split())}
         )
         await self.service.db.update_document_status(task.document_id, status="embedding", progress=70)
         await self.service.ingest_document(task.dataset_id, task.document_id)
