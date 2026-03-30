@@ -12,6 +12,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .common import import_pymupdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,11 +41,7 @@ class PDFSplitter:
 
     @staticmethod
     def _get_fitz():
-        try:
-            import pymupdf as fitz  # type: ignore
-        except ImportError:
-            import fitz  # type: ignore
-        return fitz
+        return import_pymupdf()
 
     def split_pdf(
         self,

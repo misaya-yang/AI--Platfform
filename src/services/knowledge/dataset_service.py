@@ -18,33 +18,14 @@ from ...persistence.database import DatabaseStorage
 logger = get_logger(__name__)
 
 
-def _permission_rank(p: str | None) -> int:
-    """Get numeric rank for permission level."""
-    if not p:
-        return 0
-    p = str(p).lower()
-    return {"viewer": 1, "editor": 2, "owner": 3}.get(p, 0)
+from .common import ensure_dict as _ensure_dict  # noqa: E402
+from .common import permission_rank as _permission_rank  # noqa: E402
 
 
 def _require_not_guest(user: UserContext) -> None:
     """Ensure user is not a guest."""
     if not user.is_authenticated or "guest" in (user.roles or []):
         raise PermissionDeniedError("Authentication required")
-
-
-def _ensure_dict(value: Any) -> dict[str, Any]:
-    """Ensure value is a dict."""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
 
 
 class DatasetService:

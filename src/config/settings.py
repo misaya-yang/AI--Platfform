@@ -48,12 +48,33 @@ class RedisSettings(BaseModel):
     url: str = "redis://localhost:6379/0"
 
 
+_INSECURE_JWT_SECRETS = frozenset({
+    "",
+    "default-secret-change-me",
+    "your-jwt-secret-key",
+    "secret",
+    "changeme",
+})
+
+
 class AuthJWTSettings(BaseModel):
     enabled: bool = False
     secret: str = Field(default="")
     algorithms: list[str] = Field(default_factory=lambda: ["HS256"])
     audience: str | None = None
     issuer: str | None = None
+
+    @field_validator("secret")
+    @classmethod
+    def _reject_insecure_secret_in_production(cls, v: str) -> str:
+        """Reject known-insecure secrets when running in production."""
+        env = os.environ.get("GATEWAY_ENV", "development").lower()
+        if env == "production" and v in _INSECURE_JWT_SECRETS:
+            raise ValueError(
+                "JWT secret is empty or insecure. "
+                "Set GATEWAY_AUTHENTICATION__JWT__SECRET to a strong random value."
+            )
+        return v
 
 
 class AuthAPIKeySettings(BaseModel):
@@ -149,13 +170,26 @@ class RateLimitSettings(BaseModel):
 
 
 class CORSSettings(BaseModel):
-    """CORS configuration."""
+    """CORS configuration.
+
+    Origins are read from the CORS_ALLOWED_ORIGINS environment variable
+    (comma-separated list) with a safe localhost-only default for development.
+    """
 
     allow_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+        default_factory=lambda: [
+            o.strip()
+            for o in os.environ.get(
+                "CORS_ALLOWED_ORIGINS",
+                "http://localhost:3000,http://127.0.0.1:3000",
+            ).split(",")
+            if o.strip()
+        ]
     )
     allow_credentials: bool = True
-    allow_methods: list[str] = Field(default_factory=lambda: ["*"])
+    allow_methods: list[str] = Field(
+        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    )
     allow_headers: list[str] = Field(default_factory=lambda: ["*"])
     expose_headers: list[str] = Field(default_factory=list)
     max_age: int = 600

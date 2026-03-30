@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...core.observability.logging import get_logger
+from .common import import_pymupdf
 from .processing_mode import ProcessingMode, parse_processing_mode
 from .streaming_loader import StreamingDocumentLoader
 
@@ -711,10 +712,7 @@ class KnowledgeWorker:
         if content.startswith(b"%PDF") or "pdf" in mime:
             # Extract text from PDF
             try:
-                try:
-                    import pymupdf as fitz  # type: ignore
-                except ImportError:
-                    import fitz  # type: ignore
+                fitz = import_pymupdf()
                 doc = fitz.open(stream=content, filetype="pdf")
                 text_parts = []
                 for page in doc:

@@ -21,6 +21,8 @@ import subprocess
 import tempfile
 from typing import Any
 
+from .common import import_pymupdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -290,13 +292,10 @@ def ocr_pdf_bytes(
         return ""
 
     try:
-        import pymupdf as fitz  # type: ignore
+        fitz = import_pymupdf()
     except ImportError:
-        try:
-            import fitz  # type: ignore
-        except ImportError:
-            logger.warning("PyMuPDF not installed; OCR skipped")
-            return ""
+        logger.warning("PyMuPDF not installed; OCR skipped")
+        return ""
 
     cfg = config or OCRCConfig()
     max_workers = max(1, min(int(max_workers), 4))

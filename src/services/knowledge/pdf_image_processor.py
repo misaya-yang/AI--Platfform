@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from .common import import_pymupdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,10 +160,7 @@ class PDFImageProcessor:
             PDFExtractionResult with text and images
         """
         try:
-            try:
-                import pymupdf as fitz  # type: ignore
-            except ImportError:
-                import fitz  # type: ignore
+            fitz = import_pymupdf()
         except ImportError:
             logger.warning("PyMuPDF not installed, falling back to text-only extraction")
             return self._fallback_text_only(content)
@@ -228,10 +227,7 @@ class PDFImageProcessor:
         seen_hashes: set,
     ) -> list[ExtractedImage]:
         """Extract images from a single PDF page."""
-        try:
-            import pymupdf as fitz  # type: ignore
-        except ImportError:
-            pass  # type: ignore
+        fitz = import_pymupdf()
 
         images: list[ExtractedImage] = []
 

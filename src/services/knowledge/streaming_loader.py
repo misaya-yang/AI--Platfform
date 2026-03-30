@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.observability.logging import get_logger
+from .common import import_pymupdf
 
 logger = get_logger(__name__)
 
@@ -106,19 +107,12 @@ class StreamingDocumentLoader:
         """Lazy load PyMuPDF."""
         if self._fitz is None:
             try:
-                import pymupdf as fitz
-
-                self._fitz = fitz
-            except ImportError:
-                try:
-                    import fitz  # type: ignore
-
-                    self._fitz = fitz
-                except ImportError as exc:
-                    raise ImportError(
-                        "PyMuPDF is required for streaming document loading. "
-                        "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
-                    ) from exc
+                self._fitz = import_pymupdf()
+            except ImportError as exc:
+                raise ImportError(
+                    "PyMuPDF is required for streaming document loading. "
+                    "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
+                ) from exc
         return self._fitz
 
     async def get_page_count(self, source: bytes | str) -> int:
@@ -526,11 +520,7 @@ class InMemoryLoader:
 
     def _get_fitz(self):
         if self._fitz is None:
-            try:
-                import pymupdf as fitz
-            except ImportError:
-                import fitz
-            self._fitz = fitz
+            self._fitz = import_pymupdf()
         return self._fitz
 
     async def iter_batches(

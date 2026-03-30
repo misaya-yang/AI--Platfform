@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Any
 
 from ...core.observability.logging import get_logger
+from .common import import_pymupdf
 from .processing_mode import ProcessingMode
 
 logger = get_logger(__name__)
@@ -114,19 +115,12 @@ class DocumentTypeDetector:
         """Lazy load PyMuPDF."""
         if self._fitz is None:
             try:
-                import pymupdf as fitz
-
-                self._fitz = fitz
-            except ImportError:
-                try:
-                    import fitz  # type: ignore
-
-                    self._fitz = fitz
-                except ImportError as exc:
-                    raise ImportError(
-                        "PyMuPDF is required for document type detection. "
-                        "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
-                    ) from exc
+                self._fitz = import_pymupdf()
+            except ImportError as exc:
+                raise ImportError(
+                    "PyMuPDF is required for document type detection. "
+                    "Install with: pip install 'ai-gateway[documents]' or pip install pymupdf"
+                ) from exc
         return self._fitz
 
     async def detect(

@@ -31,33 +31,7 @@ from dataclasses import dataclass
 import httpx
 
 
-# =============================================================================
-# Sensitive Data Filtering for Logging
-# =============================================================================
-class SensitiveDataFilter(logging.Filter):
-    """Filter that redacts sensitive information like API keys from log records."""
-
-    # Patterns to redact
-    _PATTERNS = [
-        (re.compile(r"Bearer\s+[a-zA-Z0-9_-]+"), "Bearer ***"),
-        (re.compile(r"api_key[=:]\s*[a-zA-Z0-9_-]+"), "api_key=***"),
-        (re.compile(r"key[=:]\s*[a-zA-Z0-9_-]+"), "key=***"),
-    ]
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Redact sensitive data from log message."""
-        if isinstance(record.msg, str):
-            record.msg = self._redact(record.msg)
-        if record.args:
-            record.args = tuple(self._redact(str(arg)) for arg in record.args)
-        return True
-
-    def _redact(self, text: str) -> str:
-        """Apply all redaction patterns."""
-        for pattern, replacement in self._PATTERNS:
-            text = pattern.sub(replacement, text)
-        return text
-
+from .common import SensitiveDataFilter
 
 logger = logging.getLogger(__name__)
 logger.addFilter(SensitiveDataFilter())

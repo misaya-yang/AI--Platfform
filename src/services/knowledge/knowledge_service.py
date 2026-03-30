@@ -78,18 +78,8 @@ _global_vlm_semaphore: asyncio.Semaphore | None = None
 _global_vlm_max_concurrent: int = 10  # Default, updated from settings on first use
 
 
-def _ensure_dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-    return {}
+from .common import ensure_dict as _ensure_dict  # noqa: E402
+from .common import permission_rank as _permission_rank  # noqa: E402
 
 
 def _resolve_mime_type(filename: str, mime_type: str | None, document_type: str | None) -> str:
@@ -109,12 +99,6 @@ def _resolve_mime_type(filename: str, mime_type: str | None, document_type: str 
     guessed, _ = mimetypes.guess_type(filename or "")
     return guessed or "application/octet-stream"
 
-
-def _permission_rank(p: str | None) -> int:
-    if not p:
-        return 0
-    p = str(p).lower()
-    return {"viewer": 1, "editor": 2, "owner": 3}.get(p, 0)
 
 
 def _require_not_guest(user: UserContext) -> None:

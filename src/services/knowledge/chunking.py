@@ -46,12 +46,11 @@ logger = logging.getLogger(__name__)
 # Multilingual Token Counter (Best Practice: 256-512 tokens for RAG)
 # =============================================================================
 
-# Arabic Unicode ranges (comprehensive)
-_ARABIC_RANGE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]")
-# Arabic diacritics (tashkeel) - these don't add tokens
-_ARABIC_DIACRITICS = re.compile(r"[\u064b-\u0652\u0670]")
-# CJK characters
-_CJK_RANGE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+from .common import (  # noqa: E402
+    RE_ARABIC_CHARS as _ARABIC_RANGE,
+    RE_ARABIC_DIACRITICS as _ARABIC_DIACRITICS,
+    RE_CJK_CHARS as _CJK_RANGE,
+)
 
 
 class TokenCounter:

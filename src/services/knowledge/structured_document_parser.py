@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .common import import_pymupdf
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,10 +156,7 @@ class StructuredDocumentParser:
         5. Optional: VLM description for key images
         """
         try:
-            try:
-                import pymupdf as fitz  # type: ignore
-            except ImportError:
-                import fitz  # type: ignore
+            fitz = import_pymupdf()
         except ImportError:
             raise RuntimeError("PyMuPDF required for PDF parsing")
 
@@ -323,10 +322,7 @@ class StructuredDocumentParser:
 
         try:
             # Import fitz here since it's only needed when PDF parsing is active
-            try:
-                import pymupdf as fitz  # type: ignore
-            except ImportError:
-                import fitz  # type: ignore
+            fitz = import_pymupdf()
 
             # Extract image from page
             pix = page.get_pixmap(clip=bbox, matrix=fitz.Matrix(2, 2))  # 2x for quality

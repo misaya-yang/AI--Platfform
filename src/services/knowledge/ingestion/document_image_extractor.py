@@ -35,19 +35,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+from ..common import import_pymupdf
+
 logger = logging.getLogger(__name__)
 
 
 def _get_fitz():
     """Get fitz module with compatibility for old/new PyMuPDF versions."""
-    try:
-        import pymupdf as fitz
-
-        return fitz
-    except ImportError:
-        import fitz
-
-        return fitz
+    return import_pymupdf()
 
 
 # ============================================================

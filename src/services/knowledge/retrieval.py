@@ -15,16 +15,16 @@ _RE_LATIN_WORD = re.compile(r"[A-Za-z0-9\-_]+")
 _RE_CJK_RUN = re.compile(r"[\u4e00-\u9fff]+")
 _RE_QUOTED = re.compile(r'["\']([^"\']+)["\']')
 
-# Arabic Unicode ranges (comprehensive)
-# - Basic Arabic: \u0600-\u06FF (letters, numbers, diacritics)
-# - Arabic Supplement: \u0750-\u077F
-# - Arabic Extended-A: \u08A0-\u08FF
-# - Arabic Presentation Forms-A: \uFB50-\uFDFF
-# - Arabic Presentation Forms-B: \uFE70-\uFEFF
-_RE_ARABIC_RUN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]+")
+from .common import (  # noqa: E402
+    RE_ARABIC_CHARS,
+    RE_ARABIC_DIACRITICS,
+    detect_language,
+    normalize_arabic,
+)
 
-# Arabic diacritics (tashkeel) - remove for tokenization
-_RE_ARABIC_DIACRITICS = re.compile(r"[\u064b-\u0652\u0670]")
+# Keep local aliases for backward compatibility within this module
+_RE_ARABIC_RUN = RE_ARABIC_CHARS
+_RE_ARABIC_DIACRITICS = RE_ARABIC_DIACRITICS
 
 # Arabic stopwords (common words to filter out for better BM25)
 ARABIC_STOPWORDS = frozenset(
@@ -200,60 +200,8 @@ ENGLISH_STOPWORDS = frozenset(
 )
 
 
-def detect_language(text: str) -> str:
-    """
-    Detect primary language from text.
 
-    Returns: "ar" | "en" | "zh" | "mixed"
-    """
-    if not text:
-        return "en"
-
-    sample = text[:2000]
-    total = max(len(sample), 1)
-
-    arabic_count = len(_RE_ARABIC_RUN.findall(sample))
-    cjk_count = len(_RE_CJK_RUN.findall(sample))
-    latin_count = len(_RE_LATIN_WORD.findall(sample))
-
-    arabic_ratio = arabic_count / total
-    cjk_ratio = cjk_count / total
-
-    if arabic_ratio > 0.2:
-        if latin_count > arabic_count * 0.3:
-            return "mixed"
-        return "ar"
-    elif cjk_ratio > 0.1:
-        return "zh"
-    else:
-        return "en"
-
-
-def normalize_arabic(text: str) -> str:
-    """
-    Normalize Arabic text for better matching.
-
-    - Remove diacritics (tashkeel)
-    - Normalize alef variations (أ إ آ ا → ا)
-    - Normalize taa marbuta (ة → ه)
-    - Normalize yaa (ى → ي)
-    """
-    if not text:
-        return ""
-
-    # Remove diacritics
-    result = _RE_ARABIC_DIACRITICS.sub("", text)
-
-    # Normalize alef variations
-    result = re.sub(r"[أإآٱ]", "ا", result)
-
-    # Normalize taa marbuta
-    result = result.replace("ة", "ه")
-
-    # Normalize alef maksura
-    result = result.replace("ى", "ي")
-
-    return result
+# detect_language and normalize_arabic imported from .common above
 
 
 def tokenize_arabic(text: str, remove_stopwords: bool = True) -> list[str]:

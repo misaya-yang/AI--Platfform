@@ -2,25 +2,12 @@
 Test all 9 chunking modes to verify they work correctly with user config.
 """
 
-import sys
-
-sys.path.insert(0, "/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/src")
-
-# Direct import to avoid complex dependency chain
-import importlib.util
-
-spec = importlib.util.spec_from_file_location(
-    "chunking",
-    "/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/src/services/knowledge/chunking.py",
+from src.services.knowledge.chunking import (
+    ChunkingConfig,
+    ChunkingMode,
+    create_chunker,
+    flatten_chunks,
 )
-chunking_module = importlib.util.module_from_spec(spec)
-sys.modules["chunking"] = chunking_module
-spec.loader.exec_module(chunking_module)
-
-ChunkingConfig = chunking_module.ChunkingConfig
-ChunkingMode = chunking_module.ChunkingMode
-create_chunker = chunking_module.create_chunker
-flatten_chunks = chunking_module.flatten_chunks
 
 # Sample text for testing
 SAMPLE_TEXT = """

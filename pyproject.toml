@@ -169,6 +169,9 @@ addopts = [
     "-v",
     "--tb=short",
     "-ra",
+    "--cov=src",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-fail-under=25",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

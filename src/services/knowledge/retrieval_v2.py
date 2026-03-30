@@ -23,31 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-# =============================================================================
-# Language Detection for Adaptive Weights
-# =============================================================================
-
-# Arabic Unicode ranges
-_ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]")
-
-
-def detect_query_language(query: str) -> str:
-    """
-    Detect primary language of query for weight adjustment.
-
-    Returns:
-        "ar" for Arabic, "en" for English/other
-    """
-    if not query:
-        return "en"
-
-    sample = query[:500]
-    arabic_chars = len(_ARABIC_PATTERN.findall(sample))
-    total = max(len(sample), 1)
-
-    if arabic_chars / total > 0.25:
-        return "ar"
-    return "en"
+from .common import detect_query_language  # noqa: E402
 
 
 def get_language_adaptive_weights(

@@ -46,19 +46,7 @@ def _detect_mime_type(filename: str) -> str:
     return DOCUMENT_MIME_TYPES.get(ext, "application/octet-stream")
 
 
-def _ensure_dict(value: Any) -> dict[str, Any]:
-    """Ensure value is a dict."""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
+from .common import ensure_dict as _ensure_dict  # noqa: E402
 
 
 def _sanitize_filename(filename: str) -> str:

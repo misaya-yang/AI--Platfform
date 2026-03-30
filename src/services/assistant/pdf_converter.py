@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ...core.observability.logging import get_logger
+from ..knowledge.common import import_pymupdf
 
 logger = get_logger(__name__)
 
@@ -138,14 +139,7 @@ class PDFConverter:
     @staticmethod
     def _import_pymupdf():
         """Import PyMuPDF with compatibility for old/new module names."""
-        try:
-            import pymupdf as fitz  # type: ignore
-
-            return fitz
-        except ImportError:
-            import fitz  # type: ignore
-
-            return fitz
+        return import_pymupdf()
 
     def _calculate_zoom(self, page_width: float, page_height: float) -> float:
         """
