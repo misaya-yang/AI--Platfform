@@ -37,7 +37,7 @@ Final thoughts and future directions are discussed here.
 """
 
 
-def test_chunking_mode(mode: ChunkingMode, config: ChunkingConfig):
+def _run_chunking_mode(mode: ChunkingMode, config: ChunkingConfig):
     """Test a single chunking mode."""
     print(f"\n{'=' * 60}")
     print(f"Testing: {mode.value}")
@@ -119,7 +119,7 @@ def main():
 
     results = []
     for mode in modes_to_test:
-        success, count = test_chunking_mode(mode, user_config)
+        success, count = _run_chunking_mode(mode, user_config)
         results.append((mode.value, success, count))
 
     # Summary
@@ -150,6 +150,36 @@ def main():
         print(f"✅ Islamic chunker loaded: {chunker.__class__.__name__}")
     except Exception as e:
         print(f"⚠️  Islamic chunker not available: {e}")
+
+
+import pytest
+
+_MODES = [
+    ChunkingMode.AUTOMATIC,
+    ChunkingMode.FIXED_SIZE,
+    ChunkingMode.PARAGRAPH,
+    ChunkingMode.PAGE,
+    ChunkingMode.HEADING,
+    ChunkingMode.REGEX,
+    ChunkingMode.SEPARATOR,
+    ChunkingMode.RECURSIVE,
+    ChunkingMode.HIERARCHICAL,
+]
+
+
+@pytest.mark.parametrize("mode", _MODES, ids=lambda m: m.value)
+def test_chunking_mode(mode):
+    """Each standard chunking mode should produce at least one chunk."""
+    config = ChunkingConfig(
+        token_limit=400,
+        use_token_count=True,
+        min_chunk_tokens=80,
+        max_chunk_tokens=400,
+        chunk_overlap=50,
+    )
+    success, count = _run_chunking_mode(mode, config)
+    assert success, f"Chunking mode {mode.value} failed"
+    assert count > 0
 
 
 if __name__ == "__main__":
