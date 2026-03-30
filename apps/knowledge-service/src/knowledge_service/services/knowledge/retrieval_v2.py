@@ -42,7 +42,7 @@ def detect_query_language(query: str) -> str:
         return "en"
 
     sample = query[:500]
-    arabic_chars = len(_ARABIC_PATTERN.findall(sample))
+    arabic_chars = sum(len(m) for m in _ARABIC_PATTERN.findall(sample))
     total = max(len(sample), 1)
 
     if arabic_chars / total > 0.25:

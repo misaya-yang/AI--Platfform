@@ -83,8 +83,10 @@ class OCRSettings(BaseModel):
     tesseract_timeout_seconds: int = 60
     min_text_chars_for_ocr: int = 200
 
-    vlm_provider: str = "gemini"  # gemini | dashscope | auto
+    vlm_provider: str = "gemini"  # gemini | dashscope | siliconflow | auto
     vlm_model: str = "gemini-3-flash-preview"
+    vlm_api_keys: str = ""  # comma-separated keys for multi-key providers (siliconflow)
+    vlm_base_url: str | None = None  # custom API URL override
     vlm_concurrency: int = 4
     vlm_timeout_seconds: int = 30
     vlm_batch_size: int = 5

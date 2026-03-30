@@ -80,8 +80,8 @@ _SUCCESS_HEALTH_WINDOW_SECONDS = 60.0
 
 def _make_rerank_cache_key(model: str, query: str, docs: list[str]) -> str:
     """Generate cache key for rerank result."""
-    docs_hash = hashlib.md5("|||".join(docs).encode()).hexdigest()
-    query_hash = hashlib.md5(query.encode()).hexdigest()
+    docs_hash = hashlib.sha256("|||".join(docs).encode()).hexdigest()[:32]
+    query_hash = hashlib.sha256(query.encode()).hexdigest()[:32]
     return f"{model}:{query_hash}:{docs_hash}"
 
 

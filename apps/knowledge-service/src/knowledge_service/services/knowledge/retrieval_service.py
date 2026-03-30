@@ -329,7 +329,13 @@ class RetrieveResult:
 
 @dataclass
 class RetrievalConfig:
-    """Configuration for retrieval."""
+    """Configuration for retrieval.
+
+    Provides both flat fields (for simple callers) and optional nested
+    sub-configs (rerank, mmr, fusion) from retrieval_config.py. Accessing
+    nested configs is safe — they default to ``None`` and callers must
+    guard with ``if config.rerank and config.rerank.enabled``.
+    """
 
     mode: str = "auto"  # auto, dense, sparse, hybrid
     top_k: int = 5
@@ -339,10 +345,15 @@ class RetrievalConfig:
     expand_queries: bool = False
     max_query_expansions: int = 3
 
-    # Cross-language retrieval (P1 enhancement)
-    enable_cross_language: bool = True  # Enable EN<->AR query expansion
+    # Cross-language retrieval
+    enable_cross_language: bool = True
     fusion_method: str = "rrf"  # "rrf" or "weighted"
-    use_adaptive_weights: bool = True  # Language-aware weights
+    use_adaptive_weights: bool = True
+
+    # Optional nested configs (from retrieval_config.py)
+    rerank: Any = None  # RerankConfig or None
+    fusion: Any = None  # FusionConfig or None
+    mmr: Any = None     # MMRConfig or None
 
 
 class RetrievalService:
@@ -528,12 +539,17 @@ class RetrievalService:
         dataset_id: str,
         queries: list[str],
         config: RetrievalConfig | None = None,
+        max_concurrency: int = 8,
     ) -> dict[str, list[RetrieveResult]]:
-        """Retrieve for multiple queries."""
-        results = {}
-        for query in queries:
-            results[query] = await self.retrieve(dataset_id, query, config)
-        return results
+        """Retrieve for multiple queries in parallel."""
+        sem = asyncio.Semaphore(max_concurrency)
+
+        async def _bounded(q: str) -> tuple[str, list[RetrieveResult]]:
+            async with sem:
+                return q, await self.retrieve(dataset_id, q, config)
+
+        pairs = await asyncio.gather(*[_bounded(q) for q in queries])
+        return {q: r for q, r in pairs}
 
     # ========================================================================
     # Dense Retrieval (Vector Search)
@@ -639,9 +655,9 @@ class RetrievalService:
             limit=config.top_k * 3,
         )
 
-        # Calculate BM25 scores
-        candidate_texts = [c.get("text", "") for c in candidates]
-        scores = bm25_scores(query_tokens, candidate_texts)
+        # Calculate BM25 scores (tokenize each document for proper BM25)
+        documents_tokens = [tokenize(c.get("text", "")) for c in candidates]
+        scores = bm25_scores(query_tokens, documents_tokens)
 
         # Build results
         results = []
@@ -854,43 +870,42 @@ class RetrievalService:
             return results
 
         try:
-            # Get embeddings for MMR calculation
             embedder = await get_cached_embedder(self.settings)
             query_embedding = await embedder.embed_query(query)
 
-            # Get result embeddings (from metadata or compute)
-            result_embeddings = []
-            for r in results:
+            # Build mmr_select-compatible structures
+            candidate_ids = [str(i) for i in range(len(results))]
+            relevance = {str(i): r.score for i, r in enumerate(results)}
+            vectors: dict[str, list[float]] = {}
+            for i, r in enumerate(results):
                 emb = r.metadata.get("embedding")
                 if emb:
-                    result_embeddings.append(emb)
+                    vectors[str(i)] = emb
                 else:
-                    # Compute embedding if not cached
                     try:
-                        emb = await embedder.embed_query(r.text[:500])  # Truncate for speed
-                        result_embeddings.append(emb)
+                        emb = await embedder.embed_query(r.text[:500])
+                        vectors[str(i)] = emb
                     except Exception:
-                        result_embeddings.append([0.0] * len(query_embedding))
+                        vectors[str(i)] = [0.0] * len(query_embedding)
 
-            # Import MMR from retrieval module
+            vectors["__query__"] = query_embedding
+
             from .retrieval import mmr_select
 
-            # MMR selection
-            selected_indices = mmr_select(
-                query_embedding,
-                result_embeddings,
-                k=len(results),
-                lambda_param=1 - diversity,
+            selected_ids, _ = mmr_select(
+                candidates=candidate_ids,
+                relevance=relevance,
+                vectors=vectors,
+                top_k=len(results),
+                lambda_mult=1 - diversity,
             )
 
-            # Reorder results
-            mmr_results = [results[i] for i in selected_indices]
-
+            mmr_results = [results[int(i)] for i in selected_ids]
             logger.info(f"[MMR] Applied diversity={diversity}, selected {len(mmr_results)} results")
             return mmr_results
 
         except Exception as e:
-            logger.error(f"[MMR] MMR failed: {e}")
+            logger.error(f"[MMR] MMR failed: {e}", exc_info=True)
             return results
 
     def _fuse_results(
@@ -900,50 +915,48 @@ class RetrievalService:
         top_k: int,
         k: int = 60,
     ) -> list[RetrieveResult]:
-        """Fuse results using Reciprocal Rank Fusion."""
-        # Build score maps
-        dense_scores = {r.segment_id: r for r in dense_results}
-        sparse_scores = {r.segment_id: r for r in sparse_results}
+        """Fuse results using Reciprocal Rank Fusion (RRF).
 
-        # Get all unique IDs
-        all_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
+        Scores are normalized to [0, 1] by dividing by the max RRF score.
+        """
+        # Build rank lookup (O(N) per list instead of O(N*M) per segment)
+        dense_rank = {r.segment_id: i for i, r in enumerate(dense_results)}
+        sparse_rank = {r.segment_id: i for i, r in enumerate(sparse_results)}
+
+        # Prefer dense result data, fall back to sparse
+        result_data: dict[str, RetrieveResult] = {}
+        for r in sparse_results:
+            result_data[r.segment_id] = r
+        for r in dense_results:
+            result_data[r.segment_id] = r
 
         # Calculate RRF scores
-        rrf_scores = []
-        for segment_id in all_ids:
+        rrf_scores: list[tuple[str, float]] = []
+        for segment_id in result_data:
             score = 0.0
-            rank = 0
+            if segment_id in dense_rank:
+                score += 1.0 / (k + dense_rank[segment_id] + 1)
+            if segment_id in sparse_rank:
+                score += 1.0 / (k + sparse_rank[segment_id] + 1)
+            rrf_scores.append((segment_id, score))
 
-            # Dense rank
-            for i, r in enumerate(dense_results):
-                if r.segment_id == segment_id:
-                    score += 1.0 / (k + i + 1)
-                    rank = i
-                    break
-
-            # Sparse rank
-            for i, r in enumerate(sparse_results):
-                if r.segment_id == segment_id:
-                    score += 1.0 / (k + i + 1)
-                    rank = max(rank, i)  # Use max for conservative estimate
-                    break
-
-            # Get result data (prefer dense)
-            result = dense_scores.get(segment_id) or sparse_scores.get(segment_id)
-            if result:
-                rrf_scores.append((segment_id, score, result))
-
-        # Sort by RRF score
+        # Sort by RRF score descending
         rrf_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Normalize to [0, 1]
+        max_rrf = rrf_scores[0][1] if rrf_scores else 1.0
+        if max_rrf <= 0:
+            max_rrf = 1.0
 
         # Build final results
         final_results = []
-        for segment_id, score, result in rrf_scores[:top_k]:
+        for segment_id, score in rrf_scores[:top_k]:
+            result = result_data[segment_id]
             final_results.append(
                 RetrieveResult(
                     segment_id=result.segment_id,
                     document_id=result.document_id,
-                    score=min(score, 1.0),
+                    score=score / max_rrf,
                     text=result.text,
                     metadata=result.metadata,
                     content_type=result.content_type,
@@ -1006,25 +1019,28 @@ class RetrievalService:
         diversity: float,
     ) -> list[RetrieveResult]:
         """Apply Maximal Marginal Relevance for diversity."""
-        # Get embeddings for results
-        result_embeddings = []
-        for r in results:
-            emb = r.metadata.get("embedding")
-            if emb:
-                result_embeddings.append(emb)
-            else:
-                # Use zero vector as fallback
-                result_embeddings.append([0.0] * len(query_embedding))
+        if not results or len(results) <= 1:
+            return results
 
-        # MMR selection
-        selected_indices = mmr_select(
-            query_embedding,
-            result_embeddings,
-            k=len(results),
-            lambda_param=1 - diversity,
+        # Build mmr_select-compatible structures: candidates, relevance, vectors
+        candidate_ids = [str(i) for i in range(len(results))]
+        relevance = {str(i): r.score for i, r in enumerate(results)}
+        vectors = {}
+        for i, r in enumerate(results):
+            emb = r.metadata.get("embedding")
+            vectors[str(i)] = emb if emb else [0.0] * len(query_embedding)
+        # Add query vector under a sentinel key for mmr_select to compute similarity
+        vectors["__query__"] = query_embedding
+
+        selected_ids, _ = mmr_select(
+            candidates=candidate_ids,
+            relevance=relevance,
+            vectors=vectors,
+            top_k=len(results),
+            lambda_mult=1 - diversity,
         )
 
-        return [results[i] for i in selected_indices]
+        return [results[int(i)] for i in selected_ids]
 
     # ========================================================================
     # Expansion and Rewriting

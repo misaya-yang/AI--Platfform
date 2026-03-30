@@ -4,6 +4,7 @@ VLM-based OCR Service for High-Accuracy Text Extraction.
 Supports multiple backends:
 - Gemini (default) — google-genai SDK, uses Gemini 3 Flash or 2.5 Flash
 - DashScope — Qwen-VL models
+- SiliconFlow — DeepSeek-OCR with multi-key round-robin (free/low-cost)
 
 Gemini 3 Flash achieves the lowest edit distance (0.115) on OmniDocBench,
 making it the best choice for OCR tasks including Arabic/RTL text.
@@ -16,6 +17,8 @@ import base64
 import logging
 import os
 from typing import Any
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +142,96 @@ class _DashScopeOCRBackend:
 
 
 # ============================================================================
+# SiliconFlow Backend (DeepSeek-OCR with multi-key round-robin)
+# ============================================================================
+
+_SILICONFLOW_DEFAULT_URL = "https://api.siliconflow.cn/v1/chat/completions"
+_SILICONFLOW_DEFAULT_MODEL = "deepseek-ai/DeepSeek-OCR"
+
+
+class _SiliconFlowOCRBackend:
+    """OCR backend using SiliconFlow API (OpenAI-compatible) with multi-key rotation.
+
+    Supports round-robin across multiple API keys with automatic rotation
+    on 429 rate limits. Concurrency is 5 requests per key.
+    """
+
+    def __init__(
+        self,
+        api_keys: list[str],
+        model: str = _SILICONFLOW_DEFAULT_MODEL,
+        base_url: str = _SILICONFLOW_DEFAULT_URL,
+        max_retries: int = 3,
+    ) -> None:
+        if not api_keys:
+            raise ValueError("At least one SiliconFlow API key is required")
+        self._api_keys = api_keys
+        self._model = model
+        self._base_url = base_url
+        self._max_retries = max_retries
+        self._key_index = 0
+        self._lock = asyncio.Lock()
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=25),
+        )
+
+    async def _next_key(self) -> str:
+        """Round-robin key selection."""
+        async with self._lock:
+            key = self._api_keys[self._key_index % len(self._api_keys)]
+            self._key_index += 1
+            return key
+
+    async def call(self, image_bytes: bytes) -> str:
+        mime = _detect_media_type(image_bytes)
+        b64 = base64.b64encode(image_bytes).decode()
+
+        payload = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                {"type": "text", "text": OCR_PROMPT},
+            ]}],
+            "max_tokens": 4096,
+        }
+
+        for attempt in range(self._max_retries):
+            key = await self._next_key()
+            try:
+                resp = await self._client.post(
+                    self._base_url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                )
+                if resp.status_code == 429:
+                    delay = 1 if len(self._api_keys) > 1 else 2 ** (attempt + 1)
+                    logger.warning(
+                        "SiliconFlow OCR 429 on key ..%s, rotating (attempt %d/%d)",
+                        key[-6:], attempt + 1, self._max_retries,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                if resp.status_code >= 400:
+                    logger.warning("SiliconFlow OCR error %d: %s", resp.status_code, resp.text[:200])
+                    if attempt < self._max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                    continue
+                data = resp.json()
+                text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                return text
+            except Exception as exc:
+                if attempt < self._max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    logger.error("SiliconFlow OCR failed after %d attempts: %s", self._max_retries, exc)
+        return ""
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+# ============================================================================
 # Unified VLM OCR Service
 # ============================================================================
 
@@ -158,9 +251,10 @@ GEMINI_MODELS = frozenset({
 class VLMOCRService:
     """High-accuracy OCR using vision language models.
 
-    Supports Gemini (default) and DashScope backends. Automatically selects
+    Supports Gemini, DashScope, and SiliconFlow backends. Automatically selects
     backend based on model name, or you can specify provider explicitly.
 
+    SiliconFlow supports multi-key round-robin for higher throughput.
     Optimized for bilingual Arabic+English scanned documents with RTL layout.
     """
 
@@ -169,49 +263,77 @@ class VLMOCRService:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str = "",
         model: str = "gemini-2.5-flash",
         provider: str = "auto",
         concurrency: int = 4,
         timeout_seconds: int = 30,
         max_retries: int = 2,
+        api_keys: list[str] | None = None,
+        base_url: str | None = None,
     ) -> None:
         """Initialize VLM OCR service.
 
         Args:
-            api_key: API key for the chosen provider.
-            model: Model name. Gemini models start with "gemini-", others use DashScope.
-            provider: "gemini", "dashscope", or "auto" (infer from model name).
-            concurrency: Max concurrent OCR requests.
+            api_key: API key for single-key providers (Gemini, DashScope).
+            model: Model name.
+            provider: "gemini", "dashscope", "siliconflow", or "auto".
+            concurrency: Max concurrent OCR requests (overridden for siliconflow).
             timeout_seconds: Per-request timeout.
             max_retries: Retry count on failure.
+            api_keys: Multiple API keys for round-robin (siliconflow).
+            base_url: Custom API base URL override.
         """
-        if not api_key:
-            raise ValueError("API key is required for VLM OCR service")
-
-        self.api_key = api_key
         self.model = model
-        self.concurrency = max(1, concurrency)
         self.timeout_seconds = timeout_seconds
         self.max_retries = max(1, max_retries)
-        self._semaphore = asyncio.Semaphore(self.concurrency)
 
         # Resolve provider
         if provider == "auto":
-            provider = "gemini" if model.startswith("gemini-") else "dashscope"
+            if model.startswith("gemini-"):
+                provider = "gemini"
+            elif "deepseek" in model.lower():
+                provider = "siliconflow"
+            else:
+                provider = "dashscope"
 
         self.provider = provider
 
-        if provider == "gemini":
-            self._backend = _GeminiOCRBackend(api_key=api_key, model=model)
-        elif provider == "dashscope":
-            self._backend = _DashScopeOCRBackend(api_key=api_key, model=model)
+        if provider == "siliconflow":
+            keys = api_keys or ([api_key] if api_key else [])
+            if not keys or not any(keys):
+                raise ValueError("At least one API key is required for SiliconFlow OCR")
+            self.concurrency = 5 * len(keys)
+            self._semaphore = asyncio.Semaphore(self.concurrency)
+            self._backend = _SiliconFlowOCRBackend(
+                api_keys=keys,
+                model=model or _SILICONFLOW_DEFAULT_MODEL,
+                base_url=base_url or _SILICONFLOW_DEFAULT_URL,
+                max_retries=self.max_retries,
+            )
+            logger.info(
+                "VLMOCRService initialized: provider=siliconflow, model=%s, keys=%d, concurrency=%d",
+                model, len(keys), self.concurrency,
+            )
         else:
-            raise ValueError(f"Unknown OCR provider: {provider}. Use 'gemini' or 'dashscope'.")
+            if not api_key:
+                raise ValueError("API key is required for VLM OCR service")
+            self.api_key = api_key
+            self.concurrency = max(1, concurrency)
+            self._semaphore = asyncio.Semaphore(self.concurrency)
 
-        logger.info(
-            f"VLMOCRService initialized: provider={provider}, model={model}, concurrency={concurrency}"
-        )
+            if provider == "gemini":
+                self._backend = _GeminiOCRBackend(api_key=api_key, model=model)
+            elif provider == "dashscope":
+                self._backend = _DashScopeOCRBackend(api_key=api_key, model=model)
+            else:
+                raise ValueError(
+                    f"Unknown OCR provider: {provider}. Use 'gemini', 'dashscope', or 'siliconflow'."
+                )
+            logger.info(
+                "VLMOCRService initialized: provider=%s, model=%s, concurrency=%d",
+                provider, model, self.concurrency,
+            )
 
     async def ocr_image(self, image_bytes: bytes) -> str:
         """Extract text from a single image using VLM.

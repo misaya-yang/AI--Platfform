@@ -152,7 +152,7 @@ class RerankConfig:
         False  # Off by default; preset configs (balanced/accurate/sota) enable it explicitly
     )
     provider: RerankProvider = RerankProvider.DASHSCOPE
-    model: str = "gte-rerank"
+    model: str = "gte-rerank-v2"
     top_n: int | None = None  # Number of results to keep after reranking
     score_threshold: float | None = None
 
@@ -189,7 +189,7 @@ class RerankConfig:
         return cls(
             enabled=bool(data.get("enabled", False)),
             provider=provider,
-            model=str(data.get("model", "gte-rerank")),
+            model=str(data.get("model", "gte-rerank-v2")),
             top_n=int(data["top_n"]) if data.get("top_n") is not None else None,
             score_threshold=float(data["score_threshold"])
             if data.get("score_threshold") is not None
@@ -504,7 +504,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank"),  # CHANGED: enable rerank by default
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),  # CHANGED: enable rerank by default
         mmr=MMRConfig(enabled=False),
     ),
     "accurate": RetrievalConfig(
@@ -512,7 +512,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.35,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank"),
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),
         mmr=MMRConfig(enabled=False),
     ),
     "diverse": RetrievalConfig(
@@ -520,7 +520,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank"),
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2"),
         mmr=MMRConfig(enabled=True, lambda_mult=0.5),
     ),
     # SOTA: State-of-the-art configuration for best accuracy
@@ -529,7 +529,7 @@ DEFAULT_CONFIGS = {
         top_k=5,
         score_threshold=0.3,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=10),
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2", top_n=10),
         mmr=MMRConfig(enabled=True, lambda_mult=0.7),  # Slight diversity
     ),
     # Islamic strict: Optimized for Islamic knowledge base with multi-madhab coverage
@@ -538,7 +538,7 @@ DEFAULT_CONFIGS = {
         top_k=10,  # More results for multi-madhab coverage
         score_threshold=0.25,  # Lower threshold for bilingual Arabic/English content
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2", top_n=15),
         mmr=MMRConfig(enabled=True, lambda_mult=0.6),  # Ensure madhab diversity
         islamic=IslamicEnhancementConfig(
             multi_query=True,
@@ -552,7 +552,7 @@ DEFAULT_CONFIGS = {
         top_k=10,
         score_threshold=0.25,
         fusion=FusionConfig(strategy=FusionStrategy.RRF, rrf_k=60, alpha=0.6),
-        rerank=RerankConfig(enabled=True, model="gte-rerank", top_n=15),
+        rerank=RerankConfig(enabled=True, model="gte-rerank-v2", top_n=15),
         mmr=MMRConfig(enabled=True, lambda_mult=0.6),
         islamic=IslamicEnhancementConfig(
             multi_query=True,

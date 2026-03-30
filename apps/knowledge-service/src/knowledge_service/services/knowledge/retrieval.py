@@ -212,9 +212,9 @@ def detect_language(text: str) -> str:
     sample = text[:2000]
     total = max(len(sample), 1)
 
-    arabic_count = len(_RE_ARABIC_RUN.findall(sample))
-    cjk_count = len(_RE_CJK_RUN.findall(sample))
-    latin_count = len(_RE_LATIN_WORD.findall(sample))
+    arabic_count = sum(len(m) for m in _RE_ARABIC_RUN.findall(sample))
+    cjk_count = sum(len(m) for m in _RE_CJK_RUN.findall(sample))
+    latin_count = sum(len(m) for m in _RE_LATIN_WORD.findall(sample))
 
     arabic_ratio = arabic_count / total
     cjk_ratio = cjk_count / total
@@ -341,9 +341,6 @@ def tokenize(text: str, keep_original: bool = False, remove_stopwords: bool = Fa
 
     # Remove quotes for further processing
     t_clean = _RE_QUOTED.sub(" ", t).lower()
-
-    # Detect language for optimal processing
-    detect_language(t_clean)
 
     # Extract Latin words (including hyphenated like Q-Flow)
     latin_words = _RE_LATIN_WORD.findall(t_clean)
@@ -751,20 +748,20 @@ def compute_language_weights(
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
-    if not a or not b:
+    if not a or not b or len(a) != len(b):
         return 0.0
-    if len(a) != len(b):
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b, strict=False):
-        dot += float(x) * float(y)
-        na += float(x) * float(x)
-        nb += float(y) * float(y)
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return float(dot / (math.sqrt(na) * math.sqrt(nb)))
+    try:
+        import numpy as np
+        va, vb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        denom = np.linalg.norm(va) * np.linalg.norm(vb)
+        return float(np.dot(va, vb) / denom) if denom > 0 else 0.0
+    except ImportError:
+        dot = sum(float(x) * float(y) for x, y in zip(a, b))
+        na = sum(float(x) ** 2 for x in a)
+        nb = sum(float(y) ** 2 for y in b)
+        if na <= 0.0 or nb <= 0.0:
+            return 0.0
+        return float(dot / (math.sqrt(na) * math.sqrt(nb)))
 
 
 @dataclass(frozen=True)

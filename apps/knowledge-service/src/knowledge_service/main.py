@@ -227,7 +227,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             app.state.knowledge_service = knowledge_service
 
-            knowledge_worker = KnowledgeWorker(knowledge_service)
+            # --- Initialize VLM OCR Service (if configured) ---
+            vlm_ocr_service = None
+            ocr = resolved.ocr
+            if ocr.enabled and ocr.strategy in ("vlm", "hybrid"):
+                try:
+                    from .services.knowledge.vlm_ocr_service import VLMOCRService
+
+                    if ocr.vlm_provider == "siliconflow" or "deepseek" in ocr.vlm_model.lower():
+                        keys = [k.strip() for k in ocr.vlm_api_keys.split(",") if k.strip()]
+                        if keys:
+                            vlm_ocr_service = VLMOCRService(
+                                api_keys=keys,
+                                model=ocr.vlm_model or "deepseek-ai/DeepSeek-OCR",
+                                provider="siliconflow",
+                                base_url=ocr.vlm_base_url,
+                                max_retries=3,
+                            )
+                    else:
+                        ocr_api_key = resolved.embeddings.api_key if ocr.vlm_provider == "gemini" else ocr.vlm_api_keys or resolved.embeddings.api_key
+                        if ocr_api_key:
+                            vlm_ocr_service = VLMOCRService(
+                                api_key=ocr_api_key,
+                                model=ocr.vlm_model,
+                                provider=ocr.vlm_provider,
+                                concurrency=ocr.vlm_concurrency,
+                                timeout_seconds=ocr.vlm_timeout_seconds,
+                            )
+                    if vlm_ocr_service:
+                        logger.info("vlm_ocr_initialized", provider=vlm_ocr_service.provider, model=vlm_ocr_service.model)
+                except Exception as e:
+                    logger.warning("vlm_ocr_init_failed", error=str(e))
+
+            knowledge_worker = KnowledgeWorker(knowledge_service, vlm_ocr_service=vlm_ocr_service)
             await knowledge_worker.start()
             app.state.knowledge_worker = knowledge_worker
 

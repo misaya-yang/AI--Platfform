@@ -424,7 +424,7 @@ class VectorStore:
             return []
 
         q = (query_text or "").strip().lower()
-        q_terms = [t for t in re.split(r"\\W+", q) if t]
+        q_terms = [t for t in re.split(r"\W+", q) if t]
 
         def lexical_score(text: str) -> float:
             if not q_terms:
