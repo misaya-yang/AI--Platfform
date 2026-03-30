@@ -184,7 +184,7 @@ class DatabaseStorage:
                     """,
                         rows,
                     )
-        except Exception:
+        except (asyncpg.PostgresError, OSError):
             # Put counts back to buffer to avoid silently losing stats.
             async with self._api_key_usage_lock:
                 for key_hash, count in pending.items():
@@ -203,8 +203,8 @@ class DatabaseStorage:
                 await asyncio.sleep(interval)
                 try:
                     await self._flush_api_key_usage_buffer()
-                except Exception as exc:
-                    logger.warning("Failed to flush API key usage batch: %s", exc)
+                except (asyncpg.PostgresError, OSError) as exc:
+                    logger.exception("Failed to flush API key usage batch")
         except asyncio.CancelledError:
             raise
 
@@ -228,11 +228,10 @@ class DatabaseStorage:
                 )
             if should_flush:
                 await self._flush_api_key_usage_buffer()
-        except Exception as exc:
-            logger.warning(
-                "API key usage batching failed for %s, falling back to sync update: %s",
+        except (asyncpg.PostgresError, OSError) as exc:
+            logger.exception(
+                "API key usage batching failed for %s, falling back to sync update",
                 key_hash[:8],
-                exc,
             )
             detached_from_buffer = False
             async with self._api_key_usage_lock:
@@ -246,11 +245,10 @@ class DatabaseStorage:
 
             try:
                 await self._update_api_key_usage_sync(key_hash)
-            except Exception as sync_exc:
-                logger.warning(
-                    "Fallback sync API key usage update failed for %s: %s",
+            except (asyncpg.PostgresError, OSError) as sync_exc:
+                logger.exception(
+                    "Fallback sync API key usage update failed for %s",
                     key_hash[:8],
-                    sync_exc,
                 )
                 if detached_from_buffer:
                     async with self._api_key_usage_lock:
@@ -363,8 +361,9 @@ class DatabaseStorage:
         try:
             if not await self._schema_is_missing():
                 return
-        except Exception:
+        except (asyncpg.PostgresError, OSError):
             # If we cannot check, skip auto-init to avoid masking the real error.
+            logger.exception("Could not check schema state, skipping auto-init")
             return
 
         schema_path = self.schema_path
@@ -394,8 +393,9 @@ class DatabaseStorage:
             return
         try:
             missing = await self._account_permission_schema_missing()
-        except Exception:
+        except (asyncpg.PostgresError, OSError):
             # If we cannot determine schema state, skip auto-migration.
+            logger.exception("Could not check account/permission schema state")
             return
         if not missing:
             return
@@ -425,8 +425,8 @@ class DatabaseStorage:
             return
         try:
             missing = await self._user_permissions_schema_missing()
-        except Exception as e:
-            logger.warning(f"Could not check user_permissions schema: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check user_permissions schema")
             return
         if not missing:
             return
@@ -444,12 +444,12 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 006_user_extra_permissions.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             # If table already exists or other non-critical error, log and continue
             if "already exists" in str(e).lower():
                 logger.info("Migration 006 already applied (user_permissions table exists)")
             else:
-                logger.error(f"Failed to apply migration 006: {e}")
+                logger.exception("Failed to apply migration 006")
 
     async def _api_keys_needs_migration(self) -> bool:
         """Check if api_keys table needs migration (missing key_id column)."""
@@ -469,8 +469,8 @@ class DatabaseStorage:
             return
         try:
             needs_migration = await self._api_keys_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check api_keys schema: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check api_keys schema")
             return
         if not needs_migration:
             return
@@ -488,11 +488,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 020_api_keys.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 020 already applied")
             else:
-                logger.error(f"Failed to apply migration 020: {e}")
+                logger.exception("Failed to apply migration 020")
 
     async def _session_memory_schema_missing(self) -> bool:
         """Check if session_memory table is missing."""
@@ -511,8 +511,8 @@ class DatabaseStorage:
             return
         try:
             missing = await self._session_memory_schema_missing()
-        except Exception as e:
-            logger.warning(f"Could not check session_memory schema: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check session_memory schema")
             return
         if not missing:
             return
@@ -530,11 +530,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 024_assistant_memory.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 024 already applied (session_memory table exists)")
             else:
-                logger.error(f"Failed to apply migration 024: {e}")
+                logger.exception("Failed to apply migration 024")
 
     async def _fts_needs_migration(self) -> bool:
         """Check if segments table is missing the text_search tsvector column."""
@@ -553,8 +553,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._fts_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check FTS schema: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check FTS schema")
             return
         if not needs:
             return
@@ -572,11 +572,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 028_segments_fulltext_search.sql (FTS GIN index)")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 028 already applied")
             else:
-                logger.error(f"Failed to apply migration 028: {e}")
+                logger.exception("Failed to apply migration 028")
 
     async def _auto_apply_islamic_metadata_migration(self) -> None:
         """Add Islamic knowledge traceability columns to segments table."""
@@ -612,11 +612,11 @@ class DatabaseStorage:
                 logger.info(
                     "Applied Islamic metadata migration: added source_type, source_reference, citation_text, etc."
                 )
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Islamic metadata migration already applied")
             else:
-                logger.error(f"Failed to apply Islamic metadata migration: {e}")
+                logger.exception("Failed to apply Islamic metadata migration")
 
     async def _islamic_canonical_storage_missing(self) -> bool:
         """Check whether the canonical Islamic content tables are missing."""
@@ -633,8 +633,8 @@ class DatabaseStorage:
             return
         try:
             missing = await self._islamic_canonical_storage_missing()
-        except Exception as exc:
-            logger.warning("Could not check Islamic canonical storage schema: %s", exc)
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check Islamic canonical storage schema")
             return
         if not missing:
             return
@@ -652,11 +652,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 040_islamic_canonical_storage.sql")
-        except Exception as exc:
+        except asyncpg.PostgresError as exc:
             if "already exists" in str(exc).lower():
                 logger.info("Migration 040 already applied")
             else:
-                logger.error("Failed to apply migration 040: %s", exc)
+                logger.exception("Failed to apply migration 040")
 
     async def _openai_embedding_needs_migration(self) -> bool:
         """Check whether OpenAI embedding migration is needed."""
@@ -687,8 +687,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openai_embedding_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenAI embedding migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenAI embedding migration")
             return
         if not needs:
             return
@@ -706,11 +706,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 029_migrate_openai_to_gemini.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 029 already applied")
             else:
-                logger.error(f"Failed to apply migration 029: {e}")
+                logger.exception("Failed to apply migration 029")
 
     async def _observability_governance_needs_migration(self) -> bool:
         """Check whether observability/governance schema migration (033) is required."""
@@ -756,8 +756,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._observability_governance_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check observability governance migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check observability governance migration")
             return
         if not needs:
             return
@@ -775,11 +775,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 033_observability_and_quota_governance.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 033 already applied")
             else:
-                logger.error(f"Failed to apply migration 033: {e}")
+                logger.exception("Failed to apply migration 033")
 
     async def _assistant_gateway_needs_migration(self) -> bool:
         """Check whether assistant gateway schema migration (034) is required."""
@@ -818,8 +818,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._assistant_gateway_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check assistant gateway schema: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check assistant gateway schema")
             return
         if not needs:
             return
@@ -837,11 +837,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 034_assistant_gateway_foundation.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 034 already applied")
             else:
-                logger.error(f"Failed to apply migration 034: {e}")
+                logger.exception("Failed to apply migration 034")
 
     async def _openclaw_memory_sot_needs_migration(self) -> bool:
         """Check whether OpenClaw memory source-of-truth tables are missing."""
@@ -861,8 +861,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openclaw_memory_sot_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenClaw memory SoT migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenClaw memory SoT migration")
             return
         if not needs:
             return
@@ -880,11 +880,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 035_openclaw_memory_sot.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 035 already applied")
             else:
-                logger.error(f"Failed to apply migration 035: {e}")
+                logger.exception("Failed to apply migration 035")
 
     async def _openclaw_queue_lane_needs_migration(self) -> bool:
         """Check whether command queue lane columns are missing."""
@@ -927,8 +927,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openclaw_queue_lane_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenClaw queue lane migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenClaw queue lane migration")
             return
         if not needs:
             return
@@ -946,11 +946,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 036_openclaw_queue_lanes.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 036 already applied")
             else:
-                logger.error(f"Failed to apply migration 036: {e}")
+                logger.exception("Failed to apply migration 036")
 
     async def _openclaw_skills_needs_migration(self) -> bool:
         """Check whether skill registry tables are missing."""
@@ -968,8 +968,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openclaw_skills_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenClaw skills migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenClaw skills migration")
             return
         if not needs:
             return
@@ -987,11 +987,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 037_openclaw_skills.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 037 already applied")
             else:
-                logger.error(f"Failed to apply migration 037: {e}")
+                logger.exception("Failed to apply migration 037")
 
     async def _openclaw_scheduler_audit_needs_migration(self) -> bool:
         """Check whether scheduler and audit tables are missing."""
@@ -1008,8 +1008,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openclaw_scheduler_audit_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenClaw scheduler/audit migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenClaw scheduler/audit migration")
             return
         if not needs:
             return
@@ -1027,11 +1027,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 038_openclaw_scheduler_audit.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 038 already applied")
             else:
-                logger.error(f"Failed to apply migration 038: {e}")
+                logger.exception("Failed to apply migration 038")
 
     async def _openclaw_context_metrics_needs_migration(self) -> bool:
         """Check whether context breakdown table is missing."""
@@ -1047,8 +1047,8 @@ class DatabaseStorage:
             return
         try:
             needs = await self._openclaw_context_metrics_needs_migration()
-        except Exception as e:
-            logger.warning(f"Could not check OpenClaw context metrics migration: {e}")
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check OpenClaw context metrics migration")
             return
         if not needs:
             return
@@ -1066,11 +1066,11 @@ class DatabaseStorage:
         try:
             await self.execute_schema(str(migration_path))
             logger.info("Applied migration 039_openclaw_context_metrics.sql")
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 039 already applied")
             else:
-                logger.error(f"Failed to apply migration 039: {e}")
+                logger.exception("Failed to apply migration 039")
 
     # =========================================================================
     # 服务定义表 (services)
@@ -2126,7 +2126,7 @@ class DatabaseStorage:
             if isinstance(seg_meta, str):
                 try:
                     seg_meta = json.loads(seg_meta)
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     seg_meta = {}
 
             level = seg.get("level")
@@ -2358,7 +2358,7 @@ class DatabaseStorage:
             )
             if result is not None:
                 return result
-        except Exception:
+        except asyncpg.PostgresError:
             pass  # Fall through to ILIKE
 
         return await self._search_segments_ilike(
@@ -2453,12 +2453,12 @@ class DatabaseStorage:
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(query, *params)
                 return [self._row_to_dict(row) for row in rows]
-        except Exception as e:
+        except asyncpg.PostgresError as e:
             err_str = str(e).lower()
             if "text_search" in err_str or "column" in err_str:
                 # Column doesn't exist yet — signal caller to use ILIKE fallback
                 return None
-            logger.error(f"FTS search error: {e}")
+            logger.exception("FTS search error")
             return None
 
     async def _search_segments_ilike(
@@ -2506,8 +2506,8 @@ class DatabaseStorage:
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(query, *params)
                 return [self._row_to_dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"ILIKE search error: {e}, params: {params[:2]}...")
+        except asyncpg.PostgresError as e:
+            logger.exception("ILIKE search error, params: %s...", params[:2])
             return []
 
     async def get_segment(self, segment_id: str) -> dict[str, Any] | None:
@@ -2844,7 +2844,7 @@ class DatabaseStorage:
                     page_number,
                 )
                 return True
-            except Exception:
+            except asyncpg.PostgresError:
                 return False
 
     async def add_segment_image_associations_batch(
@@ -2894,7 +2894,7 @@ class DatabaseStorage:
                             assoc.get("page_number"),
                         )
                         count += 1
-                    except Exception:
+                    except (asyncpg.PostgresError, ValueError, TypeError, KeyError):
                         continue
             return count
 
@@ -5572,7 +5572,7 @@ class DatabaseStorage:
                 )
                 for row in rows:
                     permissions_set.add(row["permission_code"])
-            except Exception:
+            except asyncpg.PostgresError:
                 pass
 
             # 2. 如果 role_permissions 为空，回退到 rbac_roles 的 permissions 数组
@@ -5590,7 +5590,7 @@ class DatabaseStorage:
                     )
                     for row in rows:
                         permissions_set.add(row["permission_code"])
-                except Exception:
+                except asyncpg.PostgresError:
                     pass
 
             # 3. 回退到用户自身的 permissions 字段/roles 映射
@@ -5610,7 +5610,7 @@ class DatabaseStorage:
                             for role_row in role_rows:
                                 role_perms = role_row["permissions"] or []
                                 permissions_set.update(role_perms)
-                        except Exception:
+                        except asyncpg.PostgresError:
                             pass
 
             # 4. 获取用户额外权限（直接分配）
@@ -5626,7 +5626,7 @@ class DatabaseStorage:
                 )
                 for row in extra_rows:
                     permissions_set.add(row["permission_code"])
-            except Exception:
+            except asyncpg.PostgresError:
                 # user_permissions 表可能不存在
                 pass
 
@@ -5989,7 +5989,7 @@ class DatabaseStorage:
                     user_id,
                 )
                 return [self._row_to_dict(row) for row in rows]
-            except Exception:
+            except asyncpg.PostgresError:
                 # Table might not exist yet
                 return []
 
@@ -6024,7 +6024,7 @@ class DatabaseStorage:
                     expires_at,
                 )
                 return True
-            except Exception:
+            except asyncpg.PostgresError:
                 return False
 
     async def remove_user_extra_permission(self, user_id: str, permission_code: str) -> bool:
@@ -6043,7 +6043,7 @@ class DatabaseStorage:
                     permission_code,
                 )
                 return "DELETE" in result
-            except Exception:
+            except asyncpg.PostgresError:
                 return False
 
     async def update_user_extra_permissions(

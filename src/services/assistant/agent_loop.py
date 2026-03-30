@@ -510,7 +510,7 @@ class AgentLoop:
             from .scenario_analyzer import create_scenario_analyzer
 
             return create_scenario_analyzer()
-        except Exception:
+        except (ImportError, AttributeError):
             return ScenarioAnalyzer()
 
     def _build_invocation_context(
@@ -870,7 +870,7 @@ class AgentLoop:
 
                     except Exception as e:
                         # Fallback to conservative: retrieve if analysis fails
-                        logger.warning(f"Intent analysis failed, defaulting to retrieve: {e}")
+                        logger.exception("Intent analysis failed, defaulting to retrieve")
                         should_retrieve = True
                         skip_reason = "Intent analysis failed, defaulting to retrieve"
 
@@ -968,7 +968,7 @@ class AgentLoop:
                         collector = get_context_metrics_collector()
                         await collector.record(metrics)
                     except Exception as metrics_error:
-                        logger.warning(f"Failed to record context metrics: {metrics_error}")
+                        logger.exception("Failed to record context metrics")
                 run_status = "succeeded"
                 yield AgentLoopEvent(
                     phase=AgentLoopPhase.GENERATION_STORAGE,
@@ -986,7 +986,7 @@ class AgentLoop:
             except Exception as loop_error:
                 run_status = "failed"
                 run_error = str(loop_error)
-                raise
+                raise  # re-raise after recording status
             finally:
                 final_status = run_status
                 if final_status == "running":
@@ -1005,7 +1005,7 @@ class AgentLoop:
                             error=run_error,
                         )
                     except Exception as gateway_err:
-                        logger.warning("Failed to persist run completion: %s", gateway_err)
+                        logger.exception("Failed to persist run completion")
 
                 # Persist Working Memory to session memory
                 if ctx.working_memory and self.memory_service:
@@ -1020,7 +1020,7 @@ class AgentLoop:
                             f"Persisted working memory with {len(ctx.working_memory.tasks)} tasks"
                         )
                     except Exception as persist_error:
-                        logger.warning(f"Failed to persist working memory: {persist_error}")
+                        logger.exception("Failed to persist working memory")
 
                 # Complete task registration
                 if task_id:
@@ -1098,7 +1098,7 @@ class AgentLoop:
                 )
                 return trimmed_history
         except Exception as e:
-            logger.warning(f"Failed to summarize history: {e}")
+            logger.exception("Failed to summarize history")
 
         # Fallback: just keep recent messages
         logger.info(f"Fallback: keeping only {min_recent} recent messages")
@@ -1162,7 +1162,7 @@ class AgentLoop:
             return response.content if response else None
 
         except Exception as e:
-            logger.warning(f"Summarization failed: {e}")
+            logger.exception("Summarization failed")
             return None
 
     async def _persist_context_detail(
@@ -1220,7 +1220,7 @@ class AgentLoop:
                     json.dumps(detail),
                 )
             except Exception:
-                logger.debug("Failed to persist context detail: %s", exc)
+                logger.debug("Failed to persist context detail", exc_info=True)
 
     # =========================================================================
     # Streaming-First Mode Implementation (Manus-style)
@@ -1683,15 +1683,14 @@ class AgentLoop:
                                 metadata=user_msg_metadata,
                             )
                         except Exception as persist_err:
-                            logger.error(
-                                "[CRITICAL] User message persistence failed for session %s: %s",
+                            logger.exception(
+                                "[CRITICAL] User message persistence failed for session %s",
                                 ctx.session_id,
-                                persist_err,
                             )
 
                     asyncio.create_task(_persist_user_message())
-                except Exception as e:
-                    logger.warning("Failed to schedule user message persistence: %s", e)
+                except (RuntimeError, TypeError) as e:
+                    logger.exception("Failed to schedule user message persistence")
 
             # Process uploaded files (if any) so the model can see them.
             processed_files = None
@@ -1726,7 +1725,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as e:
-                    logger.error("File processing failed (streaming-first): %s", e, exc_info=True)
+                    logger.exception("File processing failed (streaming-first)")
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type=StreamEventType.STATUS.value,
@@ -1776,6 +1775,7 @@ class AgentLoop:
                         if ds_map:
                             dataset_name_map = ds_map
                 except Exception:
+                    logger.debug("Failed to load dataset name map", exc_info=True)
                     dataset_name_map = None
 
             # OpenClaw skill metadata: load dynamically and inject only compact metadata.
@@ -1839,7 +1839,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as exc:
-                    logger.warning("Failed to load long-term memory in streaming-first mode: %s", exc)
+                    logger.exception("Failed to load long-term memory in streaming-first mode")
 
             # System prompt - ALWAYS include the streaming-first base prompt so the model
             # receives consistent tool/RAG instructions even when the frontend provides a
@@ -1911,7 +1911,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as exc:
-                    logger.warning("OpenClaw memory retrieval failed: %s", exc)
+                    logger.exception("OpenClaw memory retrieval failed")
 
                 with contextlib.suppress(Exception):
                     scheduled_job_id = await self.openclaw_runtime.schedule_daily_reflection(
@@ -1969,7 +1969,7 @@ class AgentLoop:
                         if descriptions:
                             final_message += f"\n\n---\n[图像描述]\n{descriptions}"
                 except Exception as e:
-                    logger.warning("Failed to inject processed files into prompt: %s", e)
+                    logger.exception("Failed to inject processed files into prompt")
 
             # Add current user message
             user_msg: dict[str, Any] = {"role": "user", "content": final_message}
@@ -2149,7 +2149,7 @@ class AgentLoop:
                     # and pass structured args into tool execution.
                     try:
                         parsed_args = json.loads(tool_args_str) if tool_args_str else {}
-                    except Exception:
+                    except (json.JSONDecodeError, ValueError):
                         parsed_args = {}
                     tool_args = parsed_args if isinstance(parsed_args, dict) else {}
                     kb_reuse_result_for_model = (
@@ -2640,7 +2640,7 @@ class AgentLoop:
                         step_result_preview = tool_result_preview or None
 
                     except Exception as e:
-                        logger.error(f"[STREAMING-FIRST] Tool {tool_name} failed: {e}")
+                        logger.exception("[STREAMING-FIRST] Tool %s failed", tool_name)
                         tool_result = f"Error executing {tool_name}: {str(e)}"
                         tool_result_for_model = _compact_tool_result_for_model(
                             tool_name=tool_name,
@@ -2815,7 +2815,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as e:
-                    logger.warning("Failed to persist assistant message (streaming-first): %s", e)
+                    logger.exception("Failed to persist assistant message (streaming-first)")
 
             if self.memory_service and ctx.message:
                 try:
@@ -2851,7 +2851,7 @@ class AgentLoop:
                             metadata={"source": "auto_extract", "namespace": "profile"},
                         )
                 except Exception as exc:
-                    logger.warning("Failed to persist structured user memory: %s", exc)
+                    logger.exception("Failed to persist structured user memory")
 
             if (
                 self.openclaw_runtime
@@ -2889,7 +2889,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as exc:
-                    logger.warning("Failed to persist OpenClaw daily memory: %s", exc)
+                    logger.exception("Failed to persist OpenClaw daily memory")
 
             yield AgentLoopEvent(
                 phase=phase,
@@ -2909,7 +2909,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.error(f"[STREAMING-FIRST] Error: {e}", exc_info=True)
+            logger.exception("[STREAMING-FIRST] Error")
             yield AgentLoopEvent(
                 phase=phase,
                 event_type="error",
@@ -3009,7 +3009,7 @@ class AgentLoop:
                                 f"Restored working memory with {len(ctx.working_memory.tasks)} tasks"
                             )
                     except Exception as wm_error:
-                        logger.warning(f"Failed to restore working memory: {wm_error}")
+                        logger.exception("Failed to restore working memory")
 
                 yield AgentLoopEvent(
                     phase=phase,
@@ -3056,7 +3056,7 @@ class AgentLoop:
                     )
 
             except Exception as e:
-                logger.warning(f"Failed to load memory: {e}")
+                logger.exception("Failed to load memory")
                 error = StructuredError(
                     code="MEMORY_LOAD_FAILED",
                     message=f"加载记忆失败: {str(e)}",
@@ -3139,7 +3139,7 @@ class AgentLoop:
                 f"(confidence={ctx.scenario.confidence:.2f})"
             )
         except Exception as e:
-            logger.error(f"Scenario analysis failed: {e}")
+            logger.exception("Scenario analysis failed")
             # Create default scenario
             ctx.scenario = ScenarioDetectionResult(
                 primary_scenario=ScenarioType.GENERAL_INQUIRY,
@@ -3210,7 +3210,7 @@ class AgentLoop:
                     model_name=ctx.config.model_id,
                 )
             except Exception as e:
-                logger.warning(f"Could not create task planner: {e}")
+                logger.exception("Could not create task planner")
                 yield AgentLoopEvent(
                     phase=phase,
                     event_type="skipped",
@@ -3271,7 +3271,7 @@ class AgentLoop:
                 )
 
         except Exception as e:
-            logger.error(f"Task planning failed: {e}")
+            logger.exception("Task planning failed")
             error = StructuredError(
                 code="TASK_PLANNING_FAILED",
                 message=f"任务规划失败: {str(e)}",
@@ -3446,7 +3446,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.error(f"RAG retrieval failed: {e}")
+            logger.exception("RAG retrieval failed")
             error = StructuredError(
                 code="RAG_RETRIEVAL_FAILED",
                 message=f"知识库检索失败: {str(e)}",
@@ -3625,7 +3625,7 @@ class AgentLoop:
                 await self._persist_context_detail(ctx, detail)
 
         except Exception as e:
-            logger.error(f"Context building failed: {e}")
+            logger.exception("Context building failed")
             error = StructuredError(
                 code="CONTEXT_BUILD_FAILED",
                 message=f"上下文构建失败: {str(e)}",
@@ -3858,7 +3858,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.error(f"ReAct execution failed: {e}")
+            logger.exception("ReAct execution failed")
             error = StructuredError(
                 code="REACT_EXECUTION_FAILED",
                 message=f"ReAct 执行失败: {str(e)}",
@@ -3930,7 +3930,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.error(f"Orchestrator execution failed: {e}")
+            logger.exception("Orchestrator execution failed")
             error = StructuredError(
                 code="TOOL_EXECUTION_FAILED",
                 message=f"工具执行失败: {str(e)}",
@@ -4273,7 +4273,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.warning(f"Context compression failed: {e}")
+            logger.exception("Context compression failed")
             error = StructuredError(
                 code="COMPRESSION_FAILED",
                 message=f"上下文压缩失败: {str(e)}",
@@ -4438,7 +4438,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as e:
-                    logger.warning(f"RAG evaluation failed: {e}")
+                    logger.exception("RAG evaluation failed")
                     # Non-critical, emit warning but continue
                     error = StructuredError(
                         code="RAG_EVALUATION_FAILED",
@@ -4464,7 +4464,7 @@ class AgentLoop:
                         value=ctx.generated_content[:500],
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to store session memory: {e}")
+                    logger.exception("Failed to store session memory")
                     # Non-critical, don't emit error event
 
             yield AgentLoopEvent(
@@ -4477,7 +4477,7 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.error(f"Generation failed: {e}")
+            logger.exception("Generation failed")
             error = StructuredError(
                 code="GENERATION_FAILED",
                 message=f"生成回答失败: {str(e)}",
@@ -4602,7 +4602,7 @@ class _MessagesInterface:
             return _MessageResponse(content_text)
 
         except Exception as e:
-            logger.error(f"LLM planning call failed: {e}")
+            logger.exception("LLM planning call failed")
             raise
 
 
@@ -4680,7 +4680,7 @@ class _ModelRegistryAdapter:
                 return str(response)
 
         except Exception as e:
-            logger.warning(f"LLM completion failed in adapter: {e}")
+            logger.exception("LLM completion failed in adapter")
             return ""
 
 
