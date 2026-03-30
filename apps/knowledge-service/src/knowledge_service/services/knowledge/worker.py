@@ -559,7 +559,7 @@ class KnowledgeWorker:
         await self.service.db.update_document_status(task.document_id, status="processing", progress=5)
 
         # Download PDF from storage
-        pdf_bytes = await self.service.image_storage_service.download_bytes(original_key)
+        pdf_bytes = await self.service.image_storage_service.download_original_file(original_key)
         if not pdf_bytes:
             await self.service.db.update_document_status(
                 task.document_id, status="failed", progress=100, error="failed to download file"
