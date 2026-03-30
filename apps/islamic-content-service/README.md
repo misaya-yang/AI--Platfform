@@ -13,7 +13,7 @@ Standalone Quran, Dua, and Hadith content microservice extracted from `ai-gatewa
 
 1. Install the package in editable mode
 2. Copy `.env.example` to `.env`
-3. Fill Quran Foundation and Sunnah credentials
+3. Fill Quran Foundation credentials
 4. Run migrations and bootstrap
 
 ```bash
@@ -109,7 +109,8 @@ Dua data source: [Islamic Dua and Adhkar (Kaggle)](https://www.kaggle.com/datase
 
 ## Notes
 
-- Public read APIs never call upstream Quran or Sunnah APIs directly.
+- Public read APIs never call upstream Quran or Hadith sources directly.
 - Dua data is bundled in `data/islamic_dua_dataset_final.csv`, no upstream API needed.
+- Hadith bootstrap uses the public jsDelivr mirror of `fawazahmed0/hadith-api`; no API key is required.
 - Sync is CLI-only in v1.
 - Consumers are expected to reach this service over internal/private networking in v1.

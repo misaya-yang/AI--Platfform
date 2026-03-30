@@ -29,6 +29,16 @@ def _fallback_int(new_key: str, old_key: str, default: int) -> int:
         return default
 
 
+def _fallback_float(new_key: str, old_key: str, default: float) -> float:
+    raw = os.getenv(new_key, os.getenv(old_key))
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _fallback_csv(new_key: str, old_key: str, default: str = "") -> list[str]:
     raw = os.getenv(new_key, os.getenv(old_key, default))
     return [item.strip() for item in raw.split(",") if item.strip()]
@@ -293,15 +303,8 @@ class HadithSettings(BaseModel):
     base_url: str = Field(
         default_factory=lambda: _fallback(
             "ISLAMIC_CONTENT_HADITH__BASE_URL",
-            "GATEWAY_ISLAMIC_CONTENT__SUNNAH_BASE_URL",
-            "https://api.sunnah.com/v1",
-        )
-    )
-    api_key: str = Field(
-        default_factory=lambda: _fallback(
-            "ISLAMIC_CONTENT_HADITH__API_KEY",
-            "GATEWAY_ISLAMIC_CONTENT__SUNNAH_API_KEY",
-            "",
+            "GATEWAY_ISLAMIC_CONTENT__HADITH_CDN_BASE_URL",
+            "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1",
         )
     )
     sync_collections: list[str] = Field(
@@ -310,18 +313,33 @@ class HadithSettings(BaseModel):
             for item in _fallback(
                 "ISLAMIC_CONTENT_HADITH__SYNC_COLLECTIONS",
                 "GATEWAY_ISLAMIC_CONTENT__SUNNAH_SYNC_COLLECTIONS",
-                "bukhari,muslim,abudawud",
+                "bukhari,muslim,abudawud,tirmidhi,nasai,ibnmajah,nawawi",
             ).split(",")
             if item.strip()
         ]
     )
-    page_size: int = Field(
-        default_factory=lambda: _fallback_int(
-            "ISLAMIC_CONTENT_HADITH__PAGE_SIZE",
-            "GATEWAY_ISLAMIC_CONTENT__SUNNAH_PAGE_SIZE",
-            50,
+    default_language: str = Field(
+        default_factory=lambda: _fallback(
+            "ISLAMIC_CONTENT_HADITH__DEFAULT_LANGUAGE",
+            "GATEWAY_ISLAMIC_CONTENT__HADITH_CDN_DEFAULT_LANG",
+            "eng",
         )
     )
+    arabic_language: str = "ara"
+    prefer_minified: bool = True
+    request_timeout_seconds: float = Field(
+        default_factory=lambda: _fallback_float(
+            "ISLAMIC_CONTENT_HADITH__REQUEST_TIMEOUT_SECONDS",
+            "GATEWAY_ISLAMIC_CONTENT__REQUEST_TIMEOUT_SECONDS",
+            30.0,
+        )
+    )
+
+    @model_validator(mode="after")
+    def _migrate_legacy_sunnah_base_url(self) -> "HadithSettings":
+        if self.base_url.strip().rstrip("/") == "https://api.sunnah.com/v1":
+            self.base_url = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1"
+        return self
 
 
 class DuaSettings(BaseModel):

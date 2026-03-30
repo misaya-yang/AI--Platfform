@@ -9,9 +9,9 @@ from fastapi import FastAPI
 
 from .api.router import api_router
 from .cache import RedisCache
+from .clients.hadith_cdn_client import HadithCdnClient
 from .clients.quran_foundation_client import QuranFoundationClient
 from .clients.quran_user_client import QuranUserClient
-from .clients.sunnah_client import SunnahClient
 from .config import Settings
 from .db import Database
 from .observability import configure_logging
@@ -45,7 +45,7 @@ class Runtime:
     cache: RedisCache
     quran_client: QuranFoundationClient
     quran_user_client: QuranUserClient
-    sunnah_client: SunnahClient
+    hadith_client: HadithCdnClient
     bootstrap_service: BootstrapService
     quran_query_service: QuranQueryService
     quran_user_service: QuranUserService
@@ -55,7 +55,7 @@ class Runtime:
     async def close(self) -> None:
         await self.quran_client.close()
         await self.quran_user_client.close()
-        await self.sunnah_client.close()
+        await self.hadith_client.close()
         await self.cache.close()
         await self.db.close()
 
@@ -80,10 +80,10 @@ async def build_runtime(settings: Settings) -> Runtime:
 
     quran_client = QuranFoundationClient(settings.quran)
     quran_user_client = QuranUserClient(settings.quran_user)
-    sunnah_client = SunnahClient(settings.hadith)
+    hadith_client = HadithCdnClient(settings.hadith)
 
     quran_sync_service = QuranSyncService(settings.quran, quran_client, quran_repository, sync_repository)
-    hadith_sync_service = HadithSyncService(settings.hadith, sunnah_client, hadith_repository, sync_repository)
+    hadith_sync_service = HadithSyncService(settings.hadith, hadith_client, hadith_repository, sync_repository)
     quran_query_service = QuranQueryService(settings.quran, settings.cache, quran_repository, cache)
     quran_user_service = QuranUserService(settings.quran_user, quran_user_client)
     hadith_query_service = HadithQueryService(settings.cache, hadith_repository, cache)
@@ -111,7 +111,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         cache=cache,
         quran_client=quran_client,
         quran_user_client=quran_user_client,
-        sunnah_client=sunnah_client,
+        hadith_client=hadith_client,
         bootstrap_service=bootstrap_service,
         quran_query_service=quran_query_service,
         quran_user_service=quran_user_service,

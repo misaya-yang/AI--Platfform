@@ -24,6 +24,8 @@ class HadithBookSchema(BaseModel):
 class HadithSummarySchema(BaseModel):
     collection: str | None = None
     book_number: str
+    section_number: str | None = None
+    section_title: str | None = None
     chapter_id: str | None = None
     hadith_number: str
     title: str | None = None
@@ -34,6 +36,8 @@ class HadithSummarySchema(BaseModel):
 class HadithDetailSchema(BaseModel):
     collection: str | None = None
     book_number: str
+    section_number: str | None = None
+    section_title: str | None = None
     chapter_id: str | None = None
     hadith_number: str
     chapter_title: str | None = None

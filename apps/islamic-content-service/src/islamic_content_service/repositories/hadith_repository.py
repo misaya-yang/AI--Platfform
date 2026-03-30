@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from ..db import Database
-from ..domain.constants import SUNNAH_SOURCE_API
+from ..domain.constants import HADITH_SOURCE_API
 
 
 def _hadith_sort_key(value: str) -> tuple[int, str]:
@@ -17,6 +17,164 @@ def _hadith_sort_key(value: str) -> tuple[int, str]:
 class HadithRepository:
     def __init__(self, db: Database):
         self.db = db
+
+    async def replace_collection(
+        self,
+        collection: dict[str, Any],
+        books: list[dict[str, Any]],
+        hadiths: list[dict[str, Any]],
+    ) -> None:
+        collection_name = str(collection.get("name") or "")
+        if not collection_name:
+            raise ValueError("collection.name is required")
+
+        async def _txn(connection) -> None:
+            await connection.execute(
+                """
+                INSERT INTO hadith_collections (
+                    name, title, short_intro, has_books, has_chapters,
+                    total_books, total_hadith, source_api, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                ON CONFLICT (name)
+                DO UPDATE SET
+                    title = EXCLUDED.title,
+                    short_intro = EXCLUDED.short_intro,
+                    has_books = EXCLUDED.has_books,
+                    has_chapters = EXCLUDED.has_chapters,
+                    total_books = EXCLUDED.total_books,
+                    total_hadith = EXCLUDED.total_hadith,
+                    source_api = EXCLUDED.source_api,
+                    updated_at = NOW()
+                """,
+                collection_name,
+                collection.get("title"),
+                collection.get("short_intro"),
+                collection.get("has_books"),
+                collection.get("has_chapters"),
+                collection.get("total_books"),
+                collection.get("total_hadith"),
+                collection.get("source_api") or HADITH_SOURCE_API,
+            )
+            await connection.execute(
+                "DELETE FROM hadith_items WHERE collection_name = $1",
+                collection_name,
+            )
+            await connection.execute(
+                "DELETE FROM hadith_books WHERE collection_name = $1",
+                collection_name,
+            )
+
+            book_rows = [
+                (
+                    collection_name,
+                    item.get("book_number"),
+                    item.get("title"),
+                    item.get("hadith_start_number"),
+                    item.get("hadith_end_number"),
+                    item.get("number_of_hadith"),
+                )
+                for item in books
+                if item.get("book_number")
+            ]
+            if book_rows:
+                await connection.executemany(
+                    """
+                    INSERT INTO hadith_books (
+                        collection_name, book_number, title,
+                        hadith_start_number, hadith_end_number, number_of_hadith, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    """,
+                    book_rows,
+                )
+
+            hadith_rows = [
+                (
+                    collection_name,
+                    str(item.get("book_number") or ""),
+                    str(item.get("chapter_id") or ""),
+                    str(item.get("hadith_number") or ""),
+                    item.get("chapter_title"),
+                    item.get("source_api") or HADITH_SOURCE_API,
+                )
+                for item in hadiths
+                if item.get("hadith_number")
+            ]
+            if hadith_rows:
+                await connection.executemany(
+                    """
+                    INSERT INTO hadith_items (
+                        collection_name, book_number, chapter_id, hadith_number,
+                        chapter_title, source_api, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                    """,
+                    hadith_rows,
+                )
+
+            if not hadith_rows:
+                return
+
+            item_rows = await connection.fetch(
+                """
+                SELECT id, hadith_number
+                FROM hadith_items
+                WHERE collection_name = $1
+                """,
+                collection_name,
+            )
+            item_ids = {str(row["hadith_number"]): row["id"] for row in item_rows}
+
+            localization_rows: list[tuple[Any, ...]] = []
+            grade_rows: list[tuple[Any, ...]] = []
+            for item in hadiths:
+                hadith_item_id = item_ids.get(str(item.get("hadith_number") or ""))
+                if hadith_item_id is None:
+                    continue
+                chapter_title = item.get("chapter_title")
+                if item.get("translation_text"):
+                    localization_rows.append(
+                        (hadith_item_id, "en", chapter_title, item["translation_text"])
+                    )
+                if item.get("arabic_text"):
+                    localization_rows.append(
+                        (hadith_item_id, "ar", chapter_title, item["arabic_text"])
+                    )
+                for language, grades in (item.get("grades") or {}).items():
+                    for grade in grades or []:
+                        grade_rows.append(
+                            (
+                                hadith_item_id,
+                                language,
+                                grade.get("grade"),
+                                grade.get("graded_by"),
+                                json.dumps(grade),
+                            )
+                        )
+
+            if localization_rows:
+                await connection.executemany(
+                    """
+                    INSERT INTO hadith_localizations (
+                        hadith_item_id, language, chapter_title, body_text, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, NOW())
+                    """,
+                    localization_rows,
+                )
+            if grade_rows:
+                await connection.executemany(
+                    """
+                    INSERT INTO hadith_grades (
+                        hadith_item_id, language, grade, graded_by, raw_payload, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+                    """,
+                    grade_rows,
+                )
+
+        await self.db.transaction(_txn)
 
     async def upsert_collections(self, collections: list[dict[str, Any]]) -> None:
         rows = [
@@ -178,16 +336,19 @@ class HadithRepository:
             """,
             collection_name,
         )
-        books = await self.db.fetch(
+        rows = await self.db.fetch(
             """
             SELECT book_number, title, hadith_start_number, hadith_end_number, number_of_hadith
             FROM hadith_books
             WHERE collection_name = $1
-            ORDER BY book_number
             """,
             collection_name,
         )
-        return (dict(collection) if collection else None, [dict(row) for row in books])
+        books = sorted(
+            (dict(row) for row in rows),
+            key=lambda row: _hadith_sort_key(str(row["book_number"])),
+        )
+        return (dict(collection) if collection else None, books)
 
     async def get_book_items(
         self,
@@ -200,10 +361,12 @@ class HadithRepository:
         rows = await self.db.fetch(
             """
             SELECT hi.id, hi.collection_name, hi.book_number, hi.chapter_id, hi.hadith_number,
-                   hi.chapter_title,
+                   COALESCE(hi.chapter_title, hb.title) AS section_title,
                    en.body_text AS en_body,
                    ar.body_text AS ar_body
             FROM hadith_items hi
+            LEFT JOIN hadith_books hb
+                ON hb.collection_name = hi.collection_name AND hb.book_number = hi.book_number
             LEFT JOIN hadith_localizations en
                 ON en.hadith_item_id = hi.id AND en.language = 'en'
             LEFT JOIN hadith_localizations ar
@@ -222,9 +385,11 @@ class HadithRepository:
                 {
                     "collection": row["collection_name"],
                     "book_number": row["book_number"],
-                    "chapter_id": row["chapter_id"],
+                    "section_number": row["book_number"],
+                    "section_title": row["section_title"],
+                    "chapter_id": row["chapter_id"] or row["book_number"],
                     "hadith_number": row["hadith_number"],
-                    "title": row["chapter_title"],
+                    "title": row["section_title"],
                     "preview_text": (row["en_body"] or "")[:280],
                     "arabic_preview_text": (row["ar_body"] or "")[:280],
                 }
@@ -241,27 +406,28 @@ class HadithRepository:
     async def get_chapters(
         self, collection_name: str, book_number: str
     ) -> list[dict[str, Any]]:
-        rows = await self.db.fetch(
+        row = await self.db.fetchrow(
             """
-            SELECT chapter_id, chapter_title, COUNT(*) AS hadith_count
-            FROM hadith_items
-            WHERE collection_name = $1
-              AND book_number = $2
-              AND chapter_id IS NOT NULL AND chapter_id != ''
-            GROUP BY chapter_id, chapter_title
-            ORDER BY chapter_id
+            SELECT hb.book_number AS chapter_id, hb.title AS chapter_title, COUNT(hi.id) AS hadith_count
+            FROM hadith_books hb
+            LEFT JOIN hadith_items hi
+                ON hi.collection_name = hb.collection_name AND hi.book_number = hb.book_number
+            WHERE hb.collection_name = $1 AND hb.book_number = $2
+            GROUP BY hb.book_number, hb.title
             """,
             collection_name,
             book_number,
         )
-        return [dict(row) for row in rows]
+        return [dict(row)] if row else []
 
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any] | None:
         row = await self.db.fetchrow(
             """
-            SELECT *
-            FROM hadith_items
-            WHERE collection_name = $1 AND hadith_number = $2
+            SELECT hi.*, COALESCE(hi.chapter_title, hb.title) AS section_title
+            FROM hadith_items hi
+            LEFT JOIN hadith_books hb
+                ON hb.collection_name = hi.collection_name AND hb.book_number = hi.book_number
+            WHERE hi.collection_name = $1 AND hi.hadith_number = $2
             """,
             collection_name,
             hadith_number,
@@ -303,11 +469,13 @@ class HadithRepository:
         return {
             "collection": row["collection_name"],
             "book_number": row["book_number"],
-            "chapter_id": row["chapter_id"],
+            "section_number": row["book_number"],
+            "section_title": row["section_title"],
+            "chapter_id": row["chapter_id"] or row["book_number"],
             "hadith_number": row["hadith_number"],
-            "chapter_title": row["chapter_title"],
+            "chapter_title": row["section_title"],
             "translation_text": (text_by_language.get("en") or {}).get("body_text", ""),
             "arabic_text": (text_by_language.get("ar") or {}).get("body_text", ""),
             "grades": grades_by_language,
-            "source_api": SUNNAH_SOURCE_API,
+            "source_api": HADITH_SOURCE_API,
         }

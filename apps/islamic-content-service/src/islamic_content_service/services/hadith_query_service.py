@@ -5,7 +5,7 @@ from typing import Any, Awaitable, Callable
 
 from ..cache import RedisCache
 from ..config import CacheSettings
-from ..domain.constants import SUNNAH_SOURCE_API
+from ..domain.constants import HADITH_SOURCE_API
 from ..domain.errors import NotReadyError
 from ..repositories.hadith_repository import HadithRepository
 
@@ -45,7 +45,7 @@ class HadithQueryService:
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_collections",
-                "source_api": SUNNAH_SOURCE_API,
+                "source_api": HADITH_SOURCE_API,
                 "collections": collections,
             }
 
@@ -59,7 +59,7 @@ class HadithQueryService:
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_books",
-                "source_api": SUNNAH_SOURCE_API,
+                "source_api": HADITH_SOURCE_API,
                 "collection": collection,
                 "books": books,
             }
@@ -92,7 +92,7 @@ class HadithQueryService:
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_book_items",
-                "source_api": SUNNAH_SOURCE_API,
+                "source_api": HADITH_SOURCE_API,
                 "collection_name": collection_name,
                 "book_number": book_number,
                 **payload,
@@ -108,6 +108,13 @@ class HadithQueryService:
         self, collection_name: str, book_number: str
     ) -> dict[str, Any]:
         async def _load() -> dict[str, Any]:
+            collection, _ = await self.repository.get_books(collection_name)
+            if collection is None:
+                raise NotReadyError(f"No Hadith collection found for {collection_name}")
+            if collection.get("has_chapters") is False:
+                raise NotReadyError(
+                    f"Canonical Hadith CDN exposes sections/books only; nested chapters are not available for {collection_name}"
+                )
             chapters = await self.repository.get_chapters(collection_name, book_number)
             if not chapters:
                 raise NotReadyError(
@@ -116,7 +123,7 @@ class HadithQueryService:
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_chapters",
-                "source_api": SUNNAH_SOURCE_API,
+                "source_api": HADITH_SOURCE_API,
                 "collection_name": collection_name,
                 "book_number": book_number,
                 "chapters": chapters,
@@ -138,7 +145,7 @@ class HadithQueryService:
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_detail",
-                "source_api": SUNNAH_SOURCE_API,
+                "source_api": HADITH_SOURCE_API,
                 "hadith": detail,
             }
 

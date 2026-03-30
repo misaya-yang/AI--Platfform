@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
 from typing import Any
 
-from ..clients.sunnah_client import SunnahClient
+from ..clients.hadith_cdn_client import HadithCdnClient
 from ..config import HadithSettings
-from ..domain.constants import SUNNAH_SOURCE_API
+from ..domain.constants import HADITH_SOURCE_API
+from ..domain.errors import UpstreamAPIError
 from ..repositories.hadith_repository import HadithRepository
 from ..repositories.sync_repository import SyncRepository
+
+logger = logging.getLogger(__name__)
+UNMAPPED_SECTION_TITLE = "Unmapped (CDN section gap)"
 
 
 class HadithSyncService:
     def __init__(
         self,
         settings: HadithSettings,
-        client: SunnahClient,
+        client: HadithCdnClient,
         repository: HadithRepository,
         sync_repository: SyncRepository,
     ) -> None:
@@ -35,177 +40,253 @@ class HadithSyncService:
         text = html.unescape(text)
         return re.sub(r"\s+", " ", text).strip()
 
-    def _pagination_total_pages(self, pagination: dict[str, Any] | None) -> int | None:
-        if not pagination:
+    def _find_edition(
+        self,
+        catalog: dict[str, Any],
+        collection_name: str,
+        language_prefix: str,
+    ) -> dict[str, Any] | None:
+        entry = catalog.get(collection_name) or {}
+        editions = entry.get("collection") or []
+        if not editions:
             return None
-        for key in ("totalPages", "total_pages", "lastPage", "last_page"):
-            value = pagination.get(key)
-            if value is None:
+        target_name = f"{language_prefix}-{collection_name}"
+        exact = next((item for item in editions if item.get("name") == target_name), None)
+        if exact is not None:
+            return exact
+        return next(
+            (item for item in editions if str(item.get("name") or "").startswith(f"{target_name}")),
+            None,
+        )
+
+    def _normalize_sections(
+        self,
+        metadata: dict[str, Any],
+    ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+        raw_sections = metadata.get("sections") or metadata.get("section") or {}
+        raw_details = metadata.get("section_details") or metadata.get("section_detail") or {}
+        sections: dict[str, str] = {}
+        details: dict[str, dict[str, Any]] = {}
+        for key, value in raw_sections.items():
+            section_number = str(key or "").strip()
+            section_title = str(value or "").strip()
+            if not section_number or (section_number == "0" and not section_title):
                 continue
+            detail = raw_details.get(key) or raw_details.get(section_number) or {}
+            sections[section_number] = section_title
+            details[section_number] = detail if isinstance(detail, dict) else {}
+        return sections, details
+
+    def _build_books(
+        self,
+        sections: dict[str, str],
+        section_details: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        books: list[dict[str, Any]] = []
+        for section_number in sorted(sections, key=lambda item: int(item) if item.isdigit() else item):
+            detail = section_details.get(section_number) or {}
+            start = detail.get("hadithnumber_first")
+            end = detail.get("hadithnumber_last")
+            count = None
             try:
-                return int(value)
+                if start is not None and end is not None:
+                    count = int(end) - int(start) + 1
+            except (TypeError, ValueError):
+                count = None
+            books.append(
+                {
+                    "book_number": section_number,
+                    "title": sections.get(section_number) or None,
+                    "hadith_start_number": start,
+                    "hadith_end_number": end,
+                    "number_of_hadith": count,
+                }
+            )
+        return books
+
+    def _section_lookup(
+        self,
+        sections: dict[str, str],
+        section_details: dict[str, dict[str, Any]],
+    ) -> dict[int, tuple[str, str]]:
+        mapping: dict[int, tuple[str, str]] = {}
+        for section_number, title in sections.items():
+            detail = section_details.get(section_number) or {}
+            first = detail.get("hadithnumber_first")
+            last = detail.get("hadithnumber_last")
+            try:
+                start = int(first)
+                end = int(last)
             except (TypeError, ValueError):
                 continue
-        return None
+            for hadith_number in range(start, end + 1):
+                mapping[hadith_number] = (section_number, title)
+        return mapping
 
-    def _normalize_collection(self, item: dict[str, Any]) -> dict[str, Any]:
-        entries = item.get("collection") or []
-        english = next((entry for entry in entries if entry.get("lang") == "en"), entries[0] if entries else {})
-        return {
-            "name": item.get("name"),
-            "title": english.get("title") or item.get("name"),
-            "short_intro": english.get("shortIntro"),
-            "has_books": item.get("hasBooks"),
-            "has_chapters": item.get("hasChapters"),
-            "total_books": item.get("totalBooks") or english.get("totalBooks"),
-            "total_hadith": item.get("totalHadith") or english.get("totalHadith"),
-        }
+    def _normalize_payload(
+        self,
+        *,
+        collection_name: str,
+        catalog_entry: dict[str, Any],
+        english_payload: dict[str, Any],
+        arabic_payload: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        metadata = english_payload.get("metadata") or {}
+        sections, section_details = self._normalize_sections(metadata)
+        if not sections:
+            raise UpstreamAPIError(f"{collection_name}: no section metadata found in CDN payload")
 
-    def _normalize_book(self, item: dict[str, Any]) -> dict[str, Any]:
-        entries = item.get("book") or []
-        english = next((entry for entry in entries if entry.get("lang") == "en"), entries[0] if entries else {})
-        return {
-            "book_number": str(item.get("bookNumber") or ""),
-            "title": english.get("name") or english.get("title"),
-            "hadith_start_number": item.get("hadithStartNumber"),
-            "hadith_end_number": item.get("hadithEndNumber"),
-            "number_of_hadith": item.get("numberOfHadith"),
+        books = self._build_books(sections, section_details)
+        lookup = self._section_lookup(sections, section_details)
+        english_hadiths = english_payload.get("hadiths") or []
+        arabic_map = {
+            int(item.get("hadithnumber")): self._clean_text(item.get("text"))
+            for item in (arabic_payload or {}).get("hadiths", [])
+            if item.get("hadithnumber") is not None
         }
+        normalized_hadiths: list[dict[str, Any]] = []
+        missing_sections: list[str] = []
+        zero_book_hadiths: list[str] = []
+        duplicate_hadith_numbers: list[str] = []
+        seen_hadith_numbers: set[str] = set()
+        for item in english_hadiths:
+            hadith_number_raw = item.get("hadithnumber")
+            try:
+                hadith_number_int = int(hadith_number_raw)
+            except (TypeError, ValueError):
+                continue
+            hadith_number = str(hadith_number_int)
+            reference = item.get("reference") if isinstance(item.get("reference"), dict) else {}
+            raw_section_number = reference.get("book")
+            section_number = "" if raw_section_number is None else str(raw_section_number).strip()
+            section_title = sections.get(section_number)
+            if section_number == "0":
+                section_title = UNMAPPED_SECTION_TITLE
+                zero_book_hadiths.append(hadith_number)
+            if not section_title:
+                section_number, section_title = lookup.get(hadith_number_int, ("", ""))
+            if not section_number or not section_title:
+                missing_sections.append(hadith_number)
+                continue
+            if hadith_number in seen_hadith_numbers:
+                duplicate_hadith_numbers.append(hadith_number)
+                continue
+            seen_hadith_numbers.add(hadith_number)
+            normalized_hadiths.append(
+                {
+                    "source_api": HADITH_SOURCE_API,
+                    "collection": collection_name,
+                    "book_number": section_number,
+                    "chapter_id": section_number,
+                    "hadith_number": hadith_number,
+                    "chapter_title": section_title,
+                    "translation_text": self._clean_text(item.get("text")),
+                    "arabic_text": arabic_map.get(hadith_number_int, ""),
+                    "grades": {"en": item.get("grades") or []},
+                }
+            )
 
-    def _normalize_detail(self, item: dict[str, Any]) -> dict[str, Any]:
-        entries = item.get("hadith") or []
-        english = next((entry for entry in entries if entry.get("lang") == "en"), {})
-        arabic = next((entry for entry in entries if entry.get("lang") == "ar"), {})
-        return {
-            "source_api": SUNNAH_SOURCE_API,
-            "collection": item.get("collection"),
-            "book_number": str(item.get("bookNumber") or ""),
-            "chapter_id": str(item.get("chapterId") or ""),
-            "hadith_number": str(item.get("hadithNumber") or ""),
-            "chapter_title": english.get("chapterTitle") or arabic.get("chapterTitle"),
-            "translation_text": self._clean_text(english.get("body")),
-            "arabic_text": self._clean_text(arabic.get("body")),
-            "grades": {
-                "en": english.get("grades") or [],
-                "ar": arabic.get("grades") or [],
-            },
+        if missing_sections:
+            raise UpstreamAPIError(
+                f"{collection_name}: {len(missing_sections)} hadiths missing section mapping"
+            )
+        if zero_book_hadiths and not any(book["book_number"] == "0" for book in books):
+            books = [
+                {
+                    "book_number": "0",
+                    "title": UNMAPPED_SECTION_TITLE,
+                    "hadith_start_number": None,
+                    "hadith_end_number": None,
+                    "number_of_hadith": len(zero_book_hadiths),
+                },
+                *books,
+            ]
+            logger.warning(
+                "Collection %s contains %d hadiths with CDN reference.book=0; grouped into synthetic section 0",
+                collection_name,
+                len(zero_book_hadiths),
+            )
+        if duplicate_hadith_numbers:
+            logger.warning(
+                "Collection %s contains %d duplicate hadithnumber values in CDN; keeping first occurrence per number",
+                collection_name,
+                len(duplicate_hadith_numbers),
+            )
+
+        collection = {
+            "name": collection_name,
+            "title": metadata.get("name") or catalog_entry.get("name") or collection_name,
+            "short_intro": catalog_entry.get("comments") or "",
+            "has_books": True,
+            "has_chapters": False,
+            "total_books": len(books),
+            "total_hadith": len(normalized_hadiths),
+            "source_api": HADITH_SOURCE_API,
         }
+        return collection, books, normalized_hadiths
 
     async def sync(self) -> dict[str, int]:
-        page = 1
-        collections_raw: list[dict[str, Any]] = []
-        while True:
-            payload = await self.client.get_collections(page=page, limit=self.settings.page_size)
-            await self.sync_repository.save_snapshot(
-                source_name="hadith",
-                snapshot_kind="collections_page",
-                snapshot_key=str(page),
-                request_path="collections",
-                request_params={"page": page, "limit": self.settings.page_size},
-                response_payload=payload,
-            )
-            data = payload.get("data") or []
-            if not data:
-                break
-            collections_raw.extend(data)
-            total_pages = self._pagination_total_pages(payload.get("pagination") or {})
-            if total_pages is not None and page >= total_pages:
-                break
-            if len(data) < self.settings.page_size:
-                break
-            page += 1
-
-        normalized_collections = [self._normalize_collection(item) for item in collections_raw]
-        await self.repository.upsert_collections(normalized_collections)
+        catalog = await self.client.get_editions()
+        await self.sync_repository.save_snapshot(
+            source_name="hadith",
+            snapshot_kind="editions_catalog",
+            snapshot_key="all",
+            request_path="editions",
+            request_params=None,
+            response_payload=catalog,
+        )
         wanted = {item.lower() for item in self.settings.sync_collections}
         synced_collections = 0
         synced_books = 0
         synced_hadiths = 0
 
-        for collection in normalized_collections:
-            name = str(collection.get("name") or "")
+        collection_names = sorted(catalog)
+        for name in collection_names:
             if wanted and name.lower() not in wanted:
                 continue
-            synced_collections += 1
-            collection_meta = await self.client.get_collection(name)
+            english_edition = self._find_edition(catalog, name, self.settings.default_language)
+            if english_edition is None:
+                logger.warning("Skipping %s: no %s edition found", name, self.settings.default_language)
+                continue
+            arabic_edition = self._find_edition(catalog, name, self.settings.arabic_language)
+
+            english_payload = await self.client.get_edition(str(english_edition["name"]))
             await self.sync_repository.save_snapshot(
                 source_name="hadith",
-                snapshot_kind="collection_meta",
-                snapshot_key=name,
-                request_path=f"collections/{name}",
+                snapshot_kind="edition",
+                snapshot_key=str(english_edition["name"]),
+                request_path=f"editions/{english_edition['name']}",
                 request_params=None,
-                response_payload=collection_meta,
+                response_payload=english_payload,
             )
-
-            book_page = 1
-            books: list[dict[str, Any]] = []
-            while True:
-                payload = await self.client.get_books(name, page=book_page, limit=self.settings.page_size)
+            arabic_payload = None
+            if arabic_edition is not None:
+                arabic_payload = await self.client.get_edition(str(arabic_edition["name"]))
                 await self.sync_repository.save_snapshot(
                     source_name="hadith",
-                    snapshot_kind="books_page",
-                    snapshot_key=f"{name}:{book_page}",
-                    request_path=f"collections/{name}/books",
-                    request_params={"page": book_page, "limit": self.settings.page_size},
-                    response_payload=payload,
+                    snapshot_kind="edition",
+                    snapshot_key=str(arabic_edition["name"]),
+                    request_path=f"editions/{arabic_edition['name']}",
+                    request_params=None,
+                    response_payload=arabic_payload,
                 )
-                data = payload.get("data") or []
-                if not data:
-                    break
-                books.extend(self._normalize_book(item) for item in data)
-                total_pages = self._pagination_total_pages(payload.get("pagination") or {})
-                if total_pages is not None and book_page >= total_pages:
-                    break
-                if len(data) < self.settings.page_size:
-                    break
-                book_page += 1
-
-            await self.repository.upsert_books(name, books)
-
-            for book in books:
-                synced_books += 1
-                hadith_page = 1
-                while True:
-                    payload = await self.client.get_book_hadiths(
-                        name,
-                        str(book["book_number"]),
-                        page=hadith_page,
-                        limit=self.settings.page_size,
-                    )
-                    await self.sync_repository.save_snapshot(
-                        source_name="hadith",
-                        snapshot_kind="hadith_page",
-                        snapshot_key=f"{name}:{book['book_number']}:{hadith_page}",
-                        request_path=f"collections/{name}/books/{book['book_number']}/hadiths",
-                        request_params={"page": hadith_page, "limit": self.settings.page_size},
-                        response_payload=payload,
-                    )
-                    items = payload.get("data") or []
-                    if not items:
-                        break
-                    for summary in items:
-                        hadith_number = str(summary.get("hadithNumber") or "").strip()
-                        if not hadith_number:
-                            continue
-                        detail_payload = await self.client.get_hadith_detail(name, hadith_number)
-                        await self.sync_repository.save_snapshot(
-                            source_name="hadith",
-                            snapshot_kind="hadith_detail",
-                            snapshot_key=f"{name}:{hadith_number}",
-                            request_path=f"collections/{name}/hadiths/{hadith_number}",
-                            request_params=None,
-                            response_payload=detail_payload,
-                        )
-                        await self.repository.upsert_detail(
-                            self._normalize_detail(detail_payload.get("data") or detail_payload)
-                        )
-                        synced_hadiths += 1
-                    total_pages = self._pagination_total_pages(payload.get("pagination") or {})
-                    if total_pages is not None and hadith_page >= total_pages:
-                        break
-                    if len(items) < self.settings.page_size:
-                        break
-                    hadith_page += 1
+            catalog_entry = catalog.get(name) or {}
+            collection, books, hadiths = self._normalize_payload(
+                collection_name=name,
+                catalog_entry=catalog_entry,
+                english_payload=english_payload,
+                arabic_payload=arabic_payload,
+            )
+            await self.repository.replace_collection(collection, books, hadiths)
+            logger.info(
+                "Synced hadith collection %s via CDN: books=%d hadiths=%d",
+                name,
+                len(books),
+                len(hadiths),
+            )
+            synced_collections += 1
+            synced_books += len(books)
+            synced_hadiths += len(hadiths)
 
         return {
             "collections": synced_collections,
