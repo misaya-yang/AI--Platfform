@@ -107,7 +107,6 @@ nul
 NUL
 
 # ======================== Debug & Temporary Scripts ========================
-# Debug scripts created during development (should stay in tests/)
 check_*.py
 check_*.json
 quick_test*.py
@@ -117,9 +116,25 @@ debug_*.py
 .worktrees
 .mcp.json
 apps/islamic-content-service/data/
-*.png
 
-# Demo & test screenshots
+# ======================== Screenshots & Playwright ========================
+*.png
+*.jpeg
+.playwright-mcp/
+
+# ======================== Audit & Planning Docs ========================
+# These are development artifacts, not source code
+*-Audit-*.md
+*-Optimization-*.md
+*-Report*.md
+*-Report*.docx
+*-Report*.js
+*-Spec.md
+claude-code-*.md
+plans/
+docs/plans/
+docs/architecture/
+
+# ======================== Temporary Upload/Data ========================
+tmp-*/
 demo-screenshots/
-playground-*.png
-regression-test-*.png
