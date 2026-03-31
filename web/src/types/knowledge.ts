@@ -320,7 +320,7 @@ export interface RetrieveResponse {
 // ============================================================
 
 export interface LLMConfig {
-  provider: "deepseek" | "openai" | "dashscope";
+  provider: "gemini" | "deepseek" | "dashscope" | "openai";
   model: string;
   api_key?: string;
   base_url?: string;

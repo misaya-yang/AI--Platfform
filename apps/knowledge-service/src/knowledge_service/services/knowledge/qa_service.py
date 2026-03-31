@@ -38,8 +38,8 @@ class LLMProvider(str, Enum):
 class LLMConfig:
     """LLM configuration for QA testing."""
 
-    provider: LLMProvider = LLMProvider.DEEPSEEK
-    model: str = ""  # Will use LLM_MODEL env or "deepseek-chat"
+    provider: LLMProvider = LLMProvider.GEMINI
+    model: str = ""  # Will use LLM_MODEL env or "gemini-2.0-flash"
     api_key: str | None = None
     base_url: str | None = None
     temperature: float = 0.1
@@ -49,7 +49,7 @@ class LLMConfig:
     def __post_init__(self):
         # Use environment variable for model if not set
         if not self.model:
-            self.model = os.getenv("LLM_MODEL", "deepseek-chat")
+            self.model = os.getenv("LLM_MODEL", "gemini-2.0-flash")
 
     # System prompt for QA
     system_prompt: str = """You are a helpful assistant that answers questions based on the provided context.
@@ -67,7 +67,7 @@ Context will be provided in the user message."""
         if not data:
             return cls()
 
-        provider_str = str(data.get("provider", "deepseek")).lower()
+        provider_str = str(data.get("provider", "gemini")).lower()
         try:
             provider = LLMProvider(provider_str)
         except ValueError:
@@ -75,7 +75,7 @@ Context will be provided in the user message."""
 
         return cls(
             provider=provider,
-            model=str(data.get("model", "deepseek-chat")),
+            model=str(data.get("model", "gemini-2.0-flash")),
             api_key=data.get("api_key"),
             base_url=data.get("base_url"),
             temperature=float(data.get("temperature", 0.1)),

@@ -399,8 +399,8 @@ class LLMConfigSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    provider: str = "deepseek"  # deepseek | gemini | dashscope
-    model: str = "deepseek-chat"
+    provider: str = "gemini"  # gemini | deepseek | dashscope
+    model: str = "gemini-2.0-flash"
     api_key: str | None = None
     base_url: str | None = None
     temperature: float = 0.1

@@ -122,8 +122,12 @@ type QAChatMessage = {
 };
 
 const QA_MODEL_OPTIONS = [
-  { value: "deepseek-chat", label: "DeepSeek Chat" },
-  { value: "deepseek-reasoner", label: "DeepSeek Reasoner" },
+  { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash", provider: "gemini" },
+  { value: "gemini-2.5-flash-preview-05-20", label: "Gemini 2.5 Flash", provider: "gemini" },
+  { value: "qwen-plus", label: "Qwen Plus", provider: "dashscope" },
+  { value: "qwen-turbo", label: "Qwen Turbo", provider: "dashscope" },
+  { value: "deepseek-chat", label: "DeepSeek Chat", provider: "deepseek" },
+  { value: "deepseek-reasoner", label: "DeepSeek Reasoner", provider: "deepseek" },
 ];
 
 const QA_SYSTEM_PROMPT_KEYS = {
@@ -1078,7 +1082,7 @@ export function KnowledgeDatasetDetailPage() {
       rerank,
       mmr,
       llm_config: {
-        provider: "deepseek" as const,
+        provider: QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "gemini",
         model: qaModel,
         temperature: qaTemperature,
         max_tokens: qaMaxTokens,
@@ -1929,7 +1933,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaModel")}</Label>
-                      <Badge variant="outline" className="text-xs">DeepSeek</Badge>
+                      <Badge variant="outline" className="text-xs">{(QA_MODEL_OPTIONS.find((o) => o.value === qaModel)?.provider ?? "gemini").toUpperCase()}</Badge>
                     </div>
                     <Select value={qaModel} onValueChange={setQaModel}>
                       <SelectTrigger className="border-border">
