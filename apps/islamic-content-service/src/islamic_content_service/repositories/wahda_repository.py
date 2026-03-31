@@ -48,6 +48,12 @@ class WahdaRepository:
         )
 
     async def insert_event(self, event: dict[str, Any]) -> None:
+        from datetime import date as Date
+        def _parse_date(v):
+            if v is None: return None
+            if isinstance(v, Date): return v
+            return Date.fromisoformat(str(v))
+
         await self._db.execute("""
             INSERT INTO islamic_content.religious_events
             (event_name, islamic_date, gregorian_start, gregorian_end, recurrence,
@@ -55,7 +61,7 @@ class WahdaRepository:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
         """,
             event["event_name"], event.get("islamic_date"),
-            event["gregorian_start"], event.get("gregorian_end"),
+            _parse_date(event["gregorian_start"]), _parse_date(event.get("gregorian_end")),
             event.get("recurrence", "yearly"),
             event.get("weekday"), event.get("lunar_days"),
             __import__("json").dumps(event["questions"]),
