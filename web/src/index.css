@@ -510,3 +510,30 @@
 [data-radix-toast-viewport] {
   z-index: 100 !important;
 }
+
+/* ============================================================
+ * Dark mode: suppress all bright borders globally
+ * Fixes white lines in tables, cards, inputs across all pages
+ * ============================================================ */
+.dark *,
+.dark *::before,
+.dark *::after {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.dark .ant-table-cell,
+.dark .ant-table-thead > tr > th,
+.dark .ant-table-tbody > tr > td,
+.dark .ant-select-selector,
+.dark .ant-input,
+.dark .ant-input-affix-wrapper,
+.dark .ant-card,
+.dark .ant-tabs-nav::before,
+.dark .ant-divider {
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Ensure Card and divider lines are subtle in dark mode */
+.dark [class*="border-border"] {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}

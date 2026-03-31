@@ -134,10 +134,12 @@ const QA_SYSTEM_PROMPT_KEYS = {
 import { copyToClipboard } from "@/lib/clipboard";
 
 const EMBEDDING_MODELS = [
-  { provider: "gemini", model: "gemini-embedding-001", nameKey: "knowledge.detail.embeddingGemini001", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v4", nameKey: "knowledge.detail.embeddingDashscopeV4", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v3", nameKey: "knowledge.detail.embeddingDashscopeV3", dimension: 1024 },
-  { provider: "dashscope", model: "text-embedding-v2", nameKey: "knowledge.detail.embeddingDashscopeV2", dimension: 1536 },
+  { provider: "gemini", model: "gemini-embedding-2-preview", label: "Gemini Embedding 2 Preview", dimension: 1024, badge: "推荐" },
+  { provider: "gemini", model: "gemini-embedding-001", label: "Gemini Embedding 001", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v4", label: "DashScope text-embedding-v4", dimension: 1024 },
+  { provider: "dashscope", model: "text-embedding-v3", label: "DashScope text-embedding-v3", dimension: 1024 },
+  { provider: "siliconflow", model: "BAAI/bge-m3", label: "SiliconFlow BGE-M3", dimension: 1024 },
+  { provider: "siliconflow", model: "BAAI/bge-large-zh-v1.5", label: "SiliconFlow BGE-Large-ZH", dimension: 1024 },
 ];
 
 export function KnowledgeDatasetDetailPage() {
@@ -724,21 +726,24 @@ export function KnowledgeDatasetDetailPage() {
       const [embeddingProvider, embeddingModel] = uploadEmbeddingModel.split(":");
       const selectedModel = EMBEDDING_MODELS.find(m => m.provider === embeddingProvider && m.model === embeddingModel);
 
-      await updateDatasetConfig(datasetId, {
-        chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
-        retrieval_config: {
-          rerank: {
-            enabled: rerankEnabled,
-            model: rerankModel,
+      // Best-effort config update — don't block upload if it fails
+      try {
+        await updateDatasetConfig(datasetId, {
+          chunking_config: chunkingConfig as typeof chunkingConfig & { mode: "automatic" },
+          retrieval_config: {
+            rerank: {
+              enabled: rerankEnabled,
+              model: rerankModel,
+            },
           },
-        },
-        embedding_provider: embeddingProvider,
-        embedding_model: embeddingModel,
-        embedding_dimension: selectedModel?.dimension || 1024,
-      });
-
-      // Small delay to ensure config is persisted before upload triggers ingest
-      await new Promise(resolve => setTimeout(resolve, 200));
+          embedding_provider: embeddingProvider,
+          embedding_model: embeddingModel,
+          embedding_dimension: selectedModel?.dimension || 1024,
+        });
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (configErr) {
+        console.warn("Config update failed (non-blocking):", configErr);
+      }
 
       // Close dialog immediately — progress will show in the document list
       setUploadDialogOpen(false);
@@ -2935,10 +2940,10 @@ export function KnowledgeDatasetDetailPage() {
                           <SelectItem key={`${m.provider}:${m.model}`} value={`${m.provider}:${m.model}`}>
                             <div className="flex items-center gap-2">
                               <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary flex-shrink-0">
-                                {m.provider === "gemini" ? "G" : "A"}
+                                {m.provider === "gemini" ? "G" : m.provider === "siliconflow" ? "S" : "A"}
                               </span>
-                              <span>{t(m.nameKey)}</span>
-                              <span className="text-muted-foreground text-xs">({t("knowledge.detail.dimension", { dim: m.dimension })})</span>
+                              <span>{m.label}</span>
+                              <span className="text-muted-foreground text-xs">{m.dimension}维</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -4111,19 +4116,23 @@ for chunk in results.get("chunks", []):
                       </SelectTrigger>
                       <SelectContent>
                         {EMBEDDING_MODELS.map((model) => {
-                          const isGemini = model.provider === "gemini";
-                          const badgeClass = isGemini ? "bg-blue-100 text-blue-600" : "bg-orange-100 text-orange-600";
-                          const badgeLabel = isGemini ? "G" : "A";
+                          const badgeMap: Record<string, [string, string]> = {
+                            gemini: ["bg-blue-100 text-blue-600 dark:bg-blue-900 dark:text-blue-300", "G"],
+                            dashscope: ["bg-orange-100 text-orange-600 dark:bg-orange-900 dark:text-orange-300", "A"],
+                            siliconflow: ["bg-green-100 text-green-600 dark:bg-green-900 dark:text-green-300", "S"],
+                          };
+                          const [badgeClass, badgeLabel] = badgeMap[model.provider] || ["bg-gray-100 text-gray-600", "?"];
                           return (
                             <SelectItem key={`${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>
                               <div className="flex items-center gap-2">
                                 <span className={`w-5 h-5 rounded ${badgeClass} flex items-center justify-center text-xs font-bold`}>
                                   {badgeLabel}
                                 </span>
-                                <span>{t(model.nameKey)}</span>
-                                <span className="text-xs text-muted-foreground">
-                                  ({t("knowledge.detail.dimension", { dim: model.dimension })})
-                                </span>
+                                <span>{model.label}</span>
+                                <span className="text-xs text-muted-foreground">{model.dimension}维</span>
+                                {"badge" in model && model.badge && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500 text-white">{model.badge}</span>
+                                )}
                               </div>
                             </SelectItem>
                           );
