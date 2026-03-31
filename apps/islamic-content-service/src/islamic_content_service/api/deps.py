@@ -37,3 +37,8 @@ def get_dua_query_service(request: Request) -> DuaQueryService:
 
 def get_cache(request: Request) -> RedisCache:
     return request.app.state.cache
+
+
+def get_wahda_service(request: Request):
+    from ..services.wahda_service import WahdaService
+    return request.app.state.wahda_service

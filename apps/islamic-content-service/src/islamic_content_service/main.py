@@ -51,6 +51,7 @@ class Runtime:
     quran_user_service: QuranUserService
     hadith_query_service: HadithQueryService
     dua_query_service: DuaQueryService
+    wahda_service: object = None  # WahdaService (optional)
 
     async def close(self) -> None:
         await self.quran_client.close()
@@ -93,6 +94,13 @@ async def build_runtime(settings: Settings) -> Runtime:
     )
     dua_sync_service = DuaSyncService(dua_data_path, dua_repository)
     dua_query_service = DuaQueryService(settings.cache, dua_repository, cache)
+
+    # Wahda recommendation service
+    from .repositories.wahda_repository import WahdaRepository
+    from .services.wahda_service import WahdaService
+    wahda_repo = WahdaRepository(db)
+    wahda_service = WahdaService(wahda_repo)
+
     bootstrap_service = BootstrapService(
         settings,
         db,
@@ -117,6 +125,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         quran_user_service=quran_user_service,
         hadith_query_service=hadith_query_service,
         dua_query_service=dua_query_service,
+        wahda_service=wahda_service,
     )
 
 
@@ -138,6 +147,16 @@ def create_app(settings: Settings | None = None, *, enable_runtime: bool = True)
         app.state.quran_user_service = runtime.quran_user_service
         app.state.hadith_query_service = runtime.hadith_query_service
         app.state.dua_query_service = runtime.dua_query_service
+        app.state.wahda_service = runtime.wahda_service
+
+        # Seed Wahda recommendation data (idempotent)
+        if runtime.wahda_service:
+            try:
+                await runtime.wahda_service.seed_if_empty()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("wahda_seed_failed: %s", e)
+
         if resolved_settings.bootstrap.on_start:
             await runtime.bootstrap_service.bootstrap(
                 [

@@ -1,0 +1,301 @@
+{
+  "religious_events": [
+    {
+      "event_name": "Start of Ramadan",
+      "islamic_date": "1 Ramadan",
+      "gregorian_start": "2026-02-18",
+      "gregorian_end": "2026-03-18",
+      "recurrence": "yearly",
+      "description": "Holy month of fasting",
+      "priority": 10,
+      "questions": [
+        "How long does Ramadan last?",
+        "How to prepare for Ramadan?",
+        "What are the rules of fasting?",
+        "What invalidates the fast?",
+        "How to make the most of Ramadan?"
+      ]
+    },
+    {
+      "event_name": "Laylat al-Qadr",
+      "islamic_date": "Last 10 odd nights of Ramadan",
+      "gregorian_start": "2026-03-09",
+      "gregorian_end": "2026-03-13",
+      "recurrence": "yearly",
+      "description": "The noblest night in Islam",
+      "priority": 10,
+      "questions": [
+        "What is Laylat al-Qadr?",
+        "When is Laylat al-Qadr expected?",
+        "What to do on Laylat al-Qadr?",
+        "What dua to read on Laylat al-Qadr?",
+        "Why is Laylat al-Qadr better than 1000 months?"
+      ]
+    },
+    {
+      "event_name": "Eid al-Fitr",
+      "islamic_date": "1 Shawwal",
+      "gregorian_start": "2026-03-19",
+      "gregorian_end": "2026-03-21",
+      "recurrence": "yearly",
+      "description": "Festival ending Ramadan",
+      "priority": 10,
+      "questions": [
+        "How to pray Eid al-Fitr prayer?",
+        "What is Zakat al-Fitr?",
+        "Who must pay Zakat al-Fitr?",
+        "How to greet people on Eid?",
+        "What are Eid etiquette and manners?"
+      ]
+    },
+    {
+      "event_name": "First 10 Days of Dhul-Hijjah",
+      "islamic_date": "1-10 Dhul-Hijjah",
+      "gregorian_start": "2026-06-07",
+      "gregorian_end": "2026-06-16",
+      "recurrence": "yearly",
+      "description": "The most virtuous days of the year",
+      "priority": 9,
+      "questions": [
+        "Why are the first 10 days of Dhul-Hijjah special?",
+        "What good deeds are recommended in these days?",
+        "Is fasting the first 9 days of Dhul-Hijjah Sunnah?",
+        "What is the Day of Arafah and when is it?",
+        "What is the reward of fasting the Day of Arafah?"
+      ]
+    },
+    {
+      "event_name": "Hajj Season",
+      "islamic_date": "8-12 Dhul-Hijjah",
+      "gregorian_start": "2026-06-14",
+      "gregorian_end": "2026-06-18",
+      "recurrence": "yearly",
+      "description": "Annual pilgrimage to Makkah",
+      "priority": 10,
+      "questions": [
+        "What are the steps of Hajj?",
+        "Who is obligated to perform Hajj?",
+        "What is Ihram and its rules?",
+        "What is Tawaf and Sa'i?",
+        "What to pray during Hajj?"
+      ]
+    },
+    {
+      "event_name": "Eid al-Adha",
+      "islamic_date": "10 Dhul-Hijjah",
+      "gregorian_start": "2026-06-16",
+      "gregorian_end": "2026-06-18",
+      "recurrence": "yearly",
+      "description": "Festival of Sacrifice",
+      "priority": 10,
+      "questions": [
+        "How to perform Qurbani/Udhiyah?",
+        "Rules of Eid al-Adha prayer?",
+        "What is the meaning of Qurbani?",
+        "Who can receive Qurbani meat?",
+        "How to distribute sacrifice meat?"
+      ]
+    },
+    {
+      "event_name": "Islamic New Year",
+      "islamic_date": "1 Muharram",
+      "gregorian_start": "2026-07-07",
+      "recurrence": "yearly",
+      "description": "Start of Islamic calendar (Hijrah)",
+      "priority": 7,
+      "questions": [
+        "When is Islamic New Year in 2026?",
+        "What is the significance of Hijrah?",
+        "How to observe the 1st of Muharram?",
+        "What is the history of the Islamic calendar?",
+        "What dua to recite for the Islamic New Year?"
+      ]
+    },
+    {
+      "event_name": "Day of Ashura",
+      "islamic_date": "10 Muharram",
+      "gregorian_start": "2026-07-16",
+      "recurrence": "yearly",
+      "description": "Sacred day of fasting and remembrance",
+      "priority": 8,
+      "questions": [
+        "What is the significance of Ashura?",
+        "Is fasting on Ashura Sunnah?",
+        "What happened on the Day of Ashura?",
+        "Should I fast the 9th and 10th of Muharram?",
+        "What dua is recommended on Ashura?"
+      ]
+    },
+    {
+      "event_name": "Mawlid an-Nabi",
+      "islamic_date": "12 Rabi' al-Awwal",
+      "gregorian_start": "2026-09-16",
+      "recurrence": "yearly",
+      "description": "Commemoration of Prophet Muhammad's birth",
+      "priority": 7,
+      "questions": [
+        "When is Mawlid an-Nabi in 2026?",
+        "Why do we celebrate Mawlid?",
+        "What are good deeds during Mawlid?",
+        "How to respect the Prophet in daily life?",
+        "What to learn from the Prophet's life?"
+      ]
+    },
+    {
+      "event_name": "Isra' and Mi'raj",
+      "islamic_date": "27 Rajab",
+      "gregorian_start": "2027-01-19",
+      "recurrence": "yearly",
+      "description": "Night Journey and Ascension of Prophet Muhammad (PBUH)",
+      "priority": 7,
+      "questions": [
+        "What is the story of Isra' and Mi'raj?",
+        "What lessons can we learn from Isra' and Mi'raj?",
+        "What prayers were given during Mi'raj?",
+        "How to observe the night of Isra' and Mi'raj?",
+        "What Quran verses mention the Night Journey?"
+      ]
+    },
+    {
+      "event_name": "Shab-e-Baraat (Mid-Sha'ban)",
+      "islamic_date": "15 Sha'ban",
+      "gregorian_start": "2026-02-04",
+      "recurrence": "yearly",
+      "description": "Night of Forgiveness and divine decree",
+      "priority": 6,
+      "questions": [
+        "What is the significance of Mid-Sha'ban?",
+        "What duas are recommended on this night?",
+        "Is fasting on 15th Sha'ban recommended?",
+        "What should a Muslim do on Shab-e-Baraat?",
+        "What do scholars say about Mid-Sha'ban observance?"
+      ]
+    },
+    {
+      "event_name": "Ayyam al-Beed (Bright Days)",
+      "islamic_date": "13, 14, 15 of each month",
+      "gregorian_start": "2026-01-01",
+      "gregorian_end": "2026-12-31",
+      "recurrence": "monthly",
+      "lunar_days": [13, 14, 15],
+      "description": "Sunnah fasting on the bright moon days each month",
+      "priority": 3,
+      "questions": [
+        "What are the White Days (Ayyam al-Beed)?",
+        "What is the reward of fasting the White Days?",
+        "When are the White Days each Islamic month?",
+        "Is it obligatory to fast the White Days?",
+        "Can I combine White Days with other voluntary fasts?"
+      ]
+    },
+    {
+      "event_name": "Jumu'ah (Friday Prayer)",
+      "islamic_date": "Every Friday",
+      "gregorian_start": "2026-01-01",
+      "gregorian_end": "2026-12-31",
+      "recurrence": "weekly",
+      "weekday": 4,
+      "description": "Weekly congregational prayer",
+      "priority": 2,
+      "questions": [
+        "What is Jumu'ah prayer?",
+        "When is Jumu'ah prayer time?",
+        "How to prepare for Jumu'ah?",
+        "How to pray Jumu'ah correctly?",
+        "What if I miss Jumu'ah prayer?"
+      ]
+    },
+    {
+      "event_name": "Daily Worship (Default)",
+      "islamic_date": "Daily",
+      "gregorian_start": "2026-01-01",
+      "gregorian_end": "2026-12-31",
+      "recurrence": "daily",
+      "description": "Fallback for normal days",
+      "priority": 0,
+      "questions": [
+        "What are the 5 daily prayers?",
+        "How to perform Salah properly?",
+        "How to make Wudu correctly?",
+        "How to check prayer times?",
+        "How to make up missed prayers?"
+      ]
+    }
+  ],
+  "question_pool": {
+    "typeahead_how": [
+      "How can I reduce my bad habits?",
+      "How can I do Salah properly?",
+      "How can I be a good Muslim?",
+      "How to perform Wudu correctly?",
+      "How to make up for missed prayers?"
+    ],
+    "typeahead_what": [
+      "What are the five pillars of Islam?",
+      "What breaks the fast in Ramadan?",
+      "What is Halal and Haram?",
+      "What is the meaning of Salah?",
+      "What is the importance of Zakat?"
+    ],
+    "typeahead_when": [
+      "When is the next prayer time?",
+      "When does Ramadan start and end?",
+      "When is Jumu'ah prayer held?",
+      "When should I pay Zakat?",
+      "When is Laylat al-Qadr?"
+    ],
+    "typeahead_who": [
+      "Who must perform Hajj?",
+      "Who is eligible for Zakat?",
+      "Who can break fast during Ramadan?",
+      "Who is exempt from Hajj?",
+      "Who should recite Quran daily?"
+    ],
+    "typeahead_why": [
+      "Why do Muslims pray 5 times a day?",
+      "Why is Ramadan important?",
+      "Why is Wudu needed for Salah?",
+      "Why do we perform Tawaf?",
+      "Why is Zakat mandatory?"
+    ],
+    "typeahead_where": [
+      "Where do Muslims pray?",
+      "Where is the Kaaba located?",
+      "Where to find accurate prayer times?",
+      "Where to give Zakat?",
+      "Where to perform Eid prayers?"
+    ],
+    "daily": [
+      "What are the 5 daily prayers?",
+      "How to perform Salah properly?",
+      "How to make Wudu correctly?",
+      "How to check prayer times?",
+      "How to make up missed prayers?",
+      "What is the importance of Fajr prayer?",
+      "How to improve concentration in Salah?",
+      "What are Sunnah prayers (Rawatib)?",
+      "How to perform Tahajjud (night prayer)?",
+      "What are the benefits of morning Adhkar?",
+      "How to recite Quran daily?",
+      "What are the Islamic rules on halal and haram food?",
+      "How to make sincere Dua?",
+      "What is the Islamic ruling on music and entertainment?",
+      "What are the manners of eating in Islam?",
+      "What is Riba (interest) and why is it prohibited?",
+      "What are the Islamic guidelines for business transactions?",
+      "What is the Islamic dress code for men and women?",
+      "What Surahs are recommended to recite daily?",
+      "How to perform prayer while travelling (Qasr)?",
+      "What are the rules of Tayammum (dry ablution)?",
+      "What breaks Wudu according to Islamic jurisprudence?",
+      "What are the Islamic guidelines on marriage and Nikah?",
+      "What are a Muslim's obligations towards neighbours?",
+      "What is the ruling on insurance and mortgages in Islam?",
+      "How to purify (Taharah) clothes and prayer area?",
+      "What are the Islamic rules for inheritance?",
+      "What are the types of water permissible for Wudu?",
+      "What is the Islamic etiquette for using the toilet?",
+      "What are the conditions that make Salah valid?"
+    ]
+  }
+}
