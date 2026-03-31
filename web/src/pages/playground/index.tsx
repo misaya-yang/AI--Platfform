@@ -497,14 +497,17 @@ export function PlaygroundPage() {
             showTimeline={showTimeline}
             showThinkingIndicator={showThinkingIndicator}
             onShare={async () => {
-              if (!activeSessionId) return;
-              // Resolve the LangGraph thread_id from session mapping
-              const threadId = sessionThreadIdRef.current[activeSessionId] || activeSessionId;
+              if (!activeSessionId || messages.length === 0) return;
+              // Send session_id + messages directly (no backend fetch needed)
+              const shareMessages = messages
+                .filter(m => m.role === "user" || m.role === "assistant")
+                .filter(m => m.content && m.content.trim().length > 0)
+                .map(m => ({ role: m.role, content: m.content }));
               try {
                 const resp = await fetch("/api/v1/islamic/wahda/share", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ thread_id: threadId }),
+                  body: JSON.stringify({ session_id: activeSessionId, messages: shareMessages }),
                 });
                 if (!resp.ok) {
                   const errText = await resp.text();

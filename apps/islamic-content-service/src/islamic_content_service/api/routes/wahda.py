@@ -78,8 +78,9 @@ async def create_share(
         result = await svc.create_share(
             tenant_id=tenant_id,
             user_id=user_id,
-            thread_id=body.thread_id,
+            session_id=body.session_id,
             title=body.title,
+            pre_fetched_messages=[{"role": m.role, "content": m.content} for m in body.messages] if body.messages else None,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))

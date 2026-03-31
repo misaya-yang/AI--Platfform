@@ -123,34 +123,43 @@ class WahdaService:
     # ------------------------------------------------------------------
 
     async def create_share(
-        self, tenant_id: str, user_id: str, thread_id: str,
+        self, tenant_id: str, user_id: str, session_id: str,
         title: str | None = None,
+        pre_fetched_messages: list[dict] | None = None,
     ) -> dict[str, str]:
-        """Pull full conversation from LangGraph thread and store as snapshot."""
+        """Store a full conversation snapshot.
+
+        Messages can be:
+        1. Pre-fetched by the frontend (passed in pre_fetched_messages)
+        2. Pulled from Gateway session history API
+        """
         import httpx
-        lg_url = self._langgraph_url
 
-        # Fetch thread state from LangGraph Platform
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(f"{lg_url}/threads/{thread_id}/state")
-            resp.raise_for_status()
-            state = resp.json()
-
-        # Extract messages from state
-        raw_msgs = state.get("values", {}).get("messages", [])
-        messages = []
-        for m in raw_msgs:
-            role = "user" if m.get("type") == "human" else "assistant"
-            content = m.get("content", "")
-            # Gemini returns list-of-parts
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content
-                    if isinstance(p, dict) and p.get("text")
+        if pre_fetched_messages:
+            messages = pre_fetched_messages
+        else:
+            # Pull from Gateway session history
+            gw_url = self._gateway_url
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{gw_url}/api/v1/assistant/sessions/{session_id}/history",
+                    headers={"X-User-Id": user_id, "X-Tenant-Id": tenant_id},
                 )
-            if not content or len(str(content)) < 2:
-                continue
-            messages.append({"role": role, "content": str(content)})
+                resp.raise_for_status()
+                raw = resp.json()
+
+            raw_msgs = raw if isinstance(raw, list) else raw.get("messages", raw.get("data", []))
+            messages = []
+            for m in raw_msgs:
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("text")
+                    )
+                if role in ("user", "assistant") and content and len(str(content)) > 2:
+                    messages.append({"role": role, "content": str(content)})
 
         if not messages:
             raise ValueError("No messages found in thread")
@@ -168,7 +177,7 @@ class WahdaService:
         share_id = await self._repo.create_share(
             tenant_id=tenant_id,
             user_id=user_id,
-            thread_id=thread_id,
+            thread_id=session_id,
             title=title,
             messages=messages,
             message_count=len(messages),
@@ -194,9 +203,9 @@ class WahdaService:
         }
 
     @property
-    def _langgraph_url(self) -> str:
+    def _gateway_url(self) -> str:
         import os
-        return os.getenv("LANGGRAPH_URL", "http://imam-agent:8000")
+        return os.getenv("GATEWAY_URL", "http://gateway:8080")
 
     # ------------------------------------------------------------------
     # Seed data import

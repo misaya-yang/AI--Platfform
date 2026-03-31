@@ -54,8 +54,9 @@ class ShareMessage(BaseModel):
 
 class ShareRequest(BaseModel):
     """Create a shareable snapshot of a full conversation."""
-    thread_id: str = Field(description="LangGraph thread_id")
+    session_id: str = Field(description="Gateway session_id (from Playground sidebar)")
     title: str | None = Field(default=None, description="Optional title, auto-generated from first question if empty")
+    messages: list[ShareMessage] | None = Field(default=None, description="Pre-fetched messages (if frontend already has them)")
 
 
 class ShareCreateResponse(BaseModel):
