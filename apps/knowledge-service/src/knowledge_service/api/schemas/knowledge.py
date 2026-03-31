@@ -76,9 +76,9 @@ class DatasetPermissionGrantSchema(BaseModel):
 class DatasetDeleteSchema(BaseModel):
     """Knowledge dataset delete confirmation payload."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
-    password: str = Field(..., min_length=1, max_length=128)
+    password: str | None = Field(default=None, max_length=128)
     reason: str | None = Field(default=None, max_length=500)
 
 

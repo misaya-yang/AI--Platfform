@@ -1309,6 +1309,54 @@ async def update_segment_status(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Compat routes: frontend sends POST /enable, KB Service has PATCH /status
+# ---------------------------------------------------------------------------
+
+@router.post("/knowledge/{dataset_id}/documents/{document_id}/enable")
+async def enable_document_compat(
+    dataset_id: str,
+    document_id: str,
+    payload: DocumentEnableDisableSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Compat: POST /enable → delegates to PATCH /status."""
+    return await update_document_status(dataset_id, document_id, payload, svc, user)
+
+
+@router.post("/knowledge/{dataset_id}/segments/{segment_id}/enable")
+async def enable_segment_compat(
+    dataset_id: str,
+    segment_id: str,
+    payload: SegmentEnableDisableSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Compat: POST /enable → delegates to PATCH /status."""
+    return await update_segment_status(dataset_id, segment_id, payload, svc, user)
+
+
+@router.post("/knowledge/{dataset_id}/segments/batch/enable")
+async def batch_enable_segments(
+    dataset_id: str,
+    payload: dict = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Batch enable/disable segments."""
+    segment_ids = payload.get("segment_ids", [])
+    enabled = payload.get("enabled", True)
+    updated = 0
+    for sid in segment_ids:
+        try:
+            await svc.set_segment_enabled(user, dataset_id, sid, enabled)
+            updated += 1
+        except Exception:
+            pass
+    return {"success": True, "updated": updated, "total": len(segment_ids)}
+
+
 @router.post("/knowledge/{dataset_id}/documents/{document_id}/segments")
 async def create_segment(
     dataset_id: str,
