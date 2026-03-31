@@ -63,9 +63,8 @@ async def create_dataset(
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
-    # 权限：需要 knowledge:manage 或 admin
+    # Auth is handled by Gateway proxy — KB Service trusts X-User-Id/X-Tenant-Id headers
     try:
-        request.app.state.dispatcher.rbac.require(user.roles, "knowledge:manage")
         return await svc.create_dataset(user, payload.model_dump())
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
