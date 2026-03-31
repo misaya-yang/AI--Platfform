@@ -4339,7 +4339,8 @@ for chunk in results.get("chunks", []):
               <Input
                 id="delete-kb-password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="off"
+                name="delete-confirm-pwd"
                 value={deletePassword}
                 onChange={(e) => setDeletePassword(e.target.value)}
                 placeholder={t("knowledge.detail.deletePasswordPlaceholder")}
