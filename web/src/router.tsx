@@ -13,6 +13,7 @@ import { KnowledgeDatasetsPage, KnowledgeDatasetDetailPage } from "@/pages/knowl
 import DatasetCreatePage from "@/pages/knowledge/DatasetCreate";
 import { AssistantPage } from "@/pages/assistant";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
+import { SharePage } from "@/pages/SharePage";
 
 export function AppRouter() {
   return (
@@ -20,6 +21,7 @@ export function AppRouter() {
       {/* Public routes */}
       <Route path="/login" element={<LoginPage />} />
       <Route path="/403" element={<ForbiddenPage />} />
+      <Route path="/share/:shareId" element={<SharePage />} />
 
       {/* Protected routes - wrapped with single ProtectedRoute at layout level */}
       <Route

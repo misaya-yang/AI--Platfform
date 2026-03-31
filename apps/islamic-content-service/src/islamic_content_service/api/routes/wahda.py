@@ -68,17 +68,23 @@ async def create_share(
     request: Request,
     svc=Depends(get_wahda_service),
 ):
-    """Create a shareable link for a single Q&A turn."""
+    """Create a shareable snapshot of a full conversation (ChatGPT-style).
+
+    Pulls all messages from the LangGraph thread and stores as a read-only snapshot.
+    """
     tenant_id = request.headers.get("X-Tenant-Id", "default")
     user_id = request.headers.get("X-User-Id", "anonymous")
-    result = await svc.create_share(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        session_id=body.session_id,
-        message_index=body.message_index,
-        question=body.question,
-        answer=body.answer,
-    )
+    try:
+        result = await svc.create_share(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            thread_id=body.thread_id,
+            title=body.title,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch conversation from agent: {e}")
     return ShareCreateResponse(**result)
 
 
@@ -87,7 +93,7 @@ async def get_share(
     share_id: str,
     svc=Depends(get_wahda_service),
 ):
-    """Get shared Q&A content for H5 page rendering."""
+    """Get shared conversation snapshot — full read-only chat history."""
     content = await svc.get_share(share_id)
     if not content:
         raise HTTPException(404, "Share not found or expired")

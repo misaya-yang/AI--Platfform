@@ -72,6 +72,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         await db.migrate(migrations_dir / "001_init_schema.sql")
         await db.migrate(migrations_dir / "002_dua_tables.sql")
         await db.migrate(migrations_dir / "003_wahda_features.sql")
+        await db.migrate(migrations_dir / "004_share_conversations.sql")
     cache = RedisCache(settings.cache)
     await cache.connect()
 

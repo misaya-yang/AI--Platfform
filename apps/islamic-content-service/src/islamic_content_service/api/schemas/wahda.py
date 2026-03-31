@@ -45,13 +45,17 @@ class FeedbackResponse(BaseModel):
     feedback_id: str
 
 
-# --- Share ---
+# --- Share (ChatGPT-style full conversation snapshot) ---
+
+class ShareMessage(BaseModel):
+    role: str = Field(description="'user' or 'assistant'")
+    content: str
+
 
 class ShareRequest(BaseModel):
-    session_id: str
-    message_index: int
-    question: str
-    answer: str
+    """Create a shareable snapshot of a full conversation."""
+    thread_id: str = Field(description="LangGraph thread_id")
+    title: str | None = Field(default=None, description="Optional title, auto-generated from first question if empty")
 
 
 class ShareCreateResponse(BaseModel):
@@ -61,7 +65,10 @@ class ShareCreateResponse(BaseModel):
 
 
 class ShareContentResponse(BaseModel):
-    question: str
-    answer: str
-    created_at: str
+    """Full conversation snapshot for the public share page."""
+    title: str
+    messages: list[ShareMessage]
+    message_count: int
     agent_name: str = "Sheikh Wahda"
+    created_at: str
+    expires_at: str | None = None

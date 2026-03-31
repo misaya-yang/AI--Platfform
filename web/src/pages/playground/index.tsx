@@ -496,6 +496,31 @@ export function PlaygroundPage() {
             toolCallsDefaultOpen={resolvedToolCallsDefaultOpen}
             showTimeline={showTimeline}
             showThinkingIndicator={showThinkingIndicator}
+            onShare={async () => {
+              if (!activeSessionId) return;
+              try {
+                const resp = await fetch("/api/v1/islamic/wahda/share", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ thread_id: activeSessionId }),
+                });
+                if (!resp.ok) throw new Error("Share failed");
+                const data = await resp.json();
+                const shareUrl = `${window.location.origin}/share/${data.share_id}`;
+                await navigator.clipboard.writeText(shareUrl);
+                // Toast via simple alert — replace with proper toast if available
+                alert(`Share link copied!\n${shareUrl}`);
+              } catch (e) {
+                alert("Failed to create share link");
+              }
+            }}
+            onRegenerate={() => {
+              // Find last user message and resend via existing handleSend
+              const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
+              if (lastUserMsg) {
+                handleSend(lastUserMsg.content);
+              }
+            }}
           />
         )}
       </div>

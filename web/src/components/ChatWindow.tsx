@@ -58,6 +58,8 @@ export interface ChatWindowProps {
   /** Show AG-UI timeline in assistant messages (default: true) */
   showTimeline?: boolean;
   showThinkingIndicator?: boolean;
+  onShare?: () => void;
+  onRegenerate?: () => void;
 }
 
 export function ChatWindow({
@@ -67,6 +69,8 @@ export function ChatWindow({
   toolCallsDefaultOpen = true,
   showTimeline = true,
   showThinkingIndicator = true,
+  onShare,
+  onRegenerate,
 }: ChatWindowProps) {
   const { t } = useTranslation();
   return (
@@ -88,6 +92,8 @@ export function ChatWindow({
             showTimeline={showTimeline}
             showThinkingIndicator={showThinkingIndicator}
             index={i}
+            onShare={onShare}
+            onRegenerate={onRegenerate}
           />
         ))}
       </AnimatePresence>

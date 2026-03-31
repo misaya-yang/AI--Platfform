@@ -9,7 +9,7 @@ import { MessageAvatar } from "./MessageAvatar";
 import { StatsBadge } from "./StatsBadge";
 import { TimelineSection } from "./TimelineSection";
 import { ArtifactsSection } from "./ArtifactsSection";
-import { ChevronRight, Sparkles } from "lucide-react";
+import { ChevronRight, Sparkles, Copy, Share2, RefreshCw, Check } from "lucide-react";
 
 /**
  * Remove internal "Process (brief)" execution traces from assistant output.
@@ -40,6 +40,8 @@ export interface ChatMessageItemProps {
   showTimeline?: boolean;
   showThinkingIndicator?: boolean;
   index: number;
+  onShare?: () => void;
+  onRegenerate?: () => void;
 }
 
 export const ChatMessageItem = memo(
@@ -52,6 +54,8 @@ export const ChatMessageItem = memo(
         toolCallsDefaultOpen = true,
         showTimeline = true,
         index,
+        onShare,
+        onRegenerate,
       },
       ref
     ) {
@@ -371,6 +375,15 @@ export const ChatMessageItem = memo(
               message.content && (
                 <StatsBadge stats={message.stats} />
               )}
+
+            {/* Action buttons (assistant messages, after completion) */}
+            {!isUser && !isStreaming && hasVisibleAssistantText && (
+              <MessageActions
+                content={assistantDisplayContent}
+                onShare={onShare}
+                onRegenerate={onRegenerate}
+              />
+            )}
           </div>
         </motion.div>
       );
@@ -379,3 +392,71 @@ export const ChatMessageItem = memo(
 );
 
 ChatMessageItem.displayName = "ChatMessageItem";
+
+// ---------------------------------------------------------------------------
+// Action buttons: Copy, Share, Regenerate
+// ---------------------------------------------------------------------------
+
+function MessageActions({
+  content,
+  onShare,
+  onRegenerate,
+}: {
+  content: string;
+  onShare?: () => void;
+  onRegenerate?: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* fallback: noop */
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1 mt-1">
+      {/* Copy */}
+      <button
+        type="button"
+        onClick={handleCopy}
+        className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+        title="Copy"
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-emerald-500" />
+        ) : (
+          <Copy className="h-3.5 w-3.5" />
+        )}
+      </button>
+
+      {/* Share */}
+      {onShare && (
+        <button
+          type="button"
+          onClick={onShare}
+          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+          title="Share conversation"
+        >
+          <Share2 className="h-3.5 w-3.5" />
+        </button>
+      )}
+
+      {/* Regenerate */}
+      {onRegenerate && (
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+          title="Regenerate response"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}

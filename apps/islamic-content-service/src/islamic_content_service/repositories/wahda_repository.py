@@ -134,26 +134,35 @@ class WahdaRepository:
     # ------------------------------------------------------------------
 
     async def create_share(
-        self, tenant_id: str, user_id: str, session_id: str,
-        message_index: int, question: str, answer: str,
+        self, tenant_id: str, user_id: str, thread_id: str,
+        title: str, messages: list[dict], message_count: int,
     ) -> str:
+        import json
         from datetime import timedelta
         share_id = secrets.token_urlsafe(8)[:12]
         expires = datetime.now(timezone.utc) + timedelta(days=30)
         await self._db.execute("""
             INSERT INTO islamic_content.shared_messages
-            (share_id, tenant_id, user_id, session_id, message_index, question, answer, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        """, share_id, tenant_id, user_id, session_id, message_index, question, answer, expires)
+            (share_id, tenant_id, user_id, session_id, title, messages, message_count, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+        """, share_id, tenant_id, user_id, thread_id, title,
+            json.dumps(messages), message_count, expires)
         return share_id
 
     async def get_share(self, share_id: str) -> dict[str, Any] | None:
         row = await self._db.fetchrow("""
-            SELECT question, answer, agent_name, created_at
+            SELECT title, messages, message_count, agent_name, created_at, expires_at
             FROM islamic_content.shared_messages
             WHERE share_id = $1 AND (expires_at IS NULL OR expires_at > NOW())
         """, share_id)
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        # messages is JSONB, asyncpg returns it as a Python object
+        if isinstance(d.get("messages"), str):
+            import json
+            d["messages"] = json.loads(d["messages"])
+        return d
 
     # ------------------------------------------------------------------
     # Trending (cross-schema query on public.usage_records)

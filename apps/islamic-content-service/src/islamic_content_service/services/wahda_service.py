@@ -119,15 +119,59 @@ class WahdaService:
         )
 
     # ------------------------------------------------------------------
-    # Share (§3.6.4)
+    # Share — ChatGPT-style full conversation snapshot
     # ------------------------------------------------------------------
 
     async def create_share(
-        self, tenant_id: str, user_id: str, session_id: str,
-        message_index: int, question: str, answer: str,
+        self, tenant_id: str, user_id: str, thread_id: str,
+        title: str | None = None,
     ) -> dict[str, str]:
+        """Pull full conversation from LangGraph thread and store as snapshot."""
+        import httpx
+        lg_url = self._langgraph_url
+
+        # Fetch thread state from LangGraph Platform
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{lg_url}/threads/{thread_id}/state")
+            resp.raise_for_status()
+            state = resp.json()
+
+        # Extract messages from state
+        raw_msgs = state.get("values", {}).get("messages", [])
+        messages = []
+        for m in raw_msgs:
+            role = "user" if m.get("type") == "human" else "assistant"
+            content = m.get("content", "")
+            # Gemini returns list-of-parts
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("text")
+                )
+            if not content or len(str(content)) < 2:
+                continue
+            messages.append({"role": role, "content": str(content)})
+
+        if not messages:
+            raise ValueError("No messages found in thread")
+
+        # Auto-generate title from first user message
+        if not title:
+            for m in messages:
+                if m["role"] == "user":
+                    title = m["content"][:80]
+                    if len(m["content"]) > 80:
+                        title += "..."
+                    break
+            title = title or "Shared Conversation"
+
         share_id = await self._repo.create_share(
-            tenant_id, user_id, session_id, message_index, question, answer,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            title=title,
+            messages=messages,
+            message_count=len(messages),
         )
         return {
             "share_id": share_id,
@@ -138,12 +182,21 @@ class WahdaService:
         row = await self._repo.get_share(share_id)
         if not row:
             return None
+        created = row.get("created_at")
+        expires = row.get("expires_at")
         return {
-            "question": row["question"],
-            "answer": row["answer"],
-            "created_at": row["created_at"].isoformat() if isinstance(row["created_at"], datetime) else str(row["created_at"]),
+            "title": row.get("title", "Shared Conversation"),
+            "messages": row.get("messages", []),
+            "message_count": row.get("message_count", 0),
             "agent_name": row.get("agent_name", "Sheikh Wahda"),
+            "created_at": created.isoformat() if isinstance(created, datetime) else str(created),
+            "expires_at": expires.isoformat() if isinstance(expires, datetime) else None,
         }
+
+    @property
+    def _langgraph_url(self) -> str:
+        import os
+        return os.getenv("LANGGRAPH_URL", "http://imam-agent:8000")
 
     # ------------------------------------------------------------------
     # Seed data import
