@@ -6,7 +6,8 @@
  */
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api } from "@/lib/api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface ShareMessage {
   role: "user" | "assistant";
@@ -126,16 +127,37 @@ export function SharePage() {
                   : "bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200 rounded-2xl rounded-tl-sm px-4 py-3"
               }`}
             >
-              <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                {msg.content}
-              </div>
+              {msg.role === "user" ? (
+                <div className="text-sm leading-relaxed whitespace-pre-wrap break-words">
+                  {msg.content}
+                </div>
+              ) : (
+                <div className="text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-headings:mt-3 prose-headings:mb-1 prose-p:my-1 prose-li:my-0 prose-table:text-sm">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
+                </div>
+              )}
             </div>
           </div>
         ))}
       </div>
 
+      {/* Continue conversation CTA */}
+      <div className="max-w-3xl mx-auto px-4 py-6 flex justify-center">
+        <a
+          href="/playground"
+          className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-indigo-500 to-indigo-700 text-white rounded-full text-sm font-medium shadow-lg hover:shadow-xl hover:from-indigo-600 hover:to-indigo-800 transition-all"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          </svg>
+          Continue this conversation
+        </a>
+      </div>
+
       {/* Footer */}
-      <footer className="max-w-3xl mx-auto px-4 py-8 text-center border-t border-gray-100 dark:border-gray-800 mt-8">
+      <footer className="max-w-3xl mx-auto px-4 py-8 text-center border-t border-gray-100 dark:border-gray-800">
         <p className="text-xs text-gray-400 dark:text-gray-500">
           Shared from {data.agent_name} · AI-generated content for educational purposes only
         </p>
