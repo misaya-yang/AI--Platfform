@@ -411,11 +411,17 @@ function MessageActions({
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     } catch {
-      /* fallback: noop */
+      // Fallback for HTTP (no clipboard API)
+      const textarea = document.createElement("textarea");
+      textarea.value = content;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
     }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (

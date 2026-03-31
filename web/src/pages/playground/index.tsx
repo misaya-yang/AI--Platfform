@@ -515,8 +515,13 @@ export function PlaygroundPage() {
                 }
                 const data = await resp.json();
                 const shareUrl = `${window.location.origin}/share/${data.share_id}`;
-                await navigator.clipboard.writeText(shareUrl);
-                alert(`Share link copied!\n${shareUrl}`);
+                try {
+                  await navigator.clipboard.writeText(shareUrl);
+                } catch {
+                  // Fallback for HTTP (no clipboard API)
+                  window.prompt("Copy this share link:", shareUrl);
+                }
+                alert(`Share link created!\n${shareUrl}`);
               } catch (e: any) {
                 alert(`Failed to create share link: ${e?.message || "unknown error"}`);
               }

@@ -133,10 +133,10 @@ class WahdaService:
         1. Pre-fetched by the frontend (passed in pre_fetched_messages)
         2. Pulled from Gateway session history API
         """
-        import httpx
+        import httpx, re
 
         if pre_fetched_messages:
-            messages = pre_fetched_messages
+            messages = self._clean_messages(pre_fetched_messages)
         else:
             # Pull from Gateway session history
             gw_url = self._gateway_url
@@ -160,6 +160,7 @@ class WahdaService:
                     )
                 if role in ("user", "assistant") and content and len(str(content)) > 2:
                     messages.append({"role": role, "content": str(content)})
+            messages = self._clean_messages(messages)
 
         if not messages:
             raise ValueError("No messages found in thread")
@@ -201,6 +202,24 @@ class WahdaService:
             "created_at": created.isoformat() if isinstance(created, datetime) else str(created),
             "expires_at": expires.isoformat() if isinstance(expires, datetime) else None,
         }
+
+    @staticmethod
+    def _clean_messages(raw: list[dict]) -> list[dict]:
+        """Filter to only user + final assistant messages, strip tool/KB noise."""
+        import re
+        cleaned = []
+        for m in raw:
+            role = m.get("role", "")
+            content = str(m.get("content", ""))
+            if role not in ("user", "assistant"):
+                continue
+            if not content or len(content.strip()) < 3:
+                continue
+            # Skip raw tool results (KB search output with [REF-N] patterns)
+            if role == "assistant" and re.match(r"^\s*(CONFIDENCE:|RELEVANT_SOURCES:|\[REF-\d)", content):
+                continue
+            cleaned.append({"role": role, "content": content})
+        return cleaned
 
     @property
     def _gateway_url(self) -> str:
