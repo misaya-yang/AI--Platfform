@@ -61,6 +61,22 @@ class EmbeddingSettings(BaseModel):
     base_url: str | None = None
     timeout_seconds: float = 30.0
 
+    # Per-provider API keys (for multi-model support)
+    google_api_key: str = ""
+    dashscope_api_key: str = ""
+    siliconflow_api_key: str = ""
+    siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
+
+    def get_api_key_for_provider(self, provider: str) -> str:
+        """Get the correct API key for a given embedding provider."""
+        if provider == "gemini":
+            return self.google_api_key or self.api_key
+        elif provider == "dashscope":
+            return self.dashscope_api_key or self.api_key
+        elif provider == "siliconflow":
+            return self.siliconflow_api_key or self.api_key
+        return self.api_key
+
 
 class MultimodalEmbeddingSettings(BaseModel):
     """Multimodal (image+text) embedding settings."""

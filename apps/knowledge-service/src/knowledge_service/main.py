@@ -148,16 +148,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "retry_base_delay": getattr(s.qdrant, "retry_base_delay", 1.0),
                         })(),
                         "dashscope": type("D", (), {
-                            "api_key": embed.api_key if embed.provider == "dashscope" else "",
+                            "api_key": embed.dashscope_api_key or (embed.api_key if embed.provider == "dashscope" else ""),
                             "model_name": embed.model if embed.provider == "dashscope" else "",
                         })(),
                         "gemini": type("G", (), {
-                            "api_key": embed.api_key if embed.provider == "gemini" else "",
+                            "api_key": embed.google_api_key or (embed.api_key if embed.provider == "gemini" else ""),
                             "model_name": embed.model if embed.provider == "gemini" else "",
                         })(),
                         "siliconflow": type("SF", (), {
-                            "api_key": embed.api_key if embed.provider == "siliconflow" else "",
-                            "base_url": embed.base_url or "",
+                            "api_key": embed.siliconflow_api_key or (embed.api_key if embed.provider == "siliconflow" else ""),
+                            "base_url": embed.siliconflow_base_url or embed.base_url or "",
                             "model_name": embed.model if embed.provider == "siliconflow" else "",
                         })(),
                         "ocr_enabled": s.ocr.enabled,
