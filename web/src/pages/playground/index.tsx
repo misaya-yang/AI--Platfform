@@ -498,20 +498,24 @@ export function PlaygroundPage() {
             showThinkingIndicator={showThinkingIndicator}
             onShare={async () => {
               if (!activeSessionId) return;
+              // Resolve the LangGraph thread_id from session mapping
+              const threadId = sessionThreadIdRef.current[activeSessionId] || activeSessionId;
               try {
                 const resp = await fetch("/api/v1/islamic/wahda/share", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ thread_id: activeSessionId }),
+                  body: JSON.stringify({ thread_id: threadId }),
                 });
-                if (!resp.ok) throw new Error("Share failed");
+                if (!resp.ok) {
+                  const errText = await resp.text();
+                  throw new Error(errText || `Status ${resp.status}`);
+                }
                 const data = await resp.json();
                 const shareUrl = `${window.location.origin}/share/${data.share_id}`;
                 await navigator.clipboard.writeText(shareUrl);
-                // Toast via simple alert — replace with proper toast if available
                 alert(`Share link copied!\n${shareUrl}`);
-              } catch (e) {
-                alert("Failed to create share link");
+              } catch (e: any) {
+                alert(`Failed to create share link: ${e?.message || "unknown error"}`);
               }
             }}
             onRegenerate={() => {
