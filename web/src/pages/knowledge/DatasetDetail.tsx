@@ -223,7 +223,7 @@ export function KnowledgeDatasetDetailPage() {
   const [uploadTableMode, setUploadTableMode] = useState<"markdown" | "row_based" | "structured">("markdown");
   const [uploadTableIncludeHeaders, setUploadTableIncludeHeaders] = useState(true);
   const [uploadTableGenerateSummary, setUploadTableGenerateSummary] = useState(false);
-  const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState("dashscope:text-embedding-v4");
+  const [uploadEmbeddingModel, setUploadEmbeddingModel] = useState("gemini:gemini-embedding-2-preview");
 
   // Rerank model selection
   const [rerankEnabled, setRerankEnabled] = useState(true);

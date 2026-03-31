@@ -339,7 +339,7 @@ export default function DatasetCreatePage() {
   const [visibility, setVisibility] = useState<VisibilityType>("private");
   const [kbType, setKbType] = useState<KBType>("document");
   const [useCase, setUseCase] = useState<UseCase>("basic_qa");
-  const [embeddingModel, setEmbeddingModel] = useState("dashscope:text-embedding-v4");
+  const [embeddingModel, setEmbeddingModel] = useState("gemini:gemini-embedding-001");
 
   // Step 2: Data Source
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
