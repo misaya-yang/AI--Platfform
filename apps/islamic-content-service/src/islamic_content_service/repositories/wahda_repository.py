@@ -137,10 +137,9 @@ class WahdaRepository:
         self, tenant_id: str, user_id: str, session_id: str,
         message_index: int, question: str, answer: str,
     ) -> str:
+        from datetime import timedelta
         share_id = secrets.token_urlsafe(8)[:12]
-        expires = datetime.now(timezone.utc).replace(
-            month=datetime.now(timezone.utc).month + 1 if datetime.now(timezone.utc).month < 12 else 1,
-        )
+        expires = datetime.now(timezone.utc) + timedelta(days=30)
         await self._db.execute("""
             INSERT INTO islamic_content.shared_messages
             (share_id, tenant_id, user_id, session_id, message_index, question, answer, expires_at)
