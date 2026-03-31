@@ -28,6 +28,8 @@ dependencies = [
     "orjson>=3.11.0",
     "python-dotenv>=1.2.0",
     "cachetools>=5.5.0",
+    "dashscope>=1.20.0",
+    "google-genai>=1.0.0",
     # sentence-transformers / paddleocr removed — embeddings use remote Gemini API,
     # OCR uses VLM service. Avoids pulling PyTorch (~2GB) into the image.
 ]
