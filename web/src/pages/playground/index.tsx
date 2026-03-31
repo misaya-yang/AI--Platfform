@@ -515,13 +515,20 @@ export function PlaygroundPage() {
                 }
                 const data = await resp.json();
                 const shareUrl = `${window.location.origin}/share/${data.share_id}`;
+                // Copy to clipboard (with HTTP fallback)
                 try {
                   await navigator.clipboard.writeText(shareUrl);
                 } catch {
-                  // Fallback for HTTP (no clipboard API)
-                  window.prompt("Copy this share link:", shareUrl);
+                  const ta = document.createElement("textarea");
+                  ta.value = shareUrl;
+                  ta.style.position = "fixed";
+                  ta.style.opacity = "0";
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
                 }
-                alert(`Share link created!\n${shareUrl}`);
+                alert(`Share link copied to clipboard!\n${shareUrl}`);
               } catch (e: any) {
                 alert(`Failed to create share link: ${e?.message || "unknown error"}`);
               }
