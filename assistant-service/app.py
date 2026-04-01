@@ -213,18 +213,36 @@ async def startup():
     except Exception as e:
         logger.warning(f"Quiz tool registration failed: {e}")
 
-    # --- Load models from database ---
-    if database:
+    # --- Load models from database (bypass DatabaseStorage, use raw asyncpg) ---
+    if database and hasattr(database, '_pool') and database._pool:
         try:
-            from src.services.llm.model_service import ModelService
-            model_service = ModelService(database)
-            # Debug: check what list_models returns
-            all_models = await model_service.list_models(tenant_id="default", include_disabled=False)
-            logger.info(f"DB has {len(all_models)} models: {[m.get('model_id') for m in all_models[:5]]}")
-            loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
-            logger.info(f"Loaded {loaded} models into registry. Registry now has: {list(model_registry._models.keys())[:10]}")
+            async with database._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens, "
+                    "access_level FROM llm_models WHERE tenant_id = $1 AND is_enabled = true",
+                    "default",
+                )
+                if rows:
+                    from src.services.assistant.models.model_registry import ModelInfo, ModelProvider
+                    model_registry._models.clear()
+                    for r in rows:
+                        try:
+                            provider = ModelProvider(r["provider_id"])
+                            model_registry._models[r["model_id"]] = ModelInfo(
+                                id=r["model_id"],
+                                provider=provider,
+                                display_name=r["display_name"] or r["model_id"],
+                                context_window=r["context_window"] or 32000,
+                                max_output_tokens=r["max_output_tokens"] or 4096,
+                                access_level=r["access_level"] or "public",
+                            )
+                        except ValueError:
+                            pass  # Unknown provider
+                    logger.info(f"Loaded {len(rows)} models from DB: {list(model_registry._models.keys())}")
+                else:
+                    logger.info("No models in database, keeping defaults")
         except Exception as e:
-            logger.warning(f"Failed to load models from DB: {e}", exc_info=True)
+            logger.warning(f"Failed to load models from DB: {e}")
 
     # Store on app state
     app.state.assistant_service = assistant_service
