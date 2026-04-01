@@ -41,6 +41,23 @@ export function QuizPage() {
   // Fetch quiz on mount
   useEffect(() => {
     if (!shareCode) return;
+
+    // Check if already submitted from this browser
+    const submitted = localStorage.getItem(`quiz_submitted_${shareCode}`);
+    if (submitted) {
+      try {
+        const savedResult = JSON.parse(submitted);
+        setResult(savedResult);
+        setPageState("result");
+        // Still load quiz data for review
+        fetch(`/api/v1/quiz/shared/${shareCode}`)
+          .then((r) => r.ok ? r.json() : null)
+          .then((d) => { if (d) setQuiz(d); })
+          .catch(() => {});
+        return;
+      } catch { /* corrupted localStorage, continue normally */ }
+    }
+
     fetch(`/api/v1/quiz/shared/${shareCode}`)
       .then((resp) => {
         if (!resp.ok) {
@@ -92,6 +109,8 @@ export function QuizPage() {
       const data = await resp.json();
       setResult(data);
       setPageState("result");
+      // Remember submission in localStorage to prevent re-take on page reload
+      try { localStorage.setItem(`quiz_submitted_${shareCode}`, JSON.stringify(data)); } catch {}
     } catch {
       setError("Failed to submit quiz. Please try again.");
     } finally {
