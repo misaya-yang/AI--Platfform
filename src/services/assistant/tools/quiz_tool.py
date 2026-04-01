@@ -174,7 +174,7 @@ class QuizGeneratorExecutor(ToolExecutor):
             )
 
         try:
-            # Validate question structure
+            # Validate and normalize question structure
             for i, q in enumerate(questions):
                 if not q.get("question_text"):
                     return ToolCallResult(
@@ -189,6 +189,29 @@ class QuizGeneratorExecutor(ToolExecutor):
                 q.setdefault("explanation", "")
                 if not isinstance(q.get("correct_answer"), list):
                     q["correct_answer"] = [q.get("correct_answer", "")]
+
+                # Normalize options to {label, text} format
+                # LLMs may return: {"A": "text"} or {"label": "A", "text": "..."} or "A) text"
+                normalized_opts = []
+                for opt in q.get("options", []):
+                    if isinstance(opt, dict):
+                        if "label" in opt and "text" in opt:
+                            normalized_opts.append(opt)
+                        else:
+                            # Handle {"A": "text"} format
+                            for k, v in opt.items():
+                                if k in ("type", "required"):
+                                    continue
+                                normalized_opts.append({"label": str(k), "text": str(v)})
+                    elif isinstance(opt, str):
+                        # Handle "A) text" or "A. text"
+                        import re
+                        m = re.match(r"^([A-Da-d])[.)]\s*(.*)", opt)
+                        if m:
+                            normalized_opts.append({"label": m.group(1).upper(), "text": m.group(2)})
+                        else:
+                            normalized_opts.append({"label": chr(65 + len(normalized_opts)), "text": opt})
+                q["options"] = normalized_opts
 
             # Persist to DB
             quiz_id = str(uuid.uuid4())
