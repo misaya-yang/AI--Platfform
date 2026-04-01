@@ -816,7 +816,7 @@ def create_app() -> FastAPI:
 def _make_process_file_handler(app: FastAPI, process_file_task=None):
     """Create a task handler that resolves assistant_service from app.state at runtime."""
     if process_file_task is None:
-        from .services.assistant.tasks import process_file_task as _process_file_task
+        from .services.assistant.tasks.task_types import process_file_task as _process_file_task
 
         process_file_task = _process_file_task
 
