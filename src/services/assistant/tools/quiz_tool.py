@@ -207,12 +207,19 @@ class QuizGeneratorExecutor(ToolExecutor):
                 if normalized_opts and q.get("correct_answer"):
                     text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
                     normalized_answers = []
+                    # Map numeric indices (1,2,3,4) to labels (A,B,C,D)
+                    idx_to_label = {str(i + 1): opt["label"] for i, opt in enumerate(normalized_opts)}
+                    label_set = {o["label"].upper() for o in normalized_opts}
+
                     for ans in q["correct_answer"]:
                         ans_str = str(ans).strip()
                         ans_lower = ans_str.lower()
                         # Already a label (A/B/C/D/true/false)?
-                        if ans_str.upper() in {o["label"].upper() for o in normalized_opts} or ans_lower in ("true", "false"):
+                        if ans_str.upper() in label_set or ans_lower in ("true", "false"):
                             normalized_answers.append(ans_str.upper() if len(ans_str) == 1 else ans_str.lower())
+                        # Numeric index (1→A, 2→B, etc.) — common LLM mistake
+                        elif ans_str in idx_to_label:
+                            normalized_answers.append(idx_to_label[ans_str])
                         # Text content — find matching label
                         elif ans_lower in text_to_label:
                             normalized_answers.append(text_to_label[ans_lower])
