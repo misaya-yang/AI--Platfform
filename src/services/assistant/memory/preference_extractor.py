@@ -119,7 +119,7 @@ def extract_preferences(text: str) -> dict[str, Any]:
         [
             r"我来自(?!哪里)\s*([^\s，。！？,.!?:：；;]{1,32})",
             r"(?:我住在|我人在)\s*([^\s，。！？,.!?:：；;]{1,32})",
-            r"(?:i am from|i'm from|i live in)\s+([A-Za-z][A-Za-z0-9_\\- ,]{0,47})",
+            r"(?:i am from|i'm from|i live in)\s+([A-Za-z][A-Za-z0-9_ ,-]{0,47})",
         ],
     )
     if location:
