@@ -75,21 +75,11 @@ def _get_exam_service(request: Request) -> ExamService:
 
 
 def _require_exam_permission(user: UserContext, permission: str = "exam:manage"):
-    """Check that user has exam management permission (admin)."""
-    # admin:* wildcard matches everything
-    user_perms = set(user.permissions or [])
-    for role in (user.roles or []):
-        if role == "admin":
-            return  # admin role has admin:* which matches all
-    # Direct permission check
-    if permission in user_perms:
-        return
-    # Wildcard check
-    parts = permission.split(":")
-    for i in range(len(parts) - 1, 0, -1):
-        if ":".join(parts[:i]) + ":*" in user_perms:
-            return
-    raise HTTPException(403, f"Permission denied: {permission} required")
+    """Check that user has exam management permission (admin role required)."""
+    roles = user.roles or []
+    if "admin" in roles:
+        return  # admin role has admin:* which matches all exam:* permissions
+    raise HTTPException(403, f"Permission denied: {permission} required (admin only)")
 
 
 # ---------------------------------------------------------------------------
