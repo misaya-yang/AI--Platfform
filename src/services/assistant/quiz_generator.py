@@ -16,7 +16,7 @@ from .model_registry import ChatMessage, ModelRegistry
 logger = logging.getLogger(__name__)
 
 # Default model for quiz generation (fast + good at structured JSON)
-DEFAULT_QUIZ_MODEL = "gemini-3-flash-preview"
+DEFAULT_QUIZ_MODEL = "qwen-plus"
 
 QUIZ_GENERATION_PROMPT = """\
 You are a quiz generator. Based on the following knowledge base content,
