@@ -64,28 +64,16 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
             name="questions",
             type="array",
             description=(
-                "Array of quiz question objects. Each must have: "
-                "question_num (int), question_type ('mc_single'|'mc_multi'|'true_false'|'short_answer'), "
-                "question_text (string), options (array of {label, text}), "
-                "correct_answer (array, e.g. ['B']), explanation (string, 1-2 sentences). "
-                "For mc_single: 4 options A-D, one correct. "
-                "For true_false: options [{label:'true',text:'True'},{label:'false',text:'False'}]. "
-                "For mc_multi: 4-5 options, 2-3 correct, e.g. correct_answer:['A','C']. "
-                "For short_answer: options:[], correct_answer:['expected answer']."
+                'Array of question objects. Example: '
+                '[{"question_num":1,"question_type":"mc_single","question_text":"What is X?",'
+                '"options":[{"label":"A","text":"Option 1"},{"label":"B","text":"Option 2"},'
+                '{"label":"C","text":"Option 3"},{"label":"D","text":"Option 4"}],'
+                '"correct_answer":["C"],"explanation":"C is correct because..."}]. '
+                'IMPORTANT: correct_answer must be the LABEL (A/B/C/D), NOT the text content. '
+                'options must use {"label":"A","text":"..."} format.'
             ),
             required=True,
-            items={
-                "type": "object",
-                "properties": {
-                    "question_num": {"type": "number"},
-                    "question_type": {"type": "string", "enum": ["mc_single", "mc_multi", "true_false", "short_answer"]},
-                    "question_text": {"type": "string"},
-                    "options": {"type": "array", "items": {"type": "object"}},
-                    "correct_answer": {"type": "array"},
-                    "explanation": {"type": "string"},
-                },
-                "required": ["question_num", "question_type", "question_text", "correct_answer"],
-            },
+            items={"type": "object"},
         ),
     ],
     category=ToolCategory.GENERATION,
