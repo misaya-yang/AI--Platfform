@@ -111,7 +111,7 @@ async def startup():
         try:
             from src.persistence.database import DatabaseStorage
             database = DatabaseStorage(db_url)
-            await database.initialize()
+            await database.connect()
             logger.info("Database connected")
 
             from src.services.session.database_session_manager import DatabaseSessionManager
@@ -216,7 +216,7 @@ async def startup():
     # --- Load models from database ---
     if database:
         try:
-            from src.services.models.model_service import ModelService
+            from src.services.llm.model_service import ModelService
             model_service = ModelService(database)
             loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
             logger.info(f"Loaded {loaded} models from database")
