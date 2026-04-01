@@ -1,14 +1,21 @@
 """
-Quiz Generation Tool — Allows the LLM to generate quizzes from KB content.
+Quiz Generation Tool — PPTX-pattern: main LLM generates quiz content,
+tool only validates and persists. No separate LLM call.
 
-The model decides when to call this tool based on user intent.
+The main LLM already has KB context (from search_knowledge_base) and/or
+uploaded file content (from FileProcessor). It generates the full quiz
+JSON as tool arguments. This tool just saves it to DB.
+
+Performance: 70s → <1s (eliminates redundant LLM + KB calls).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+import uuid
+from datetime import datetime, timezone
+from typing import Any
 
 from .tool_registry import (
     ToolCallRequest,
@@ -22,49 +29,63 @@ from .tool_registry import (
     register_tool,
 )
 
-if TYPE_CHECKING:
-    from ....persistence.database import DatabaseStorage
-    from ....services.knowledge.knowledge_service import KnowledgeService
-    from ..model_registry import ModelRegistry
-
 logger = logging.getLogger(__name__)
 
 QUIZ_GENERATION_DEFINITION = ToolDefinition(
     name="generate_quiz",
     description=(
-        "MUST USE this tool when user asks for quiz, test, or practice questions. "
-        "Generates an interactive quiz card from knowledge base content. "
-        "Do NOT generate quiz questions as plain text — always call this tool instead. "
-        "The tool creates a graded, interactive quiz UI with score tracking."
+        "MUST USE this tool when user asks for a quiz, test, or practice questions. "
+        "You generate the quiz content yourself based on KB search results or uploaded file content, "
+        "then pass the complete questions array to this tool for interactive rendering. "
+        "Do NOT output quiz questions as plain text — always use this tool to create an interactive quiz card."
     ),
     parameters=[
         ToolParameter(
-            name="topic",
+            name="title",
             type="string",
-            description="The topic to generate questions about. Extract from user's message.",
+            description="Quiz title, e.g. 'Quiz: Zakat Rules'",
             required=True,
         ),
         ToolParameter(
-            name="question_count",
-            type="number",
-            description="Number of questions (1-10). Default 5. Extract from user's message if specified.",
+            name="description",
+            type="string",
+            description="One sentence quiz description",
             required=False,
-            default=5,
-        ),
-        ToolParameter(
-            name="question_types",
-            type="array",
-            description="Question types: mc_single, mc_multi, true_false, short_answer. Default mc_single.",
-            required=False,
-            items={"type": "string", "enum": ["mc_single", "mc_multi", "true_false", "short_answer"]},
         ),
         ToolParameter(
             name="difficulty",
             type="string",
-            description="easy, medium, or hard. Default medium.",
+            description="easy, medium, or hard",
             required=False,
             default="medium",
             enum=["easy", "medium", "hard"],
+        ),
+        ToolParameter(
+            name="questions",
+            type="array",
+            description=(
+                "Array of quiz question objects. Each must have: "
+                "question_num (int), question_type ('mc_single'|'mc_multi'|'true_false'|'short_answer'), "
+                "question_text (string), options (array of {label, text}), "
+                "correct_answer (array, e.g. ['B']), explanation (string, 1-2 sentences). "
+                "For mc_single: 4 options A-D, one correct. "
+                "For true_false: options [{label:'true',text:'True'},{label:'false',text:'False'}]. "
+                "For mc_multi: 4-5 options, 2-3 correct, e.g. correct_answer:['A','C']. "
+                "For short_answer: options:[], correct_answer:['expected answer']."
+            ),
+            required=True,
+            items={
+                "type": "object",
+                "properties": {
+                    "question_num": {"type": "number"},
+                    "question_type": {"type": "string", "enum": ["mc_single", "mc_multi", "true_false", "short_answer"]},
+                    "question_text": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "object"}},
+                    "correct_answer": {"type": "array"},
+                    "explanation": {"type": "string"},
+                },
+                "required": ["question_num", "question_type", "question_text", "correct_answer"],
+            },
         ),
     ],
     category=ToolCategory.GENERATION,
@@ -73,72 +94,75 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
         "ALWAYS use this tool when the user's message contains ANY of these intents: "
         "quiz, test, 测验, 测试, 出题, 考考, 练习, flashcard, practice questions, "
         "test my knowledge, check my understanding, 考我, 题目. "
-        "This tool is MANDATORY for quiz requests — never answer quiz requests with plain text."
+        "You must FIRST search the knowledge base (if available) to get factual content, "
+        "then generate questions based on that content and pass them to this tool. "
+        "If the user uploaded a file, generate questions from the file content visible in the conversation."
     ),
     when_not_to_use=(
-        "Only skip if the user is asking a factual question that expects a direct answer, "
-        "NOT a quiz or test format."
+        "Only skip if the user is asking a factual question expecting a direct answer."
     ),
     examples=[
         ToolExample(
-            description="Chinese: 出5道题测试我",
-            input={"topic": "Zakat", "question_count": 5, "difficulty": "medium"},
-            expected_output="Interactive quiz card with 5 MC questions",
-        ),
-        ToolExample(
-            description="English: quiz me on 3 questions about prayer",
-            input={"topic": "prayer", "question_count": 3, "difficulty": "medium"},
-            expected_output="Interactive quiz card with 3 questions",
-        ),
-        ToolExample(
-            description="出3道关于Zakat的选择题",
-            input={"topic": "Zakat", "question_count": 3, "question_types": ["mc_single"]},
-            expected_output="3 multiple choice questions about Zakat",
+            description="3-question MC quiz about Zakat",
+            input={
+                "title": "Quiz: Zakat Fundamentals",
+                "description": "Test your knowledge of Zakat rules",
+                "difficulty": "medium",
+                "questions": [
+                    {
+                        "question_num": 1,
+                        "question_type": "mc_single",
+                        "question_text": "What is the standard Zakat rate on wealth?",
+                        "options": [
+                            {"label": "A", "text": "1%"},
+                            {"label": "B", "text": "2.5%"},
+                            {"label": "C", "text": "5%"},
+                            {"label": "D", "text": "10%"},
+                        ],
+                        "correct_answer": ["B"],
+                        "explanation": "The standard rate is 2.5% of qualifying wealth held for one lunar year.",
+                    },
+                ],
+            },
+            expected_output="Interactive quiz card rendered in chat",
         ),
     ],
-    timeout_seconds=120,
+    timeout_seconds=30,  # Fast: no LLM call, just DB persist
 )
 
 
 class QuizGeneratorExecutor(ToolExecutor):
-    """Executes quiz generation: KB retrieval → LLM → persist → return quiz data."""
+    """Validates and persists quiz data. No LLM call — main LLM provides content."""
 
-    def __init__(
-        self,
-        kb_service: Any | None = None,
-        model_registry: ModelRegistry | None = None,
-        database: DatabaseStorage | None = None,
-        kb_proxy: Any | None = None,
-    ) -> None:
-        self.kb_service = kb_service
-        self.kb_proxy = kb_proxy
-        self.model_registry = model_registry
+    def __init__(self, database: Any | None = None, **kwargs: Any) -> None:
         self.database = database
+        # Accept but ignore other kwargs for backward compat
+        for key in ("kb_service", "model_registry", "kb_proxy"):
+            setattr(self, key, kwargs.get(key))
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         args = request.arguments
         user = request.user
-        topic = args.get("topic", "key concepts")
-        count = min(10, max(1, int(args.get("question_count", 5))))
-        q_types = args.get("question_types", ["mc_single"])
-        difficulty = args.get("difficulty", "medium")
-        language = args.get("language", "auto")
 
-        retriever = self.kb_service or self.kb_proxy
-        if not retriever or not self.model_registry or not self.database:
-            missing = []
-            if not retriever:
-                missing.append("kb_service/kb_proxy")
-            if not self.model_registry:
-                missing.append("model_registry")
-            if not self.database:
-                missing.append("database")
-            logger.error(f"Quiz tool missing services: {missing}")
+        title = args.get("title", "Quiz")
+        description = args.get("description", "")
+        difficulty = args.get("difficulty", "medium")
+        questions = args.get("questions")
+
+        if not questions or not isinstance(questions, list):
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"Quiz generation services not available (missing: {', '.join(missing)})",
+                error="No questions provided. Generate questions from KB/file content and pass them as the 'questions' parameter.",
+            )
+
+        if not self.database:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="Database not available",
             )
 
         if not user:
@@ -146,77 +170,111 @@ class QuizGeneratorExecutor(ToolExecutor):
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error="User context required for quiz generation",
-            )
-
-        # Get KB dataset IDs from request metadata
-        kb_dataset_ids = request.metadata.get("kb_dataset_ids") or []
-        if not kb_dataset_ids:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="No knowledge base datasets selected. Please select a dataset first.",
+                error="User context required",
             )
 
         try:
-            # 1. Retrieve KB chunks
-            all_chunks: list[dict[str, Any]] = []
-            for ds_id in kb_dataset_ids:
-                try:
-                    results, _ = await retriever.retrieve(
-                        user=user, dataset_id=ds_id, query=topic,
-                        top_k=12, mode="hybrid",
+            # Validate question structure
+            for i, q in enumerate(questions):
+                if not q.get("question_text"):
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=f"Question {i + 1} missing 'question_text'",
                     )
-                    for r in results:
-                        all_chunks.append({
-                            "content": r.text, "score": r.score,
-                            "metadata": r.metadata or {},
-                        })
-                except Exception as e:
-                    logger.warning(f"Quiz KB retrieval failed for {ds_id}: {e}")
+                q.setdefault("question_num", i + 1)
+                q.setdefault("question_type", "mc_single")
+                q.setdefault("options", [])
+                q.setdefault("explanation", "")
+                if not isinstance(q.get("correct_answer"), list):
+                    q["correct_answer"] = [q.get("correct_answer", "")]
 
-            if not all_chunks:
-                return ToolCallResult(
-                    call_id=request.call_id,
-                    tool_name=request.tool_name,
-                    success=False,
-                    error="No content retrieved from knowledge base datasets.",
-                )
+            # Persist to DB
+            quiz_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            kb_dataset_ids = request.metadata.get("kb_dataset_ids") or []
 
-            # 2. Generate quiz
-            from ..quiz_generator import QuizGenerator
-            from ..quiz_grader import QuizGrader
-            from ..quiz_service import QuizService
-
-            generator = QuizGenerator(self.model_registry)
-            grader = QuizGrader(model_registry=self.model_registry)
-            svc = QuizService(db=self.database, generator=generator, grader=grader)
-
-            quiz = await svc.create_quiz(
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                dataset_ids=kb_dataset_ids,
-                kb_chunks=all_chunks,
-                topic=topic,
-                question_count=count,
-                question_types=q_types,
-                difficulty=difficulty,
-                language=language,
+            await self.database.execute(
+                """
+                INSERT INTO quizzes (id, tenant_id, created_by, title, description,
+                                     dataset_ids, topic, question_count, difficulty,
+                                     config, status, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                """,
+                uuid.UUID(quiz_id),
+                user.tenant_id,
+                user.user_id,
+                title,
+                description,
+                json.dumps(kb_dataset_ids),
+                title,
+                len(questions),
+                difficulty,
+                json.dumps({}),
+                "ready",
+                now,
+                now,
             )
 
-            logger.info(f"Quiz tool generated: {quiz['quiz_id']} ({quiz['question_count']} questions)")
+            q_rows = []
+            for q in questions:
+                q_id = str(uuid.uuid4())
+                q["id"] = q_id
+                q_rows.append((
+                    uuid.UUID(q_id),
+                    uuid.UUID(quiz_id),
+                    q["question_num"],
+                    q.get("question_type", "mc_single"),
+                    q["question_text"],
+                    json.dumps(q.get("options", [])),
+                    json.dumps(q.get("correct_answer", [])),
+                    q.get("explanation", ""),
+                    json.dumps([]),
+                    now,
+                ))
+
+            await self.database.executemany(
+                """
+                INSERT INTO quiz_questions (id, quiz_id, question_num, question_type,
+                                            question_text, options, correct_answer,
+                                            explanation, source_chunks, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                q_rows,
+            )
+
+            logger.info(f"Quiz persisted: {quiz_id} ({len(questions)} questions) in <1s")
+
+            # Build response for frontend QuizCard
+            quiz_data = {
+                "quiz_id": quiz_id,
+                "title": title,
+                "description": description,
+                "difficulty": difficulty,
+                "question_count": len(questions),
+                "questions": [
+                    {
+                        "id": q["id"],
+                        "question_num": q["question_num"],
+                        "question_type": q.get("question_type", "mc_single"),
+                        "question_text": q["question_text"],
+                        "options": q.get("options", []),
+                    }
+                    for q in questions
+                ],
+            }
 
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
-                result=f"Quiz generated: '{quiz['title']}' with {quiz['question_count']} {difficulty} questions.",
-                metadata={"quiz_data": quiz},
+                result=f"Quiz '{title}' created with {len(questions)} questions. Interactive quiz card is now displayed.",
+                metadata={"quiz_data": quiz_data},
             )
 
         except Exception as e:
-            logger.error(f"Quiz generation failed: {e}", exc_info=True)
+            logger.error(f"Quiz persist failed: {e}", exc_info=True)
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
@@ -226,16 +284,9 @@ class QuizGeneratorExecutor(ToolExecutor):
 
 
 def register_quiz_tool(
-    kb_service: Any | None = None,
-    model_registry: Any | None = None,
     database: Any | None = None,
-    kb_proxy: Any | None = None,
+    **kwargs: Any,
 ) -> None:
     """Register the quiz generation tool in the global registry."""
-    executor = QuizGeneratorExecutor(
-        kb_service=kb_service,
-        model_registry=model_registry,
-        database=database,
-        kb_proxy=kb_proxy,
-    )
+    executor = QuizGeneratorExecutor(database=database, **kwargs)
     register_tool(QUIZ_GENERATION_DEFINITION, executor)

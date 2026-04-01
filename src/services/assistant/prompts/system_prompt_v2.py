@@ -1193,6 +1193,16 @@ You have access to company knowledge bases:
 ## Available Tools
 You can call these tools when needed: {", ".join(sorted(set(available_tools)))}.
 """
+        if "generate_quiz" in available_tools:
+            tools_hint += """
+## Quiz Generation (generate_quiz tool)
+When user asks for a quiz/test/练习/测验/出题/考考:
+1. First use `search_knowledge_base` to get relevant content (if KB available)
+2. Then call `generate_quiz` with the FULL questions array you create from that content
+3. You must provide: title, questions (with question_text, options, correct_answer, explanation)
+4. For uploaded files: generate questions directly from the file content in the conversation
+5. NEVER output quiz questions as plain text — always use the generate_quiz tool
+"""
 
     # Generate web search guidance based on user preference
     if web_search_enabled:
