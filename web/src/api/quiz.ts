@@ -2,7 +2,7 @@
  * Quiz API client — generate, fetch, submit, and list quizzes.
  */
 
-import api from "@/lib/api";
+import { api } from "@/lib/api";
 import type { QuizData, QuizAttemptResult } from "@/pages/assistant/types";
 
 export interface GenerateQuizRequest {
